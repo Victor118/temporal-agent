@@ -12,10 +12,12 @@ type MemoryActivities struct {
 
 type LoadContextInput struct {
 	SessionID string
+	UserID    string
 }
 
 type LoadContextOutput struct {
-	Messages []store.Message
+	Messages   []store.Message
+	UserMemory string
 }
 
 func (a *MemoryActivities) LoadContext(ctx context.Context, input LoadContextInput) (LoadContextOutput, error) {
@@ -23,7 +25,13 @@ func (a *MemoryActivities) LoadContext(ctx context.Context, input LoadContextInp
 	if err != nil {
 		return LoadContextOutput{}, err
 	}
-	return LoadContextOutput{Messages: messages}, nil
+
+	var userMemory string
+	if input.UserID != "" {
+		userMemory, _ = a.Store.LoadMemory(ctx, store.MemoryScopeUser, input.UserID)
+	}
+
+	return LoadContextOutput{Messages: messages, UserMemory: userMemory}, nil
 }
 
 type PersistContextInput struct {

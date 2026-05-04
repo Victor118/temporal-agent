@@ -18,12 +18,16 @@ const maxReActIterations = 50
 
 type AgentWorkflowInput struct {
 	SessionID    string          `json:"session_id"`
+	UserID       string          `json:"user_id,omitempty"`
 	UserMessage  string          `json:"user_message"`
 	Messages     []store.Message `json:"messages"`      // Context loaded by session
+	UserMemory   string          `json:"user_memory,omitempty"` // Persistent user memory injected into system prompt
 	SystemPrompt string          `json:"system_prompt"`
 	Model        string          `json:"model"`
 	SessionTools []string        `json:"session_tools,omitempty"` // Tools that persist through a session
 	AgentChain   []string        `json:"agent_chain,omitempty"`   // Chain of parent agent names (task queues) for context propagation
+	Channel      string          `json:"channel,omitempty"`       // "web", "telegram"
+	ChannelID    string          `json:"channel_id,omitempty"`    // chat_id for telegram
 }
 
 type AgentWorkflowOutput struct {
@@ -37,23 +41,46 @@ type AgentWorkflowOutput struct {
 // When SessionTools is set, a Temporal session is created to pin those tools' activities
 // to a single worker (required for stateful tools like filesystem operations).
 func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflowOutput, error) {
-	// LLM calls: longer timeout, retry on transient errors
-	llmCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-		StartToCloseTimeout: 180 * time.Second,
-		HeartbeatTimeout:    60 * time.Second,
-		RetryPolicy: &temporal.RetryPolicy{
-			MaximumAttempts: 3,
-		},
+	// Capture activity → task queue mapping via SideEffect.
+	// Reads from worker-cached config (no DB call). Recorded in history for deterministic replay.
+	var queueMap map[string]string
+	encoded := workflow.SideEffect(ctx, func(ctx workflow.Context) interface{} {
+		return activity.GetActivityQueues()
 	})
+	_ = encoded.Get(&queueMap)
+	if queueMap == nil {
+		queueMap = make(map[string]string)
+	}
+
+	// LLM calls: longer timeout, retry on transient errors (429, 529, network)
+	// No HeartbeatTimeout — CallLLM is a blocking HTTP call with no opportunity to heartbeat.
+	llmOpts := workflow.ActivityOptions{
+		StartToCloseTimeout: 180 * time.Second,
+		RetryPolicy: &temporal.RetryPolicy{
+			InitialInterval:        5 * time.Second,
+			BackoffCoefficient:     3.0,
+			MaximumInterval:        2 * time.Minute,
+			MaximumAttempts:        6,
+			NonRetryableErrorTypes: []string{"PermanentAPIError"},
+		},
+	}
+	if q, ok := queueMap["CallLLM"]; ok {
+		llmOpts.TaskQueue = q
+	}
+	llmCtx := workflow.WithActivityOptions(ctx, llmOpts)
 
 	// Tool execution: no retry on application errors — let the LLM decide
-	toolCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+	toolOpts := workflow.ActivityOptions{
 		StartToCloseTimeout: 120 * time.Second,
 		RetryPolicy: &temporal.RetryPolicy{
 			MaximumAttempts:        1,
 			NonRetryableErrorTypes: []string{"ApplicationError"},
 		},
-	})
+	}
+	if q, ok := queueMap["ExecuteTool"]; ok {
+		toolOpts.TaskQueue = q
+	}
+	toolCtx := workflow.WithActivityOptions(ctx, toolOpts)
 
 	// Build session tools lookup
 	sessionToolSet := make(map[string]bool, len(input.SessionTools))
@@ -105,6 +132,11 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 		systemPrompt = skillsResult.SystemPrompt
 	}
 
+	// Append user memory to system prompt if available
+	if input.UserMemory != "" {
+		systemPrompt += "\n## User Memory\n\nThe following is what you remember about this user from previous conversations. Use it to personalize your responses.\n\n" + input.UserMemory + "\n\n"
+	}
+
 	// Load available tools
 	var toolAct *activity.ToolActivities
 	var toolList activity.ListToolsOutput
@@ -116,6 +148,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 	).Get(ctx, &toolList); err != nil {
 		return AgentWorkflowOutput{}, fmt.Errorf("list tools: %w", err)
 	}
+
 
 	// Start from the context provided by the session
 	messages := make([]store.Message, len(input.Messages))
@@ -130,14 +163,35 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 
 	// ReAct loop
 	for i := 0; i < maxReActIterations; i++ {
+		// Check for cancellation before each iteration
+		if ctx.Err() != nil {
+			return AgentWorkflowOutput{
+				Response: "Agent cancelled.",
+				Messages: messages,
+			}, nil
+		}
+
 		chatMessages := convertMessages(messages)
 
+		// Mark cache breakpoints:
+		// 1. System prompt (stable across iterations)
+		// 2. Last tool definition (stable across iterations)
+		// 3. Second-to-last message (conversation prefix, grows but stable within a turn)
+		tools := toolList.Tools
+		if len(tools) > 0 {
+			tools[len(tools)-1].CacheBreakpoint = true
+		}
+		if len(chatMessages) >= 2 {
+			chatMessages[len(chatMessages)-2].CacheBreakpoint = true
+		}
+
 		request := provider.ChatRequest{
-			Model:     input.Model,
-			System:    systemPrompt,
-			Messages:  chatMessages,
-			Tools:     toolList.Tools,
-			MaxTokens: 4096,
+			Model:       input.Model,
+			System:      systemPrompt,
+			Messages:    chatMessages,
+			Tools:       tools,
+			MaxTokens:   16384,
+			CacheSystem: true,
 		}
 
 		var llmAct *activity.LLMActivities
@@ -156,7 +210,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 				})
 			}
 
-			notifyResponse(ctx, input.SessionID, response.Content)
+			notifyResponse(ctx, input.SessionID, input.Channel, input.ChannelID, response.Content)
 
 			return AgentWorkflowOutput{
 				Response:     response.Content,
@@ -184,7 +238,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 		}
 		messages = append(messages, assistantMsg)
 
-		notifyToolCalls(ctx, input.SessionID, response.ToolCalls)
+		notifyToolCalls(ctx, input.SessionID, input.Channel, input.ChannelID, response.ToolCalls)
 
 		// Resolve tool kinds to know how to dispatch each tool
 		toolNames := make([]string, len(response.ToolCalls))
@@ -231,8 +285,9 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 					execCtx = sessionToolCtx
 				}
 				d.future = workflow.ExecuteActivity(execCtx, toolAct.ExecuteTool, activity.ExecuteToolInput{
-					Name:  tc.Name,
-					Input: tc.Input,
+					Name:      tc.Name,
+					Input:     tc.Input,
+					SessionID: input.SessionID,
 				})
 			}
 			dispatches[j] = d
@@ -316,7 +371,7 @@ func convertMessages(messages []store.Message) []provider.ChatMessage {
 	return result
 }
 
-func notifyResponse(ctx workflow.Context, sessionID, content string) {
+func notifyResponse(ctx workflow.Context, sessionID, channel, channelID, content string) {
 	data, _ := json.Marshal(map[string]string{
 		"type":    "message",
 		"content": content,
@@ -324,11 +379,13 @@ func notifyResponse(ctx workflow.Context, sessionID, content string) {
 	var notifAct *activity.NotificationActivities
 	_ = workflow.ExecuteActivity(
 		workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-			StartToCloseTimeout: 5 * time.Second,
+			StartToCloseTimeout: 10 * time.Second,
 		}),
 		notifAct.NotifyStep,
 		activity.NotifyInput{
 			SessionID: sessionID,
+			Channel:   channel,
+			ChannelID: channelID,
 			Event: activity.SSEEvent{
 				Type: "message",
 				Data: data,
@@ -371,10 +428,12 @@ func buildChildInput(toolName string, rawInput json.RawMessage, parent AgentWork
 		}
 
 	case "ask_user":
-		// Enrich the raw input with the agent chain for UX context
+		// Enrich the raw input with agent chain and channel info
 		var enriched map[string]interface{}
 		json.Unmarshal(rawInput, &enriched)
 		enriched["agent_chain"] = agentChain
+		enriched["channel"] = parent.Channel
+		enriched["channel_id"] = parent.ChannelID
 		enrichedJSON, _ := json.Marshal(enriched)
 		return res.WorkflowName, json.RawMessage(enrichedJSON)
 
@@ -383,7 +442,7 @@ func buildChildInput(toolName string, rawInput json.RawMessage, parent AgentWork
 	}
 }
 
-func notifyToolCalls(ctx workflow.Context, sessionID string, toolCalls []provider.ToolCallInfo) {
+func notifyToolCalls(ctx workflow.Context, sessionID, channel, channelID string, toolCalls []provider.ToolCallInfo) {
 	data, _ := json.Marshal(map[string]interface{}{
 		"type":       "tool_calls",
 		"tool_calls": toolCalls,
@@ -396,6 +455,8 @@ func notifyToolCalls(ctx workflow.Context, sessionID string, toolCalls []provide
 		notifAct.NotifyStep,
 		activity.NotifyInput{
 			SessionID: sessionID,
+			Channel:   channel,
+			ChannelID: channelID,
 			Event: activity.SSEEvent{
 				Type: "tool_calls",
 				Data: data,

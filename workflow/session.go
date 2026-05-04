@@ -10,14 +10,18 @@ import (
 )
 
 const (
-	SignalUserMessage  = "user-message"
-	QuerySessionState  = "session-state"
+	SignalUserMessage   = "user-message"
+	SignalCancelAgent   = "cancel-agent"
+	QuerySessionState   = "session-state"
 )
 
 type SessionWorkflowInput struct {
 	SessionID    string `json:"session_id"`
+	UserID       string `json:"user_id"`
 	SystemPrompt string `json:"system_prompt"`
 	Model        string `json:"model"`
+	Channel      string `json:"channel,omitempty"`    // "web", "telegram"
+	ChannelID    string `json:"channel_id,omitempty"` // chat_id for telegram
 }
 
 type SessionState struct {
@@ -66,7 +70,7 @@ func SessionWorkflow(ctx workflow.Context, input SessionWorkflowInput) error {
 		if err := processTurn(actCtx, ctx, input, userMessage, &state); err != nil {
 			logger.Error("Turn failed", "session_id", input.SessionID, "turn", state.TurnCount, "error", err)
 			// Notify the error to the client, don't kill the session
-			notifyResponse(ctx, input.SessionID, fmt.Sprintf("Error processing message: %v", err))
+			notifyResponse(ctx, input.SessionID, input.Channel, input.ChannelID, fmt.Sprintf("Error processing message: %v", err))
 			continue
 		}
 
@@ -74,53 +78,90 @@ func SessionWorkflow(ctx workflow.Context, input SessionWorkflowInput) error {
 		for msgCh.ReceiveAsync(&userMessage) {
 			if err := processTurn(actCtx, ctx, input, userMessage, &state); err != nil {
 				logger.Error("Turn failed", "error", err)
-				notifyResponse(ctx, input.SessionID, fmt.Sprintf("Error processing message: %v", err))
+				notifyResponse(ctx, input.SessionID, input.Channel, input.ChannelID, fmt.Sprintf("Error processing message: %v", err))
 			}
 		}
 	}
 }
 
 // processTurn handles a single user message: load context → agent → persist.
+// It listens for cancel-agent signals to interrupt the agent mid-execution.
 func processTurn(actCtx, ctx workflow.Context, input SessionWorkflowInput, userMessage string, state *SessionState) error {
 	state.Status = "processing"
 	state.TurnCount++
 
 	var memAct *activity.MemoryActivities
 
-	// 1. Load context
+	// 1. Load context (messages + user memory)
 	var loadResult activity.LoadContextOutput
 	if err := workflow.ExecuteActivity(actCtx, memAct.LoadContext, activity.LoadContextInput{
 		SessionID: input.SessionID,
+		UserID:    input.UserID,
 	}).Get(ctx, &loadResult); err != nil {
 		return fmt.Errorf("load context: %w", err)
 	}
 
-	// 2. Launch agent child workflow with the loaded messages
-	childCtx := workflow.WithChildOptions(ctx, workflow.ChildWorkflowOptions{
+	// 2. Launch agent child workflow with a cancellable context
+	childCtx, cancelChild := workflow.WithCancel(ctx)
+	childCtx = workflow.WithChildOptions(childCtx, workflow.ChildWorkflowOptions{
 		WorkflowID: fmt.Sprintf("%s-turn-%d", input.SessionID, state.TurnCount),
 	})
 
-	var result AgentWorkflowOutput
-	if err := workflow.ExecuteChildWorkflow(childCtx, AgentWorkflow, AgentWorkflowInput{
+	agentFuture := workflow.ExecuteChildWorkflow(childCtx, AgentWorkflow, AgentWorkflowInput{
 		SessionID:    input.SessionID,
+		UserID:       input.UserID,
 		UserMessage:  userMessage,
 		Messages:     loadResult.Messages,
-		SystemPrompt: input.SystemPrompt, // Optional override; empty = load from task queue skills
+		UserMemory:   loadResult.UserMemory,
+		SystemPrompt: input.SystemPrompt,
 		Model:        input.Model,
-	}).Get(ctx, &result); err != nil {
-		return fmt.Errorf("agent workflow: %w", err)
+		Channel:      input.Channel,
+		ChannelID:    input.ChannelID,
+	})
+
+	// Listen for cancel signal in parallel
+	cancelCh := workflow.GetSignalChannel(ctx, SignalCancelAgent)
+	cancelSel := workflow.NewSelector(ctx)
+
+	var result AgentWorkflowOutput
+	var agentErr error
+	cancelled := false
+
+	cancelSel.AddFuture(agentFuture, func(f workflow.Future) {
+		agentErr = f.Get(ctx, &result)
+	})
+
+	cancelSel.AddReceive(cancelCh, func(ch workflow.ReceiveChannel, more bool) {
+		// Drain the signal value
+		ch.Receive(ctx, nil)
+		cancelled = true
+		cancelChild()
+	})
+
+	// Wait for either the agent to finish or a cancel signal
+	cancelSel.Select(ctx)
+
+	if cancelled {
+		// Wait for the child to actually finish after cancellation
+		_ = agentFuture.Get(ctx, &result)
+		// Notify the user
+		notifyResponse(ctx, input.SessionID, input.Channel, input.ChannelID, "Agent interrupted by user.")
+	} else if agentErr != nil {
+		return fmt.Errorf("agent workflow: %w", agentErr)
 	}
 
-	// 3. Persist the updated messages returned by the agent
-	if err := workflow.ExecuteActivity(actCtx, memAct.PersistContext, activity.PersistContextInput{
-		SessionID: input.SessionID,
-		Messages:  result.Messages,
-	}).Get(ctx, nil); err != nil {
-		return fmt.Errorf("persist context: %w", err)
+	// 3. Always persist — even if cancelled, save the messages accumulated so far
+	if len(result.Messages) > 0 {
+		if err := workflow.ExecuteActivity(actCtx, memAct.PersistContext, activity.PersistContextInput{
+			SessionID: input.SessionID,
+			Messages:  result.Messages,
+		}).Get(ctx, nil); err != nil {
+			return fmt.Errorf("persist context: %w", err)
+		}
 	}
 
 	// 4. Check goal
-	if result.GoalAchieved {
+	if !cancelled && result.GoalAchieved {
 		state.Status = "completed"
 	}
 

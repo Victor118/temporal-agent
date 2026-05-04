@@ -42,7 +42,7 @@ func registerScheduleTask(registry *Registry, temporalClient client.Client, st s
 				},
 				"delivery_channel": {
 					"type": "string",
-					"enum": ["slack", "email", "app_notification"],
+					"enum": ["app_notification"],
 					"description": "How to deliver the result (default: app_notification)"
 				},
 				"description": {
@@ -79,18 +79,42 @@ func registerScheduleTask(registry *Registry, temporalClient client.Client, st s
 				if err != nil {
 					return fmt.Sprintf("Invalid delay format %q: %s", params.Delay, err.Error()), nil
 				}
-				spec.StartAt = time.Now().Add(delay)
+				// StartAt gates when the schedule becomes active,
+				// Intervals provides the actual trigger mechanism,
+				// EndAt prevents repeated firings.
+				now := time.Now()
+				spec.StartAt = now.Add(delay)
+				spec.EndAt = now.Add(delay).Add(2 * time.Minute)
+				spec.Intervals = []client.ScheduleIntervalSpec{
+					{Every: 1 * time.Minute},
+				}
+			}
+
+			// Resolve the user who owns this session
+			var userID string
+			if sid := SessionIDFromContext(ctx); sid != "" {
+				if uid, err := st.GetSessionUser(ctx, sid); err == nil {
+					userID = uid
+				}
 			}
 
 			workflowInput := ScheduledAgentInput{
 				Prompt:          params.Prompt,
 				DeliveryChannel: params.DeliveryChannel,
 				ScheduleID:      scheduleID,
+				UserID:          userID,
+			}
+
+			// For one-shot tasks, limit to a single action
+			remainingActions := 0
+			if params.Cron == "" && params.Delay != "" {
+				remainingActions = 1
 			}
 
 			_, err := temporalClient.ScheduleClient().Create(ctx, client.ScheduleOptions{
-				ID:   scheduleID,
-				Spec: spec,
+				ID:               scheduleID,
+				Spec:             spec,
+				RemainingActions: remainingActions,
 				Action: &client.ScheduleWorkflowAction{
 					ID:        fmt.Sprintf("cron-%s", scheduleID),
 					Workflow:  scheduledWorkflowFunc,

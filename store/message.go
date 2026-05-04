@@ -28,3 +28,8 @@ type Message struct {
 	ToolCalls  []ToolCall   `json:"tool_calls,omitempty"`
 	ToolResult *ToolResult  `json:"tool_result,omitempty"`
 }
+
+type MessageWithID struct {
+	ID int64 `json:"id"`
+	Message
+}

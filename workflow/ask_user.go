@@ -20,6 +20,8 @@ func AskUserWorkflow(ctx workflow.Context, rawInput json.RawMessage) (string, er
 	var input struct {
 		Question   string   `json:"question"`
 		AgentChain []string `json:"agent_chain,omitempty"`
+		Channel    string   `json:"channel,omitempty"`
+		ChannelID  string   `json:"channel_id,omitempty"`
 	}
 	if err := json.Unmarshal(rawInput, &input); err != nil {
 		return "", fmt.Errorf("parse input: %w", err)
@@ -52,6 +54,8 @@ func AskUserWorkflow(ctx workflow.Context, rawInput json.RawMessage) (string, er
 		notifAct.NotifyStep,
 		activity.NotifyInput{
 			SessionID: sessionID,
+			Channel:   input.Channel,
+			ChannelID: input.ChannelID,
 			Event: activity.SSEEvent{
 				Type: "ask_user",
 				Data: data,

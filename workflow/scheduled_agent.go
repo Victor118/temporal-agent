@@ -15,7 +15,7 @@ import (
 // It executes the prompt, then delivers the result via the configured channel.
 func ScheduledAgentWorkflow(ctx workflow.Context, input tool.ScheduledAgentInput) error {
 	logger := workflow.GetLogger(ctx)
-	logger.Info("Scheduled agent starting", "schedule_id", input.ScheduleID, "channel", input.DeliveryChannel)
+	logger.Info("Scheduled agent starting", "schedule_id", input.ScheduleID)
 
 	// Run the agent loop as a child workflow
 	childCtx := workflow.WithChildOptions(ctx, workflow.ChildWorkflowOptions{
@@ -49,13 +49,18 @@ func ScheduledAgentWorkflow(ctx workflow.Context, input tool.ScheduledAgentInput
 	var deliverAct *activity.DeliveryActivities
 	if err := workflow.ExecuteActivity(deliverCtx, deliverAct.DeliverResult, activity.DeliverInput{
 		UserID:     input.UserID,
-		Channel:    input.DeliveryChannel,
 		Content:    response,
 		ScheduleID: input.ScheduleID,
 	}).Get(ctx, nil); err != nil {
 		logger.Error("Failed to deliver result", "schedule_id", input.ScheduleID, "error", err)
 		return fmt.Errorf("deliver result: %w", err)
 	}
+
+	// Cleanup: delete the schedule and update task log for one-shot tasks
+	var schedAct *activity.ScheduleActivities
+	_ = workflow.ExecuteActivity(deliverCtx, schedAct.DeleteSchedule, activity.DeleteScheduleInput{
+		ScheduleID: input.ScheduleID,
+	}).Get(ctx, nil)
 
 	return nil
 }

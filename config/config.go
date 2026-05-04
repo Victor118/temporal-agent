@@ -14,6 +14,7 @@ type Config struct {
 	TemporalTLSKey    string
 	TaskQueues        []string
 	TaskQueueSkills   map[string][]string // queue name → skill names
+	TaskQueueMCP      map[string][]string // queue name → MCP server names
 
 	// Store
 	DatabaseURL string
@@ -27,6 +28,7 @@ type Config struct {
 	HTTPAddr     string
 	InternalAddr string // Internal endpoint for worker→server notifications
 	NotifyURL    string // Base URL the worker POSTs notifications to
+	APIKey       string // Shared secret for auth (required in production)
 
 	// Workspace
 	WorkspacePath string
@@ -38,6 +40,16 @@ type Config struct {
 
 	// Web Search
 	BraveSearchAPIKey string
+
+	// Telegram
+	TelegramBotToken string
+
+	// Email (SMTP)
+	SMTPHost     string
+	SMTPPort     string
+	SMTPUsername string
+	SMTPPassword string
+	SMTPFrom     string // Default sender address
 
 	// MCP Servers
 	MCPServers []MCPServer
@@ -67,6 +79,7 @@ func Load() *Config {
 		HTTPAddr:     envOr("HTTP_ADDR", ":8888"),
 		InternalAddr: envOr("INTERNAL_ADDR", ":9999"),
 		NotifyURL:    envOr("NOTIFY_URL", "http://localhost:9999"),
+		APIKey:       os.Getenv("API_KEY"),
 
 		WorkspacePath: envOr("WORKSPACE_PATH", "./workspace"),
 
@@ -76,9 +89,18 @@ func Load() *Config {
 
 		BraveSearchAPIKey: os.Getenv("BRAVE_SEARCH_API_KEY"),
 
+		TelegramBotToken: os.Getenv("TELEGRAM_BOT_TOKEN"),
+
+		SMTPHost:     os.Getenv("SMTP_HOST"),
+		SMTPPort:     envOr("SMTP_PORT", "587"),
+		SMTPUsername: os.Getenv("SMTP_USERNAME"),
+		SMTPPassword: os.Getenv("SMTP_PASSWORD"),
+		SMTPFrom:     os.Getenv("SMTP_FROM"),
+
 		MCPServers: parseMCPServers(os.Getenv("MCP_SERVERS")),
 
 		TaskQueueSkills: parseTaskQueueSkills(os.Getenv("TASK_QUEUE_SKILLS")),
+		TaskQueueMCP:    parseTaskQueueSkills(os.Getenv("TASK_QUEUE_MCP")),
 	}
 }
 
@@ -123,6 +145,31 @@ func parseTaskQueueSkills(raw string) map[string][]string {
 	var mapping map[string][]string
 	json.Unmarshal([]byte(raw), &mapping)
 	return mapping
+}
+
+// MCPServersForQueues returns the MCP servers assigned to the given task queues.
+// If TaskQueueMCP is not configured, all MCP servers are returned (backward compat).
+func (c *Config) MCPServersForQueues(queues []string) []MCPServer {
+	if len(c.TaskQueueMCP) == 0 {
+		return c.MCPServers
+	}
+
+	// Collect unique MCP server names for these queues
+	needed := make(map[string]bool)
+	for _, q := range queues {
+		for _, name := range c.TaskQueueMCP[q] {
+			needed[name] = true
+		}
+	}
+
+	// Filter
+	var result []MCPServer
+	for _, s := range c.MCPServers {
+		if needed[s.Name] {
+			result = append(result, s)
+		}
+	}
+	return result
 }
 
 func envOr(key, fallback string) string {

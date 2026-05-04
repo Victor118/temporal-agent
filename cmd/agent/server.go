@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
@@ -16,8 +15,8 @@ import (
 	"go.temporal.io/sdk/client"
 
 	"github.com/victor/temporal-agent/config"
-	"github.com/victor/temporal-agent/skill"
 	"github.com/victor/temporal-agent/sse"
+	"github.com/victor/temporal-agent/store"
 	"github.com/victor/temporal-agent/web"
 )
 
@@ -43,31 +42,19 @@ func runServer(cmd *cobra.Command, args []string) {
 	// SSE hub
 	hub := sse.NewHub()
 
-	// Skills store
-	var skillStore skill.Store
-	if cfg.SkillsRepo != "" {
-		skillStore = &skill.GitStore{
-			RepoURL:  cfg.SkillsRepo,
-			Branch:   cfg.SkillsBranch,
-			CacheDir: filepath.Join(os.TempDir(), "temporal-agent-skills"),
-		}
+	// Store
+	st, err := store.NewPostgresStore(cfg.DatabaseURL)
+	if err != nil {
+		log.Fatalf("Failed to init store: %v", err)
 	}
+	defer st.Close()
 
 	// Handler
 	h := &handler{
 		temporalClient: temporalClient,
 		hub:            hub,
 		cfg:            cfg,
-		skillStore:     skillStore,
-	}
-
-	// Load initial skills (for version tracking — prompts are built by workers)
-	if skillStore != nil {
-		if err := h.reloadSkills(); err != nil {
-			log.Printf("Warning: failed to load skills from repo: %v", err)
-		}
-	} else {
-		log.Println("No skills repo configured (SKILLS_REPO), running without skills")
+		store:          st,
 	}
 
 	// Public API
@@ -76,20 +63,42 @@ func runServer(cmd *cobra.Command, args []string) {
 	publicRouter.Use(middleware.Recoverer)
 	publicRouter.Use(corsMiddleware)
 
+	// Unauthenticated routes
 	publicRouter.Get("/", web.HandleIndex)
-	publicRouter.Post("/sessions", h.createSession)
-	publicRouter.Post("/sessions/{id}/messages", h.sendMessage)
-	publicRouter.Get("/sessions/{id}/state", h.getState)
-	publicRouter.Get("/sessions/{id}/stream", h.stream)
-	publicRouter.Post("/sessions/{id}/answer", h.answerQuestion)
+	publicRouter.Post("/auth/login", h.login)
+	publicRouter.Post("/auth/logout", h.logout)
 	publicRouter.Post("/webhooks/skills", h.handleSkillsWebhook)
+	publicRouter.Post("/webhooks/telegram", h.handleTelegramWebhook)
 
-	// Internal API (receives notifications from workers + skills version)
+	// Authenticated routes
+	publicRouter.Group(func(r chi.Router) {
+		r.Use(authMiddleware(cfg))
+
+		r.Get("/auth/check", h.checkAuth)
+		r.Post("/sessions", h.createSession)
+		r.Get("/users/{userID}/sessions", h.listSessions)
+		r.Get("/users/{userID}/notifications", h.getNotifications)
+		r.Get("/users/{userID}/notifications/stream", h.streamNotifications)
+		r.Delete("/users/{userID}/notifications/{notifID}", h.deleteNotification)
+		r.Delete("/users/{userID}/notifications", h.deleteAllNotifications)
+		r.Post("/sessions/{id}/messages", h.sendMessage)
+		r.Post("/sessions/{id}/cancel", h.cancelAgent)
+		r.Delete("/sessions/{id}", h.deleteSession)
+		r.Get("/sessions/{id}/state", h.getState)
+		r.Get("/sessions/{id}/history", h.getHistory)
+		r.Get("/sessions/{id}/stream", h.stream)
+		r.Post("/sessions/{id}/answer", h.answerQuestion)
+
+		// Admin routes
+		r.Get("/admin/queues", h.listKnownQueues)
+		r.Get("/admin/activity-queues", h.listActivityQueues)
+		r.Put("/admin/activity-queues", h.setActivityQueue)
+		r.Delete("/admin/activity-queues/{activityName}", h.deleteActivityQueue)
+	})
+
+	// Internal API (receives SSE notifications from workers)
 	internalRouter := chi.NewRouter()
 	internalRouter.Post("/internal/notify", handleInternalNotify(hub))
-	internalRouter.Get("/internal/skills/version", h.handleSkillsVersion)
-	internalRouter.Post("/internal/workers/register", h.handleRegisterWorker)
-	internalRouter.Get("/internal/agents", h.handleGetAgents)
 
 	publicSrv := &http.Server{Addr: cfg.HTTPAddr, Handler: publicRouter}
 	internalSrv := &http.Server{Addr: cfg.InternalAddr, Handler: internalRouter}

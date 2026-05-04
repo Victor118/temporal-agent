@@ -17,6 +17,8 @@ Key behaviors:
 - When the user asks you to run a command, use exec.
 - When a task requires specialized expertise, use spawn_session to delegate to a sub-agent.
 - Always prefer action over explanation. If you can answer by using a tool, do it.
+- NEVER write a file as a way to deliver your answer. Respond directly in the conversation. Only use write_file/edit_file when the user explicitly asks you to create or modify a file.
+- Use save_user_memory to remember important facts about the user (role, preferences, expertise, projects) that would be useful in future conversations. Each call replaces the full memory, so include everything. Only save when you learn something genuinely new and useful.
 
 `
 
@@ -85,8 +87,8 @@ func (a *SkillActivities) LoadSkillsForQueue(ctx context.Context, input LoadSkil
 		basePrompt = defaultSystemPrompt
 	}
 
-	// Append agents directory so every agent knows about the others
-	directory := buildAgentsDirectory(catalog)
+	// Append agents directory so every agent knows about the others (excluding self)
+	directory := buildAgentsDirectory(catalog, input.TaskQueue)
 	return LoadSkillsForQueueOutput{SystemPrompt: basePrompt + directory}, nil
 }
 
@@ -112,8 +114,16 @@ func BuildSkillPrompts(allSkills []skill.Skill, queueSkills map[string][]string)
 }
 
 // buildAgentsDirectory generates a prompt section listing all available specialized agents.
-func buildAgentsDirectory(catalog []AgentCatalogEntry) string {
-	if len(catalog) == 0 {
+// currentQueue is excluded from the list so an agent never spawns a copy of itself.
+func buildAgentsDirectory(catalog []AgentCatalogEntry, currentQueue string) string {
+	var filtered []AgentCatalogEntry
+	for _, entry := range catalog {
+		if entry.TaskQueue != currentQueue {
+			filtered = append(filtered, entry)
+		}
+	}
+
+	if len(filtered) == 0 {
 		return "## Specialized Agents\n\nNo specialized sub-agents are currently available. Do not invent agent names or task queues that are not listed here.\n\n"
 	}
 
@@ -121,9 +131,10 @@ func buildAgentsDirectory(catalog []AgentCatalogEntry) string {
 	sb.WriteString("## Available Specialized Agents\n\n")
 	sb.WriteString("You can delegate tasks to specialized agents using the `spawn_session` tool with the appropriate `task_queue`. Only use task queues listed below — do not invent others.\n\n")
 
-	for _, entry := range catalog {
-		sb.WriteString(fmt.Sprintf("- **%s**: %s\n", entry.TaskQueue, strings.Join(entry.Skills, ", ")))
+	for _, entry := range filtered {
+		sb.WriteString(fmt.Sprintf("- task_queue=`%s` (skills: %s)\n", entry.TaskQueue, strings.Join(entry.Skills, ", ")))
 	}
+	sb.WriteString("\nIMPORTANT: The `task_queue` parameter must be the exact task queue name (e.g. `market-analyst`), NOT a skill name (e.g. `market-research`).\n")
 	sb.WriteString("\n")
 
 	return sb.String()

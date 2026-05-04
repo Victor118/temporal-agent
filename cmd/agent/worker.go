@@ -1,11 +1,8 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"log"
-	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -21,6 +18,7 @@ import (
 	"github.com/victor/temporal-agent/provider"
 	"github.com/victor/temporal-agent/skill"
 	"github.com/victor/temporal-agent/store"
+	"github.com/victor/temporal-agent/telegram"
 	"github.com/victor/temporal-agent/tool"
 	"github.com/victor/temporal-agent/workflow"
 )
@@ -58,13 +56,22 @@ func runWorker(cmd *cobra.Command, args []string) {
 	tool.RegisterExecTool(registry, cfg.WorkspacePath)
 	tool.RegisterWebTools(registry)
 	tool.RegisterWebSearchTool(registry, cfg.BraveSearchAPIKey)
+	tool.RegisterEmailTool(registry, tool.SMTPConfig{
+		Host:     cfg.SMTPHost,
+		Port:     cfg.SMTPPort,
+		Username: cfg.SMTPUsername,
+		Password: cfg.SMTPPassword,
+		From:     cfg.SMTPFrom,
+	})
 	tool.RegisterSpawnTool(registry, workflow.AgentWorkflow)
 	tool.RegisterAskUserTool(registry, workflow.AskUserWorkflow)
+	tool.RegisterMemoryTools(registry, st)
 
-	// MCP servers
-	if len(cfg.MCPServers) > 0 {
-		mcpConfigs := make([]tool.MCPServerConfig, len(cfg.MCPServers))
-		for i, s := range cfg.MCPServers {
+	// MCP servers — only load those assigned to this worker's task queues
+	mcpServers := cfg.MCPServersForQueues(cfg.TaskQueues)
+	if len(mcpServers) > 0 {
+		mcpConfigs := make([]tool.MCPServerConfig, len(mcpServers))
+		for i, s := range mcpServers {
 			mcpConfigs[i] = tool.MCPServerConfig{
 				Name:      s.Name,
 				URL:       s.URL,
@@ -105,10 +112,14 @@ func runWorker(cmd *cobra.Command, args []string) {
 		log.Println("No skills repo configured (SKILLS_REPO), running without skills")
 	}
 
-	skillAct := activity.NewSkillActivities(prompts, nil)
+	// Register this worker's queues in the catalog (DB)
+	catalog := registerAndLoadCatalog(st, cfg)
+	skillAct := activity.NewSkillActivities(prompts, catalog)
 
-	// Register this worker's queues with the server and fetch the full catalog
-	registerAndFetchCatalog(cfg, skillAct)
+	// Load activity queue mapping from DB and register for workflow SideEffect access
+	workerCfg := activity.NewWorkerConfig()
+	workerCfg.SetActivityQueues(loadActivityQueuesFromDB(st))
+	activity.SetGlobalWorkerConfig(workerCfg)
 
 	// Temporal client
 	temporalClient, err := client.Dial(client.Options{
@@ -126,8 +137,15 @@ func runWorker(cmd *cobra.Command, args []string) {
 	// Register schedule tools (needs temporal client + store)
 	tool.RegisterScheduleTools(registry, temporalClient, st, workflow.ScheduledAgentWorkflow, cfg.PrimaryTaskQueue())
 
-	// Notification bridge: POST to server's internal endpoint
+	// Notification bridge: POST to server's internal endpoint (SSE requires HTTP)
 	notifier := activity.NewHTTPNotifier(cfg.NotifyURL)
+
+	// Telegram client (optional)
+	var tgClient activity.TelegramSender
+	if cfg.TelegramBotToken != "" {
+		tgClient = telegram.NewClient(cfg.TelegramBotToken)
+		log.Println("Telegram bot client configured")
+	}
 
 	// Create one worker per task queue
 	workers := make([]worker.Worker, 0, len(cfg.TaskQueues))
@@ -142,18 +160,22 @@ func runWorker(cmd *cobra.Command, args []string) {
 		w.RegisterActivity(&activity.LLMActivities{Provider: llmProvider})
 		w.RegisterActivity(&activity.MemoryActivities{Store: st})
 		w.RegisterActivity(&activity.ToolActivities{Registry: registry})
-		w.RegisterActivity(&activity.NotificationActivities{Hub: notifier})
-		w.RegisterActivity(&activity.DeliveryActivities{Hub: notifier})
+		w.RegisterActivity(&activity.NotificationActivities{Hub: notifier, Telegram: tgClient})
+		w.RegisterActivity(&activity.DeliveryActivities{Hub: notifier, Store: st})
+		w.RegisterActivity(&activity.ScheduleActivities{Client: temporalClient, Store: st})
 		w.RegisterActivity(skillAct)
 
 		workers = append(workers, w)
 		log.Printf("Worker registered on task queue %q", queue)
 	}
 
-	// Poll server for skills version changes + refresh catalog
+	// Poll DB for activity queue mapping changes
 	ctx, stopPoll := context.WithCancel(context.Background())
+	go pollActivityQueues(ctx, st, workerCfg, 30*time.Second)
+
+	// Poll DB for skills version changes
 	if cfg.SkillsRepo != "" && skillStore != nil {
-		go watchSkillsVersion(ctx, cfg.NotifyURL, 30*time.Second, func() {
+		go watchSkillsVersionDB(ctx, st, 30*time.Second, func() {
 			reloadCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 			defer cancel()
 			skills, err := skillStore.LoadAll(reloadCtx)
@@ -162,7 +184,11 @@ func runWorker(cmd *cobra.Command, args []string) {
 				return
 			}
 			activity.SetPrompts(skillAct, activity.BuildSkillPrompts(skills, cfg.TaskQueueSkills))
-			refreshCatalog(cfg.NotifyURL, skillAct)
+
+			// Refresh catalog from DB
+			agents := loadCatalogFromDB(st)
+			activity.SetCatalog(skillAct, agents)
+
 			log.Printf("Worker reloaded %d skills, rebuilt prompts", len(skills))
 		})
 	}
@@ -195,66 +221,94 @@ func runWorker(cmd *cobra.Command, args []string) {
 	}
 }
 
-// registerAndFetchCatalog registers this worker's queues+skills with the server,
-// then fetches the full agents catalog so all agents know about each other.
-func registerAndFetchCatalog(cfg *config.Config, skillAct *activity.SkillActivities) {
+// registerAndLoadCatalog upserts this worker's queues into the DB catalog
+// and returns the full catalog for all agents.
+func registerAndLoadCatalog(st store.Store, cfg *config.Config) []activity.AgentCatalogEntry {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Register each queue with its skills
 	for queue, skillNames := range cfg.TaskQueueSkills {
-		body, _ := json.Marshal(map[string]interface{}{
-			"task_queue": queue,
-			"skills":     skillNames,
-		})
-		req, err := http.NewRequestWithContext(ctx, "POST", cfg.NotifyURL+"/internal/workers/register", bytes.NewReader(body))
-		if err != nil {
-			log.Printf("Warning: failed to build register request for queue %q: %v", queue, err)
+		if err := st.UpsertAgent(ctx, queue, skillNames); err != nil {
+			log.Printf("Warning: failed to register queue %q in catalog: %v", queue, err)
 			continue
 		}
-		req.Header.Set("Content-Type", "application/json")
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			log.Printf("Warning: failed to register queue %q with server: %v", queue, err)
-			continue
-		}
-		resp.Body.Close()
-		log.Printf("Registered queue %q with server", queue)
+		log.Printf("Registered queue %q in catalog", queue)
 	}
 
-	// Fetch the full catalog
-	refreshCatalog(cfg.NotifyURL, skillAct)
+	return loadCatalogFromDB(st)
 }
 
-// refreshCatalog fetches the full agents catalog from the server.
-func refreshCatalog(serverURL string, skillAct *activity.SkillActivities) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+// loadCatalogFromDB reads the full agent catalog from PostgreSQL.
+func loadCatalogFromDB(st store.Store) []activity.AgentCatalogEntry {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, "GET", serverURL+"/internal/agents", nil)
+	agents, err := st.ListAgents(ctx)
 	if err != nil {
-		log.Printf("Warning: failed to build catalog request: %v", err)
-		return
+		log.Printf("Warning: failed to load agents catalog from DB: %v", err)
+		return nil
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	catalog := make([]activity.AgentCatalogEntry, len(agents))
+	for i, a := range agents {
+		catalog[i] = activity.AgentCatalogEntry{TaskQueue: a.TaskQueue, Skills: a.Skills}
+	}
+	log.Printf("Loaded agents catalog from DB: %d agents", len(catalog))
+	return catalog
+}
+
+// loadActivityQueuesFromDB reads the activity → task queue mapping from PostgreSQL.
+func loadActivityQueuesFromDB(st store.Store) map[string]string {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	m, err := st.GetActivityQueueMap(ctx)
 	if err != nil {
-		log.Printf("Warning: failed to fetch agents catalog: %v", err)
-		return
+		log.Printf("Warning: failed to load activity queue mapping from DB: %v", err)
+		return nil
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		log.Printf("Warning: agents catalog returned status %d", resp.StatusCode)
-		return
+	if len(m) > 0 {
+		log.Printf("Loaded activity queue mapping from DB: %v", m)
 	}
+	return m
+}
 
-	var catalog []activity.AgentCatalogEntry
-	if err := json.NewDecoder(resp.Body).Decode(&catalog); err != nil {
-		log.Printf("Warning: failed to decode agents catalog: %v", err)
-		return
+// pollActivityQueues periodically refreshes the activity → task queue mapping from DB.
+func pollActivityQueues(ctx context.Context, st store.Store, cfg *activity.WorkerConfig, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			cfg.SetActivityQueues(loadActivityQueuesFromDB(st))
+		}
 	}
+}
 
-	activity.SetCatalog(skillAct, catalog)
-	log.Printf("Fetched agents catalog: %d agents", len(catalog))
+// watchSkillsVersionDB polls PostgreSQL for skills version changes.
+func watchSkillsVersionDB(ctx context.Context, st store.Store, interval time.Duration, onReload func()) {
+	var currentVersion int64
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			v, err := st.GetSkillsVersion(ctx)
+			if err != nil {
+				log.Printf("Warning: failed to poll skills version from DB: %v", err)
+				continue
+			}
+			if v > currentVersion {
+				currentVersion = v
+				log.Printf("Skills version changed to %d, reloading...", v)
+				onReload()
+			}
+		}
+	}
 }

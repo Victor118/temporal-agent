@@ -21,6 +21,7 @@ import (
 	"github.com/victor/temporal-agent/skill"
 	"github.com/victor/temporal-agent/sse"
 	"github.com/victor/temporal-agent/store"
+	"github.com/victor/temporal-agent/telegram"
 	"github.com/victor/temporal-agent/tool"
 	"github.com/victor/temporal-agent/web"
 	"github.com/victor/temporal-agent/workflow"
@@ -59,13 +60,22 @@ func runDev(cmd *cobra.Command, args []string) {
 	tool.RegisterExecTool(registry, cfg.WorkspacePath)
 	tool.RegisterWebTools(registry)
 	tool.RegisterWebSearchTool(registry, cfg.BraveSearchAPIKey)
+	tool.RegisterEmailTool(registry, tool.SMTPConfig{
+		Host:     cfg.SMTPHost,
+		Port:     cfg.SMTPPort,
+		Username: cfg.SMTPUsername,
+		Password: cfg.SMTPPassword,
+		From:     cfg.SMTPFrom,
+	})
 	tool.RegisterSpawnTool(registry, workflow.AgentWorkflow)
 	tool.RegisterAskUserTool(registry, workflow.AskUserWorkflow)
+	tool.RegisterMemoryTools(registry, st)
 
-	// MCP servers
-	if len(cfg.MCPServers) > 0 {
-		mcpConfigs := make([]tool.MCPServerConfig, len(cfg.MCPServers))
-		for i, s := range cfg.MCPServers {
+	// MCP servers — only load those assigned to this worker's task queues
+	mcpServers := cfg.MCPServersForQueues(cfg.TaskQueues)
+	if len(mcpServers) > 0 {
+		mcpConfigs := make([]tool.MCPServerConfig, len(mcpServers))
+		for i, s := range mcpServers {
 			mcpConfigs[i] = tool.MCPServerConfig{
 				Name:      s.Name,
 				URL:       s.URL,
@@ -102,6 +112,11 @@ func runDev(cmd *cobra.Command, args []string) {
 	}
 	skillAct := activity.NewSkillActivities(prompts, catalog)
 
+	// Load activity queue mapping from DB and register for workflow SideEffect access
+	workerCfg := activity.NewWorkerConfig()
+	workerCfg.SetActivityQueues(loadActivityQueuesFromDB(st))
+	activity.SetGlobalWorkerConfig(workerCfg)
+
 	// SSE hub (in-memory, shared between server and worker)
 	hub := sse.NewHub()
 
@@ -121,6 +136,13 @@ func runDev(cmd *cobra.Command, args []string) {
 	// Register schedule tools (needs temporal client + store)
 	tool.RegisterScheduleTools(registry, temporalClient, st, workflow.ScheduledAgentWorkflow, cfg.PrimaryTaskQueue())
 
+	// Telegram client (optional)
+	var tgClient activity.TelegramSender
+	if cfg.TelegramBotToken != "" {
+		tgClient = telegram.NewClient(cfg.TelegramBotToken)
+		log.Println("Telegram bot client configured")
+	}
+
 	// Workers — one per task queue
 	var workers []worker.Worker
 	for _, queue := range cfg.TaskQueues {
@@ -134,13 +156,17 @@ func runDev(cmd *cobra.Command, args []string) {
 		w.RegisterActivity(&activity.LLMActivities{Provider: llmProvider})
 		w.RegisterActivity(&activity.MemoryActivities{Store: st})
 		w.RegisterActivity(&activity.ToolActivities{Registry: registry})
-		w.RegisterActivity(&activity.NotificationActivities{Hub: hub}) // Direct in-memory hub
-		w.RegisterActivity(&activity.DeliveryActivities{Hub: hub})
+		w.RegisterActivity(&activity.NotificationActivities{Hub: hub, Telegram: tgClient})
+		w.RegisterActivity(&activity.DeliveryActivities{Hub: hub, Store: st})
+		w.RegisterActivity(&activity.ScheduleActivities{Client: temporalClient, Store: st})
 		w.RegisterActivity(skillAct)
 
 		workers = append(workers, w)
 		log.Printf("Worker registered on task queue %q", queue)
 	}
+
+	// Poll DB for activity queue mapping changes
+	go pollActivityQueues(context.Background(), st, workerCfg, 30*time.Second)
 
 	// Start all workers in background
 	for _, w := range workers {
@@ -157,6 +183,7 @@ func runDev(cmd *cobra.Command, args []string) {
 		hub:            hub,
 		cfg:            cfg,
 		registry:       registry,
+		store:          st,
 	}
 
 	r := chi.NewRouter()
@@ -164,12 +191,37 @@ func runDev(cmd *cobra.Command, args []string) {
 	r.Use(middleware.Recoverer)
 	r.Use(corsMiddleware)
 
+	// Unauthenticated routes
 	r.Get("/", web.HandleIndex)
-	r.Post("/sessions", h.createSession)
-	r.Post("/sessions/{id}/messages", h.sendMessage)
-	r.Get("/sessions/{id}/state", h.getState)
-	r.Get("/sessions/{id}/stream", h.stream)
-	r.Post("/sessions/{id}/answer", h.answerQuestion)
+	r.Post("/auth/login", h.login)
+	r.Post("/auth/logout", h.logout)
+	r.Post("/webhooks/telegram", h.handleTelegramWebhook)
+
+	// Authenticated routes
+	r.Group(func(g chi.Router) {
+		g.Use(authMiddleware(cfg))
+
+		g.Get("/auth/check", h.checkAuth)
+		g.Post("/sessions", h.createSession)
+		g.Get("/users/{userID}/sessions", h.listSessions)
+		g.Get("/users/{userID}/notifications", h.getNotifications)
+		g.Get("/users/{userID}/notifications/stream", h.streamNotifications)
+		g.Delete("/users/{userID}/notifications/{notifID}", h.deleteNotification)
+		g.Delete("/users/{userID}/notifications", h.deleteAllNotifications)
+		g.Post("/sessions/{id}/messages", h.sendMessage)
+		g.Post("/sessions/{id}/cancel", h.cancelAgent)
+		g.Delete("/sessions/{id}", h.deleteSession)
+		g.Get("/sessions/{id}/state", h.getState)
+		g.Get("/sessions/{id}/history", h.getHistory)
+		g.Get("/sessions/{id}/stream", h.stream)
+		g.Post("/sessions/{id}/answer", h.answerQuestion)
+
+		// Admin routes
+		g.Get("/admin/queues", h.listKnownQueues)
+		g.Get("/admin/activity-queues", h.listActivityQueues)
+		g.Put("/admin/activity-queues", h.setActivityQueue)
+		g.Delete("/admin/activity-queues/{activityName}", h.deleteActivityQueue)
+	})
 
 	srv := &http.Server{Addr: cfg.HTTPAddr, Handler: r}
 

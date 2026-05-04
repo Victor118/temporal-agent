@@ -9,7 +9,10 @@ import (
 	"net/http"
 )
 
-const anthropicAPIURL = "https://api.anthropic.com/v1/messages"
+const (
+	anthropicAPIURL      = "https://api.anthropic.com/v1/messages"
+	anthropicDefaultModel = "claude-sonnet-4-20250514"
+)
 
 type AnthropicProvider struct {
 	apiKey string
@@ -27,7 +30,7 @@ func NewAnthropicProvider(apiKey string) *AnthropicProvider {
 
 type anthropicRequest struct {
 	Model     string              `json:"model"`
-	System    string              `json:"system,omitempty"`
+	System    interface{}         `json:"system,omitempty"` // string or []anthropicContentBlock for cache_control
 	Messages  []anthropicMessage  `json:"messages"`
 	Tools     []anthropicTool     `json:"tools,omitempty"`
 	MaxTokens int                 `json:"max_tokens"`
@@ -39,9 +42,14 @@ type anthropicMessage struct {
 }
 
 type anthropicTool struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description"`
-	InputSchema json.RawMessage `json:"input_schema"`
+	Name         string                  `json:"name"`
+	Description  string                  `json:"description"`
+	InputSchema  json.RawMessage         `json:"input_schema"`
+	CacheControl *anthropicCacheControl  `json:"cache_control,omitempty"`
+}
+
+type anthropicCacheControl struct {
+	Type string `json:"type"`
 }
 
 type anthropicResponse struct {
@@ -68,11 +76,15 @@ func (p *AnthropicProvider) Chat(ctx context.Context, request ChatRequest) (Chat
 	// Convert tools
 	tools := make([]anthropicTool, 0, len(request.Tools))
 	for _, t := range request.Tools {
-		tools = append(tools, anthropicTool{
+		at := anthropicTool{
 			Name:        t.Name,
 			Description: t.Description,
 			InputSchema: t.InputSchema,
-		})
+		}
+		if t.CacheBreakpoint {
+			at.CacheControl = &anthropicCacheControl{Type: "ephemeral"}
+		}
+		tools = append(tools, at)
 	}
 
 	maxTokens := request.MaxTokens
@@ -80,9 +92,30 @@ func (p *AnthropicProvider) Chat(ctx context.Context, request ChatRequest) (Chat
 		maxTokens = 4096
 	}
 
+	model := request.Model
+	if model == "" {
+		model = anthropicDefaultModel
+	}
+
+	// System prompt: use structured content block if caching is requested
+	var system interface{}
+	if request.System != "" {
+		if request.CacheSystem {
+			system = []map[string]interface{}{
+				{
+					"type":          "text",
+					"text":          request.System,
+					"cache_control": map[string]string{"type": "ephemeral"},
+				},
+			}
+		} else {
+			system = request.System
+		}
+	}
+
 	reqBody := anthropicRequest{
-		Model:     request.Model,
-		System:    request.System,
+		Model:     model,
+		System:    system,
 		Messages:  messages,
 		Tools:     tools,
 		MaxTokens: maxTokens,
@@ -101,6 +134,7 @@ func (p *AnthropicProvider) Chat(ctx context.Context, request ChatRequest) (Chat
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("X-API-Key", p.apiKey)
 	httpReq.Header.Set("Anthropic-Version", "2023-06-01")
+	httpReq.Header.Set("Anthropic-Beta", "prompt-caching-2024-07-31")
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
@@ -114,7 +148,13 @@ func (p *AnthropicProvider) Chat(ctx context.Context, request ChatRequest) (Chat
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return ChatResponse{}, fmt.Errorf("anthropic API error (status %d): %s", resp.StatusCode, string(respBody))
+		err := fmt.Errorf("anthropic API error (status %d): %s", resp.StatusCode, string(respBody))
+		// 429 (rate limit) and 529 (overloaded) are transient — let Temporal retry.
+		// Everything else (400, 401, 402, 403, etc.) is permanent — no point retrying.
+		if resp.StatusCode != 429 && resp.StatusCode != 529 {
+			return ChatResponse{}, &PermanentAPIError{Err: err}
+		}
+		return ChatResponse{}, err
 	}
 
 	var aResp anthropicResponse
@@ -143,6 +183,8 @@ func (p *AnthropicProvider) Chat(ctx context.Context, request ChatRequest) (Chat
 }
 
 func convertToAnthropicMessage(msg ChatMessage) anthropicMessage {
+	cacheCtl := cacheControlFor(msg.CacheBreakpoint)
+
 	// If the message has tool calls, build content blocks
 	if len(msg.ToolCalls) > 0 {
 		var blocks []interface{}
@@ -157,27 +199,34 @@ func convertToAnthropicMessage(msg ChatMessage) anthropicMessage {
 			})
 		}
 
-		for _, tc := range msg.ToolCalls {
-			blocks = append(blocks, map[string]interface{}{
+		for i, tc := range msg.ToolCalls {
+			block := map[string]interface{}{
 				"type":  "tool_use",
 				"id":    tc.ID,
 				"name":  tc.Name,
 				"input": tc.Input,
-			})
+			}
+			// Cache breakpoint goes on the last content block
+			if cacheCtl != nil && i == len(msg.ToolCalls)-1 {
+				block["cache_control"] = cacheCtl
+			}
+			blocks = append(blocks, block)
 		}
 		return anthropicMessage{Role: msg.Role, Content: blocks}
 	}
 
 	// If this is a tool result message
 	if msg.ToolResult != nil {
-		blocks := []map[string]interface{}{
-			{
-				"type":        "tool_result",
-				"tool_use_id": msg.ToolResult.ToolCallID,
-				"content":     msg.ToolResult.Content,
-				"is_error":    msg.ToolResult.IsError,
-			},
+		block := map[string]interface{}{
+			"type":        "tool_result",
+			"tool_use_id": msg.ToolResult.ToolCallID,
+			"content":     msg.ToolResult.Content,
+			"is_error":    msg.ToolResult.IsError,
 		}
+		if cacheCtl != nil {
+			block["cache_control"] = cacheCtl
+		}
+		blocks := []map[string]interface{}{block}
 		return anthropicMessage{Role: "user", Content: blocks}
 	}
 
@@ -187,5 +236,23 @@ func convertToAnthropicMessage(msg ChatMessage) anthropicMessage {
 		// Content is already structured, pass through
 		return anthropicMessage{Role: msg.Role, Content: msg.Content}
 	}
+
+	if cacheCtl != nil {
+		blocks := []map[string]interface{}{
+			{
+				"type":          "text",
+				"text":          text,
+				"cache_control": cacheCtl,
+			},
+		}
+		return anthropicMessage{Role: msg.Role, Content: blocks}
+	}
 	return anthropicMessage{Role: msg.Role, Content: text}
+}
+
+func cacheControlFor(breakpoint bool) map[string]string {
+	if !breakpoint {
+		return nil
+	}
+	return map[string]string{"type": "ephemeral"}
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"runtime"
+	"strings"
 
 	"github.com/victor/temporal-agent/provider"
 )
@@ -36,7 +37,12 @@ func (t *Tool) WorkflowName() string {
 	if t.WorkflowFunc == nil {
 		return ""
 	}
-	return runtime.FuncForPC(reflect.ValueOf(t.WorkflowFunc).Pointer()).Name()
+	fullName := runtime.FuncForPC(reflect.ValueOf(t.WorkflowFunc).Pointer()).Name()
+	// Extract short name (e.g. "AgentWorkflow" from "github.com/.../workflow.AgentWorkflow")
+	if idx := strings.LastIndex(fullName, "."); idx >= 0 {
+		return fullName[idx+1:]
+	}
+	return fullName
 }
 
 

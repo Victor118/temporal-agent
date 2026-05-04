@@ -13,8 +13,9 @@ type ToolActivities struct {
 }
 
 type ExecuteToolInput struct {
-	Name  string          `json:"name"`
-	Input json.RawMessage `json:"input"`
+	Name      string          `json:"name"`
+	Input     json.RawMessage `json:"input"`
+	SessionID string          `json:"session_id,omitempty"`
 }
 
 type ExecuteToolOutput struct {
@@ -64,6 +65,9 @@ func (a *ToolActivities) ResolveToolKinds(ctx context.Context, input ResolveTool
 }
 
 func (a *ToolActivities) ExecuteTool(ctx context.Context, input ExecuteToolInput) (ExecuteToolOutput, error) {
+	if input.SessionID != "" {
+		ctx = tool.WithSessionID(ctx, input.SessionID)
+	}
 	result, err := a.Registry.Execute(ctx, input.Name, input.Input)
 	if err != nil {
 		// Return error as content to the LLM, not as a Temporal error
