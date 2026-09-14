@@ -87,7 +87,7 @@ func runWorker(cmd *cobra.Command, args []string) {
 		}
 	}
 
-	// Skills — load from git repo if configured, build per-queue prompts
+	// Skills — load from git repo if configured, build per-agent prompts
 	var skillStore skill.Store
 	var prompts map[string]string
 	if cfg.SkillsRepo != "" {
@@ -103,16 +103,17 @@ func runWorker(cmd *cobra.Command, args []string) {
 			log.Printf("Warning: failed to load skills from repo: %v", err)
 		} else {
 			log.Printf("Loaded %d skills from %s", len(skills), cfg.SkillsRepo)
-			prompts = activity.BuildSkillPrompts(skills, cfg.TaskQueueSkills)
-			for queue, skillNames := range cfg.TaskQueueSkills {
-				log.Printf("Task queue %q: skills %v", queue, skillNames)
+			prompts = activity.BuildSkillPrompts(skills, cfg.AgentDefinitions)
+			for _, def := range cfg.AgentDefinitions {
+				log.Printf("Agent %q (queue=%s): skills %v", def.ID, def.DefaultQueue, def.Skills)
 			}
 		}
 	} else {
 		log.Println("No skills repo configured (SKILLS_REPO), running without skills")
+		prompts = activity.BuildSkillPrompts(nil, cfg.AgentDefinitions)
 	}
 
-	// Register this worker's queues in the catalog (DB)
+	// Register all agents in the catalog (DB) and load full catalog
 	catalog := registerAndLoadCatalog(st, cfg)
 	skillAct := activity.NewSkillActivities(prompts, catalog)
 
@@ -183,7 +184,7 @@ func runWorker(cmd *cobra.Command, args []string) {
 				log.Printf("Error reloading skills: %v", err)
 				return
 			}
-			activity.SetPrompts(skillAct, activity.BuildSkillPrompts(skills, cfg.TaskQueueSkills))
+			activity.SetPrompts(skillAct, activity.BuildSkillPrompts(skills, cfg.AgentDefinitions))
 
 			// Refresh catalog from DB
 			agents := loadCatalogFromDB(st)
@@ -221,18 +222,24 @@ func runWorker(cmd *cobra.Command, args []string) {
 	}
 }
 
-// registerAndLoadCatalog upserts this worker's queues into the DB catalog
-// and returns the full catalog for all agents.
+// registerAndLoadCatalog upserts every agent definition known to this worker
+// into the DB catalog and returns the full catalog (all agents from all workers).
 func registerAndLoadCatalog(st store.Store, cfg *config.Config) []activity.AgentCatalogEntry {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	for queue, skillNames := range cfg.TaskQueueSkills {
-		if err := st.UpsertAgent(ctx, queue, skillNames); err != nil {
-			log.Printf("Warning: failed to register queue %q in catalog: %v", queue, err)
+	for _, def := range cfg.AgentDefinitions {
+		if err := st.UpsertAgent(ctx, store.Agent{
+			ID:           def.ID,
+			Name:         def.Name,
+			Description:  def.Description,
+			Skills:       def.Skills,
+			DefaultQueue: def.DefaultQueue,
+		}); err != nil {
+			log.Printf("Warning: failed to register agent %q in catalog: %v", def.ID, err)
 			continue
 		}
-		log.Printf("Registered queue %q in catalog", queue)
+		log.Printf("Registered agent %q in catalog", def.ID)
 	}
 
 	return loadCatalogFromDB(st)
@@ -251,7 +258,13 @@ func loadCatalogFromDB(st store.Store) []activity.AgentCatalogEntry {
 
 	catalog := make([]activity.AgentCatalogEntry, len(agents))
 	for i, a := range agents {
-		catalog[i] = activity.AgentCatalogEntry{TaskQueue: a.TaskQueue, Skills: a.Skills}
+		catalog[i] = activity.AgentCatalogEntry{
+			ID:           a.ID,
+			Name:         a.Name,
+			Description:  a.Description,
+			Skills:       a.Skills,
+			DefaultQueue: a.DefaultQueue,
+		}
 	}
 	log.Printf("Loaded agents catalog from DB: %d agents", len(catalog))
 	return catalog

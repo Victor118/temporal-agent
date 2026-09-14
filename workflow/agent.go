@@ -19,13 +19,14 @@ const maxReActIterations = 50
 type AgentWorkflowInput struct {
 	SessionID    string          `json:"session_id"`
 	UserID       string          `json:"user_id,omitempty"`
+	AgentID      string          `json:"agent_id,omitempty"`    // Logical agent identity (loads its skills/prompt). If empty, the worker resolves a default from the current task queue.
 	UserMessage  string          `json:"user_message"`
 	Messages     []store.Message `json:"messages"`      // Context loaded by session
 	UserMemory   string          `json:"user_memory,omitempty"` // Persistent user memory injected into system prompt
 	SystemPrompt string          `json:"system_prompt"`
 	Model        string          `json:"model"`
 	SessionTools []string        `json:"session_tools,omitempty"` // Tools that persist through a session
-	AgentChain   []string        `json:"agent_chain,omitempty"`   // Chain of parent agent names (task queues) for context propagation
+	AgentChain   []string        `json:"agent_chain,omitempty"`   // Chain of parent agent IDs for context propagation
 	Channel      string          `json:"channel,omitempty"`       // "web", "telegram"
 	ChannelID    string          `json:"channel_id,omitempty"`    // chat_id for telegram
 }
@@ -110,26 +111,44 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 		})
 	}
 
-	// Build the current agent chain for context propagation to sub-agents and ask_user
-	currentQueue := workflow.GetInfo(ctx).TaskQueueName
-	currentChain := append(input.AgentChain, currentQueue)
-
-	// Load skills for the current task queue (unless a system prompt override is provided)
-	systemPrompt := input.SystemPrompt
-	if systemPrompt == "" {
-		taskQueue := workflow.GetInfo(ctx).TaskQueueName
-		var skillAct *activity.SkillActivities
-		var skillsResult activity.LoadSkillsForQueueOutput
+	// Resolve the current agent identity. Prefer the explicit AgentID from input;
+	// fall back to a lookup by current task queue (for legacy/edge cases).
+	currentAgentID := input.AgentID
+	var skillAct *activity.SkillActivities
+	if currentAgentID == "" {
+		currentQueue := workflow.GetInfo(ctx).TaskQueueName
+		var resolved string
 		if err := workflow.ExecuteActivity(
 			workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 				StartToCloseTimeout: 5 * time.Second,
 			}),
-			skillAct.LoadSkillsForQueue,
-			activity.LoadSkillsForQueueInput{TaskQueue: taskQueue},
+			skillAct.ResolveAgentByQueue,
+			currentQueue,
+		).Get(ctx, &resolved); err != nil {
+			return AgentWorkflowOutput{}, fmt.Errorf("resolve agent by queue: %w", err)
+		}
+		currentAgentID = resolved
+	}
+	currentChain := append(input.AgentChain, currentAgentID)
+
+	// Load skills for the current agent (unless a system prompt override is provided)
+	systemPrompt := input.SystemPrompt
+	queueToAgentID := map[string]string{}
+	if systemPrompt == "" || currentAgentID != "" {
+		var skillsResult activity.LoadSkillsForAgentOutput
+		if err := workflow.ExecuteActivity(
+			workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+				StartToCloseTimeout: 5 * time.Second,
+			}),
+			skillAct.LoadSkillsForAgent,
+			activity.LoadSkillsForAgentInput{AgentID: currentAgentID},
 		).Get(ctx, &skillsResult); err != nil {
 			return AgentWorkflowOutput{}, fmt.Errorf("load skills: %w", err)
 		}
-		systemPrompt = skillsResult.SystemPrompt
+		queueToAgentID = skillsResult.QueueToAgentID
+		if systemPrompt == "" {
+			systemPrompt = skillsResult.SystemPrompt
+		}
 	}
 
 	// Append user memory to system prompt if available
@@ -268,7 +287,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 				d.workflowID = fmt.Sprintf("%s-tool-%s-%d", input.SessionID, tc.Name, i)
 
 				// Build input first — may override task queue for spawn_session
-				workflowName, childInput := buildChildInput(tc.Name, tc.Input, input, d.workflowID, &res, currentChain)
+				workflowName, childInput := buildChildInput(tc.Name, tc.Input, input, d.workflowID, &res, currentChain, queueToAgentID)
 
 				opts := workflow.ChildWorkflowOptions{
 					WorkflowID: d.workflowID,
@@ -395,10 +414,11 @@ func notifyResponse(ctx workflow.Context, sessionID, channel, channelID, content
 }
 
 // buildChildInput constructs the proper input for child workflow tools.
-// For spawn_session, it builds an AgentWorkflowInput with the agent chain.
+// For spawn_session, it builds an AgentWorkflowInput with the agent chain and
+// resolves the target task queue to an agent_id via queueToAgentID.
 // For ask_user, it enriches the raw input with the agent chain.
 // For other workflow tools, it passes the raw input unchanged.
-func buildChildInput(toolName string, rawInput json.RawMessage, parent AgentWorkflowInput, childID string, res *activity.ToolResolution, agentChain []string) (workflowName string, input interface{}) {
+func buildChildInput(toolName string, rawInput json.RawMessage, parent AgentWorkflowInput, childID string, res *activity.ToolResolution, agentChain []string, queueToAgentID map[string]string) (workflowName string, input interface{}) {
 	switch toolName {
 	case "spawn_session":
 		var spawnInput struct {
@@ -419,8 +439,13 @@ func buildChildInput(toolName string, rawInput json.RawMessage, parent AgentWork
 			res.TaskQueue = spawnInput.TaskQueue
 		}
 
+		// Resolve target agent_id from the chosen queue (Phase 1: spawn_session API
+		// still takes task_queue; we map it to agent_id internally).
+		childAgentID := queueToAgentID[res.TaskQueue]
+
 		return res.WorkflowName, AgentWorkflowInput{
 			SessionID:    childID,
+			AgentID:      childAgentID,
 			UserMessage:  spawnInput.Task,
 			Model:        model,
 			SessionTools: spawnInput.SessionTools,

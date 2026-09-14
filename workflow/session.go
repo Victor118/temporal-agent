@@ -18,6 +18,7 @@ const (
 type SessionWorkflowInput struct {
 	SessionID    string `json:"session_id"`
 	UserID       string `json:"user_id"`
+	AgentID      string `json:"agent_id,omitempty"` // Logical agent identity. Resolved by handlers when starting a session.
 	SystemPrompt string `json:"system_prompt"`
 	Model        string `json:"model"`
 	Channel      string `json:"channel,omitempty"`    // "web", "telegram"
@@ -110,6 +111,7 @@ func processTurn(actCtx, ctx workflow.Context, input SessionWorkflowInput, userM
 	agentFuture := workflow.ExecuteChildWorkflow(childCtx, AgentWorkflow, AgentWorkflowInput{
 		SessionID:    input.SessionID,
 		UserID:       input.UserID,
+		AgentID:      input.AgentID,
 		UserMessage:  userMessage,
 		Messages:     loadResult.Messages,
 		UserMemory:   loadResult.UserMemory,

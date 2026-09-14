@@ -84,11 +84,17 @@ func (s *PostgresStore) migrate() error {
 			status TEXT NOT NULL DEFAULT 'scheduled'
 		);
 
-		CREATE TABLE IF NOT EXISTS agent_catalog (
-			task_queue TEXT PRIMARY KEY,
-			skills JSONB NOT NULL DEFAULT '[]',
-			updated_at TIMESTAMPTZ DEFAULT NOW()
+		DROP TABLE IF EXISTS agent_catalog;
+		CREATE TABLE IF NOT EXISTS agents (
+			agent_id      TEXT PRIMARY KEY,
+			name          TEXT NOT NULL,
+			description   TEXT NOT NULL DEFAULT '',
+			skills        JSONB NOT NULL DEFAULT '[]',
+			default_queue TEXT NOT NULL,
+			created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		);
+		CREATE INDEX IF NOT EXISTS idx_agents_default_queue ON agents(default_queue);
 
 		CREATE TABLE IF NOT EXISTS skills_version (
 			id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
@@ -349,37 +355,59 @@ func (s *PostgresStore) UpdateTaskLogStatus(ctx context.Context, scheduleID, sta
 	return err
 }
 
-func (s *PostgresStore) UpsertAgent(ctx context.Context, taskQueue string, skills []string) error {
-	data, err := json.Marshal(skills)
+func (s *PostgresStore) UpsertAgent(ctx context.Context, agent Agent) error {
+	skillsJSON, err := json.Marshal(agent.Skills)
 	if err != nil {
 		return err
 	}
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO agent_catalog (task_queue, skills, updated_at)
-		VALUES ($1, $2, NOW())
-		ON CONFLICT (task_queue) DO UPDATE SET skills = EXCLUDED.skills, updated_at = NOW()`,
-		taskQueue, string(data))
+		INSERT INTO agents (agent_id, name, description, skills, default_queue, updated_at)
+		VALUES ($1, $2, $3, $4, $5, NOW())
+		ON CONFLICT (agent_id) DO UPDATE SET
+			name = EXCLUDED.name,
+			description = EXCLUDED.description,
+			skills = EXCLUDED.skills,
+			default_queue = EXCLUDED.default_queue,
+			updated_at = NOW()`,
+		agent.ID, agent.Name, agent.Description, string(skillsJSON), agent.DefaultQueue)
 	return err
 }
 
-func (s *PostgresStore) ListAgents(ctx context.Context) ([]AgentEntry, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT task_queue, skills FROM agent_catalog ORDER BY task_queue")
+func (s *PostgresStore) ListAgents(ctx context.Context) ([]Agent, error) {
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT agent_id, name, description, skills, default_queue FROM agents ORDER BY agent_id")
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var agents []AgentEntry
+	var agents []Agent
 	for rows.Next() {
-		var a AgentEntry
+		var a Agent
 		var skillsJSON string
-		if err := rows.Scan(&a.TaskQueue, &skillsJSON); err != nil {
+		if err := rows.Scan(&a.ID, &a.Name, &a.Description, &skillsJSON, &a.DefaultQueue); err != nil {
 			return nil, err
 		}
 		json.Unmarshal([]byte(skillsJSON), &a.Skills)
 		agents = append(agents, a)
 	}
 	return agents, rows.Err()
+}
+
+func (s *PostgresStore) GetAgent(ctx context.Context, agentID string) (*Agent, error) {
+	var a Agent
+	var skillsJSON string
+	err := s.db.QueryRowContext(ctx,
+		"SELECT agent_id, name, description, skills, default_queue FROM agents WHERE agent_id = $1",
+		agentID).Scan(&a.ID, &a.Name, &a.Description, &skillsJSON, &a.DefaultQueue)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	json.Unmarshal([]byte(skillsJSON), &a.Skills)
+	return &a, nil
 }
 
 func (s *PostgresStore) GetSkillsVersion(ctx context.Context) (int64, error) {

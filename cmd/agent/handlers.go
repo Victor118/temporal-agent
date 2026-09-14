@@ -144,6 +144,7 @@ func authMiddleware(cfg *config.Config) func(http.Handler) http.Handler {
 
 type createSessionRequest struct {
 	UserID       string `json:"user_id,omitempty"`
+	AgentID      string `json:"agent_id,omitempty"`
 	SystemPrompt string `json:"system_prompt,omitempty"`
 	Model        string `json:"model,omitempty"`
 }
@@ -169,7 +170,26 @@ func (h *handler) createSession(w http.ResponseWriter, r *http.Request) {
 		model = h.cfg.LLMModel
 	}
 
-	taskQueue := h.cfg.PrimaryTaskQueue()
+	// Resolve target agent: explicit agent_id from request, or fall back to the
+	// agent whose default_queue matches the primary task queue.
+	var agentDef *config.AgentDefinition
+	if req.AgentID != "" {
+		agentDef = h.cfg.AgentByID(req.AgentID)
+		if agentDef == nil {
+			http.Error(w, fmt.Sprintf("Unknown agent_id %q", req.AgentID), http.StatusBadRequest)
+			return
+		}
+	} else {
+		agentDef = h.cfg.AgentByDefaultQueue(h.cfg.PrimaryTaskQueue())
+		if agentDef == nil && len(h.cfg.AgentDefinitions) > 0 {
+			agentDef = &h.cfg.AgentDefinitions[0]
+		}
+	}
+	if agentDef == nil {
+		http.Error(w, "No agent definitions configured", http.StatusInternalServerError)
+		return
+	}
+	taskQueue := agentDef.DefaultQueue
 
 	_, err := h.temporalClient.ExecuteWorkflow(r.Context(), client.StartWorkflowOptions{
 		ID:        "session-" + sessionID,
@@ -177,7 +197,8 @@ func (h *handler) createSession(w http.ResponseWriter, r *http.Request) {
 	}, workflow.SessionWorkflow, workflow.SessionWorkflowInput{
 		SessionID:    sessionID,
 		UserID:       userID,
-		SystemPrompt: req.SystemPrompt, // Optional override; empty = load from task queue skills
+		AgentID:      agentDef.ID,
+		SystemPrompt: req.SystemPrompt, // Optional override; empty = load from agent skills
 		Model:        model,
 	})
 	if err != nil {
@@ -303,13 +324,25 @@ func (h *handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 	// Find the active workflow for this session, or restart if none
 	workflowID := h.findActiveWorkflowID(r.Context(), sessionID)
 	if workflowID == "" {
+		// Recover the original task_queue (and thus agent_id) from the persisted session
+		sess, _ := h.store.GetSession(r.Context(), sessionID)
+		taskQueue := h.cfg.PrimaryTaskQueue()
+		var agentID string
+		if sess != nil && sess.TaskQueue != "" {
+			taskQueue = sess.TaskQueue
+			if def := h.cfg.AgentByDefaultQueue(taskQueue); def != nil {
+				agentID = def.ID
+			}
+		}
+
 		newWorkflowID := fmt.Sprintf("session-%s-%d", sessionID, time.Now().Unix())
 		_, err := h.temporalClient.ExecuteWorkflow(r.Context(), client.StartWorkflowOptions{
 			ID:        newWorkflowID,
-			TaskQueue: h.cfg.PrimaryTaskQueue(),
+			TaskQueue: taskQueue,
 		}, workflow.SessionWorkflow, workflow.SessionWorkflowInput{
 			SessionID: sessionID,
 			UserID:    func() string { u, _ := h.store.GetSessionUser(r.Context(), sessionID); return u }(),
+			AgentID:   agentID,
 			Model:     h.cfg.LLMModel,
 		})
 		if err != nil {
@@ -646,9 +679,13 @@ func (h *handler) listKnownQueues(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("Failed to list agents: %v", err), http.StatusInternalServerError)
 		return
 	}
-	queues := make([]string, len(agents))
-	for i, a := range agents {
-		queues[i] = a.TaskQueue
+	queues := make([]string, 0, len(agents))
+	seen := make(map[string]bool, len(agents))
+	for _, a := range agents {
+		if a.DefaultQueue != "" && !seen[a.DefaultQueue] {
+			queues = append(queues, a.DefaultQueue)
+			seen[a.DefaultQueue] = true
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(queues)

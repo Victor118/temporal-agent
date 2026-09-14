@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/victor/temporal-agent/config"
 	"github.com/victor/temporal-agent/skill"
 )
 
@@ -22,18 +23,21 @@ Key behaviors:
 
 `
 
-// AgentCatalogEntry describes a specialized agent registered on a task queue.
+// AgentCatalogEntry describes a logical agent (persona) for the directory shown in prompts.
 type AgentCatalogEntry struct {
-	TaskQueue string   `json:"task_queue"`
-	Skills    []string `json:"skills"`
+	ID           string   `json:"id"`
+	Name         string   `json:"name"`
+	Description  string   `json:"description"`
+	Skills       []string `json:"skills"`
+	DefaultQueue string   `json:"default_queue"`
 }
 
-// SkillActivities provides skill loading as a Temporal activity.
-// Prompts are built at worker startup from pre-loaded skills.
-// The agents catalog is fetched from the server and can be updated at runtime.
+// SkillActivities provides per-agent system prompt loading as a Temporal activity.
+// Prompts are built at worker startup from pre-loaded skills, indexed by agent ID.
+// The catalog is fetched from the DB and can be updated at runtime.
 type SkillActivities struct {
 	mu      sync.RWMutex
-	prompts map[string]string // queue → system prompt (skills only, no catalog)
+	prompts map[string]string // agent_id → base system prompt (skills only, no directory)
 	catalog []AgentCatalogEntry
 }
 
@@ -69,17 +73,21 @@ func SetCatalog(a *SkillActivities, catalog []AgentCatalogEntry) {
 	a.setCatalog(catalog)
 }
 
-type LoadSkillsForQueueInput struct {
-	TaskQueue string `json:"task_queue"`
+type LoadSkillsForAgentInput struct {
+	AgentID string `json:"agent_id"`
 }
 
-type LoadSkillsForQueueOutput struct {
-	SystemPrompt string `json:"system_prompt"`
+type LoadSkillsForAgentOutput struct {
+	SystemPrompt   string            `json:"system_prompt"`
+	QueueToAgentID map[string]string `json:"queue_to_agent_id"` // default_queue → agent_id, used to route spawn_session
 }
 
-func (a *SkillActivities) LoadSkillsForQueue(ctx context.Context, input LoadSkillsForQueueInput) (LoadSkillsForQueueOutput, error) {
+// LoadSkillsForAgent returns the full system prompt for the given agent (its base
+// skills prompt plus the directory of all OTHER agents, self excluded), and a
+// queue→agent_id map used by the workflow to resolve spawn_session targets.
+func (a *SkillActivities) LoadSkillsForAgent(ctx context.Context, input LoadSkillsForAgentInput) (LoadSkillsForAgentOutput, error) {
 	a.mu.RLock()
-	basePrompt := a.prompts[input.TaskQueue]
+	basePrompt := a.prompts[input.AgentID]
 	catalog := a.catalog
 	a.mu.RUnlock()
 
@@ -87,54 +95,101 @@ func (a *SkillActivities) LoadSkillsForQueue(ctx context.Context, input LoadSkil
 		basePrompt = defaultSystemPrompt
 	}
 
-	// Append agents directory so every agent knows about the others (excluding self)
-	directory := buildAgentsDirectory(catalog, input.TaskQueue)
-	return LoadSkillsForQueueOutput{SystemPrompt: basePrompt + directory}, nil
+	directory := buildAgentsDirectory(catalog, input.AgentID)
+
+	queueMap := make(map[string]string, len(catalog))
+	for _, e := range catalog {
+		if e.DefaultQueue != "" {
+			queueMap[e.DefaultQueue] = e.ID
+		}
+	}
+
+	return LoadSkillsForAgentOutput{
+		SystemPrompt:   basePrompt + directory,
+		QueueToAgentID: queueMap,
+	}, nil
 }
 
-// BuildSkillPrompts builds a map of task queue → base system prompt (without agents directory).
-// The agents directory is appended at runtime by LoadSkillsForQueue.
-func BuildSkillPrompts(allSkills []skill.Skill, queueSkills map[string][]string) map[string]string {
+// ResolveAgentByQueue returns the agent_id whose default_queue matches the given queue.
+// Used at workflow startup to resolve a fallback agent identity when AgentID is not
+// provided in the input (e.g. legacy session start).
+func (a *SkillActivities) ResolveAgentByQueue(ctx context.Context, queue string) (string, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	for _, e := range a.catalog {
+		if e.DefaultQueue == queue {
+			return e.ID, nil
+		}
+	}
+	return "", nil
+}
+
+// BuildSkillPrompts builds a map of agent_id → base system prompt (without agents directory).
+// The directory is appended at runtime by LoadSkillsForAgent (so it can filter out self).
+func BuildSkillPrompts(allSkills []skill.Skill, agentDefs []config.AgentDefinition) map[string]string {
 	skillsByName := make(map[string]skill.Skill, len(allSkills))
 	for _, s := range allSkills {
 		skillsByName[s.Name] = s
 	}
 
-	prompts := make(map[string]string, len(queueSkills))
-	for queue, skillNames := range queueSkills {
+	prompts := make(map[string]string, len(agentDefs))
+	for _, def := range agentDefs {
 		var matched []skill.Skill
-		for _, name := range skillNames {
+		for _, name := range def.Skills {
 			if s, ok := skillsByName[name]; ok {
 				matched = append(matched, s)
 			}
 		}
-		prompts[queue] = buildSystemPrompt(matched)
+		prompts[def.ID] = buildSystemPrompt(matched)
 	}
 	return prompts
 }
 
+// CatalogFromDefinitions converts AgentDefinitions to catalog entries.
+// Used in dev mode where we don't query the DB to build the catalog.
+func CatalogFromDefinitions(defs []config.AgentDefinition) []AgentCatalogEntry {
+	out := make([]AgentCatalogEntry, len(defs))
+	for i, d := range defs {
+		out[i] = AgentCatalogEntry{
+			ID:           d.ID,
+			Name:         d.Name,
+			Description:  d.Description,
+			Skills:       d.Skills,
+			DefaultQueue: d.DefaultQueue,
+		}
+	}
+	return out
+}
+
 // buildAgentsDirectory generates a prompt section listing all available specialized agents.
-// currentQueue is excluded from the list so an agent never spawns a copy of itself.
-func buildAgentsDirectory(catalog []AgentCatalogEntry, currentQueue string) string {
+// currentAgentID is excluded from the list so an agent never spawns a copy of itself.
+func buildAgentsDirectory(catalog []AgentCatalogEntry, currentAgentID string) string {
 	var filtered []AgentCatalogEntry
 	for _, entry := range catalog {
-		if entry.TaskQueue != currentQueue {
+		if entry.ID != currentAgentID {
 			filtered = append(filtered, entry)
 		}
 	}
 
 	if len(filtered) == 0 {
-		return "## Specialized Agents\n\nNo specialized sub-agents are currently available. Do not invent agent names or task queues that are not listed here.\n\n"
+		return "## Specialized Agents\n\nNo specialized sub-agents are currently available. Do not invent agent IDs that are not listed here.\n\n"
 	}
 
 	var sb strings.Builder
 	sb.WriteString("## Available Specialized Agents\n\n")
-	sb.WriteString("You can delegate tasks to specialized agents using the `spawn_session` tool with the appropriate `task_queue`. Only use task queues listed below — do not invent others.\n\n")
+	sb.WriteString("You can delegate tasks to specialized agents using the `spawn_session` tool with the appropriate `task_queue` (the agent's default queue). Only use task queues listed below — do not invent others.\n\n")
 
 	for _, entry := range filtered {
-		sb.WriteString(fmt.Sprintf("- task_queue=`%s` (skills: %s)\n", entry.TaskQueue, strings.Join(entry.Skills, ", ")))
+		sb.WriteString(fmt.Sprintf("- **%s** (`task_queue=%s`)", entry.Name, entry.DefaultQueue))
+		if entry.Description != "" {
+			sb.WriteString(" — " + entry.Description)
+		}
+		if len(entry.Skills) > 0 {
+			sb.WriteString(fmt.Sprintf(" _(skills: %s)_", strings.Join(entry.Skills, ", ")))
+		}
+		sb.WriteString("\n")
 	}
-	sb.WriteString("\nIMPORTANT: The `task_queue` parameter must be the exact task queue name (e.g. `market-analyst`), NOT a skill name (e.g. `market-research`).\n")
+	sb.WriteString("\nIMPORTANT: The `task_queue` parameter must be the exact value shown above (e.g. `market-analyst`), NOT a skill name.\n")
 	sb.WriteString("\n")
 
 	return sb.String()

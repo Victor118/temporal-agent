@@ -1,0 +1,20 @@
+agents:
+  - id: default
+    name: Default Agent
+    description: General-purpose assistant for everyday tasks.
+    skills: []
+    default_queue: agent-default
+
+  - id: market-analyst
+    name: Market Analyst
+    description: Analyzes financial markets, performs trading research, summarizes market trends.
+    skills:
+      - market-research
+    default_queue: market-analyst
+
+  - id: code-reviewer
+    name: Code Reviewer
+    description: Reviews code changes, suggests improvements, checks for bugs and code quality.
+    skills:
+      - code-review
+    default_queue: code-reviewer

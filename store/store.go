@@ -41,8 +41,9 @@ type Store interface {
 	UpdateTaskLogStatus(ctx context.Context, scheduleID, status string) error
 
 	// Agent catalog
-	UpsertAgent(ctx context.Context, taskQueue string, skills []string) error
-	ListAgents(ctx context.Context) ([]AgentEntry, error)
+	UpsertAgent(ctx context.Context, agent Agent) error
+	ListAgents(ctx context.Context) ([]Agent, error)
+	GetAgent(ctx context.Context, agentID string) (*Agent, error)
 
 	// Skills version
 	GetSkillsVersion(ctx context.Context) (int64, error)
@@ -63,7 +64,10 @@ type ActivityQueueEntry struct {
 	TaskQueue    string `json:"task_queue"`
 }
 
-type AgentEntry struct {
-	TaskQueue string   `json:"task_queue"`
-	Skills    []string `json:"skills"`
+type Agent struct {
+	ID           string   `json:"id"`
+	Name         string   `json:"name"`
+	Description  string   `json:"description"`
+	Skills       []string `json:"skills"`
+	DefaultQueue string   `json:"default_queue"`
 }

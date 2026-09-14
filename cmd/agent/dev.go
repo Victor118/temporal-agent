@@ -102,14 +102,24 @@ func runDev(cmd *cobra.Command, args []string) {
 	} else {
 		log.Println("No skills found in ./skills")
 	}
-	prompts := activity.BuildSkillPrompts(skills, cfg.TaskQueueSkills)
+	prompts := activity.BuildSkillPrompts(skills, cfg.AgentDefinitions)
 
-	// In dev mode, build the catalog locally (no server to register with)
-	var catalog []activity.AgentCatalogEntry
-	for queue, skillNames := range cfg.TaskQueueSkills {
-		log.Printf("Task queue %q: skills %v", queue, skillNames)
-		catalog = append(catalog, activity.AgentCatalogEntry{TaskQueue: queue, Skills: skillNames})
+	// In dev mode, also persist the catalog to DB so handlers and queries see it.
+	for _, def := range cfg.AgentDefinitions {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := st.UpsertAgent(ctx, store.Agent{
+			ID:           def.ID,
+			Name:         def.Name,
+			Description:  def.Description,
+			Skills:       def.Skills,
+			DefaultQueue: def.DefaultQueue,
+		}); err != nil {
+			log.Printf("Warning: failed to register agent %q: %v", def.ID, err)
+		}
+		cancel()
+		log.Printf("Agent %q (queue=%s): skills %v", def.ID, def.DefaultQueue, def.Skills)
 	}
+	catalog := activity.CatalogFromDefinitions(cfg.AgentDefinitions)
 	skillAct := activity.NewSkillActivities(prompts, catalog)
 
 	// Load activity queue mapping from DB and register for workflow SideEffect access

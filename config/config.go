@@ -2,8 +2,12 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
+	"regexp"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
@@ -13,8 +17,10 @@ type Config struct {
 	TemporalTLSCert   string
 	TemporalTLSKey    string
 	TaskQueues        []string
-	TaskQueueSkills   map[string][]string // queue name → skill names
 	TaskQueueMCP      map[string][]string // queue name → MCP server names
+
+	// Agent definitions (loaded from agents.yaml)
+	AgentDefinitions []AgentDefinition
 
 	// Store
 	DatabaseURL string
@@ -62,13 +68,31 @@ type MCPServer struct {
 	Transport string `json:"transport,omitempty"` // "http" or "sse"
 }
 
+// AgentDefinition is the static config of a logical agent (persona).
+// Loaded from agents.yaml at startup. Independent of which worker runs it.
+type AgentDefinition struct {
+	ID           string   `yaml:"id" json:"id"`
+	Name         string   `yaml:"name" json:"name"`
+	Description  string   `yaml:"description" json:"description"`
+	Skills       []string `yaml:"skills" json:"skills"`
+	DefaultQueue string   `yaml:"default_queue" json:"default_queue"`
+}
+
 func Load() *Config {
+	agentsFile := envOr("AGENT_DEFINITIONS_FILE", "./agents.yaml")
+	defs, err := loadAgentDefinitions(agentsFile)
+	if err != nil {
+		panic(fmt.Sprintf("config: %v", err))
+	}
+
 	return &Config{
 		TemporalHost:      envOr("TEMPORAL_HOST", "localhost:7233"),
 		TemporalNamespace: envOr("TEMPORAL_NAMESPACE", "default"),
 		TemporalTLSCert:   os.Getenv("TEMPORAL_TLS_CERT"),
 		TemporalTLSKey:    os.Getenv("TEMPORAL_TLS_KEY"),
 		TaskQueues:        parseTaskQueues(envOr("TASK_QUEUES", envOr("TASK_QUEUE", "agent-default"))),
+
+		AgentDefinitions: defs,
 
 		DatabaseURL: envOr("DATABASE_URL", "postgres://agent:agent@localhost:5432/agent?sslmode=disable"),
 
@@ -99,9 +123,84 @@ func Load() *Config {
 
 		MCPServers: parseMCPServers(os.Getenv("MCP_SERVERS")),
 
-		TaskQueueSkills: parseTaskQueueSkills(os.Getenv("TASK_QUEUE_SKILLS")),
-		TaskQueueMCP:    parseTaskQueueSkills(os.Getenv("TASK_QUEUE_MCP")),
+		TaskQueueMCP: parseTaskQueueMap(os.Getenv("TASK_QUEUE_MCP")),
 	}
+}
+
+// agentIDPattern enforces lowercase alphanumeric + hyphen, no leading/trailing hyphen.
+// Single-letter IDs are allowed (e.g. "x").
+var agentIDPattern = regexp.MustCompile(`^[a-z]([a-z0-9-]*[a-z0-9])?$`)
+
+func loadAgentDefinitions(path string) ([]AgentDefinition, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+
+	var doc struct {
+		Agents []AgentDefinition `yaml:"agents"`
+	}
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+
+	if len(doc.Agents) == 0 {
+		return nil, fmt.Errorf("%s: no agents defined", path)
+	}
+
+	seen := make(map[string]bool, len(doc.Agents))
+	for i, a := range doc.Agents {
+		if !agentIDPattern.MatchString(a.ID) {
+			return nil, fmt.Errorf("%s: agent[%d] invalid id %q (must match %s)", path, i, a.ID, agentIDPattern.String())
+		}
+		if seen[a.ID] {
+			return nil, fmt.Errorf("%s: duplicate agent id %q", path, a.ID)
+		}
+		seen[a.ID] = true
+		if a.Name == "" {
+			return nil, fmt.Errorf("%s: agent %q missing name", path, a.ID)
+		}
+		if a.DefaultQueue == "" {
+			return nil, fmt.Errorf("%s: agent %q missing default_queue", path, a.ID)
+		}
+	}
+	return doc.Agents, nil
+}
+
+// AgentByID returns the agent definition with the given ID, or nil.
+func (c *Config) AgentByID(id string) *AgentDefinition {
+	for i := range c.AgentDefinitions {
+		if c.AgentDefinitions[i].ID == id {
+			return &c.AgentDefinitions[i]
+		}
+	}
+	return nil
+}
+
+// AgentByDefaultQueue returns the agent whose default_queue matches the given queue, or nil.
+// Used during the transitional period where spawn_session still routes by task_queue.
+func (c *Config) AgentByDefaultQueue(queue string) *AgentDefinition {
+	for i := range c.AgentDefinitions {
+		if c.AgentDefinitions[i].DefaultQueue == queue {
+			return &c.AgentDefinitions[i]
+		}
+	}
+	return nil
+}
+
+// AgentsForQueues returns all agent definitions whose default_queue is in the given list.
+func (c *Config) AgentsForQueues(queues []string) []AgentDefinition {
+	queueSet := make(map[string]bool, len(queues))
+	for _, q := range queues {
+		queueSet[q] = true
+	}
+	var result []AgentDefinition
+	for _, a := range c.AgentDefinitions {
+		if queueSet[a.DefaultQueue] {
+			result = append(result, a)
+		}
+	}
+	return result
 }
 
 // parseMCPServers parses MCP_SERVERS env var as JSON array.
@@ -136,9 +235,9 @@ func parseTaskQueues(raw string) []string {
 	return queues
 }
 
-// parseTaskQueueSkills parses TASK_QUEUE_SKILLS env var as JSON object.
-// Example: {"coding":["ddd","tdd","hexagonal-architecture"],"devops":["terraform","k8s"]}
-func parseTaskQueueSkills(raw string) map[string][]string {
+// parseTaskQueueMap parses a JSON object env var like TASK_QUEUE_MCP.
+// Example: {"coding":["mcp-github"],"devops":["mcp-k8s"]}
+func parseTaskQueueMap(raw string) map[string][]string {
 	if raw == "" {
 		return nil
 	}
