@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"runtime"
+	"sort"
 	"strings"
 
 	"github.com/victor/temporal-agent/provider"
@@ -68,9 +69,19 @@ func (r *Registry) Get(name string) (*Tool, bool) {
 
 var emptySchema = json.RawMessage(`{"type":"object","properties":{}}`)
 
+// List returns tool definitions sorted by name. The order must be stable:
+// tools are the start of the LLM prompt prefix, so any reordering invalidates
+// the prompt cache (tools, system prompt and history).
 func (r *Registry) List() []provider.ToolDefinition {
+	names := make([]string, 0, len(r.tools))
+	for name := range r.tools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
 	defs := make([]provider.ToolDefinition, 0, len(r.tools))
-	for _, t := range r.tools {
+	for _, name := range names {
+		t := r.tools[name]
 		schema := t.InputSchema
 		if len(schema) == 0 {
 			schema = emptySchema
