@@ -27,7 +27,7 @@
 - [x] Support multi task queues par worker (`TASK_QUEUES=q1,q2,q3` → lance N workers Temporal)
 - [ ] Système de hooks dans la boucle ReAct (`beforeCallLLM`/`afterCallLLM`/`beforeUseTool`/`afterUseTool`) — interface unique `HookInput → HookOutput`, deux modes d'exécution : déterministe (fonction pure, exécutée dans le workflow) ou non-déterministe (activity Temporal, pour RAG, API externes, etc.). Use cases : filtrage/troncation des résultats tools, injection de contexte RAG, métriques, validation inputs, blocage conditionnel
 - [ ] Système de webhooks entrants avec abonnement : tool `subscribe_webhook` pour qu'un workflow s'abonne à un type d'événement (ex: `github.pull_request.merged` + filtre), registre d'abonnements (table ou mémoire), endpoint générique `POST /webhooks/{source}` qui parse l'événement et signale tous les workflows abonnés
-- [ ] Worker registration & dynamic task queue assignment — les workers se déclarent avec un ID + tags, le server assigne les queues dynamiquement (spec: `docs/worker-registration.md`)
+- [ ] Catalogue de tools par queue (queue = capacité) + allowlist par agent — voir `docs/architecture.md`
 - [ ] Queue partagée `llm` pour les calls LLM — tous les workers y écoutent, `CallLLM` routed via `TaskQueue: "llm"` dans les activity options, les tools/skills restent sur les queues spécialisées
 
 ## Agents & Skills dynamiques
