@@ -6,7 +6,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/victor/temporal-agent/config"
 	"github.com/victor/temporal-agent/skill"
 )
 
@@ -29,22 +28,27 @@ type AgentCatalogEntry struct {
 	Name         string   `json:"name"`
 	Description  string   `json:"description"`
 	Skills       []string `json:"skills"`
+	Tools        []string `json:"tools"` // Allowed tool name globs; nil = all tools
 	DefaultQueue string   `json:"default_queue"`
 }
 
 // SkillActivities provides per-agent system prompt loading as a Temporal activity.
-// Prompts are built at worker startup from pre-loaded skills, indexed by agent ID.
-// The catalog is fetched from the DB and can be updated at runtime.
+// It holds the loaded skills and the agent catalog (read from the DB); both can be
+// replaced at runtime, and prompts are built on demand from the current state.
 type SkillActivities struct {
 	mu      sync.RWMutex
-	prompts map[string]string // agent_id → base system prompt (skills only, no directory)
+	skills  map[string]skill.Skill // skill name → skill
 	catalog []AgentCatalogEntry
 }
 
-func (a *SkillActivities) setPrompts(prompts map[string]string) {
+func (a *SkillActivities) setSkills(skills []skill.Skill) {
+	byName := make(map[string]skill.Skill, len(skills))
+	for _, s := range skills {
+		byName[s.Name] = s
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.prompts = prompts
+	a.skills = byName
 }
 
 func (a *SkillActivities) setCatalog(catalog []AgentCatalogEntry) {
@@ -53,18 +57,18 @@ func (a *SkillActivities) setCatalog(catalog []AgentCatalogEntry) {
 	a.catalog = catalog
 }
 
-// NewSkillActivities creates a SkillActivities with initial prompts and catalog.
-func NewSkillActivities(prompts map[string]string, catalog []AgentCatalogEntry) *SkillActivities {
+// NewSkillActivities creates a SkillActivities with initial skills and catalog.
+func NewSkillActivities(skills []skill.Skill, catalog []AgentCatalogEntry) *SkillActivities {
 	a := &SkillActivities{}
-	a.setPrompts(prompts)
+	a.setSkills(skills)
 	a.setCatalog(catalog)
 	return a
 }
 
-// SetPrompts is a package-level wrapper so external packages can update prompts
+// SetSkills is a package-level wrapper so external packages can update skills
 // without exposing a method that Temporal would register as an activity.
-func SetPrompts(a *SkillActivities, prompts map[string]string) {
-	a.setPrompts(prompts)
+func SetSkills(a *SkillActivities, skills []skill.Skill) {
+	a.setSkills(skills)
 }
 
 // SetCatalog is a package-level wrapper so external packages can update the catalog
@@ -87,13 +91,15 @@ type LoadSkillsForAgentOutput struct {
 // queue→agent_id map used by the workflow to resolve spawn_session targets.
 func (a *SkillActivities) LoadSkillsForAgent(ctx context.Context, input LoadSkillsForAgentInput) (LoadSkillsForAgentOutput, error) {
 	a.mu.RLock()
-	basePrompt := a.prompts[input.AgentID]
+	basePrompt := defaultSystemPrompt
 	catalog := a.catalog
-	a.mu.RUnlock()
-
-	if basePrompt == "" {
-		basePrompt = defaultSystemPrompt
+	for _, e := range catalog {
+		if e.ID == input.AgentID {
+			basePrompt = buildSystemPrompt(matchSkills(a.skills, e.Skills))
+			break
+		}
 	}
+	a.mu.RUnlock()
 
 	directory := buildAgentsDirectory(catalog, input.AgentID)
 
@@ -124,41 +130,15 @@ func (a *SkillActivities) ResolveAgentByQueue(ctx context.Context, queue string)
 	return "", nil
 }
 
-// BuildSkillPrompts builds a map of agent_id → base system prompt (without agents directory).
-// The directory is appended at runtime by LoadSkillsForAgent (so it can filter out self).
-func BuildSkillPrompts(allSkills []skill.Skill, agentDefs []config.AgentDefinition) map[string]string {
-	skillsByName := make(map[string]skill.Skill, len(allSkills))
-	for _, s := range allSkills {
-		skillsByName[s.Name] = s
-	}
-
-	prompts := make(map[string]string, len(agentDefs))
-	for _, def := range agentDefs {
-		var matched []skill.Skill
-		for _, name := range def.Skills {
-			if s, ok := skillsByName[name]; ok {
-				matched = append(matched, s)
-			}
-		}
-		prompts[def.ID] = buildSystemPrompt(matched)
-	}
-	return prompts
-}
-
-// CatalogFromDefinitions converts AgentDefinitions to catalog entries.
-// Used in dev mode where we don't query the DB to build the catalog.
-func CatalogFromDefinitions(defs []config.AgentDefinition) []AgentCatalogEntry {
-	out := make([]AgentCatalogEntry, len(defs))
-	for i, d := range defs {
-		out[i] = AgentCatalogEntry{
-			ID:           d.ID,
-			Name:         d.Name,
-			Description:  d.Description,
-			Skills:       d.Skills,
-			DefaultQueue: d.DefaultQueue,
+// matchSkills returns the skills named in names, in order, skipping unknown ones.
+func matchSkills(byName map[string]skill.Skill, names []string) []skill.Skill {
+	var matched []skill.Skill
+	for _, name := range names {
+		if s, ok := byName[name]; ok {
+			matched = append(matched, s)
 		}
 	}
-	return out
+	return matched
 }
 
 // buildAgentsDirectory generates a prompt section listing all available specialized agents.

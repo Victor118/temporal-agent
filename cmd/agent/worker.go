@@ -87,9 +87,9 @@ func runWorker(cmd *cobra.Command, args []string) {
 		}
 	}
 
-	// Skills — load from git repo if configured, build per-agent prompts
+	// Skills — load from git repo if configured
 	var skillStore skill.Store
-	var prompts map[string]string
+	var skills []skill.Skill
 	if cfg.SkillsRepo != "" {
 		skillStore = &skill.GitStore{
 			RepoURL:  cfg.SkillsRepo,
@@ -97,25 +97,21 @@ func runWorker(cmd *cobra.Command, args []string) {
 			CacheDir: filepath.Join(os.TempDir(), "temporal-agent-skills-worker"),
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		skills, err := skillStore.LoadAll(ctx)
+		loaded, err := skillStore.LoadAll(ctx)
 		cancel()
 		if err != nil {
 			log.Printf("Warning: failed to load skills from repo: %v", err)
 		} else {
+			skills = loaded
 			log.Printf("Loaded %d skills from %s", len(skills), cfg.SkillsRepo)
-			prompts = activity.BuildSkillPrompts(skills, cfg.AgentDefinitions)
-			for _, def := range cfg.AgentDefinitions {
-				log.Printf("Agent %q (queue=%s): skills %v", def.ID, def.DefaultQueue, def.Skills)
-			}
 		}
 	} else {
 		log.Println("No skills repo configured (SKILLS_REPO), running without skills")
-		prompts = activity.BuildSkillPrompts(nil, cfg.AgentDefinitions)
 	}
 
-	// Register all agents in the catalog (DB) and load full catalog
-	catalog := registerAndLoadCatalog(st, cfg)
-	skillAct := activity.NewSkillActivities(prompts, catalog)
+	// Agents catalog — read-only from DB (the server seeds and edits it)
+	catalog := initCatalog(st)
+	skillAct := activity.NewSkillActivities(skills, catalog)
 
 	// Load activity queue mapping from DB and register for workflow SideEffect access
 	workerCfg := activity.NewWorkerConfig()
@@ -170,9 +166,10 @@ func runWorker(cmd *cobra.Command, args []string) {
 		log.Printf("Worker registered on task queue %q", queue)
 	}
 
-	// Poll DB for activity queue mapping changes
+	// Poll DB for activity queue mapping and agents catalog changes
 	ctx, stopPoll := context.WithCancel(context.Background())
 	go pollActivityQueues(ctx, st, workerCfg, 30*time.Second)
+	go pollAgents(ctx, st, skillAct, catalog, 30*time.Second)
 
 	// Poll DB for skills version changes
 	if cfg.SkillsRepo != "" && skillStore != nil {
@@ -184,13 +181,8 @@ func runWorker(cmd *cobra.Command, args []string) {
 				log.Printf("Error reloading skills: %v", err)
 				return
 			}
-			activity.SetPrompts(skillAct, activity.BuildSkillPrompts(skills, cfg.AgentDefinitions))
-
-			// Refresh catalog from DB
-			agents := loadCatalogFromDB(st)
-			activity.SetCatalog(skillAct, agents)
-
-			log.Printf("Worker reloaded %d skills, rebuilt prompts", len(skills))
+			activity.SetSkills(skillAct, skills)
+			log.Printf("Worker reloaded %d skills", len(skills))
 		})
 	}
 
@@ -220,54 +212,6 @@ func runWorker(cmd *cobra.Command, args []string) {
 			}
 		}
 	}
-}
-
-// registerAndLoadCatalog upserts every agent definition known to this worker
-// into the DB catalog and returns the full catalog (all agents from all workers).
-func registerAndLoadCatalog(st store.Store, cfg *config.Config) []activity.AgentCatalogEntry {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	for _, def := range cfg.AgentDefinitions {
-		if err := st.UpsertAgent(ctx, store.Agent{
-			ID:           def.ID,
-			Name:         def.Name,
-			Description:  def.Description,
-			Skills:       def.Skills,
-			DefaultQueue: def.DefaultQueue,
-		}); err != nil {
-			log.Printf("Warning: failed to register agent %q in catalog: %v", def.ID, err)
-			continue
-		}
-		log.Printf("Registered agent %q in catalog", def.ID)
-	}
-
-	return loadCatalogFromDB(st)
-}
-
-// loadCatalogFromDB reads the full agent catalog from PostgreSQL.
-func loadCatalogFromDB(st store.Store) []activity.AgentCatalogEntry {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	agents, err := st.ListAgents(ctx)
-	if err != nil {
-		log.Printf("Warning: failed to load agents catalog from DB: %v", err)
-		return nil
-	}
-
-	catalog := make([]activity.AgentCatalogEntry, len(agents))
-	for i, a := range agents {
-		catalog[i] = activity.AgentCatalogEntry{
-			ID:           a.ID,
-			Name:         a.Name,
-			Description:  a.Description,
-			Skills:       a.Skills,
-			DefaultQueue: a.DefaultQueue,
-		}
-	}
-	log.Printf("Loaded agents catalog from DB: %d agents", len(catalog))
-	return catalog
 }
 
 // loadActivityQueuesFromDB reads the activity → task queue mapping from PostgreSQL.

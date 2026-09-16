@@ -102,25 +102,13 @@ func runDev(cmd *cobra.Command, args []string) {
 	} else {
 		log.Println("No skills found in ./skills")
 	}
-	prompts := activity.BuildSkillPrompts(skills, cfg.AgentDefinitions)
 
-	// In dev mode, also persist the catalog to DB so handlers and queries see it.
-	for _, def := range cfg.AgentDefinitions {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if err := st.UpsertAgent(ctx, store.Agent{
-			ID:           def.ID,
-			Name:         def.Name,
-			Description:  def.Description,
-			Skills:       def.Skills,
-			DefaultQueue: def.DefaultQueue,
-		}); err != nil {
-			log.Printf("Warning: failed to register agent %q: %v", def.ID, err)
-		}
-		cancel()
-		log.Printf("Agent %q (queue=%s): skills %v", def.ID, def.DefaultQueue, def.Skills)
+	// Agents — dev mode seeds the DB like the server, then reads the catalog from it
+	if err := seedAgents(st, cfg.AgentsFile); err != nil {
+		log.Fatalf("Failed to seed agents: %v", err)
 	}
-	catalog := activity.CatalogFromDefinitions(cfg.AgentDefinitions)
-	skillAct := activity.NewSkillActivities(prompts, catalog)
+	catalog := initCatalog(st)
+	skillAct := activity.NewSkillActivities(skills, catalog)
 
 	// Load activity queue mapping from DB and register for workflow SideEffect access
 	workerCfg := activity.NewWorkerConfig()
@@ -175,8 +163,9 @@ func runDev(cmd *cobra.Command, args []string) {
 		log.Printf("Worker registered on task queue %q", queue)
 	}
 
-	// Poll DB for activity queue mapping changes
+	// Poll DB for activity queue mapping and agents catalog changes
 	go pollActivityQueues(context.Background(), st, workerCfg, 30*time.Second)
+	go pollAgents(context.Background(), st, skillAct, catalog, 30*time.Second)
 
 	// Start all workers in background
 	for _, w := range workers {

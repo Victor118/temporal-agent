@@ -42,6 +42,7 @@ type Store interface {
 
 	// Agent catalog
 	UpsertAgent(ctx context.Context, agent Agent) error
+	InsertAgentIfAbsent(ctx context.Context, agent Agent) (bool, error)
 	ListAgents(ctx context.Context) ([]Agent, error)
 	GetAgent(ctx context.Context, agentID string) (*Agent, error)
 
@@ -69,5 +70,6 @@ type Agent struct {
 	Name         string   `json:"name"`
 	Description  string   `json:"description"`
 	Skills       []string `json:"skills"`
+	Tools        []string `json:"tools"` // Allowed tool name globs; nil = no allowlist (all tools)
 	DefaultQueue string   `json:"default_queue"`
 }

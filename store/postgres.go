@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
@@ -84,12 +85,12 @@ func (s *PostgresStore) migrate() error {
 			status TEXT NOT NULL DEFAULT 'scheduled'
 		);
 
-		DROP TABLE IF EXISTS agent_catalog;
 		CREATE TABLE IF NOT EXISTS agents (
 			agent_id      TEXT PRIMARY KEY,
 			name          TEXT NOT NULL,
 			description   TEXT NOT NULL DEFAULT '',
 			skills        JSONB NOT NULL DEFAULT '[]',
+			tools         JSONB,
 			default_queue TEXT NOT NULL,
 			created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -355,27 +356,50 @@ func (s *PostgresStore) UpdateTaskLogStatus(ctx context.Context, scheduleID, sta
 	return err
 }
 
+// agentColumns is the column list shared by agent queries, in scanAgent order.
+const agentColumns = "agent_id, name, description, skills, tools, default_queue"
+
+// UpsertAgent creates or replaces an agent definition.
 func (s *PostgresStore) UpsertAgent(ctx context.Context, agent Agent) error {
-	skillsJSON, err := json.Marshal(agent.Skills)
+	skillsJSON, toolsJSON, err := marshalAgentLists(agent)
 	if err != nil {
 		return err
 	}
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO agents (agent_id, name, description, skills, default_queue, updated_at)
-		VALUES ($1, $2, $3, $4, $5, NOW())
+		INSERT INTO agents (agent_id, name, description, skills, tools, default_queue, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, NOW())
 		ON CONFLICT (agent_id) DO UPDATE SET
 			name = EXCLUDED.name,
 			description = EXCLUDED.description,
 			skills = EXCLUDED.skills,
+			tools = EXCLUDED.tools,
 			default_queue = EXCLUDED.default_queue,
 			updated_at = NOW()`,
-		agent.ID, agent.Name, agent.Description, string(skillsJSON), agent.DefaultQueue)
+		agent.ID, agent.Name, agent.Description, skillsJSON, toolsJSON, agent.DefaultQueue)
 	return err
 }
 
+// InsertAgentIfAbsent inserts the agent only if no agent with the same ID exists.
+// Existing rows are never modified. Returns true if the agent was inserted.
+func (s *PostgresStore) InsertAgentIfAbsent(ctx context.Context, agent Agent) (bool, error) {
+	skillsJSON, toolsJSON, err := marshalAgentLists(agent)
+	if err != nil {
+		return false, err
+	}
+	res, err := s.db.ExecContext(ctx, `
+		INSERT INTO agents (agent_id, name, description, skills, tools, default_queue)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (agent_id) DO NOTHING`,
+		agent.ID, agent.Name, agent.Description, skillsJSON, toolsJSON, agent.DefaultQueue)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
 func (s *PostgresStore) ListAgents(ctx context.Context) ([]Agent, error) {
-	rows, err := s.db.QueryContext(ctx,
-		"SELECT agent_id, name, description, skills, default_queue FROM agents ORDER BY agent_id")
+	rows, err := s.db.QueryContext(ctx, "SELECT "+agentColumns+" FROM agents ORDER BY agent_id")
 	if err != nil {
 		return nil, err
 	}
@@ -383,30 +407,59 @@ func (s *PostgresStore) ListAgents(ctx context.Context) ([]Agent, error) {
 
 	var agents []Agent
 	for rows.Next() {
-		var a Agent
-		var skillsJSON string
-		if err := rows.Scan(&a.ID, &a.Name, &a.Description, &skillsJSON, &a.DefaultQueue); err != nil {
+		a, err := scanAgent(rows)
+		if err != nil {
 			return nil, err
 		}
-		json.Unmarshal([]byte(skillsJSON), &a.Skills)
-		agents = append(agents, a)
+		agents = append(agents, *a)
 	}
 	return agents, rows.Err()
 }
 
 func (s *PostgresStore) GetAgent(ctx context.Context, agentID string) (*Agent, error) {
-	var a Agent
-	var skillsJSON string
-	err := s.db.QueryRowContext(ctx,
-		"SELECT agent_id, name, description, skills, default_queue FROM agents WHERE agent_id = $1",
-		agentID).Scan(&a.ID, &a.Name, &a.Description, &skillsJSON, &a.DefaultQueue)
+	a, err := scanAgent(s.db.QueryRowContext(ctx,
+		"SELECT "+agentColumns+" FROM agents WHERE agent_id = $1", agentID))
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
+	return a, err
+}
+
+// marshalAgentLists encodes skills and tools for storage.
+// A nil Tools slice is stored as SQL NULL (no allowlist).
+func marshalAgentLists(agent Agent) (skills string, tools sql.NullString, err error) {
+	if agent.Skills == nil {
+		agent.Skills = []string{}
+	}
+	b, err := json.Marshal(agent.Skills)
 	if err != nil {
+		return "", tools, err
+	}
+	if agent.Tools != nil {
+		t, err := json.Marshal(agent.Tools)
+		if err != nil {
+			return "", tools, err
+		}
+		tools = sql.NullString{String: string(t), Valid: true}
+	}
+	return string(b), tools, nil
+}
+
+func scanAgent(row interface{ Scan(...any) error }) (*Agent, error) {
+	var a Agent
+	var skillsJSON string
+	var toolsJSON sql.NullString
+	if err := row.Scan(&a.ID, &a.Name, &a.Description, &skillsJSON, &toolsJSON, &a.DefaultQueue); err != nil {
 		return nil, err
 	}
-	json.Unmarshal([]byte(skillsJSON), &a.Skills)
+	if err := json.Unmarshal([]byte(skillsJSON), &a.Skills); err != nil {
+		return nil, fmt.Errorf("agent %s: decode skills: %w", a.ID, err)
+	}
+	if toolsJSON.Valid {
+		if err := json.Unmarshal([]byte(toolsJSON.String), &a.Tools); err != nil {
+			return nil, fmt.Errorf("agent %s: decode tools: %w", a.ID, err)
+		}
+	}
 	return &a, nil
 }
 

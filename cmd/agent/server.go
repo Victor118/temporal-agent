@@ -49,6 +49,11 @@ func runServer(cmd *cobra.Command, args []string) {
 	}
 	defer st.Close()
 
+	// Seed agents missing from the DB (the DB is the source of truth)
+	if err := seedAgents(st, cfg.AgentsFile); err != nil {
+		log.Fatalf("Failed to seed agents: %v", err)
+	}
+
 	// Handler
 	h := &handler{
 		temporalClient: temporalClient,

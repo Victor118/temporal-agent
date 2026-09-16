@@ -19,8 +19,8 @@ type Config struct {
 	TaskQueues        []string
 	TaskQueueMCP      map[string][]string // queue name → MCP server names
 
-	// Agent definitions (loaded from agents.yaml)
-	AgentDefinitions []AgentDefinition
+	// Agent definitions seed file (imported into the DB by the server)
+	AgentsFile string
 
 	// Store
 	DatabaseURL string
@@ -68,23 +68,19 @@ type MCPServer struct {
 	Transport string `json:"transport,omitempty"` // "http" or "sse"
 }
 
-// AgentDefinition is the static config of a logical agent (persona).
-// Loaded from agents.yaml at startup. Independent of which worker runs it.
+// AgentDefinition is the seed definition of a logical agent (persona), read from
+// agents.yaml. The DB agents table is the source of truth; this file only seeds
+// agents that don't exist yet.
 type AgentDefinition struct {
 	ID           string   `yaml:"id" json:"id"`
 	Name         string   `yaml:"name" json:"name"`
 	Description  string   `yaml:"description" json:"description"`
 	Skills       []string `yaml:"skills" json:"skills"`
+	Tools        []string `yaml:"tools" json:"tools"` // Allowed tool name globs; omitted = all tools
 	DefaultQueue string   `yaml:"default_queue" json:"default_queue"`
 }
 
 func Load() *Config {
-	agentsFile := envOr("AGENT_DEFINITIONS_FILE", "./agents.yaml")
-	defs, err := loadAgentDefinitions(agentsFile)
-	if err != nil {
-		panic(fmt.Sprintf("config: %v", err))
-	}
-
 	return &Config{
 		TemporalHost:      envOr("TEMPORAL_HOST", "localhost:7233"),
 		TemporalNamespace: envOr("TEMPORAL_NAMESPACE", "default"),
@@ -92,7 +88,7 @@ func Load() *Config {
 		TemporalTLSKey:    os.Getenv("TEMPORAL_TLS_KEY"),
 		TaskQueues:        parseTaskQueues(envOr("TASK_QUEUES", envOr("TASK_QUEUE", "agent-default"))),
 
-		AgentDefinitions: defs,
+		AgentsFile: envOr("AGENT_DEFINITIONS_FILE", "./agents.yaml"),
 
 		DatabaseURL: envOr("DATABASE_URL", "postgres://agent:agent@localhost:5432/agent?sslmode=disable"),
 
@@ -131,7 +127,8 @@ func Load() *Config {
 // Single-letter IDs are allowed (e.g. "x").
 var agentIDPattern = regexp.MustCompile(`^[a-z]([a-z0-9-]*[a-z0-9])?$`)
 
-func loadAgentDefinitions(path string) ([]AgentDefinition, error) {
+// LoadAgentDefinitions reads and validates the agents seed file.
+func LoadAgentDefinitions(path string) ([]AgentDefinition, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
@@ -165,42 +162,6 @@ func loadAgentDefinitions(path string) ([]AgentDefinition, error) {
 		}
 	}
 	return doc.Agents, nil
-}
-
-// AgentByID returns the agent definition with the given ID, or nil.
-func (c *Config) AgentByID(id string) *AgentDefinition {
-	for i := range c.AgentDefinitions {
-		if c.AgentDefinitions[i].ID == id {
-			return &c.AgentDefinitions[i]
-		}
-	}
-	return nil
-}
-
-// AgentByDefaultQueue returns the agent whose default_queue matches the given queue, or nil.
-// Used during the transitional period where spawn_session still routes by task_queue.
-func (c *Config) AgentByDefaultQueue(queue string) *AgentDefinition {
-	for i := range c.AgentDefinitions {
-		if c.AgentDefinitions[i].DefaultQueue == queue {
-			return &c.AgentDefinitions[i]
-		}
-	}
-	return nil
-}
-
-// AgentsForQueues returns all agent definitions whose default_queue is in the given list.
-func (c *Config) AgentsForQueues(queues []string) []AgentDefinition {
-	queueSet := make(map[string]bool, len(queues))
-	for _, q := range queues {
-		queueSet[q] = true
-	}
-	var result []AgentDefinition
-	for _, a := range c.AgentDefinitions {
-		if queueSet[a.DefaultQueue] {
-			result = append(result, a)
-		}
-	}
-	return result
 }
 
 // parseMCPServers parses MCP_SERVERS env var as JSON array.

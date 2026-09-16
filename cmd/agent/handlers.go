@@ -172,17 +172,27 @@ func (h *handler) createSession(w http.ResponseWriter, r *http.Request) {
 
 	// Resolve target agent: explicit agent_id from request, or fall back to the
 	// agent whose default_queue matches the primary task queue.
-	var agentDef *config.AgentDefinition
+	var agentDef *store.Agent
 	if req.AgentID != "" {
-		agentDef = h.cfg.AgentByID(req.AgentID)
-		if agentDef == nil {
+		a, err := h.store.GetAgent(r.Context(), req.AgentID)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to load agent: %v", err), http.StatusInternalServerError)
+			return
+		}
+		if a == nil {
 			http.Error(w, fmt.Sprintf("Unknown agent_id %q", req.AgentID), http.StatusBadRequest)
 			return
 		}
+		agentDef = a
 	} else {
-		agentDef = h.cfg.AgentByDefaultQueue(h.cfg.PrimaryTaskQueue())
-		if agentDef == nil && len(h.cfg.AgentDefinitions) > 0 {
-			agentDef = &h.cfg.AgentDefinitions[0]
+		agents, err := h.store.ListAgents(r.Context())
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to list agents: %v", err), http.StatusInternalServerError)
+			return
+		}
+		agentDef = agentByDefaultQueue(agents, h.cfg.PrimaryTaskQueue())
+		if agentDef == nil && len(agents) > 0 {
+			agentDef = &agents[0]
 		}
 	}
 	if agentDef == nil {
@@ -330,7 +340,11 @@ func (h *handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 		var agentID string
 		if sess != nil && sess.TaskQueue != "" {
 			taskQueue = sess.TaskQueue
-			if def := h.cfg.AgentByDefaultQueue(taskQueue); def != nil {
+			agents, err := h.store.ListAgents(r.Context())
+			if err != nil {
+				log.Printf("Warning: failed to list agents: %v", err)
+			}
+			if def := agentByDefaultQueue(agents, taskQueue); def != nil {
 				agentID = def.ID
 			}
 		}
@@ -669,6 +683,17 @@ func verifyGitHubSignature(payload []byte, signature, secret string) bool {
 	expected := mac.Sum(nil)
 
 	return hmac.Equal(got, expected)
+}
+
+// agentByDefaultQueue returns the agent whose default_queue matches queue, or nil.
+// Transitional: sessions still record a task queue rather than an agent ID.
+func agentByDefaultQueue(agents []store.Agent, queue string) *store.Agent {
+	for i := range agents {
+		if agents[i].DefaultQueue == queue {
+			return &agents[i]
+		}
+	}
+	return nil
 }
 
 // Admin: list known task queues (from agent catalog)
