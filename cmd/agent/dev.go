@@ -71,25 +71,9 @@ func runDev(cmd *cobra.Command, args []string) {
 	tool.RegisterAskUserTool(registry, workflow.AskUserWorkflow)
 	tool.RegisterMemoryTools(registry, st)
 
-	// MCP servers — only load those assigned to this worker's task queues
-	mcpServers := cfg.MCPServersForQueues(cfg.TaskQueues)
-	if len(mcpServers) > 0 {
-		mcpConfigs := make([]tool.MCPServerConfig, len(mcpServers))
-		for i, s := range mcpServers {
-			mcpConfigs[i] = tool.MCPServerConfig{
-				Name:      s.Name,
-				URL:       s.URL,
-				APIKey:    s.APIKey,
-				Transport: s.Transport,
-			}
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		errs := tool.RegisterMCPServers(ctx, registry, mcpConfigs)
-		cancel()
-		for _, err := range errs {
-			log.Printf("Warning: MCP server error: %v", err)
-		}
-	}
+	// Worker config — queue served by this worker and the tools it exposes there
+	workerConf := loadWorkerConfig(cfg)
+	registerMCPServers(registry, workerConf.MCP)
 
 	// Skills — dev mode loads from local filesystem
 	skillStore := &skill.FileStore{Dir: "./skills"}
@@ -133,6 +117,10 @@ func runDev(cmd *cobra.Command, args []string) {
 
 	// Register schedule tools (needs temporal client + store)
 	tool.RegisterScheduleTools(registry, temporalClient, st, workflow.ScheduledAgentWorkflow, cfg.PrimaryTaskQueue())
+
+	// Expose only the configured tools and publish them to the DB catalog
+	cfg.TaskQueues = exposeTools(registry, workerConf, cfg.TaskQueues)
+	publishTools(st, temporalClient, registry, workerConf.Queue)
 
 	// Telegram client (optional)
 	var tgClient activity.TelegramSender

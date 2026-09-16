@@ -1,0 +1,20 @@
+# Worker config (WORKER_CONFIG, default ./worker.yaml).
+# A queue is a capability: every worker serving the same queue must expose the
+# same tools, and a given tool must be served by a single queue.
+# Without this file, the worker serves its primary TASK_QUEUE with all tools
+# and loads MCP_SERVERS filtered by TASK_QUEUE_MCP.
+
+queue: tools-core
+
+# Tool name globs exposed on this queue ("*" = every registered tool).
+tools:
+  - memory_*
+  - web_*
+  - github_*
+
+# MCP servers loaded by this worker; their tools are named "<name>_<tool>".
+mcp:
+  - name: github
+    url: http://mcp-github:3001
+    api_key: ""
+    transport: http

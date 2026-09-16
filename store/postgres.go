@@ -104,6 +104,19 @@ func (s *PostgresStore) migrate() error {
 		);
 		INSERT INTO skills_version (id, version) VALUES (1, 0) ON CONFLICT DO NOTHING;
 
+		CREATE TABLE IF NOT EXISTS tools (
+			name            TEXT PRIMARY KEY,
+			task_queue      TEXT NOT NULL,
+			description     TEXT NOT NULL DEFAULT '',
+			input_schema    JSONB NOT NULL,
+			kind            TEXT NOT NULL,
+			workflow_name   TEXT NOT NULL DEFAULT '',
+			fire_and_forget BOOLEAN NOT NULL DEFAULT FALSE,
+			schema_hash     TEXT NOT NULL,
+			updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+		CREATE INDEX IF NOT EXISTS idx_tools_task_queue ON tools(task_queue);
+
 		CREATE TABLE IF NOT EXISTS activity_queues (
 			activity_name TEXT PRIMARY KEY,
 			task_queue TEXT NOT NULL,
@@ -461,6 +474,50 @@ func scanAgent(row interface{ Scan(...any) error }) (*Agent, error) {
 		}
 	}
 	return &a, nil
+}
+
+// UpsertTool publishes a tool, replacing any previous row with the same name.
+// Callers decide beforehand whether taking over another queue's tool is allowed.
+func (s *PostgresStore) UpsertTool(ctx context.Context, t ToolRecord) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO tools (name, task_queue, description, input_schema, kind, workflow_name, fire_and_forget, schema_hash)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		ON CONFLICT (name) DO UPDATE SET
+			task_queue = EXCLUDED.task_queue,
+			description = EXCLUDED.description,
+			input_schema = EXCLUDED.input_schema,
+			kind = EXCLUDED.kind,
+			workflow_name = EXCLUDED.workflow_name,
+			fire_and_forget = EXCLUDED.fire_and_forget,
+			schema_hash = EXCLUDED.schema_hash,
+			updated_at = NOW()`,
+		t.Name, t.TaskQueue, t.Description, string(t.InputSchema), t.Kind, t.WorkflowName,
+		t.FireAndForget, t.SchemaHash)
+	return err
+}
+
+func (s *PostgresStore) ListTools(ctx context.Context) ([]ToolRecord, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT name, task_queue, description, input_schema, kind, workflow_name,
+		       fire_and_forget, schema_hash, updated_at
+		FROM tools ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tools []ToolRecord
+	for rows.Next() {
+		var t ToolRecord
+		var schema string
+		if err := rows.Scan(&t.Name, &t.TaskQueue, &t.Description, &schema, &t.Kind, &t.WorkflowName,
+			&t.FireAndForget, &t.SchemaHash, &t.UpdatedAt); err != nil {
+			return nil, err
+		}
+		t.InputSchema = json.RawMessage(schema)
+		tools = append(tools, t)
+	}
+	return tools, rows.Err()
 }
 
 func (s *PostgresStore) GetSkillsVersion(ctx context.Context) (int64, error) {

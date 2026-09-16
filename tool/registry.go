@@ -2,8 +2,11 @@ package tool
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"path"
 	"reflect"
 	"runtime"
 	"sort"
@@ -23,14 +26,14 @@ const (
 type ExecuteFunc func(ctx context.Context, input json.RawMessage) (string, error)
 
 type Tool struct {
-	Name         string          `json:"name"`
-	Description  string          `json:"description"`
-	InputSchema  json.RawMessage `json:"input_schema"`
-	Kind         ToolKind        `json:"-"`
-	Execute      ExecuteFunc     `json:"-"`
-	WorkflowFunc  interface{} `json:"-"` // Workflow function for ToolKindWorkflow
-	TaskQueue     string     `json:"-"` // Target task queue for workflow tools
-	FireAndForget bool       `json:"-"` // If true, don't wait for workflow result
+	Name          string          `json:"name"`
+	Description   string          `json:"description"`
+	InputSchema   json.RawMessage `json:"input_schema"`
+	Kind          ToolKind        `json:"-"`
+	Execute       ExecuteFunc     `json:"-"`
+	WorkflowFunc  interface{}     `json:"-"` // Workflow function for ToolKindWorkflow
+	TaskQueue     string          `json:"-"` // Target task queue for workflow tools
+	FireAndForget bool            `json:"-"` // If true, don't wait for workflow result
 }
 
 // WorkflowName returns the function name used by Temporal to identify the workflow.
@@ -46,7 +49,33 @@ func (t *Tool) WorkflowName() string {
 	return fullName
 }
 
+// SchemaHash identifies the tool's contract (description, input schema, kind,
+// workflow). Two workers exposing the same tool must produce the same hash.
+func (t *Tool) SchemaHash() string {
+	h := sha256.New()
+	for _, part := range []string{
+		t.Description,
+		string(t.InputSchema),
+		string(t.Kind),
+		t.WorkflowName(),
+		fmt.Sprint(t.FireAndForget),
+	} {
+		h.Write([]byte(part))
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
 
+// MatchAny reports whether name matches at least one glob (path.Match syntax).
+// Invalid patterns never match; validate them when loading config.
+func MatchAny(globs []string, name string) bool {
+	for _, g := range globs {
+		if ok, _ := path.Match(g, name); ok {
+			return true
+		}
+	}
+	return false
+}
 
 type Registry struct {
 	tools map[string]*Tool
@@ -73,12 +102,7 @@ var emptySchema = json.RawMessage(`{"type":"object","properties":{}}`)
 // tools are the start of the LLM prompt prefix, so any reordering invalidates
 // the prompt cache (tools, system prompt and history).
 func (r *Registry) List() []provider.ToolDefinition {
-	names := make([]string, 0, len(r.tools))
-	for name := range r.tools {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-
+	names := r.sortedNames()
 	defs := make([]provider.ToolDefinition, 0, len(r.tools))
 	for _, name := range names {
 		t := r.tools[name]
@@ -95,6 +119,38 @@ func (r *Registry) List() []provider.ToolDefinition {
 	return defs
 }
 
+// All returns the registered tools sorted by name.
+func (r *Registry) All() []*Tool {
+	names := r.sortedNames()
+	tools := make([]*Tool, len(names))
+	for i, name := range names {
+		tools[i] = r.tools[name]
+	}
+	return tools
+}
+
+// Retain removes every tool whose name matches none of the globs and returns
+// the removed names, sorted.
+func (r *Registry) Retain(globs []string) []string {
+	var removed []string
+	for _, name := range r.sortedNames() {
+		if !MatchAny(globs, name) {
+			delete(r.tools, name)
+			removed = append(removed, name)
+		}
+	}
+	return removed
+}
+
+func (r *Registry) sortedNames() []string {
+	names := make([]string, 0, len(r.tools))
+	for name := range r.tools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // WorkflowTools returns all tools of kind workflow, for registration at worker startup.
 func (r *Registry) WorkflowTools() []*Tool {
 	var tools []*Tool
@@ -105,7 +161,6 @@ func (r *Registry) WorkflowTools() []*Tool {
 	}
 	return tools
 }
-
 
 func (r *Registry) Execute(ctx context.Context, name string, input json.RawMessage) (string, error) {
 	t, ok := r.tools[name]

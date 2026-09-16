@@ -22,6 +22,9 @@ type Config struct {
 	// Agent definitions seed file (imported into the DB by the server)
 	AgentsFile string
 
+	// Worker config file (queue + exposed tools + MCP servers)
+	WorkerFile string
+
 	// Store
 	DatabaseURL string
 
@@ -89,6 +92,7 @@ func Load() *Config {
 		TaskQueues:        parseTaskQueues(envOr("TASK_QUEUES", envOr("TASK_QUEUE", "agent-default"))),
 
 		AgentsFile: envOr("AGENT_DEFINITIONS_FILE", "./agents.yaml"),
+		WorkerFile: envOr("WORKER_CONFIG", "./worker.yaml"),
 
 		DatabaseURL: envOr("DATABASE_URL", "postgres://agent:agent@localhost:5432/agent?sslmode=disable"),
 

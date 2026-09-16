@@ -97,7 +97,10 @@ flowchart LR
   `agents`. Importe `agents.yaml` si la table est vide ou sur commande explicite.
 - **Workers** : lisent leur `worker.yaml`, enregistrent leurs outils dans la
   table `tools` (nom, schéma, kind, queue), écoutent leur queue. Un même binaire
-  peut aussi écouter la queue des workflows.
+  peut aussi écouter la queue des workflows. Un outil déjà publié sur une autre
+  queue n'est repris que si Temporal ne voit plus de worker sur cette queue
+  (`DescribeTaskQueue`) ; sinon c'est un conflit, loggé en erreur. Pas de
+  heartbeat maison : Temporal fait foi sur la vivacité des queues.
 - **Mode dev** : serveur + worker dans le même processus.
 
 ### Configuration
@@ -129,7 +132,7 @@ tools: [github_*]
 | Table | Contenu | Écrivain |
 |---|---|---|
 | `agents` | définition des agents (+ `tools` allowlist) | serveur |
-| `tools` | outil → queue, schéma, kind, `schema_hash`, `last_seen` | workers |
+| `tools` | outil → queue, schéma, kind, `schema_hash` | workers |
 | `messages`, `sessions`, `memory`, `users`, `task_logs` | données runtime | workflows / serveur |
 | `skills_version` | signal de rechargement des skills | serveur |
 | `agent_executions`, `user_questions` | arbre d'exécution, questions (prévu) | workflows |
@@ -185,18 +188,18 @@ diagnostic.
 
 - La **queue sert encore d'identité d'agent** à plusieurs endroits :
   `default_queue`, `spawn_session(task_queue)`, `AgentByDefaultQueue`.
-- **Pas de table `tools`** : chaque worker a son registry en mémoire.
-  `ListTools` et `ExecuteTool` peuvent s'exécuter sur des workers différents,
-  donc le LLM peut voir un outil que le worker exécutant ne possède pas.
+- **La table `tools` est publiée mais pas encore lue** : `ListTools` renvoie
+  le registry local du worker. `ListTools` et `ExecuteTool` peuvent s'exécuter
+  sur des workers différents, donc le LLM peut voir un outil que le worker
+  exécutant ne possède pas.
 - **Routage des activities par type** (`activity_queues` : `ExecuteTool` →
   queue) et non par outil.
 - **MCP filtrés par queue** via `TASK_QUEUE_MCP`, puis fusionnés dans un
   registry unique partagé par toutes les queues du processus : aucun
   cloisonnement dès qu'un worker écoute plusieurs queues.
-- **Pas d'allowlist** : tout agent voit tous les outils, y compris `exec`.
-- **`agents.yaml` recopié en base par chaque worker** au démarrage : la dernière
-  version démarrée écrase les autres, et écraserait des modifications faites
-  depuis une UI.
+- **Allowlist stockée mais pas appliquée** : `agents.tools` existe, mais tout
+  agent voit encore tous les outils, y compris `exec`. Aucune API/UI pour
+  l'éditer.
 - **`session_tools` probablement cassé** : `EnableSessionWorker` absent, session
   créée sur la queue du workflow et non sur celle des outils, pas de validation
   des noms.
@@ -206,10 +209,10 @@ diagnostic.
 ## Feuille de route
 
 1. **Modèle** : ce document.
-2. **Backend minimal**
+2. **Backend minimal** (fait)
    - table `tools`, publiée par les workers depuis `worker.yaml` ;
    - table `agents` qui fait foi (+ colonne `tools`), écrite par le serveur
-     seul, seed depuis `agents.yaml`.
+     seul, seed depuis `agents.yaml` (insertion des agents absents).
 3. **UI en lecture seule** : agents, outils par queue, workers actifs.
 4. **UI d'édition des agents** : skills, allowlist, description.
 5. **Dispatch par outil** dans `AgentWorkflow` : `ListTools(agentID)`,
@@ -231,6 +234,5 @@ diagnostic.
 - Un processus peut-il exposer plusieurs queues d'outils ?
 - Outils présents dans chaque binaire (fs, exec) : activés seulement là où
   `worker.yaml` les déclare ?
-- Propagation des changements : polling (30 s) ou `LISTEN/NOTIFY` ?
 - Claude Code : clone ou worktree sur miroir ; absence de commit = échec ou
   résultat normal ; PR automatique ; liste blanche de repos.

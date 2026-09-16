@@ -1,6 +1,10 @@
 package store
 
-import "context"
+import (
+	"context"
+	"encoding/json"
+	"time"
+)
 
 type MemoryScope string
 
@@ -46,6 +50,10 @@ type Store interface {
 	ListAgents(ctx context.Context) ([]Agent, error)
 	GetAgent(ctx context.Context, agentID string) (*Agent, error)
 
+	// Tool catalog (published by workers)
+	UpsertTool(ctx context.Context, tool ToolRecord) error
+	ListTools(ctx context.Context) ([]ToolRecord, error)
+
 	// Skills version
 	GetSkillsVersion(ctx context.Context) (int64, error)
 	IncrementSkillsVersion(ctx context.Context) (int64, error)
@@ -72,4 +80,17 @@ type Agent struct {
 	Skills       []string `json:"skills"`
 	Tools        []string `json:"tools"` // Allowed tool name globs; nil = no allowlist (all tools)
 	DefaultQueue string   `json:"default_queue"`
+}
+
+// ToolRecord is a tool published by a worker: where it runs and its contract.
+type ToolRecord struct {
+	Name          string          `json:"name"`
+	TaskQueue     string          `json:"task_queue"`
+	Description   string          `json:"description"`
+	InputSchema   json.RawMessage `json:"input_schema"`
+	Kind          string          `json:"kind"`
+	WorkflowName  string          `json:"workflow_name,omitempty"`
+	FireAndForget bool            `json:"fire_and_forget,omitempty"`
+	SchemaHash    string          `json:"schema_hash"`
+	UpdatedAt     time.Time       `json:"updated_at"`
 }
