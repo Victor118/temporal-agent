@@ -63,7 +63,7 @@ func (c *Client) SendMessage(chatID, text string) error {
 
 // Update represents an incoming Telegram update.
 type Update struct {
-	UpdateID int      `json:"update_id"`
+	UpdateID int        `json:"update_id"`
 	Message  *TGMessage `json:"message,omitempty"`
 }
 

@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	anthropicAPIURL      = "https://api.anthropic.com/v1/messages"
+	anthropicAPIURL       = "https://api.anthropic.com/v1/messages"
 	anthropicDefaultModel = "claude-sonnet-4-20250514"
 )
 
@@ -29,11 +29,11 @@ func NewAnthropicProvider(apiKey string) *AnthropicProvider {
 // Anthropic API types
 
 type anthropicRequest struct {
-	Model     string              `json:"model"`
-	System    interface{}         `json:"system,omitempty"` // string or []anthropicContentBlock for cache_control
-	Messages  []anthropicMessage  `json:"messages"`
-	Tools     []anthropicTool     `json:"tools,omitempty"`
-	MaxTokens int                 `json:"max_tokens"`
+	Model     string             `json:"model"`
+	System    interface{}        `json:"system,omitempty"` // string or []anthropicContentBlock for cache_control
+	Messages  []anthropicMessage `json:"messages"`
+	Tools     []anthropicTool    `json:"tools,omitempty"`
+	MaxTokens int                `json:"max_tokens"`
 }
 
 type anthropicMessage struct {
@@ -42,10 +42,10 @@ type anthropicMessage struct {
 }
 
 type anthropicTool struct {
-	Name         string                  `json:"name"`
-	Description  string                  `json:"description"`
-	InputSchema  json.RawMessage         `json:"input_schema"`
-	CacheControl *anthropicCacheControl  `json:"cache_control,omitempty"`
+	Name         string                 `json:"name"`
+	Description  string                 `json:"description"`
+	InputSchema  json.RawMessage        `json:"input_schema"`
+	CacheControl *anthropicCacheControl `json:"cache_control,omitempty"`
 }
 
 type anthropicCacheControl struct {

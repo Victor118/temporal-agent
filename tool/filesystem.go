@@ -24,7 +24,9 @@ func RegisterFilesystemTools(r *Registry, workspacePath string) {
 		}`),
 		Kind: ToolKindActivity,
 		Execute: func(ctx context.Context, input json.RawMessage) (string, error) {
-			var params struct{ Path string `json:"path"` }
+			var params struct {
+				Path string `json:"path"`
+			}
 			if err := json.Unmarshal(input, &params); err != nil {
 				return "", err
 			}
@@ -131,7 +133,9 @@ func RegisterFilesystemTools(r *Registry, workspacePath string) {
 		}`),
 		Kind: ToolKindActivity,
 		Execute: func(ctx context.Context, input json.RawMessage) (string, error) {
-			var params struct{ Path string `json:"path"` }
+			var params struct {
+				Path string `json:"path"`
+			}
 			if err := json.Unmarshal(input, &params); err != nil {
 				return "", err
 			}

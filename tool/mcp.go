@@ -16,9 +16,9 @@ import (
 
 // MCPServerConfig describes an MCP server to connect to.
 type MCPServerConfig struct {
-	Name     string `json:"name"`      // Prefix for tool names (e.g. "github")
-	URL      string `json:"url"`       // Base URL of the MCP server
-	APIKey   string `json:"api_key"`   // Optional auth token
+	Name      string `json:"name"`      // Prefix for tool names (e.g. "github")
+	URL       string `json:"url"`       // Base URL of the MCP server
+	APIKey    string `json:"api_key"`   // Optional auth token
 	Transport string `json:"transport"` // "http" (default) or "sse"
 }
 

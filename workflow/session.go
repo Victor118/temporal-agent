@@ -10,9 +10,9 @@ import (
 )
 
 const (
-	SignalUserMessage   = "user-message"
-	SignalCancelAgent   = "cancel-agent"
-	QuerySessionState   = "session-state"
+	SignalUserMessage = "user-message"
+	SignalCancelAgent = "cancel-agent"
+	QuerySessionState = "session-state"
 )
 
 type SessionWorkflowInput struct {

@@ -27,7 +27,9 @@ func RegisterWebTools(r *Registry) {
 		}`),
 		Kind: ToolKindActivity,
 		Execute: func(ctx context.Context, input json.RawMessage) (string, error) {
-			var params struct{ URL string `json:"url"` }
+			var params struct {
+				URL string `json:"url"`
+			}
 			if err := json.Unmarshal(input, &params); err != nil {
 				return "", err
 			}

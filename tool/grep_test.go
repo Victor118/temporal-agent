@@ -101,8 +101,8 @@ func TestGrep_IncludeFilter(t *testing.T) {
 	_, r := setupGrepWorkspace(t)
 
 	result, err := grepExec(t, r, map[string]interface{}{
-		"pattern": ".",
-		"include": "*.md",
+		"pattern":     ".",
+		"include":     "*.md",
 		"output_mode": "files",
 	})
 	if err != nil {

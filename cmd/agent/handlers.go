@@ -414,8 +414,8 @@ func (h *handler) getHistory(w http.ResponseWriter, r *http.Request) {
 
 	// Convert store messages to a frontend-friendly format
 	type historyEntry struct {
-		Type      string      `json:"type"`                 // "message", "tool_calls"
-		Role      string      `json:"role,omitempty"`       // "user", "assistant"
+		Type      string      `json:"type"`           // "message", "tool_calls"
+		Role      string      `json:"role,omitempty"` // "user", "assistant"
 		Content   string      `json:"content,omitempty"`
 		ToolCalls interface{} `json:"tool_calls,omitempty"`
 	}

@@ -13,8 +13,8 @@ type SandboxProfile string
 
 const (
 	SandboxReadonly SandboxProfile = "readonly"
-	SandboxNetwork SandboxProfile = "network"
-	SandboxFull    SandboxProfile = "full"
+	SandboxNetwork  SandboxProfile = "network"
+	SandboxFull     SandboxProfile = "full"
 )
 
 func RegisterExecTool(r *Registry, workspacePath string) {

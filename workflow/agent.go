@@ -19,9 +19,9 @@ const maxReActIterations = 50
 type AgentWorkflowInput struct {
 	SessionID    string          `json:"session_id"`
 	UserID       string          `json:"user_id,omitempty"`
-	AgentID      string          `json:"agent_id,omitempty"`    // Logical agent identity (loads its skills/prompt). If empty, the worker resolves a default from the current task queue.
+	AgentID      string          `json:"agent_id,omitempty"` // Logical agent identity (loads its skills/prompt). If empty, the worker resolves a default from the current task queue.
 	UserMessage  string          `json:"user_message"`
-	Messages     []store.Message `json:"messages"`      // Context loaded by session
+	Messages     []store.Message `json:"messages"`              // Context loaded by session
 	UserMemory   string          `json:"user_memory,omitempty"` // Persistent user memory injected into system prompt
 	SystemPrompt string          `json:"system_prompt"`
 	Model        string          `json:"model"`
@@ -33,7 +33,7 @@ type AgentWorkflowInput struct {
 
 type AgentWorkflowOutput struct {
 	Response     string          `json:"response"`
-	Messages     []store.Message `json:"messages"`      // Updated messages to persist
+	Messages     []store.Message `json:"messages"` // Updated messages to persist
 	GoalAchieved bool            `json:"goal_achieved"`
 }
 
@@ -167,7 +167,6 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 	).Get(ctx, &toolList); err != nil {
 		return AgentWorkflowOutput{}, fmt.Errorf("list tools: %w", err)
 	}
-
 
 	// Start from the context provided by the session
 	messages := make([]store.Message, len(input.Messages))

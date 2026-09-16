@@ -3,9 +3,9 @@ package store
 import "time"
 
 type User struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	TelegramID *int64 `json:"telegram_id,omitempty"`
+	ID         string    `json:"id"`
+	Name       string    `json:"name"`
+	TelegramID *int64    `json:"telegram_id,omitempty"`
 	CreatedAt  time.Time `json:"created_at"`
 }
 

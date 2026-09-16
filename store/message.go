@@ -23,10 +23,10 @@ type ToolResult struct {
 }
 
 type Message struct {
-	Role       Role         `json:"role"`
-	Content    string       `json:"content,omitempty"`
-	ToolCalls  []ToolCall   `json:"tool_calls,omitempty"`
-	ToolResult *ToolResult  `json:"tool_result,omitempty"`
+	Role       Role        `json:"role"`
+	Content    string      `json:"content,omitempty"`
+	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`
+	ToolResult *ToolResult `json:"tool_result,omitempty"`
 }
 
 type MessageWithID struct {
