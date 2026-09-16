@@ -2,9 +2,11 @@ package workflow
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
+	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
@@ -16,15 +18,19 @@ import (
 
 const maxReActIterations = 50
 
+// toolScheduleToStartTimeout bounds how long a tool call waits for a worker on
+// its task queue before being reported to the LLM as unavailable.
+const toolScheduleToStartTimeout = 60 * time.Second
+
 type AgentWorkflowInput struct {
 	SessionID    string          `json:"session_id"`
 	UserID       string          `json:"user_id,omitempty"`
-	AgentID      string          `json:"agent_id,omitempty"` // Logical agent identity (loads its skills/prompt). If empty, the worker resolves a default from the current task queue.
+	AgentID      string          `json:"agent_id"` // Required. Logical agent identity: prompt, skills and allowed tools
 	UserMessage  string          `json:"user_message"`
 	Messages     []store.Message `json:"messages"`              // Context loaded by session
 	UserMemory   string          `json:"user_memory,omitempty"` // Persistent user memory injected into system prompt
 	SystemPrompt string          `json:"system_prompt"`
-	Model        string          `json:"model"`
+	Model        string          `json:"model"`                   // Explicit model; empty = the worker's default (LLM_MODEL)
 	SessionTools []string        `json:"session_tools,omitempty"` // Tools that persist through a session
 	AgentChain   []string        `json:"agent_chain,omitempty"`   // Chain of parent agent IDs for context propagation
 	Channel      string          `json:"channel,omitempty"`       // "web", "telegram"
@@ -39,8 +45,9 @@ type AgentWorkflowOutput struct {
 
 // AgentWorkflow is a pure resolution workflow: ReAct loop only.
 // It receives messages from the session, runs LLM + tools, and returns the updated messages.
-// When SessionTools is set, a Temporal session is created to pin those tools' activities
-// to a single worker (required for stateful tools like filesystem operations).
+// When SessionTools is set, a Temporal session is created on the queue serving those
+// tools to pin their activities to a single worker (required for stateful tools like
+// filesystem operations).
 func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflowOutput, error) {
 	// Capture activity → task queue mapping via SideEffect.
 	// Reads from worker-cached config (no DB call). Recorded in history for deterministic replay.
@@ -78,77 +85,35 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 			NonRetryableErrorTypes: []string{"ApplicationError"},
 		},
 	}
-	if q, ok := queueMap["ExecuteTool"]; ok {
-		toolOpts.TaskQueue = q
-	}
-	toolCtx := workflow.WithActivityOptions(ctx, toolOpts)
+	// Each call is routed to its tool's task queue (see dispatch below).
+	toolOpts.ScheduleToStartTimeout = toolScheduleToStartTimeout
 
-	// Build session tools lookup
-	sessionToolSet := make(map[string]bool, len(input.SessionTools))
-	for _, t := range input.SessionTools {
-		sessionToolSet[t] = true
-	}
-
-	// If session tools are set, create a Temporal session to pin activities to one worker
-	var sessionToolCtx workflow.Context
-	if len(sessionToolSet) > 0 {
-		sessCtx, err := workflow.CreateSession(ctx, &workflow.SessionOptions{
-			CreationTimeout:  time.Minute,
-			ExecutionTimeout: 30 * time.Minute,
-		})
-		if err != nil {
-			return AgentWorkflowOutput{}, fmt.Errorf("create session: %w", err)
-		}
-		defer workflow.CompleteSession(sessCtx)
-
-		// Apply same tool activity options on the session context
-		sessionToolCtx = workflow.WithActivityOptions(sessCtx, workflow.ActivityOptions{
-			StartToCloseTimeout: 120 * time.Second,
-			RetryPolicy: &temporal.RetryPolicy{
-				MaximumAttempts:        1,
-				NonRetryableErrorTypes: []string{"ApplicationError"},
-			},
-		})
-	}
-
-	// Resolve the current agent identity. Prefer the explicit AgentID from input;
-	// fall back to a lookup by current task queue (for legacy/edge cases).
+	// The agent identity selects the prompt, skills and allowed tools.
 	currentAgentID := input.AgentID
-	var skillAct *activity.SkillActivities
 	if currentAgentID == "" {
-		currentQueue := workflow.GetInfo(ctx).TaskQueueName
-		var resolved string
-		if err := workflow.ExecuteActivity(
-			workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-				StartToCloseTimeout: 5 * time.Second,
-			}),
-			skillAct.ResolveAgentByQueue,
-			currentQueue,
-		).Get(ctx, &resolved); err != nil {
-			return AgentWorkflowOutput{}, fmt.Errorf("resolve agent by queue: %w", err)
-		}
-		currentAgentID = resolved
+		return AgentWorkflowOutput{}, temporal.NewNonRetryableApplicationError("agent_id is required", "MissingAgentID", nil)
 	}
+	var skillAct *activity.SkillActivities
 	currentChain := append(input.AgentChain, currentAgentID)
 
-	// Load skills for the current agent (unless a system prompt override is provided)
+	// Load the agent's prompt (unless overridden) and the known agents
+	var skillsResult activity.LoadSkillsForAgentOutput
+	if err := workflow.ExecuteActivity(
+		workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+			StartToCloseTimeout: 5 * time.Second,
+		}),
+		skillAct.LoadSkillsForAgent,
+		activity.LoadSkillsForAgentInput{AgentID: currentAgentID},
+	).Get(ctx, &skillsResult); err != nil {
+		return AgentWorkflowOutput{}, fmt.Errorf("load skills: %w", err)
+	}
 	systemPrompt := input.SystemPrompt
-	queueToAgentID := map[string]string{}
-	if systemPrompt == "" || currentAgentID != "" {
-		var skillsResult activity.LoadSkillsForAgentOutput
-		if err := workflow.ExecuteActivity(
-			workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-				StartToCloseTimeout: 5 * time.Second,
-			}),
-			skillAct.LoadSkillsForAgent,
-			activity.LoadSkillsForAgentInput{AgentID: currentAgentID},
-		).Get(ctx, &skillsResult); err != nil {
-			return AgentWorkflowOutput{}, fmt.Errorf("load skills: %w", err)
-		}
-		queueToAgentID = skillsResult.QueueToAgentID
-		if systemPrompt == "" {
-			systemPrompt = skillsResult.SystemPrompt
-		}
+	if systemPrompt == "" {
+		systemPrompt = skillsResult.SystemPrompt
+	}
+	knownAgents := make(map[string]bool, len(skillsResult.AgentIDs))
+	for _, id := range skillsResult.AgentIDs {
+		knownAgents[id] = true
 	}
 
 	// Append user memory to system prompt if available
@@ -156,7 +121,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 		systemPrompt += "\n## User Memory\n\nThe following is what you remember about this user from previous conversations. Use it to personalize your responses.\n\n" + input.UserMemory + "\n\n"
 	}
 
-	// Load available tools
+	// Load the tools this agent may use, with the queue serving each one
 	var toolAct *activity.ToolActivities
 	var toolList activity.ListToolsOutput
 	if err := workflow.ExecuteActivity(
@@ -164,8 +129,34 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 			StartToCloseTimeout: 5 * time.Second,
 		}),
 		toolAct.ListTools,
+		activity.ListToolsInput{AgentID: currentAgentID},
 	).Get(ctx, &toolList); err != nil {
 		return AgentWorkflowOutput{}, fmt.Errorf("list tools: %w", err)
+	}
+
+	// Stateful tools: pin their calls to one worker of their queue with a session
+	sessionToolSet := make(map[string]bool, len(input.SessionTools))
+	var sessionToolCtx workflow.Context
+	if len(input.SessionTools) > 0 {
+		queue, err := sessionToolsQueue(input.SessionTools, toolList.Resolutions)
+		if err != nil {
+			return AgentWorkflowOutput{}, temporal.NewNonRetryableApplicationError(err.Error(), "InvalidSessionTools", nil)
+		}
+		sessCtx, err := workflow.CreateSession(
+			workflow.WithActivityOptions(ctx, workflow.ActivityOptions{TaskQueue: queue}),
+			&workflow.SessionOptions{
+				CreationTimeout:  time.Minute,
+				ExecutionTimeout: 30 * time.Minute,
+			})
+		if err != nil {
+			return AgentWorkflowOutput{}, fmt.Errorf("create session on %q: %w", queue, err)
+		}
+		defer workflow.CompleteSession(sessCtx)
+
+		for _, t := range input.SessionTools {
+			sessionToolSet[t] = true
+		}
+		sessionToolCtx = workflow.WithActivityOptions(sessCtx, toolOpts)
 	}
 
 	// Start from the context provided by the session
@@ -258,47 +249,45 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 
 		notifyToolCalls(ctx, input.SessionID, input.Channel, input.ChannelID, response.ToolCalls)
 
-		// Resolve tool kinds to know how to dispatch each tool
-		toolNames := make([]string, len(response.ToolCalls))
-		for j, tc := range response.ToolCalls {
-			toolNames[j] = tc.Name
-		}
-		var resolveResult activity.ResolveToolKindsOutput
-		if err := workflow.ExecuteActivity(toolCtx, toolAct.ResolveToolKinds, activity.ResolveToolKindsInput{
-			Names: toolNames,
-		}).Get(ctx, &resolveResult); err != nil {
-			return AgentWorkflowOutput{}, fmt.Errorf("resolve tool kinds: %w", err)
-		}
-
-		// Execute all tools in parallel, routing by kind
+		// Execute all tools in parallel, each on its tool's task queue
 		type toolDispatch struct {
 			future        workflow.Future
 			kind          tool.ToolKind
 			fireAndForget bool
 			workflowID    string
+			taskQueue     string
+			unavailable   string // non-empty: error returned without dispatching
 		}
 		dispatches := make([]toolDispatch, len(response.ToolCalls))
 		for j, tc := range response.ToolCalls {
-			res := resolveResult.Tools[tc.Name]
-			d := toolDispatch{kind: tool.ToolKind(res.Kind), fireAndForget: res.FireAndForget}
+			res, allowed := toolList.Resolutions[tc.Name]
+			if !allowed {
+				// Not in this agent's allowlist, or unknown (hallucinated) tool
+				dispatches[j] = toolDispatch{unavailable: fmt.Sprintf("Tool %q is not available to this agent.", tc.Name)}
+				continue
+			}
+			d := toolDispatch{kind: tool.ToolKind(res.Kind), fireAndForget: res.FireAndForget, taskQueue: res.TaskQueue}
 
 			if d.kind == tool.ToolKindWorkflow {
-				d.workflowID = fmt.Sprintf("%s-tool-%s-%d", input.SessionID, tc.Name, i)
+				d.workflowID = childWorkflowID(input.SessionID, tc.Name, tc.ID, i, j)
 
-				// Build input first — may override task queue for spawn_session
-				workflowName, childInput := buildChildInput(tc.Name, tc.Input, input, d.workflowID, &res, currentChain, queueToAgentID)
+				// Build input first — spawn_session runs on the current workflow queue
+				workflowName, childInput, err := buildChildInput(tc.Name, tc.Input, input, d.workflowID, &res, currentChain, currentAgentID, knownAgents, workflow.GetInfo(ctx).TaskQueueName)
+				if err != nil {
+					dispatches[j] = toolDispatch{unavailable: err.Error()}
+					continue
+				}
 
-				opts := workflow.ChildWorkflowOptions{
+				childCtx := workflow.WithChildOptions(ctx, workflow.ChildWorkflowOptions{
 					WorkflowID: d.workflowID,
-				}
-				if res.TaskQueue != "" {
-					opts.TaskQueue = res.TaskQueue
-				}
-				childCtx := workflow.WithChildOptions(ctx, opts)
+					TaskQueue:  res.TaskQueue,
+				})
 				d.future = workflow.ExecuteChildWorkflow(childCtx, workflowName, childInput)
 			} else {
+				opts := toolOpts
+				opts.TaskQueue = res.TaskQueue
+				execCtx := workflow.WithActivityOptions(ctx, opts)
 				// Route to session worker if this tool is in session_tools
-				execCtx := toolCtx
 				if sessionToolSet[tc.Name] && sessionToolCtx != nil {
 					execCtx = sessionToolCtx
 				}
@@ -306,6 +295,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 					Name:      tc.Name,
 					Input:     tc.Input,
 					SessionID: input.SessionID,
+					AgentID:   currentAgentID,
 				})
 			}
 			dispatches[j] = d
@@ -316,22 +306,28 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 			var content string
 			var isError bool
 
-			if d.fireAndForget {
+			if d.unavailable != "" {
+				content = d.unavailable
+				isError = true
+			} else if d.fireAndForget {
 				// Don't wait — return the workflow ID so the LLM can query it later
 				content = fmt.Sprintf("Workflow started (workflow_id: %s). Use query_workflow to check its status.", d.workflowID)
 			} else if d.kind == tool.ToolKindWorkflow {
-				// Workflow tools return their result as a string
-				var result string
+				var result json.RawMessage
 				if err := d.future.Get(ctx, &result); err != nil {
 					content = fmt.Sprintf("Workflow failed: %s", err.Error())
 					isError = true
 				} else {
-					content = result
+					content = workflowToolContent(result)
 				}
 			} else {
 				var result activity.ExecuteToolOutput
 				if err := d.future.Get(ctx, &result); err != nil {
-					content = fmt.Sprintf("Tool execution failed: %s", err.Error())
+					if isScheduleToStartTimeout(err) {
+						content = fmt.Sprintf("Tool %q is unavailable: no worker is serving task queue %q.", response.ToolCalls[j].Name, d.taskQueue)
+					} else {
+						content = fmt.Sprintf("Tool execution failed: %s", err.Error())
+					}
 					isError = true
 				} else {
 					content = result.Content
@@ -413,34 +409,39 @@ func notifyResponse(ctx workflow.Context, sessionID, channel, channelID, content
 }
 
 // buildChildInput constructs the proper input for child workflow tools.
-// For spawn_session, it builds an AgentWorkflowInput with the agent chain and
-// resolves the target task queue to an agent_id via queueToAgentID.
+// For spawn_session, it builds an AgentWorkflowInput for the target agent (the
+// current one if none is given) and keeps the child on the current workflow queue;
+// an unknown agent is an error reported to the LLM.
 // For ask_user, it enriches the raw input with the agent chain.
 // For other workflow tools, it passes the raw input unchanged.
-func buildChildInput(toolName string, rawInput json.RawMessage, parent AgentWorkflowInput, childID string, res *activity.ToolResolution, agentChain []string, queueToAgentID map[string]string) (workflowName string, input interface{}) {
+func buildChildInput(toolName string, rawInput json.RawMessage, parent AgentWorkflowInput, childID string, res *activity.ToolResolution, agentChain []string, currentAgentID string, knownAgents map[string]bool, currentQueue string) (workflowName string, input interface{}, err error) {
 	switch toolName {
 	case "spawn_session":
 		var spawnInput struct {
 			Task         string   `json:"task"`
-			TaskQueue    string   `json:"task_queue,omitempty"`
+			AgentID      string   `json:"agent_id,omitempty"`
 			SessionTools []string `json:"session_tools"`
 			Model        string   `json:"model,omitempty"`
 		}
-		json.Unmarshal(rawInput, &spawnInput)
+		if err := json.Unmarshal(rawInput, &spawnInput); err != nil {
+			return "", nil, fmt.Errorf("invalid spawn_session input: %w", err)
+		}
+
+		childAgentID := spawnInput.AgentID
+		if childAgentID == "" {
+			childAgentID = currentAgentID
+		}
+		if !knownAgents[childAgentID] {
+			return "", nil, fmt.Errorf("unknown agent_id %q: use an agent from the agents directory", childAgentID)
+		}
 
 		model := spawnInput.Model
 		if model == "" {
 			model = parent.Model
 		}
 
-		// Override the task queue if specified by the LLM
-		if spawnInput.TaskQueue != "" {
-			res.TaskQueue = spawnInput.TaskQueue
-		}
-
-		// Resolve target agent_id from the chosen queue (Phase 1: spawn_session API
-		// still takes task_queue; we map it to agent_id internally).
-		childAgentID := queueToAgentID[res.TaskQueue]
+		// Sub-agents are orchestration: they run where their parent runs.
+		res.TaskQueue = currentQueue
 
 		return res.WorkflowName, AgentWorkflowInput{
 			SessionID:    childID,
@@ -449,7 +450,7 @@ func buildChildInput(toolName string, rawInput json.RawMessage, parent AgentWork
 			Model:        model,
 			SessionTools: spawnInput.SessionTools,
 			AgentChain:   agentChain,
-		}
+		}, nil
 
 	case "ask_user":
 		// Enrich the raw input with agent chain and channel info
@@ -459,10 +460,10 @@ func buildChildInput(toolName string, rawInput json.RawMessage, parent AgentWork
 		enriched["channel"] = parent.Channel
 		enriched["channel_id"] = parent.ChannelID
 		enrichedJSON, _ := json.Marshal(enriched)
-		return res.WorkflowName, json.RawMessage(enrichedJSON)
+		return res.WorkflowName, json.RawMessage(enrichedJSON), nil
 
 	default:
-		return res.WorkflowName, rawInput
+		return res.WorkflowName, rawInput, nil
 	}
 }
 
@@ -487,4 +488,56 @@ func notifyToolCalls(ctx workflow.Context, sessionID, channel, channelID string,
 			},
 		},
 	).Get(ctx, nil)
+}
+
+// isScheduleToStartTimeout reports whether err is an activity that no worker
+// picked up in time.
+func isScheduleToStartTimeout(err error) bool {
+	var timeoutErr *temporal.TimeoutError
+	return errors.As(err, &timeoutErr) && timeoutErr.TimeoutType() == enumspb.TIMEOUT_TYPE_SCHEDULE_TO_START
+}
+
+// sessionToolsQueue checks that the session tools are allowed activity tools
+// served by a single task queue, and returns that queue.
+func sessionToolsQueue(names []string, resolutions map[string]activity.ToolResolution) (string, error) {
+	queue := ""
+	for _, name := range names {
+		res, ok := resolutions[name]
+		if !ok {
+			return "", fmt.Errorf("session tool %q is not available to this agent", name)
+		}
+		if tool.ToolKind(res.Kind) != tool.ToolKindActivity {
+			return "", fmt.Errorf("session tool %q is not an activity tool", name)
+		}
+		if queue != "" && res.TaskQueue != queue {
+			return "", fmt.Errorf("session tools must share one task queue: %q is on %q, not %q", name, res.TaskQueue, queue)
+		}
+		queue = res.TaskQueue
+	}
+	return queue, nil
+}
+
+// workflowToolContent turns a workflow tool result into tool_result content:
+// a string result is used as is, an agent result gives its final response,
+// anything else is passed as raw JSON.
+func workflowToolContent(result json.RawMessage) string {
+	var text string
+	if err := json.Unmarshal(result, &text); err == nil {
+		return text
+	}
+	var agent AgentWorkflowOutput
+	if err := json.Unmarshal(result, &agent); err == nil && agent.Response != "" {
+		return agent.Response
+	}
+	return string(result)
+}
+
+// childWorkflowID names a workflow tool call "{sessionID}-tool-{tool}-{callID}".
+// The prefix is relied upon (ask_user extracts the session ID from it); the tool
+// call ID keeps parallel calls and later turns distinct.
+func childWorkflowID(sessionID, toolName, callID string, iteration, index int) string {
+	if callID == "" {
+		callID = fmt.Sprintf("%d-%d", iteration, index)
+	}
+	return fmt.Sprintf("%s-tool-%s-%s", sessionID, toolName, callID)
 }

@@ -9,36 +9,67 @@ import (
 	"github.com/victor/temporal-agent/skill"
 )
 
-const defaultSystemPrompt = `You are a helpful AI assistant with access to tools. You MUST use your tools proactively to accomplish the user's goals — do not just describe what you could do, actually do it.
+const promptIntro = "You are a helpful AI assistant with access to tools. You MUST use your tools proactively to accomplish the user's goals — do not just describe what you could do, actually do it.\n\n"
 
-Key behaviors:
-- When the user asks for information you don't have, use web_fetch to look it up.
-- When the user asks you to work with files, use read_file, write_file, edit_file, grep, glob.
-- When the user asks you to run a command, use exec.
-- When a task requires specialized expertise, use spawn_session to delegate to a sub-agent.
-- Always prefer action over explanation. If you can answer by using a tool, do it.
-- NEVER write a file as a way to deliver your answer. Respond directly in the conversation. Only use write_file/edit_file when the user explicitly asks you to create or modify a file.
-- Use save_user_memory to remember important facts about the user (role, preferences, expertise, projects) that would be useful in future conversations. Each call replaces the full memory, so include everything. Only save when you learn something genuinely new and useful.
+// promptRule is a behavior guideline shown only if the agent may use at least
+// one of its tools (%s is replaced by the allowed ones). A rule without tools
+// is always shown.
+type promptRule struct {
+	tools []string
+	text  string
+}
 
-`
+var promptRules = []promptRule{
+	{[]string{"web_search", "web_fetch"}, "When the user asks for information you don't have, look it up with %s."},
+	{[]string{"read_file", "write_file", "edit_file", "list_directory", "grep", "glob"}, "When the user asks you to work with files, use %s."},
+	{[]string{"exec"}, "When the user asks you to run a command, use %s."},
+	{[]string{"spawn_session"}, "When a task requires specialized expertise, use %s to delegate to a sub-agent."},
+	{nil, "Always prefer action over explanation. If you can answer by using a tool, do it."},
+	{nil, "Only use the tools you are given. If a task needs a tool you don't have, say so instead of pretending."},
+	{[]string{"write_file", "edit_file"}, "NEVER write a file as a way to deliver your answer. Respond directly in the conversation. Only use %s when the user explicitly asks you to create or modify a file."},
+	{[]string{"save_user_memory"}, "Use %s to remember important facts about the user (role, preferences, expertise, projects) that would be useful in future conversations. Each call replaces the full memory, so include everything. Only save when you learn something genuinely new and useful."},
+}
+
+// buildBehaviors returns the "Key behaviors" section for the allowed tools.
+func buildBehaviors(allowed map[string]bool) string {
+	var sb strings.Builder
+	sb.WriteString(promptIntro)
+	sb.WriteString("Key behaviors:\n")
+	for _, r := range promptRules {
+		if r.tools == nil {
+			sb.WriteString("- " + r.text + "\n")
+			continue
+		}
+		var names []string
+		for _, t := range r.tools {
+			if allowed[t] {
+				names = append(names, t)
+			}
+		}
+		if len(names) > 0 {
+			sb.WriteString("- " + fmt.Sprintf(r.text, strings.Join(names, ", ")) + "\n")
+		}
+	}
+	sb.WriteString("\n")
+	return sb.String()
+}
 
 // AgentCatalogEntry describes a logical agent (persona) for the directory shown in prompts.
 type AgentCatalogEntry struct {
-	ID           string   `json:"id"`
-	Name         string   `json:"name"`
-	Description  string   `json:"description"`
-	Skills       []string `json:"skills"`
-	Tools        []string `json:"tools"` // Allowed tool name globs; nil = all tools
-	DefaultQueue string   `json:"default_queue"`
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Skills      []string `json:"skills"`
+	Tools       []string `json:"tools"` // Allowed tool name globs; nil = all tools
 }
 
 // SkillActivities provides per-agent system prompt loading as a Temporal activity.
-// It holds the loaded skills and the agent catalog (read from the DB); both can be
-// replaced at runtime, and prompts are built on demand from the current state.
+// It holds the loaded skills and reads agents from the shared catalog; both can
+// change at runtime, and prompts are built on demand from the current state.
 type SkillActivities struct {
 	mu      sync.RWMutex
 	skills  map[string]skill.Skill // skill name → skill
-	catalog []AgentCatalogEntry
+	catalog *Catalog
 }
 
 func (a *SkillActivities) setSkills(skills []skill.Skill) {
@@ -51,17 +82,10 @@ func (a *SkillActivities) setSkills(skills []skill.Skill) {
 	a.skills = byName
 }
 
-func (a *SkillActivities) setCatalog(catalog []AgentCatalogEntry) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.catalog = catalog
-}
-
-// NewSkillActivities creates a SkillActivities with initial skills and catalog.
-func NewSkillActivities(skills []skill.Skill, catalog []AgentCatalogEntry) *SkillActivities {
-	a := &SkillActivities{}
+// NewSkillActivities creates a SkillActivities with initial skills and the shared catalog.
+func NewSkillActivities(skills []skill.Skill, catalog *Catalog) *SkillActivities {
+	a := &SkillActivities{catalog: catalog}
 	a.setSkills(skills)
-	a.setCatalog(catalog)
 	return a
 }
 
@@ -71,63 +95,50 @@ func SetSkills(a *SkillActivities, skills []skill.Skill) {
 	a.setSkills(skills)
 }
 
-// SetCatalog is a package-level wrapper so external packages can update the catalog
-// without exposing a method that Temporal would register as an activity.
-func SetCatalog(a *SkillActivities, catalog []AgentCatalogEntry) {
-	a.setCatalog(catalog)
-}
-
 type LoadSkillsForAgentInput struct {
 	AgentID string `json:"agent_id"`
 }
 
 type LoadSkillsForAgentOutput struct {
-	SystemPrompt   string            `json:"system_prompt"`
-	QueueToAgentID map[string]string `json:"queue_to_agent_id"` // default_queue → agent_id, used to route spawn_session
+	SystemPrompt string   `json:"system_prompt"`
+	AgentIDs     []string `json:"agent_ids"` // All known agents, used to validate spawn_session targets
 }
 
-// LoadSkillsForAgent returns the full system prompt for the given agent (its base
-// skills prompt plus the directory of all OTHER agents, self excluded), and a
-// queue→agent_id map used by the workflow to resolve spawn_session targets.
+// LoadSkillsForAgent returns the full system prompt for the given agent (behaviors
+// for its allowed tools, its skills, and — if it may delegate — the directory of
+// all OTHER agents), and the IDs of all known agents.
 func (a *SkillActivities) LoadSkillsForAgent(ctx context.Context, input LoadSkillsForAgentInput) (LoadSkillsForAgentOutput, error) {
-	a.mu.RLock()
-	basePrompt := defaultSystemPrompt
-	catalog := a.catalog
+	catalog := a.catalog.Agents()
+	allowed := make(map[string]bool)
+	for name := range a.catalog.AllowedTools(input.AgentID).Resolutions {
+		allowed[name] = true
+	}
+
+	var agentSkills []string
 	for _, e := range catalog {
 		if e.ID == input.AgentID {
-			basePrompt = buildSystemPrompt(matchSkills(a.skills, e.Skills))
+			agentSkills = e.Skills
 			break
 		}
 	}
+	a.mu.RLock()
+	prompt := buildSystemPrompt(matchSkills(a.skills, agentSkills), allowed)
 	a.mu.RUnlock()
 
-	directory := buildAgentsDirectory(catalog, input.AgentID)
+	// The agents directory is only useful to an agent that can delegate
+	if allowed["spawn_session"] {
+		prompt += buildAgentsDirectory(catalog, input.AgentID)
+	}
 
-	queueMap := make(map[string]string, len(catalog))
-	for _, e := range catalog {
-		if e.DefaultQueue != "" {
-			queueMap[e.DefaultQueue] = e.ID
-		}
+	ids := make([]string, len(catalog))
+	for i, e := range catalog {
+		ids[i] = e.ID
 	}
 
 	return LoadSkillsForAgentOutput{
-		SystemPrompt:   basePrompt + directory,
-		QueueToAgentID: queueMap,
+		SystemPrompt: prompt,
+		AgentIDs:     ids,
 	}, nil
-}
-
-// ResolveAgentByQueue returns the agent_id whose default_queue matches the given queue.
-// Used at workflow startup to resolve a fallback agent identity when AgentID is not
-// provided in the input (e.g. legacy session start).
-func (a *SkillActivities) ResolveAgentByQueue(ctx context.Context, queue string) (string, error) {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	for _, e := range a.catalog {
-		if e.DefaultQueue == queue {
-			return e.ID, nil
-		}
-	}
-	return "", nil
 }
 
 // matchSkills returns the skills named in names, in order, skipping unknown ones.
@@ -157,10 +168,10 @@ func buildAgentsDirectory(catalog []AgentCatalogEntry, currentAgentID string) st
 
 	var sb strings.Builder
 	sb.WriteString("## Available Specialized Agents\n\n")
-	sb.WriteString("You can delegate tasks to specialized agents using the `spawn_session` tool with the appropriate `task_queue` (the agent's default queue). Only use task queues listed below — do not invent others.\n\n")
+	sb.WriteString("You can delegate tasks to specialized agents using the `spawn_session` tool with the agent's `agent_id`. Only use agent IDs listed below — do not invent others.\n\n")
 
 	for _, entry := range filtered {
-		sb.WriteString(fmt.Sprintf("- **%s** (`task_queue=%s`)", entry.Name, entry.DefaultQueue))
+		sb.WriteString(fmt.Sprintf("- **%s** (`agent_id=%s`)", entry.Name, entry.ID))
 		if entry.Description != "" {
 			sb.WriteString(" — " + entry.Description)
 		}
@@ -169,15 +180,17 @@ func buildAgentsDirectory(catalog []AgentCatalogEntry, currentAgentID string) st
 		}
 		sb.WriteString("\n")
 	}
-	sb.WriteString("\nIMPORTANT: The `task_queue` parameter must be the exact value shown above (e.g. `market-analyst`), NOT a skill name.\n")
+	sb.WriteString("\nIMPORTANT: The `agent_id` parameter must be the exact value shown above (e.g. `market-analyst`), NOT a skill name.\n")
 	sb.WriteString("\n")
 
 	return sb.String()
 }
 
-func buildSystemPrompt(skills []skill.Skill) string {
+// buildSystemPrompt builds an agent's base prompt: behaviors for its allowed
+// tools, then its skills.
+func buildSystemPrompt(skills []skill.Skill, allowed map[string]bool) string {
 	var sb strings.Builder
-	sb.WriteString(defaultSystemPrompt)
+	sb.WriteString(buildBehaviors(allowed))
 
 	if len(skills) > 0 {
 		sb.WriteString("## Skills\n\n")

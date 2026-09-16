@@ -74,12 +74,11 @@ type ActivityQueueEntry struct {
 }
 
 type Agent struct {
-	ID           string   `json:"id"`
-	Name         string   `json:"name"`
-	Description  string   `json:"description"`
-	Skills       []string `json:"skills"`
-	Tools        []string `json:"tools"` // Allowed tool name globs; nil = no allowlist (all tools)
-	DefaultQueue string   `json:"default_queue"`
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Skills      []string `json:"skills"`
+	Tools       []string `json:"tools"` // Allowed tool name globs; nil = no allowlist (all tools)
 }
 
 // ToolRecord is a tool published by a worker: where it runs and its contract.

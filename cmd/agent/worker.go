@@ -43,7 +43,7 @@ func runWorker(cmd *cobra.Command, args []string) {
 	var llmProvider provider.LLMProvider
 	switch cfg.LLMProvider {
 	case "anthropic":
-		llmProvider = provider.NewAnthropicProvider(cfg.LLMAPIKey)
+		llmProvider = provider.NewAnthropicProvider(cfg.LLMAPIKey, cfg.LLMModel)
 	default:
 		log.Fatalf("Unknown LLM provider: %s", cfg.LLMProvider)
 	}
@@ -93,7 +93,7 @@ func runWorker(cmd *cobra.Command, args []string) {
 		log.Println("No skills repo configured (SKILLS_REPO), running without skills")
 	}
 
-	// Agents catalog — read-only from DB (the server seeds and edits it)
+	// Catalog (agents + tools) — read-only copy of the DB, refreshed by polling
 	catalog := initCatalog(st)
 	skillAct := activity.NewSkillActivities(skills, catalog)
 
@@ -116,11 +116,13 @@ func runWorker(cmd *cobra.Command, args []string) {
 	tool.RegisterQueryWorkflowTool(registry, temporalClient)
 
 	// Register schedule tools (needs temporal client + store)
-	tool.RegisterScheduleTools(registry, temporalClient, st, workflow.ScheduledAgentWorkflow, cfg.PrimaryTaskQueue())
+	tool.RegisterScheduleTools(registry, temporalClient, st, workflow.ScheduledAgentWorkflow, cfg.WorkflowQueue)
 
 	// Expose only the configured tools and publish them to the DB catalog
-	cfg.TaskQueues = exposeTools(registry, workerConf, cfg.TaskQueues)
+	exposeTools(registry, workerConf)
+	queues := workerQueues(cfg, workerConf)
 	publishTools(st, temporalClient, registry, workerConf.Queue)
+	refreshCatalog(st, catalog) // include the tools just published
 
 	// Notification bridge: POST to server's internal endpoint (SSE requires HTTP)
 	notifier := activity.NewHTTPNotifier(cfg.NotifyURL)
@@ -133,9 +135,12 @@ func runWorker(cmd *cobra.Command, args []string) {
 	}
 
 	// Create one worker per task queue
-	workers := make([]worker.Worker, 0, len(cfg.TaskQueues))
-	for _, queue := range cfg.TaskQueues {
-		w := worker.New(temporalClient, queue, worker.Options{})
+	workers := make([]worker.Worker, 0, len(queues))
+	for _, queue := range queues {
+		// Sessions pin stateful tool calls to one worker of the tool queue
+		w := worker.New(temporalClient, queue, worker.Options{
+			EnableSessionWorker: queue == workerConf.Queue,
+		})
 
 		w.RegisterWorkflow(workflow.SessionWorkflow)
 		w.RegisterWorkflow(workflow.AgentWorkflow)
@@ -144,7 +149,7 @@ func runWorker(cmd *cobra.Command, args []string) {
 
 		w.RegisterActivity(&activity.LLMActivities{Provider: llmProvider})
 		w.RegisterActivity(&activity.MemoryActivities{Store: st})
-		w.RegisterActivity(&activity.ToolActivities{Registry: registry})
+		w.RegisterActivity(&activity.ToolActivities{Registry: registry, Catalog: catalog})
 		w.RegisterActivity(&activity.NotificationActivities{Hub: notifier, Telegram: tgClient})
 		w.RegisterActivity(&activity.DeliveryActivities{Hub: notifier, Store: st})
 		w.RegisterActivity(&activity.ScheduleActivities{Client: temporalClient, Store: st})
@@ -157,7 +162,7 @@ func runWorker(cmd *cobra.Command, args []string) {
 	// Poll DB for activity queue mapping and agents catalog changes
 	ctx, stopPoll := context.WithCancel(context.Background())
 	go pollActivityQueues(ctx, st, workerCfg, 30*time.Second)
-	go pollAgents(ctx, st, skillAct, catalog, 30*time.Second)
+	go pollCatalog(ctx, st, catalog, 30*time.Second)
 
 	// Poll DB for skills version changes
 	if cfg.SkillsRepo != "" && skillStore != nil {

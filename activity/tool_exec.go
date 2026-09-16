@@ -9,13 +9,15 @@ import (
 )
 
 type ToolActivities struct {
-	Registry *tool.Registry
+	Registry *tool.Registry // Tools this worker executes
+	Catalog  *Catalog       // Tools published by all workers
 }
 
 type ExecuteToolInput struct {
 	Name      string          `json:"name"`
 	Input     json.RawMessage `json:"input"`
 	SessionID string          `json:"session_id,omitempty"`
+	AgentID   string          `json:"agent_id,omitempty"` // Agent calling the tool
 }
 
 type ExecuteToolOutput struct {
@@ -23,50 +25,34 @@ type ExecuteToolOutput struct {
 	IsError bool   `json:"is_error"`
 }
 
-type ResolveToolKindsInput struct {
-	Names []string `json:"names"`
-}
-
+// ToolResolution tells the workflow how to dispatch a tool call.
 type ToolResolution struct {
 	Kind          string `json:"kind"`
 	WorkflowName  string `json:"workflow_name,omitempty"`
-	TaskQueue     string `json:"task_queue,omitempty"`
+	TaskQueue     string `json:"task_queue"`
 	FireAndForget bool   `json:"fire_and_forget,omitempty"`
 }
 
-type ResolveToolKindsOutput struct {
-	Tools map[string]ToolResolution `json:"tools"`
+type ListToolsInput struct {
+	AgentID string `json:"agent_id"`
 }
 
 type ListToolsOutput struct {
-	Tools []provider.ToolDefinition `json:"tools"`
+	Tools       []provider.ToolDefinition `json:"tools"`       // Definitions sent to the LLM, sorted by name
+	Resolutions map[string]ToolResolution `json:"resolutions"` // Tool name → dispatch info; absent = not allowed
 }
 
-func (a *ToolActivities) ListTools(ctx context.Context) (ListToolsOutput, error) {
-	return ListToolsOutput{Tools: a.Registry.List()}, nil
-}
-
-func (a *ToolActivities) ResolveToolKinds(ctx context.Context, input ResolveToolKindsInput) (ResolveToolKindsOutput, error) {
-	tools := make(map[string]ToolResolution, len(input.Names))
-	for _, name := range input.Names {
-		t, ok := a.Registry.Get(name)
-		if !ok {
-			tools[name] = ToolResolution{Kind: string(tool.ToolKindActivity)}
-			continue
-		}
-		tools[name] = ToolResolution{
-			Kind:          string(t.Kind),
-			WorkflowName:  t.WorkflowName(),
-			TaskQueue:     t.TaskQueue,
-			FireAndForget: t.FireAndForget,
-		}
-	}
-	return ResolveToolKindsOutput{Tools: tools}, nil
+// ListTools returns the tools the agent may use, from the worker's catalog.
+func (a *ToolActivities) ListTools(ctx context.Context, input ListToolsInput) (ListToolsOutput, error) {
+	return a.Catalog.AllowedTools(input.AgentID), nil
 }
 
 func (a *ToolActivities) ExecuteTool(ctx context.Context, input ExecuteToolInput) (ExecuteToolOutput, error) {
 	if input.SessionID != "" {
 		ctx = tool.WithSessionID(ctx, input.SessionID)
+	}
+	if input.AgentID != "" {
+		ctx = tool.WithAgentID(ctx, input.AgentID)
 	}
 	result, err := a.Registry.Execute(ctx, input.Name, input.Input)
 	if err != nil {

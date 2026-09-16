@@ -28,6 +28,7 @@ func ScheduledAgentWorkflow(ctx workflow.Context, input tool.ScheduledAgentInput
 	var result AgentWorkflowOutput
 	err := workflow.ExecuteChildWorkflow(childCtx, AgentWorkflow, AgentWorkflowInput{
 		SessionID:   input.ScheduleID,
+		AgentID:     input.AgentID,
 		UserMessage: input.Prompt,
 		Model:       "", // Uses default from LLM provider
 	}).Get(ctx, &result)

@@ -1,10 +1,13 @@
 # Worker config (WORKER_CONFIG, default ./worker.yaml).
 # A queue is a capability: every worker serving the same queue must expose the
 # same tools, and a given tool must be served by a single queue.
-# Without this file, the worker serves its primary TASK_QUEUE with all tools
-# and loads MCP_SERVERS filtered by TASK_QUEUE_MCP.
+# Without this file, the worker serves workflows and all tools on the workflow
+# queue (WORKFLOW_QUEUE, default "agent") and loads every MCP_SERVERS entry.
 
 queue: tools-core
+
+# Also serve the workflow queue: sessions, agents and LLM calls.
+workflows: true
 
 # Tool name globs exposed on this queue ("*" = every registered tool).
 tools:

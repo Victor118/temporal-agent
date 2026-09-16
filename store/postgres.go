@@ -63,14 +63,12 @@ func (s *PostgresStore) migrate() error {
 			session_id TEXT PRIMARY KEY,
 			user_id TEXT NOT NULL,
 			title TEXT NOT NULL DEFAULT '',
-			task_queue TEXT NOT NULL DEFAULT '',
+			agent_id TEXT NOT NULL DEFAULT '',
 			channel TEXT NOT NULL DEFAULT 'web',
 			channel_id TEXT NOT NULL DEFAULT '',
 			created_at TIMESTAMPTZ DEFAULT NOW()
 		);
 		CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id, created_at DESC);
-		ALTER TABLE sessions ADD COLUMN IF NOT EXISTS channel TEXT NOT NULL DEFAULT 'web';
-		ALTER TABLE sessions ADD COLUMN IF NOT EXISTS channel_id TEXT NOT NULL DEFAULT '';
 
 		CREATE TABLE IF NOT EXISTS task_logs (
 			schedule_id TEXT PRIMARY KEY,
@@ -91,11 +89,9 @@ func (s *PostgresStore) migrate() error {
 			description   TEXT NOT NULL DEFAULT '',
 			skills        JSONB NOT NULL DEFAULT '[]',
 			tools         JSONB,
-			default_queue TEXT NOT NULL,
 			created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		);
-		CREATE INDEX IF NOT EXISTS idx_agents_default_queue ON agents(default_queue);
 
 		CREATE TABLE IF NOT EXISTS skills_version (
 			id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
@@ -142,17 +138,17 @@ func (s *PostgresStore) GetUserByTelegramID(ctx context.Context, telegramID int6
 
 func (s *PostgresStore) CreateSession(ctx context.Context, session Session) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO sessions (session_id, user_id, title, task_queue, channel, channel_id)
+		INSERT INTO sessions (session_id, user_id, title, agent_id, channel, channel_id)
 		VALUES ($1, $2, $3, $4, $5, $6)`,
-		session.SessionID, session.UserID, session.Title, session.TaskQueue, session.Channel, session.ChannelID)
+		session.SessionID, session.UserID, session.Title, session.AgentID, session.Channel, session.ChannelID)
 	return err
 }
 
 func (s *PostgresStore) GetSession(ctx context.Context, sessionID string) (*Session, error) {
 	var sess Session
 	err := s.db.QueryRowContext(ctx,
-		"SELECT session_id, user_id, title, task_queue, channel, channel_id, created_at FROM sessions WHERE session_id = $1",
-		sessionID).Scan(&sess.SessionID, &sess.UserID, &sess.Title, &sess.TaskQueue, &sess.Channel, &sess.ChannelID, &sess.CreatedAt)
+		"SELECT session_id, user_id, title, agent_id, channel, channel_id, created_at FROM sessions WHERE session_id = $1",
+		sessionID).Scan(&sess.SessionID, &sess.UserID, &sess.Title, &sess.AgentID, &sess.Channel, &sess.ChannelID, &sess.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -165,10 +161,10 @@ func (s *PostgresStore) GetSession(ctx context.Context, sessionID string) (*Sess
 func (s *PostgresStore) GetActiveSessionByChannel(ctx context.Context, userID, channel, channelID string) (*Session, error) {
 	var sess Session
 	err := s.db.QueryRowContext(ctx,
-		`SELECT session_id, user_id, title, task_queue, channel, channel_id, created_at
+		`SELECT session_id, user_id, title, agent_id, channel, channel_id, created_at
 		 FROM sessions WHERE user_id = $1 AND channel = $2 AND channel_id = $3
 		 ORDER BY created_at DESC LIMIT 1`,
-		userID, channel, channelID).Scan(&sess.SessionID, &sess.UserID, &sess.Title, &sess.TaskQueue, &sess.Channel, &sess.ChannelID, &sess.CreatedAt)
+		userID, channel, channelID).Scan(&sess.SessionID, &sess.UserID, &sess.Title, &sess.AgentID, &sess.Channel, &sess.ChannelID, &sess.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -203,7 +199,7 @@ func (s *PostgresStore) DeleteSession(ctx context.Context, sessionID string) err
 
 func (s *PostgresStore) ListSessionsByUser(ctx context.Context, userID string) ([]Session, error) {
 	rows, err := s.db.QueryContext(ctx,
-		"SELECT session_id, user_id, title, task_queue, channel, channel_id, created_at FROM sessions WHERE user_id = $1 ORDER BY created_at DESC",
+		"SELECT session_id, user_id, title, agent_id, channel, channel_id, created_at FROM sessions WHERE user_id = $1 ORDER BY created_at DESC",
 		userID)
 	if err != nil {
 		return nil, err
@@ -213,7 +209,7 @@ func (s *PostgresStore) ListSessionsByUser(ctx context.Context, userID string) (
 	var sessions []Session
 	for rows.Next() {
 		var s Session
-		if err := rows.Scan(&s.SessionID, &s.UserID, &s.Title, &s.TaskQueue, &s.Channel, &s.ChannelID, &s.CreatedAt); err != nil {
+		if err := rows.Scan(&s.SessionID, &s.UserID, &s.Title, &s.AgentID, &s.Channel, &s.ChannelID, &s.CreatedAt); err != nil {
 			return nil, err
 		}
 		sessions = append(sessions, s)
@@ -370,7 +366,7 @@ func (s *PostgresStore) UpdateTaskLogStatus(ctx context.Context, scheduleID, sta
 }
 
 // agentColumns is the column list shared by agent queries, in scanAgent order.
-const agentColumns = "agent_id, name, description, skills, tools, default_queue"
+const agentColumns = "agent_id, name, description, skills, tools"
 
 // UpsertAgent creates or replaces an agent definition.
 func (s *PostgresStore) UpsertAgent(ctx context.Context, agent Agent) error {
@@ -379,16 +375,15 @@ func (s *PostgresStore) UpsertAgent(ctx context.Context, agent Agent) error {
 		return err
 	}
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO agents (agent_id, name, description, skills, tools, default_queue, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, NOW())
+		INSERT INTO agents (agent_id, name, description, skills, tools, updated_at)
+		VALUES ($1, $2, $3, $4, $5, NOW())
 		ON CONFLICT (agent_id) DO UPDATE SET
 			name = EXCLUDED.name,
 			description = EXCLUDED.description,
 			skills = EXCLUDED.skills,
 			tools = EXCLUDED.tools,
-			default_queue = EXCLUDED.default_queue,
 			updated_at = NOW()`,
-		agent.ID, agent.Name, agent.Description, skillsJSON, toolsJSON, agent.DefaultQueue)
+		agent.ID, agent.Name, agent.Description, skillsJSON, toolsJSON)
 	return err
 }
 
@@ -400,10 +395,10 @@ func (s *PostgresStore) InsertAgentIfAbsent(ctx context.Context, agent Agent) (b
 		return false, err
 	}
 	res, err := s.db.ExecContext(ctx, `
-		INSERT INTO agents (agent_id, name, description, skills, tools, default_queue)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO agents (agent_id, name, description, skills, tools)
+		VALUES ($1, $2, $3, $4, $5)
 		ON CONFLICT (agent_id) DO NOTHING`,
-		agent.ID, agent.Name, agent.Description, skillsJSON, toolsJSON, agent.DefaultQueue)
+		agent.ID, agent.Name, agent.Description, skillsJSON, toolsJSON)
 	if err != nil {
 		return false, err
 	}
@@ -462,7 +457,7 @@ func scanAgent(row interface{ Scan(...any) error }) (*Agent, error) {
 	var a Agent
 	var skillsJSON string
 	var toolsJSON sql.NullString
-	if err := row.Scan(&a.ID, &a.Name, &a.Description, &skillsJSON, &toolsJSON, &a.DefaultQueue); err != nil {
+	if err := row.Scan(&a.ID, &a.Name, &a.Description, &skillsJSON, &toolsJSON); err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal([]byte(skillsJSON), &a.Skills); err != nil {

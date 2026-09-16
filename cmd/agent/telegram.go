@@ -47,18 +47,25 @@ func (h *handler) handleTelegramWebhook(w http.ResponseWriter, r *http.Request) 
 
 	channelID := strconv.FormatInt(chatID, 10)
 
+	// Telegram sessions use the default agent
+	agentID, err := h.resolveAgentID(r.Context(), "")
+	if err != nil {
+		log.Printf("Telegram webhook: %v", err)
+		http.Error(w, "Internal error", http.StatusInternalServerError)
+		return
+	}
+
 	// Handle /new command: create a fresh session
 	if text == "/new" {
 		sessionID := newUUID()
-		taskQueue := h.cfg.PrimaryTaskQueue()
 
 		_, err := h.temporalClient.ExecuteWorkflow(r.Context(), client.StartWorkflowOptions{
 			ID:        "session-" + sessionID,
-			TaskQueue: taskQueue,
+			TaskQueue: h.cfg.WorkflowQueue,
 		}, workflow.SessionWorkflow, workflow.SessionWorkflowInput{
 			SessionID: sessionID,
 			UserID:    user.ID,
-			Model:     h.cfg.LLMModel,
+			AgentID:   agentID,
 			Channel:   "telegram",
 			ChannelID: channelID,
 		})
@@ -71,7 +78,7 @@ func (h *handler) handleTelegramWebhook(w http.ResponseWriter, r *http.Request) 
 		if err := h.store.CreateSession(r.Context(), store.Session{
 			SessionID: sessionID,
 			UserID:    user.ID,
-			TaskQueue: taskQueue,
+			AgentID:   agentID,
 			Channel:   "telegram",
 			ChannelID: channelID,
 		}); err != nil {
@@ -94,15 +101,14 @@ func (h *handler) handleTelegramWebhook(w http.ResponseWriter, r *http.Request) 
 	if session == nil {
 		// Create a new session
 		sessionID := newUUID()
-		taskQueue := h.cfg.PrimaryTaskQueue()
 
 		_, err := h.temporalClient.ExecuteWorkflow(r.Context(), client.StartWorkflowOptions{
 			ID:        "session-" + sessionID,
-			TaskQueue: taskQueue,
+			TaskQueue: h.cfg.WorkflowQueue,
 		}, workflow.SessionWorkflow, workflow.SessionWorkflowInput{
 			SessionID: sessionID,
 			UserID:    user.ID,
-			Model:     h.cfg.LLMModel,
+			AgentID:   agentID,
 			Channel:   "telegram",
 			ChannelID: channelID,
 		})
@@ -115,14 +121,14 @@ func (h *handler) handleTelegramWebhook(w http.ResponseWriter, r *http.Request) 
 		if err := h.store.CreateSession(r.Context(), store.Session{
 			SessionID: sessionID,
 			UserID:    user.ID,
-			TaskQueue: taskQueue,
+			AgentID:   agentID,
 			Channel:   "telegram",
 			ChannelID: channelID,
 		}); err != nil {
 			log.Printf("Telegram webhook: failed to persist session: %v", err)
 		}
 
-		session = &store.Session{SessionID: sessionID}
+		session = &store.Session{SessionID: sessionID, AgentID: agentID}
 		log.Printf("Telegram: auto-created session %s for user %s", sessionID, user.ID)
 	}
 
@@ -132,11 +138,11 @@ func (h *handler) handleTelegramWebhook(w http.ResponseWriter, r *http.Request) 
 		newWorkflowID := fmt.Sprintf("session-%s-%d", session.SessionID, time.Now().Unix())
 		_, err := h.temporalClient.ExecuteWorkflow(r.Context(), client.StartWorkflowOptions{
 			ID:        newWorkflowID,
-			TaskQueue: h.cfg.PrimaryTaskQueue(),
+			TaskQueue: h.cfg.WorkflowQueue,
 		}, workflow.SessionWorkflow, workflow.SessionWorkflowInput{
 			SessionID: session.SessionID,
 			UserID:    user.ID,
-			Model:     h.cfg.LLMModel,
+			AgentID:   sessionAgentID(session, agentID),
 			Channel:   "telegram",
 			ChannelID: channelID,
 		})
@@ -194,4 +200,12 @@ func (h *handler) tryAnswerAskUser(ctx context.Context, sessionID, answer string
 
 	log.Printf("Telegram: routed answer to ask_user workflow %s", askWfID)
 	return true
+}
+
+// sessionAgentID returns the agent recorded on the session, or fallback.
+func sessionAgentID(s *store.Session, fallback string) string {
+	if s != nil && s.AgentID != "" {
+		return s.AgentID
+	}
+	return fallback
 }

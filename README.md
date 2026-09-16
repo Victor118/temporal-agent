@@ -6,7 +6,7 @@ An AI agent platform orchestrated by [Temporal](https://temporal.io/), built in 
 
 - **Durable AI workflows** — ReAct loop (LLM reasoning + tool execution) powered by Temporal, with automatic retries and fault tolerance
 - **Multi-agent system** — Agents can spawn sub-agents for specialized tasks, each with isolated context
-- **Pluggable skills** — Skills loaded from Git repositories or local files, mapped to task queues for domain-specific expertise
+- **Pluggable skills** — Skills loaded from Git repositories or local files, assigned to agents for domain-specific expertise
 - **Persistent memory** — PostgreSQL-backed storage for conversation history, key-value memory (user/project/session scoped), and task logs
 - **Real-time streaming** — SSE (Server-Sent Events) hub for live updates to connected clients
 - **Built-in tools** — File system operations, web access, shell execution, user interaction, workflow queries, scheduling, and MCP support
@@ -24,18 +24,16 @@ The system runs in three modes:
 ### Workflows
 
 - **SessionWorkflow** — Long-lived orchestration managing context persistence (load/persist via PostgreSQL)
-- **AgentWorkflow** — ReAct loop: calls LLM, executes tools, repeats until done. Loads skills based on its task queue
+- **AgentWorkflow** — ReAct loop: calls LLM, executes tools, repeats until done. Loads the prompt, skills and allowed tools of its agent (`agent_id`)
 - **Sub-agents** — One-shot AgentWorkflows with isolated context; the parent only sees the final response
 
-### Skills & Task Queues
+### Agents, Tools & Task Queues
 
-Skills are domain-specific prompt augmentations mapped to task queues:
+- **Agents** live in the `agents` table (source of truth). `agents.yaml` only seeds agents missing from the DB. Each agent has skills and an optional tool allowlist (globs, e.g. `github_*`).
+- **Task queues are capabilities**: each worker declares in its `worker.yaml` the queue it serves and the tools it exposes there, and publishes them to the `tools` table. Every tool call is routed to its tool's queue.
+- **Workflows** (sessions, agents, LLM calls) run on a dedicated queue (`WORKFLOW_QUEUE`).
 
-```json
-{"coding": ["ddd", "tdd"], "devops": ["terraform", "k8s"]}
-```
-
-Workers register at startup and receive the full agent catalog, enabling cross-agent delegation.
+See [docs/architecture.md](docs/architecture.md) for the full model.
 
 ## Getting Started
 
@@ -80,8 +78,11 @@ The API will be available at `http://localhost:8888`.
 | `LLM_API_KEY` | LLM API key |
 | `LLM_MODEL` | Model to use |
 | `HTTP_ADDR` | Public HTTP server address |
-| `TASK_QUEUES` | Comma-separated task queue names |
-| `TASK_QUEUE_SKILLS` | JSON mapping of queues to skills |
+| `WORKFLOW_QUEUE` | Task queue for sessions, agents and LLM calls (default `agent`) |
+| `DEFAULT_AGENT_ID` | Agent used when a session doesn't name one (default `default`) |
+| `AGENT_DEFINITIONS_FILE` | Agents seed file (default `./agents.yaml`) |
+| `WORKER_CONFIG` | Worker config: tool queue, exposed tools, MCP servers (default `./worker.yaml`, see `worker.example.yaml`) |
+| `MCP_SERVERS` | JSON array of MCP servers, used only without a worker config |
 
 ## Project Structure
 

@@ -20,22 +20,23 @@ import (
 // as served. Temporal itself drops pollers unseen for about 5 minutes.
 const queuePollerFreshness = 5 * time.Minute
 
-// loadWorkerConfig reads the worker config file. Without a file, it falls back
-// to the legacy env config: primary task queue, all tools, MCP_SERVERS filtered
-// by TASK_QUEUE_MCP.
+// loadWorkerConfig reads the worker config file. Without a file, the worker
+// serves everything on the workflow queue: workflows, all tools, and every
+// MCP server from MCP_SERVERS.
 func loadWorkerConfig(cfg *config.Config) *config.WorkerConfig {
 	wc, err := config.LoadWorkerConfig(cfg.WorkerFile)
 	if err == nil {
-		log.Printf("Worker config %s: queue %q, tools %v, %d MCP servers", cfg.WorkerFile, wc.Queue, wc.Tools, len(wc.MCP))
+		log.Printf("Worker config %s: queue %q, workflows %v, tools %v, %d MCP servers",
+			cfg.WorkerFile, wc.Queue, wc.Workflows, wc.Tools, len(wc.MCP))
 		return wc
 	}
 	if !errors.Is(err, os.ErrNotExist) {
 		log.Fatalf("Invalid worker config: %v", err)
 	}
 
-	log.Printf("No worker config at %s, using env config (queue %q, all tools)", cfg.WorkerFile, cfg.PrimaryTaskQueue())
-	wc = &config.WorkerConfig{Queue: cfg.PrimaryTaskQueue(), Tools: []string{"*"}}
-	for _, s := range cfg.MCPServersForQueues(cfg.TaskQueues) {
+	log.Printf("No worker config at %s: serving workflows and all tools on queue %q", cfg.WorkerFile, cfg.WorkflowQueue)
+	wc = &config.WorkerConfig{Queue: cfg.WorkflowQueue, Workflows: true, Tools: []string{"*"}}
+	for _, s := range cfg.MCPServers {
 		wc.MCP = append(wc.MCP, config.WorkerMCPServer{
 			Name:      s.Name,
 			URL:       s.URL,
@@ -67,11 +68,19 @@ func registerMCPServers(registry *tool.Registry, servers []config.WorkerMCPServe
 	}
 }
 
-// exposeTools keeps only the tools listed in the worker config, makes sure the
-// worker polls its queue, and returns the task queues to poll.
-func exposeTools(registry *tool.Registry, wc *config.WorkerConfig, queues []string) []string {
+// exposeTools keeps only the tools listed in the worker config.
+func exposeTools(registry *tool.Registry, wc *config.WorkerConfig) {
 	if removed := registry.Retain(wc.Tools); len(removed) > 0 {
 		log.Printf("Tools not exposed by this worker: %v", removed)
+	}
+}
+
+// workerQueues returns the task queues this worker polls: the workflow queue
+// if it serves workflows, and its tool queue.
+func workerQueues(cfg *config.Config, wc *config.WorkerConfig) []string {
+	var queues []string
+	if wc.Workflows {
+		queues = append(queues, cfg.WorkflowQueue)
 	}
 	if !slices.Contains(queues, wc.Queue) {
 		queues = append(queues, wc.Queue)

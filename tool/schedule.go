@@ -15,6 +15,7 @@ import (
 
 // RegisterScheduleTools registers schedule_task, list_schedules, and cancel_schedule tools.
 // These tools allow the LLM to create, list, and cancel Temporal Schedules.
+// taskQueue is the workflow queue the scheduled agent runs on.
 func RegisterScheduleTools(registry *Registry, temporalClient client.Client, st store.Store, scheduledWorkflowFunc interface{}, taskQueue string) {
 	registerScheduleTask(registry, temporalClient, st, scheduledWorkflowFunc, taskQueue)
 	registerListSchedules(registry, temporalClient, st)
@@ -99,6 +100,7 @@ func registerScheduleTask(registry *Registry, temporalClient client.Client, st s
 			}
 
 			workflowInput := ScheduledAgentInput{
+				AgentID:         AgentIDFromContext(ctx),
 				Prompt:          params.Prompt,
 				DeliveryChannel: params.DeliveryChannel,
 				ScheduleID:      scheduleID,
@@ -223,6 +225,7 @@ func registerCancelSchedule(registry *Registry, temporalClient client.Client, st
 
 // ScheduledAgentInput is the input for the ScheduledAgentWorkflow.
 type ScheduledAgentInput struct {
+	AgentID         string `json:"agent_id"` // Agent that scheduled the task, and runs it
 	Prompt          string `json:"prompt"`
 	UserID          string `json:"user_id,omitempty"`
 	DeliveryChannel string `json:"delivery_channel"`

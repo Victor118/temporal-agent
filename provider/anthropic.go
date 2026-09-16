@@ -9,21 +9,33 @@ import (
 	"net/http"
 )
 
-const (
-	anthropicAPIURL       = "https://api.anthropic.com/v1/messages"
-	anthropicDefaultModel = "claude-sonnet-4-20250514"
-)
+const anthropicAPIURL = "https://api.anthropic.com/v1/messages"
 
 type AnthropicProvider struct {
-	apiKey string
-	client *http.Client
+	apiKey       string
+	defaultModel string
+	client       *http.Client
 }
 
-func NewAnthropicProvider(apiKey string) *AnthropicProvider {
+// NewAnthropicProvider creates a provider. defaultModel is used for requests
+// that don't name a model, so a config change applies to running sessions.
+func NewAnthropicProvider(apiKey, defaultModel string) *AnthropicProvider {
 	return &AnthropicProvider{
-		apiKey: apiKey,
-		client: &http.Client{},
+		apiKey:       apiKey,
+		defaultModel: defaultModel,
+		client:       &http.Client{},
 	}
+}
+
+// resolveModel returns the requested model, or the provider default.
+func (p *AnthropicProvider) resolveModel(requested string) (string, error) {
+	if requested != "" {
+		return requested, nil
+	}
+	if p.defaultModel != "" {
+		return p.defaultModel, nil
+	}
+	return "", &PermanentAPIError{Err: fmt.Errorf("no model: set LLM_MODEL or pass a model")}
 }
 
 // Anthropic API types
@@ -92,9 +104,9 @@ func (p *AnthropicProvider) Chat(ctx context.Context, request ChatRequest) (Chat
 		maxTokens = 4096
 	}
 
-	model := request.Model
-	if model == "" {
-		model = anthropicDefaultModel
+	model, err := p.resolveModel(request.Model)
+	if err != nil {
+		return ChatResponse{}, err
 	}
 
 	// System prompt: use structured content block if caching is requested

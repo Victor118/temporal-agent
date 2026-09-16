@@ -19,6 +19,7 @@ func writeFile(t *testing.T, content string) string {
 func TestLoadWorkerConfig(t *testing.T) {
 	p := writeFile(t, `
 queue: tools-github
+workflows: true
 tools: ["github_*"]
 mcp:
   - name: github
@@ -28,7 +29,7 @@ mcp:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if wc.Queue != "tools-github" || len(wc.Tools) != 1 || wc.MCP[0].Name != "github" {
+	if wc.Queue != "tools-github" || !wc.Workflows || len(wc.Tools) != 1 || wc.MCP[0].Name != "github" {
 		t.Errorf("unexpected config: %+v", wc)
 	}
 }

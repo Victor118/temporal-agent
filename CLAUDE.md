@@ -6,30 +6,32 @@
   - `cd /home/victor/dev/temporal-agent && docker compose up -d`
   - `docker compose exec agent go build ./...`
   - `docker compose exec agent go test ./...`
-- Hot-reload via air dans le container
+- Pas de hot-reload : le `CMD` du Dockerfile compile une fois au démarrage → `docker compose restart agent` après une modification
 - Port 8888 exposé pour l'API HTTP
 
 ## Architecture
 
 - 3 modes : `agent server`, `agent worker`, `agent dev` (les deux combinés)
 - Server = API HTTP + SSE hub + catalogue agents + skills versioning
-- Worker = Temporal worker + activities + skills par task queue
-- Communication inter-services via endpoints `/internal/*` (notify, skills/version, workers/register, agents)
+- Worker = Temporal worker + activities + tools publiés sur sa queue (`worker.yaml`)
+- Communication worker → serveur via `/internal/notify` ; le reste passe par PostgreSQL (agents, tools, skills_version)
 
 ## Workflows
 
-- **SessionWorkflow** : orchestration long-lived, gère la persistance (LoadContext/PersistContext via SQLite)
-- **AgentWorkflow** : boucle ReAct (LLM + tools), charge ses skills via `workflow.GetInfo(ctx).TaskQueueName`
-- **Les sous-agents** (spawn_session) sont des AgentWorkflow one-shot, sans persistance, contexte isolé du parent
+- **SessionWorkflow** : orchestration long-lived, gère la persistance (LoadContext/PersistContext via PostgreSQL)
+- **AgentWorkflow** : boucle ReAct (LLM + tools), `agent_id` obligatoire (prompt, skills, allowlist)
+- **Les sous-agents** (`spawn_session(agent_id)`) sont des AgentWorkflow one-shot, sans persistance, contexte isolé du parent, avec l'allowlist de leur propre agent
 - Le parent ne voit que la réponse finale du sous-agent (string)
 
-## Skills & Task Queues
+## Agents, Tools & Task Queues
 
+- Modèle cible et état : `docs/architecture.md`
+- Agent = persona logique identifiée par `agent_id` (prompt, skills, allowlist d'outils). Table `agents` = source de vérité ; `agents.yaml` = seed (insère les agents absents, n'écrase jamais)
+- Queue = capacité, jamais un agent ni une machine. Chaque worker lit `worker.yaml` (`WORKER_CONFIG`) : `queue`, `tools` (globs), `mcp`, `workflows`, et publie ses tools dans la table `tools`
+- Sans `worker.yaml` : le worker sert workflows + tous les tools sur `WORKFLOW_QUEUE` (défaut `agent`)
+- Workflows (Session/Agent/LLM) sur `WORKFLOW_QUEUE`. Chaque appel d'outil part sur la queue de l'outil (`ExecuteTool` générique, queue fixée dans `ActivityOptions`)
+- Les workers gardent un catalogue en mémoire (agents + tools) rechargé toutes les 30 s ; `ListTools(agentID)` applique l'allowlist
 - Skills chargés depuis un repo Git (prod) ou `./skills` (dev)
-- Mapping queue -> skills via `TASK_QUEUE_SKILLS` env var (JSON) : `{"coding":["ddd","tdd"],"devops":["terraform","k8s"]}`
-- Catalogue des agents centralisé sur le serveur (`POST /internal/workers/register`, `GET /internal/agents`)
-- Chaque agent voit dans son prompt : ses propres skills + le catalogue complet des autres agents
-- Les workers s'enregistrent au demarrage et fetchent le catalogue
 
 ## Store (PostgreSQL)
 
@@ -42,7 +44,7 @@
 
 ## Conventions
 
-- `SystemPrompt` dans les workflow inputs = override manuel ; si vide, charge depuis la task queue
+- `SystemPrompt` dans les workflow inputs = override manuel ; si vide, prompt construit depuis l'agent (`agent_id`)
 - Les tool results remontent comme string au parent
 - Les notifications SSE passent par `/internal/notify` (prod) ou in-memory hub (dev)
 - ask_user fonctionne pour les sous-agents (SSE route vers le bon sessionID via le workflowID)

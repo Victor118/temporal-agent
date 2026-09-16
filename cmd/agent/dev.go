@@ -47,7 +47,7 @@ func runDev(cmd *cobra.Command, args []string) {
 	var llmProvider provider.LLMProvider
 	switch cfg.LLMProvider {
 	case "anthropic":
-		llmProvider = provider.NewAnthropicProvider(cfg.LLMAPIKey)
+		llmProvider = provider.NewAnthropicProvider(cfg.LLMAPIKey, cfg.LLMModel)
 	default:
 		log.Fatalf("Unknown LLM provider: %s", cfg.LLMProvider)
 	}
@@ -87,7 +87,8 @@ func runDev(cmd *cobra.Command, args []string) {
 		log.Println("No skills found in ./skills")
 	}
 
-	// Agents — dev mode seeds the DB like the server, then reads the catalog from it
+	// Agents — dev mode seeds the DB like the server, then reads the catalog
+	// (agents + tools) from it
 	if err := seedAgents(st, cfg.AgentsFile); err != nil {
 		log.Fatalf("Failed to seed agents: %v", err)
 	}
@@ -116,11 +117,13 @@ func runDev(cmd *cobra.Command, args []string) {
 	tool.RegisterQueryWorkflowTool(registry, temporalClient)
 
 	// Register schedule tools (needs temporal client + store)
-	tool.RegisterScheduleTools(registry, temporalClient, st, workflow.ScheduledAgentWorkflow, cfg.PrimaryTaskQueue())
+	tool.RegisterScheduleTools(registry, temporalClient, st, workflow.ScheduledAgentWorkflow, cfg.WorkflowQueue)
 
 	// Expose only the configured tools and publish them to the DB catalog
-	cfg.TaskQueues = exposeTools(registry, workerConf, cfg.TaskQueues)
+	exposeTools(registry, workerConf)
+	queues := workerQueues(cfg, workerConf)
 	publishTools(st, temporalClient, registry, workerConf.Queue)
+	refreshCatalog(st, catalog) // include the tools just published
 
 	// Telegram client (optional)
 	var tgClient activity.TelegramSender
@@ -131,8 +134,11 @@ func runDev(cmd *cobra.Command, args []string) {
 
 	// Workers — one per task queue
 	var workers []worker.Worker
-	for _, queue := range cfg.TaskQueues {
-		w := worker.New(temporalClient, queue, worker.Options{})
+	for _, queue := range queues {
+		// Sessions pin stateful tool calls to one worker of the tool queue
+		w := worker.New(temporalClient, queue, worker.Options{
+			EnableSessionWorker: queue == workerConf.Queue,
+		})
 
 		w.RegisterWorkflow(workflow.SessionWorkflow)
 		w.RegisterWorkflow(workflow.AgentWorkflow)
@@ -141,7 +147,7 @@ func runDev(cmd *cobra.Command, args []string) {
 
 		w.RegisterActivity(&activity.LLMActivities{Provider: llmProvider})
 		w.RegisterActivity(&activity.MemoryActivities{Store: st})
-		w.RegisterActivity(&activity.ToolActivities{Registry: registry})
+		w.RegisterActivity(&activity.ToolActivities{Registry: registry, Catalog: catalog})
 		w.RegisterActivity(&activity.NotificationActivities{Hub: hub, Telegram: tgClient})
 		w.RegisterActivity(&activity.DeliveryActivities{Hub: hub, Store: st})
 		w.RegisterActivity(&activity.ScheduleActivities{Client: temporalClient, Store: st})
@@ -153,7 +159,7 @@ func runDev(cmd *cobra.Command, args []string) {
 
 	// Poll DB for activity queue mapping and agents catalog changes
 	go pollActivityQueues(context.Background(), st, workerCfg, 30*time.Second)
-	go pollAgents(context.Background(), st, skillAct, catalog, 30*time.Second)
+	go pollCatalog(context.Background(), st, catalog, 30*time.Second)
 
 	// Start all workers in background
 	for _, w := range workers {
@@ -225,7 +231,7 @@ func runDev(cmd *cobra.Command, args []string) {
 		}
 	}()
 
-	log.Printf("Dev mode: API on %s, workers on queues %v", cfg.HTTPAddr, cfg.TaskQueues)
+	log.Printf("Dev mode: API on %s, workers on queues %v", cfg.HTTPAddr, queues)
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		log.Fatalf("HTTP server error: %v", err)
 	}

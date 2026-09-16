@@ -12,9 +12,10 @@ import (
 // serves (a capability) and the tools it exposes there. All workers sharing a
 // queue must expose the same tools; keeping that consistent is the operator's job.
 type WorkerConfig struct {
-	Queue string            `yaml:"queue"`
-	Tools []string          `yaml:"tools"` // Tool name globs exposed by this worker
-	MCP   []WorkerMCPServer `yaml:"mcp"`
+	Queue     string            `yaml:"queue"`
+	Tools     []string          `yaml:"tools"`     // Tool name globs exposed by this worker
+	MCP       []WorkerMCPServer `yaml:"mcp"`       // MCP servers loaded by this worker
+	Workflows bool              `yaml:"workflows"` // Also serve the workflow queue (sessions, agents, LLM calls)
 }
 
 // WorkerMCPServer is an MCP server loaded by this worker. Its tools are

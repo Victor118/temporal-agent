@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -165,49 +166,21 @@ func (h *handler) createSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sessionID := newUUID()
-	model := req.Model
-	if model == "" {
-		model = h.cfg.LLMModel
-	}
+	model := req.Model // Explicit choice only; empty = worker default (LLM_MODEL)
 
-	// Resolve target agent: explicit agent_id from request, or fall back to the
-	// agent whose default_queue matches the primary task queue.
-	var agentDef *store.Agent
-	if req.AgentID != "" {
-		a, err := h.store.GetAgent(r.Context(), req.AgentID)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("Failed to load agent: %v", err), http.StatusInternalServerError)
-			return
-		}
-		if a == nil {
-			http.Error(w, fmt.Sprintf("Unknown agent_id %q", req.AgentID), http.StatusBadRequest)
-			return
-		}
-		agentDef = a
-	} else {
-		agents, err := h.store.ListAgents(r.Context())
-		if err != nil {
-			http.Error(w, fmt.Sprintf("Failed to list agents: %v", err), http.StatusInternalServerError)
-			return
-		}
-		agentDef = agentByDefaultQueue(agents, h.cfg.PrimaryTaskQueue())
-		if agentDef == nil && len(agents) > 0 {
-			agentDef = &agents[0]
-		}
-	}
-	if agentDef == nil {
-		http.Error(w, "No agent definitions configured", http.StatusInternalServerError)
+	agentID, err := h.resolveAgentID(r.Context(), req.AgentID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	taskQueue := agentDef.DefaultQueue
 
-	_, err := h.temporalClient.ExecuteWorkflow(r.Context(), client.StartWorkflowOptions{
+	_, err = h.temporalClient.ExecuteWorkflow(r.Context(), client.StartWorkflowOptions{
 		ID:        "session-" + sessionID,
-		TaskQueue: taskQueue,
+		TaskQueue: h.cfg.WorkflowQueue,
 	}, workflow.SessionWorkflow, workflow.SessionWorkflowInput{
 		SessionID:    sessionID,
 		UserID:       userID,
-		AgentID:      agentDef.ID,
+		AgentID:      agentID,
 		SystemPrompt: req.SystemPrompt, // Optional override; empty = load from agent skills
 		Model:        model,
 	})
@@ -220,7 +193,7 @@ func (h *handler) createSession(w http.ResponseWriter, r *http.Request) {
 	if err := h.store.CreateSession(r.Context(), store.Session{
 		SessionID: sessionID,
 		UserID:    userID,
-		TaskQueue: taskQueue,
+		AgentID:   agentID,
 		Channel:   "web",
 	}); err != nil {
 		log.Printf("Warning: failed to persist session: %v", err)
@@ -334,30 +307,28 @@ func (h *handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 	// Find the active workflow for this session, or restart if none
 	workflowID := h.findActiveWorkflowID(r.Context(), sessionID)
 	if workflowID == "" {
-		// Recover the original task_queue (and thus agent_id) from the persisted session
-		sess, _ := h.store.GetSession(r.Context(), sessionID)
-		taskQueue := h.cfg.PrimaryTaskQueue()
-		var agentID string
-		if sess != nil && sess.TaskQueue != "" {
-			taskQueue = sess.TaskQueue
-			agents, err := h.store.ListAgents(r.Context())
-			if err != nil {
-				log.Printf("Warning: failed to list agents: %v", err)
-			}
-			if def := agentByDefaultQueue(agents, taskQueue); def != nil {
-				agentID = def.ID
-			}
+		// Resume with the session's agent (or the default one if it's gone)
+		var sessionAgentID string
+		if sess, _ := h.store.GetSession(r.Context(), sessionID); sess != nil {
+			sessionAgentID = sess.AgentID
+		}
+		agentID, err := h.resolveAgentID(r.Context(), sessionAgentID)
+		if err != nil {
+			agentID, err = h.resolveAgentID(r.Context(), "")
+		}
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
 		}
 
 		newWorkflowID := fmt.Sprintf("session-%s-%d", sessionID, time.Now().Unix())
-		_, err := h.temporalClient.ExecuteWorkflow(r.Context(), client.StartWorkflowOptions{
+		_, err = h.temporalClient.ExecuteWorkflow(r.Context(), client.StartWorkflowOptions{
 			ID:        newWorkflowID,
-			TaskQueue: taskQueue,
+			TaskQueue: h.cfg.WorkflowQueue,
 		}, workflow.SessionWorkflow, workflow.SessionWorkflowInput{
 			SessionID: sessionID,
 			UserID:    func() string { u, _ := h.store.GetSessionUser(r.Context(), sessionID); return u }(),
 			AgentID:   agentID,
-			Model:     h.cfg.LLMModel,
 		})
 		if err != nil {
 			http.Error(w, fmt.Sprintf("Failed to resume session: %v", err), http.StatusInternalServerError)
@@ -685,31 +656,47 @@ func verifyGitHubSignature(payload []byte, signature, secret string) bool {
 	return hmac.Equal(got, expected)
 }
 
-// agentByDefaultQueue returns the agent whose default_queue matches queue, or nil.
-// Transitional: sessions still record a task queue rather than an agent ID.
-func agentByDefaultQueue(agents []store.Agent, queue string) *store.Agent {
-	for i := range agents {
-		if agents[i].DefaultQueue == queue {
-			return &agents[i]
+// resolveAgentID returns requested if it is a known agent. With no request, it
+// returns the configured default agent, or the first agent if that one is missing.
+func (h *handler) resolveAgentID(ctx context.Context, requested string) (string, error) {
+	if requested != "" {
+		a, err := h.store.GetAgent(ctx, requested)
+		if err != nil {
+			return "", fmt.Errorf("load agent %q: %w", requested, err)
+		}
+		if a == nil {
+			return "", fmt.Errorf("unknown agent_id %q", requested)
+		}
+		return a.ID, nil
+	}
+
+	agents, err := h.store.ListAgents(ctx)
+	if err != nil {
+		return "", fmt.Errorf("list agents: %w", err)
+	}
+	for _, a := range agents {
+		if a.ID == h.cfg.DefaultAgentID {
+			return a.ID, nil
 		}
 	}
-	return nil
+	if len(agents) > 0 {
+		return agents[0].ID, nil
+	}
+	return "", fmt.Errorf("no agents configured")
 }
 
-// Admin: list known task queues (from agent catalog)
+// Admin: list known task queues (workflow queue + queues serving tools)
 
 func (h *handler) listKnownQueues(w http.ResponseWriter, r *http.Request) {
-	agents, err := h.store.ListAgents(r.Context())
+	tools, err := h.store.ListTools(r.Context())
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to list agents: %v", err), http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("Failed to list tools: %v", err), http.StatusInternalServerError)
 		return
 	}
-	queues := make([]string, 0, len(agents))
-	seen := make(map[string]bool, len(agents))
-	for _, a := range agents {
-		if a.DefaultQueue != "" && !seen[a.DefaultQueue] {
-			queues = append(queues, a.DefaultQueue)
-			seen[a.DefaultQueue] = true
+	queues := []string{h.cfg.WorkflowQueue}
+	for _, t := range tools {
+		if !slices.Contains(queues, t.TaskQueue) {
+			queues = append(queues, t.TaskQueue)
 		}
 	}
 	w.Header().Set("Content-Type", "application/json")

@@ -120,6 +120,7 @@ agents:
 
 ```yaml
 queue: tools-github
+workflows: false        # true = sert aussi la queue des workflows (WORKFLOW_QUEUE)
 mcp:
   - name: github
     url: http://mcp-github:3001
@@ -165,9 +166,10 @@ Les workers de ces queues activent `EnableSessionWorker`.
 
 ### Sous-agent
 
-`spawn_session(agent_id, task)` lance un `AgentWorkflow` enfant, contexte isolé,
-avec **l'allowlist de l'agent enfant** (jamais celle du parent). Le parent ne
-reçoit que la réponse finale.
+`spawn_session(agent_id, task)` lance un `AgentWorkflow` enfant sur la queue des
+workflows, contexte isolé, avec **l'allowlist de l'agent enfant** (jamais celle
+du parent). Un `agent_id` inconnu est refusé ; sans `agent_id`, l'enfant est le
+même agent que le parent. Le parent ne reçoit que la réponse finale.
 
 ### Workflow déterministe : Claude Code
 
@@ -186,25 +188,16 @@ diagnostic.
 
 ## État actuel (écarts avec la cible)
 
-- La **queue sert encore d'identité d'agent** à plusieurs endroits :
-  `default_queue`, `spawn_session(task_queue)`, `AgentByDefaultQueue`.
-- **La table `tools` est publiée mais pas encore lue** : `ListTools` renvoie
-  le registry local du worker. `ListTools` et `ExecuteTool` peuvent s'exécuter
-  sur des workers différents, donc le LLM peut voir un outil que le worker
-  exécutant ne possède pas.
-- **Routage des activities par type** (`activity_queues` : `ExecuteTool` →
-  queue) et non par outil.
-- **MCP filtrés par queue** via `TASK_QUEUE_MCP`, puis fusionnés dans un
-  registry unique partagé par toutes les queues du processus : aucun
-  cloisonnement dès qu'un worker écoute plusieurs queues.
-- **Allowlist stockée mais pas appliquée** : `agents.tools` existe, mais tout
-  agent voit encore tous les outils, y compris `exec`. Aucune API/UI pour
-  l'éditer.
-- **`session_tools` probablement cassé** : `EnableSessionWorker` absent, session
-  créée sur la queue du workflow et non sur celle des outils, pas de validation
-  des noms.
+- **Aucune API/UI** pour lire ou éditer les agents et leur allowlist : seul le
+  seed `agents.yaml` les alimente.
+- **Tous les workflows et activities sont enregistrés sur toutes les queues**
+  d'un worker, y compris sa queue d'outils. Les outils de type workflow
+  (`ask_user`) tournent donc sur la queue de l'outil.
+- **`CallLLM` peut encore être routé par type** via `activity_queues`.
 - **Parsing silencieux** de `MCP_SERVERS` (JSON invalide = aucun serveur), pas
   de handshake MCP `initialize`.
+- **Déplacer un outil de queue** juste après l'arrêt de l'ancien worker est
+  refusé tant que Temporal voit encore ses pollers (~5 min).
 
 ## Feuille de route
 
@@ -213,24 +206,21 @@ diagnostic.
    - table `tools`, publiée par les workers depuis `worker.yaml` ;
    - table `agents` qui fait foi (+ colonne `tools`), écrite par le serveur
      seul, seed depuis `agents.yaml` (insertion des agents absents).
-3. **UI en lecture seule** : agents, outils par queue, workers actifs.
-4. **UI d'édition des agents** : skills, allowlist, description.
-5. **Dispatch par outil** dans `AgentWorkflow` : `ListTools(agentID)`,
-   allowlist appliquée, routage vers la queue de l'outil, suppression de
-   `ResolveToolKinds` et de `queueMap["ExecuteTool"]`.
-6. **Sessions et outils à état** : `EnableSessionWorker`, session sur la queue
-   de l'outil, validation.
+3. **Dispatch par outil** (fait) : catalogue en mémoire sur les workers,
+   `ListTools(agentID)`, allowlist appliquée, routage vers la queue de l'outil.
+4. **Agent identifié par `agent_id`** (fait) : `spawn_session(agent_id)`,
+   sessions avec `agent_id`, queue de workflows dédiée (`WORKFLOW_QUEUE`),
+   suppression de `default_queue`, `TASK_QUEUES`, `TASK_QUEUE_MCP`.
+   Sessions d'outils à état sur la queue des outils, validées.
+5. **UI en lecture seule** : agents, outils par queue, queues actives.
+6. **UI d'édition des agents** : skills, allowlist, description.
 7. **`ClaudeCodeWorkflow`.**
 8. **Arbre d'exécution et questions utilisateur** (`agent_executions`,
    `user_questions`, refonte d'`AskUserWorkflow`).
-9. **Nettoyage** : suppression de `TASK_QUEUE_MCP`, `default_queue`, du paramètre
-   `task_queue` de `spawn_session` ; mise à jour du README et de CLAUDE.md.
 
 ## Questions ouvertes
 
 - Agent sans champ `tools` : tous les outils ou aucun ?
-- Queue des workflows : une seule queue partagée (`agent`) ou déclarée par
-  worker ?
 - Un processus peut-il exposer plusieurs queues d'outils ?
 - Outils présents dans chaque binaire (fs, exec) : activés seulement là où
   `worker.yaml` les déclare ?

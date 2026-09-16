@@ -20,7 +20,7 @@ type SessionWorkflowInput struct {
 	UserID       string `json:"user_id"`
 	AgentID      string `json:"agent_id,omitempty"` // Logical agent identity. Resolved by handlers when starting a session.
 	SystemPrompt string `json:"system_prompt"`
-	Model        string `json:"model"`
+	Model        string `json:"model"`                // Explicit model; empty = the worker's default (LLM_MODEL)
 	Channel      string `json:"channel,omitempty"`    // "web", "telegram"
 	ChannelID    string `json:"channel_id,omitempty"` // chat_id for telegram
 }

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"regexp"
-	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -16,8 +15,10 @@ type Config struct {
 	TemporalNamespace string
 	TemporalTLSCert   string
 	TemporalTLSKey    string
-	TaskQueues        []string
-	TaskQueueMCP      map[string][]string // queue name → MCP server names
+	WorkflowQueue     string // Task queue running SessionWorkflow, AgentWorkflow and LLM calls
+
+	// Agent started when a session doesn't name one
+	DefaultAgentID string
 
 	// Agent definitions seed file (imported into the DB by the server)
 	AgentsFile string
@@ -31,7 +32,7 @@ type Config struct {
 	// LLM
 	LLMProvider string
 	LLMAPIKey   string
-	LLMModel    string
+	LLMModel    string // Default model, applied by workers to requests without an explicit model
 
 	// Server
 	HTTPAddr     string
@@ -75,12 +76,11 @@ type MCPServer struct {
 // agents.yaml. The DB agents table is the source of truth; this file only seeds
 // agents that don't exist yet.
 type AgentDefinition struct {
-	ID           string   `yaml:"id" json:"id"`
-	Name         string   `yaml:"name" json:"name"`
-	Description  string   `yaml:"description" json:"description"`
-	Skills       []string `yaml:"skills" json:"skills"`
-	Tools        []string `yaml:"tools" json:"tools"` // Allowed tool name globs; omitted = all tools
-	DefaultQueue string   `yaml:"default_queue" json:"default_queue"`
+	ID          string   `yaml:"id" json:"id"`
+	Name        string   `yaml:"name" json:"name"`
+	Description string   `yaml:"description" json:"description"`
+	Skills      []string `yaml:"skills" json:"skills"`
+	Tools       []string `yaml:"tools" json:"tools"` // Allowed tool name globs; omitted = all tools
 }
 
 func Load() *Config {
@@ -89,7 +89,9 @@ func Load() *Config {
 		TemporalNamespace: envOr("TEMPORAL_NAMESPACE", "default"),
 		TemporalTLSCert:   os.Getenv("TEMPORAL_TLS_CERT"),
 		TemporalTLSKey:    os.Getenv("TEMPORAL_TLS_KEY"),
-		TaskQueues:        parseTaskQueues(envOr("TASK_QUEUES", envOr("TASK_QUEUE", "agent-default"))),
+		WorkflowQueue:     envOr("WORKFLOW_QUEUE", "agent"),
+
+		DefaultAgentID: envOr("DEFAULT_AGENT_ID", "default"),
 
 		AgentsFile: envOr("AGENT_DEFINITIONS_FILE", "./agents.yaml"),
 		WorkerFile: envOr("WORKER_CONFIG", "./worker.yaml"),
@@ -98,7 +100,7 @@ func Load() *Config {
 
 		LLMProvider: envOr("LLM_PROVIDER", "anthropic"),
 		LLMAPIKey:   os.Getenv("LLM_API_KEY"),
-		LLMModel:    envOr("LLM_MODEL", "claude-sonnet-4-20250514"),
+		LLMModel:    envOr("LLM_MODEL", "claude-sonnet-5"),
 
 		HTTPAddr:     envOr("HTTP_ADDR", ":8888"),
 		InternalAddr: envOr("INTERNAL_ADDR", ":9999"),
@@ -122,8 +124,6 @@ func Load() *Config {
 		SMTPFrom:     os.Getenv("SMTP_FROM"),
 
 		MCPServers: parseMCPServers(os.Getenv("MCP_SERVERS")),
-
-		TaskQueueMCP: parseTaskQueueMap(os.Getenv("TASK_QUEUE_MCP")),
 	}
 }
 
@@ -161,9 +161,6 @@ func LoadAgentDefinitions(path string) ([]AgentDefinition, error) {
 		if a.Name == "" {
 			return nil, fmt.Errorf("%s: agent %q missing name", path, a.ID)
 		}
-		if a.DefaultQueue == "" {
-			return nil, fmt.Errorf("%s: agent %q missing default_queue", path, a.ID)
-		}
 	}
 	return doc.Agents, nil
 }
@@ -177,63 +174,6 @@ func parseMCPServers(raw string) []MCPServer {
 	var servers []MCPServer
 	json.Unmarshal([]byte(raw), &servers)
 	return servers
-}
-
-// PrimaryTaskQueue returns the first configured task queue.
-func (c *Config) PrimaryTaskQueue() string {
-	if len(c.TaskQueues) > 0 {
-		return c.TaskQueues[0]
-	}
-	return "agent-default"
-}
-
-// parseTaskQueues splits a comma-separated list of task queue names.
-// Example: "agent-default,agent-gpu,agent-tools"
-func parseTaskQueues(raw string) []string {
-	var queues []string
-	for _, q := range strings.Split(raw, ",") {
-		q = strings.TrimSpace(q)
-		if q != "" {
-			queues = append(queues, q)
-		}
-	}
-	return queues
-}
-
-// parseTaskQueueMap parses a JSON object env var like TASK_QUEUE_MCP.
-// Example: {"coding":["mcp-github"],"devops":["mcp-k8s"]}
-func parseTaskQueueMap(raw string) map[string][]string {
-	if raw == "" {
-		return nil
-	}
-	var mapping map[string][]string
-	json.Unmarshal([]byte(raw), &mapping)
-	return mapping
-}
-
-// MCPServersForQueues returns the MCP servers assigned to the given task queues.
-// If TaskQueueMCP is not configured, all MCP servers are returned (backward compat).
-func (c *Config) MCPServersForQueues(queues []string) []MCPServer {
-	if len(c.TaskQueueMCP) == 0 {
-		return c.MCPServers
-	}
-
-	// Collect unique MCP server names for these queues
-	needed := make(map[string]bool)
-	for _, q := range queues {
-		for _, name := range c.TaskQueueMCP[q] {
-			needed[name] = true
-		}
-	}
-
-	// Filter
-	var result []MCPServer
-	for _, s := range c.MCPServers {
-		if needed[s.Name] {
-			result = append(result, s)
-		}
-	}
-	return result
 }
 
 func envOr(key, fallback string) string {
