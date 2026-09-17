@@ -57,6 +57,11 @@ func ScheduledAgentWorkflow(ctx workflow.Context, input tool.ScheduledAgentInput
 		return fmt.Errorf("deliver result: %w", err)
 	}
 
+	// Recurring tasks keep their schedule until cancel_schedule
+	if input.Cron != "" {
+		return nil
+	}
+
 	// Cleanup: delete the schedule and update task log for one-shot tasks
 	var schedAct *activity.ScheduleActivities
 	_ = workflow.ExecuteActivity(deliverCtx, schedAct.DeleteSchedule, activity.DeleteScheduleInput{

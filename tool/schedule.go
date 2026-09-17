@@ -105,6 +105,7 @@ func registerScheduleTask(registry *Registry, temporalClient client.Client, st s
 				DeliveryChannel: params.DeliveryChannel,
 				ScheduleID:      scheduleID,
 				UserID:          userID,
+				Cron:            params.Cron,
 			}
 
 			// For one-shot tasks, limit to a single action
@@ -230,6 +231,7 @@ type ScheduledAgentInput struct {
 	UserID          string `json:"user_id,omitempty"`
 	DeliveryChannel string `json:"delivery_channel"`
 	ScheduleID      string `json:"schedule_id"`
+	Cron            string `json:"cron,omitempty"` // Empty for one-shot tasks
 }
 
 var nonAlphaNum = regexp.MustCompile(`[^a-z0-9]+`)
