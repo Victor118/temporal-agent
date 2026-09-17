@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"go.temporal.io/sdk/workflow"
@@ -10,6 +11,10 @@ import (
 )
 
 const (
+	// Thresholds for continuing the session workflow as a new run.
+	maxSessionHistoryEvents = 4000
+	maxSessionHistoryBytes  = 4 * 1024 * 1024
+
 	SignalUserMessage = "user-message"
 	SignalCancelAgent = "cancel-agent"
 	QuerySessionState = "session-state"
@@ -82,27 +87,53 @@ func SessionWorkflow(ctx workflow.Context, input SessionWorkflowInput) error {
 				notifyResponse(ctx, input.SessionID, input.Channel, input.ChannelID, fmt.Sprintf("Error processing message: %v", err))
 			}
 		}
+
+		// A long burst of turns grows this workflow's history without bound.
+		// Start a fresh run: the conversation lives in the store, so the new run
+		// reloads it and nothing is lost. Only do it with the channel drained —
+		// a signal still queued would be dropped with the old run.
+		if msgCh.Len() == 0 && sessionHistoryIsLarge(ctx) {
+			logger.Info("Continuing session as new", "session_id", input.SessionID, "turns", state.TurnCount)
+			return workflow.NewContinueAsNewError(ctx, SessionWorkflow, input)
+		}
 	}
 }
 
-// processTurn handles a single user message: load context → agent → persist.
-// It listens for cancel-agent signals to interrupt the agent mid-execution.
+// sessionHistoryIsLarge reports whether the workflow history is big enough to
+// warrant a fresh run. The thresholds sit well under Temporal's hard limits
+// (51200 events, 50MB), since a turn can add a lot at once.
+func sessionHistoryIsLarge(ctx workflow.Context) bool {
+	info := workflow.GetInfo(ctx)
+	return info.GetCurrentHistoryLength() >= maxSessionHistoryEvents ||
+		info.GetCurrentHistorySize() >= maxSessionHistoryBytes
+}
+
+// processTurn handles a single user message: run the agent, then persist what
+// the turn produced. The agent loads the conversation itself. processTurn
+// listens for cancel-agent signals to interrupt the agent mid-execution.
 func processTurn(actCtx, ctx workflow.Context, input SessionWorkflowInput, userMessage string, state *SessionState) error {
+	// Backstop for every channel that can signal a session: an empty user
+	// message is rejected by the LLM API, and once persisted it breaks every
+	// later turn of this session.
+	if strings.TrimSpace(userMessage) == "" {
+		workflow.GetLogger(ctx).Warn("Ignoring empty user message", "session_id", input.SessionID)
+		return nil
+	}
+
 	state.Status = "processing"
 	state.TurnCount++
 
 	var memAct *activity.MemoryActivities
 
-	// 1. Load context (messages + user memory)
-	var loadResult activity.LoadContextOutput
-	if err := workflow.ExecuteActivity(actCtx, memAct.LoadContext, activity.LoadContextInput{
-		SessionID: input.SessionID,
-		UserID:    input.UserID,
-	}).Get(ctx, &loadResult); err != nil {
-		return fmt.Errorf("load context: %w", err)
-	}
+	// turnKey names this turn globally: the run ID keeps it distinct from the
+	// same turn number in an earlier workflow run for this session, which a
+	// resumed session would otherwise reuse.
+	turnKey := fmt.Sprintf("%s-%d", workflow.GetInfo(ctx).WorkflowExecution.RunID, state.TurnCount)
 
-	// 2. Launch agent child workflow with a cancellable context
+	// 1. Launch agent child workflow with a cancellable context. It loads the
+	// conversation itself: passing it here put a full copy of the history in
+	// this workflow's event history on every turn, and this workflow is
+	// long-lived.
 	childCtx, cancelChild := workflow.WithCancel(ctx)
 	childCtx = workflow.WithChildOptions(childCtx, workflow.ChildWorkflowOptions{
 		WorkflowID: fmt.Sprintf("%s-turn-%d", input.SessionID, state.TurnCount),
@@ -112,9 +143,8 @@ func processTurn(actCtx, ctx workflow.Context, input SessionWorkflowInput, userM
 		SessionID:    input.SessionID,
 		UserID:       input.UserID,
 		AgentID:      input.AgentID,
+		TurnKey:      turnKey,
 		UserMessage:  userMessage,
-		Messages:     loadResult.Messages,
-		UserMemory:   loadResult.UserMemory,
 		SystemPrompt: input.SystemPrompt,
 		Model:        input.Model,
 		Channel:      input.Channel,
@@ -148,17 +178,29 @@ func processTurn(actCtx, ctx workflow.Context, input SessionWorkflowInput, userM
 		_ = agentFuture.Get(ctx, &result)
 		// Notify the user
 		notifyResponse(ctx, input.SessionID, input.Channel, input.ChannelID, "Agent interrupted by user.")
-	} else if agentErr != nil {
-		return fmt.Errorf("agent workflow: %w", agentErr)
 	}
 
-	// 3. Always persist — even if cancelled, save the messages accumulated so far
-	if len(result.Messages) > 0 {
+	// 2. Persist before reporting anything, so a failed or cancelled turn keeps
+	// its transcript. The agent already flushed these messages as it produced
+	// them; writing them again under the same keys is a no-op, and covers the
+	// case where one of its flushes failed.
+	if len(result.NewMessages) > 0 {
 		if err := workflow.ExecuteActivity(actCtx, memAct.PersistContext, activity.PersistContextInput{
 			SessionID: input.SessionID,
-			Messages:  result.Messages,
+			TurnKey:   turnKey,
+			Messages:  result.NewMessages,
 		}).Get(ctx, nil); err != nil {
 			return fmt.Errorf("persist context: %w", err)
+		}
+	}
+
+	// 3. Report failures once the transcript is safe
+	if !cancelled {
+		if agentErr != nil {
+			return fmt.Errorf("agent workflow: %w", agentErr)
+		}
+		if result.Error != "" {
+			return fmt.Errorf("agent workflow: %s", result.Error)
 		}
 	}
 

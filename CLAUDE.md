@@ -35,10 +35,12 @@
 
 ## Store (PostgreSQL)
 
-- `messages` : historique de conversation par session (JSONB)
+- `messages` : historique de conversation par session (JSONB), append-only ; `msg_key` = cle d'idempotence (`{run id}-{tour}:{index}`, ou `sched:{id}:{run}` pour un resultat de tache), lecture `ORDER BY id`
 - `memory` : key-value scope (user/project/session)
 - `task_logs` : suivi des taches schedulees
-- Persistance geree par SessionWorkflow, pas par AgentWorkflow
+- AgentWorkflow ecrit ses messages au fil du tour quand `TurnKey` est fourni ; SessionWorkflow reecrit le meme delta en fin de tour (les memes cles, donc sans effet si deja ecrit). Un sous-agent n'a pas de `TurnKey` et ne persiste rien
+- Un tour qui echoue ne doit pas perdre son transcript : `AgentWorkflow` renvoie `Error` dans sa sortie plutot qu'une erreur de workflow (un workflow en echec ne rend aucun resultat)
+- Ne jamais persister un message assistant portant des tool calls sans ses tool results : le tour suivant serait rejete par l'API LLM
 - Config via `DATABASE_URL` env var
 - Migration automatique au demarrage (CREATE TABLE IF NOT EXISTS)
 

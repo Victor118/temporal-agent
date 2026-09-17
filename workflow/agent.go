@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"time"
+	"unicode/utf8"
 
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/temporal"
@@ -18,29 +19,47 @@ import (
 
 const maxReActIterations = 50
 
+// maxToolResultBytes caps what a single tool result contributes to the
+// conversation. An unbounded result is recorded three times over — as the
+// activity result, inside the next LLM request and as a persisted message — and
+// one large enough to cross Temporal's 2MB payload limit fails the turn
+// outright. It also keeps a runaway command from eating the model's context.
+const maxToolResultBytes = 96 * 1024
+
 // toolScheduleToStartTimeout bounds how long a tool call waits for a worker on
 // its task queue before being reported to the LLM as unavailable.
 const toolScheduleToStartTimeout = 60 * time.Second
 
 type AgentWorkflowInput struct {
-	SessionID    string          `json:"session_id"`
-	UserID       string          `json:"user_id,omitempty"`
-	AgentID      string          `json:"agent_id"` // Required. Logical agent identity: prompt, skills and allowed tools
-	UserMessage  string          `json:"user_message"`
-	Messages     []store.Message `json:"messages"`              // Context loaded by session
-	UserMemory   string          `json:"user_memory,omitempty"` // Persistent user memory injected into system prompt
-	SystemPrompt string          `json:"system_prompt"`
-	Model        string          `json:"model"`                   // Explicit model; empty = the worker's default (LLM_MODEL)
-	SessionTools []string        `json:"session_tools,omitempty"` // Tools that persist through a session
-	AgentChain   []string        `json:"agent_chain,omitempty"`   // Chain of parent agent IDs for context propagation
-	Channel      string          `json:"channel,omitempty"`       // "web", "telegram"
-	ChannelID    string          `json:"channel_id,omitempty"`    // chat_id for telegram
+	SessionID    string   `json:"session_id"`
+	UserID       string   `json:"user_id,omitempty"`
+	AgentID      string   `json:"agent_id"` // Required. Logical agent identity: prompt, skills and allowed tools
+	UserMessage  string   `json:"user_message"`
+	SystemPrompt string   `json:"system_prompt"`
+	Model        string   `json:"model"`                   // Explicit model; empty = the worker's default (LLM_MODEL)
+	SessionTools []string `json:"session_tools,omitempty"` // Tools that persist through a session
+	// TurnKey identifies the session turn this run belongs to. When set, the
+	// agent persists its messages as it produces them under that key, so a
+	// crash, a cancel or a failed LLM call cannot lose the transcript. Sub-agents
+	// and scheduled runs leave it empty: they own no session history.
+	TurnKey    string   `json:"turn_key,omitempty"`
+	AgentChain []string `json:"agent_chain,omitempty"` // Chain of parent agent IDs for context propagation
+	Channel    string   `json:"channel,omitempty"`     // "web", "telegram"
+	ChannelID  string   `json:"channel_id,omitempty"`  // chat_id for telegram
 }
 
 type AgentWorkflowOutput struct {
-	Response     string          `json:"response"`
-	Messages     []store.Message `json:"messages"` // Updated messages to persist
+	Response string `json:"response"`
+	// NewMessages holds only what this run produced, not the history it was
+	// given: the caller appends them. Returning the whole conversation made
+	// every turn carry the full history back through Temporal, which grows
+	// until it hits the payload limit.
+	NewMessages  []store.Message `json:"new_messages"`
 	GoalAchieved bool            `json:"goal_achieved"`
+	// Error reports a turn that failed with a transcript worth keeping (the LLM
+	// call gave up, for instance). The workflow returns no error in that case,
+	// so NewMessages survives — a failed workflow returns no result at all.
+	Error string `json:"error,omitempty"`
 }
 
 // AgentWorkflow is a pure resolution workflow: ReAct loop only.
@@ -96,6 +115,84 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 	var skillAct *activity.SkillActivities
 	currentChain := append(input.AgentChain, currentAgentID)
 
+	// Load the conversation this turn continues. The session used to pass it in,
+	// which recorded a full copy of the history in the session workflow's event
+	// history on every turn; loading it here keeps that copy inside this
+	// short-lived run instead. A sub-agent has no session history: its context is
+	// isolated by design, so it loads nothing.
+	var memAct *activity.MemoryActivities
+	var messages []store.Message
+	var userMemory string
+	if input.TurnKey != "" {
+		var loaded activity.LoadContextOutput
+		if err := workflow.ExecuteActivity(
+			workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+				StartToCloseTimeout: 30 * time.Second,
+			}),
+			memAct.LoadContext,
+			activity.LoadContextInput{SessionID: input.SessionID, UserID: input.UserID},
+		).Get(ctx, &loaded); err != nil {
+			return AgentWorkflowOutput{}, fmt.Errorf("load context: %w", err)
+		}
+		messages, userMemory = loaded.Messages, loaded.UserMemory
+	}
+
+	// Everything appended from here on is this turn's output: it is flushed to
+	// the store as it is produced and also returned to the caller, which appends
+	// it again. Both writes use the same keys, so the second one is a no-op and
+	// either one alone is enough.
+	newStart := len(messages)
+	persisted := 0
+
+	contentJSON, _ := json.Marshal(input.UserMessage)
+	messages = append(messages, store.Message{
+		Role:    store.RoleUser,
+		Content: string(contentJSON),
+	})
+
+	persistOpts := workflow.ActivityOptions{
+		StartToCloseTimeout: 30 * time.Second,
+		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 3},
+	}
+	// flush writes the messages produced since the last call. It must only be
+	// called where the transcript is valid on its own: a flushed assistant
+	// message carrying tool calls whose results never landed would make the next
+	// turn unreplayable by the LLM API. A failed flush is not fatal — the caller
+	// receives NewMessages and writes them again.
+	flush := func(c workflow.Context) {
+		pending := messages[newStart+persisted:]
+		if input.TurnKey == "" || len(pending) == 0 {
+			return
+		}
+		if err := workflow.ExecuteActivity(
+			workflow.WithActivityOptions(c, persistOpts),
+			memAct.PersistContext,
+			activity.PersistContextInput{
+				SessionID:  input.SessionID,
+				TurnKey:    input.TurnKey,
+				StartIndex: persisted,
+				Messages:   pending,
+			},
+		).Get(c, nil); err != nil {
+			workflow.GetLogger(ctx).Error("Persist turn messages failed",
+				"session_id", input.SessionID, "turn_key", input.TurnKey, "error", err)
+			return
+		}
+		persisted += len(pending)
+	}
+	// cancelSafeFlush persists through a detached context once the workflow is
+	// cancelled — a cancelled context refuses to schedule activities.
+	cancelSafeFlush := func() {
+		if ctx.Err() != nil {
+			dctx, cancel := workflow.NewDisconnectedContext(ctx)
+			defer cancel()
+			flush(dctx)
+			return
+		}
+		flush(ctx)
+	}
+	cancelSafeFlush()
+
 	// Load the agent's prompt (unless overridden) and the known agents
 	var skillsResult activity.LoadSkillsForAgentOutput
 	if err := workflow.ExecuteActivity(
@@ -117,8 +214,8 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 	}
 
 	// Append user memory to system prompt if available
-	if input.UserMemory != "" {
-		systemPrompt += "\n## User Memory\n\nThe following is what you remember about this user from previous conversations. Use it to personalize your responses.\n\n" + input.UserMemory + "\n\n"
+	if userMemory != "" {
+		systemPrompt += "\n## User Memory\n\nThe following is what you remember about this user from previous conversations. Use it to personalize your responses.\n\n" + userMemory + "\n\n"
 	}
 
 	// Load the tools this agent may use, with the queue serving each one
@@ -159,24 +256,14 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 		sessionToolCtx = workflow.WithActivityOptions(sessCtx, toolOpts)
 	}
 
-	// Start from the context provided by the session
-	messages := make([]store.Message, len(input.Messages))
-	copy(messages, input.Messages)
-
-	// Append user message
-	contentJSON, _ := json.Marshal(input.UserMessage)
-	messages = append(messages, store.Message{
-		Role:    store.RoleUser,
-		Content: string(contentJSON),
-	})
-
 	// ReAct loop
 	for i := 0; i < maxReActIterations; i++ {
 		// Check for cancellation before each iteration
 		if ctx.Err() != nil {
+			cancelSafeFlush()
 			return AgentWorkflowOutput{
-				Response: "Agent cancelled.",
-				Messages: messages,
+				Response:    "Agent cancelled.",
+				NewMessages: messages[newStart:],
 			}, nil
 		}
 
@@ -206,7 +293,19 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 		var llmAct *activity.LLMActivities
 		var response provider.ChatResponse
 		if err := workflow.ExecuteActivity(llmCtx, llmAct.CallLLM, request).Get(ctx, &response); err != nil {
-			return AgentWorkflowOutput{}, fmt.Errorf("call LLM: %w", err)
+			cancelSafeFlush()
+			if ctx.Err() != nil {
+				return AgentWorkflowOutput{
+					Response:    "Agent cancelled.",
+					NewMessages: messages[newStart:],
+				}, nil
+			}
+			// Soft failure: returning an error would discard everything the turn
+			// produced, since a failed workflow carries no result.
+			return AgentWorkflowOutput{
+				NewMessages: messages[newStart:],
+				Error:       fmt.Sprintf("call LLM: %s", err),
+			}, nil
 		}
 
 		// No tool calls → final response
@@ -219,11 +318,12 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 				})
 			}
 
+			cancelSafeFlush()
 			notifyResponse(ctx, input.SessionID, input.Channel, input.ChannelID, response.Content)
 
 			return AgentWorkflowOutput{
 				Response:     response.Content,
-				Messages:     messages,
+				NewMessages:  messages[newStart:],
 				GoalAchieved: response.StopReason == "end_turn",
 			}, nil
 		}
@@ -339,18 +439,52 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 				Role: store.RoleTool,
 				ToolResult: &store.ToolResult{
 					ToolCallID: response.ToolCalls[j].ID,
-					Content:    content,
+					Content:    truncateToolResult(content),
 					IsError:    isError,
 				},
 			})
 		}
 
+		// Flush the assistant message and its tool results together: a stored
+		// tool call with no result would break the next turn.
+		cancelSafeFlush()
 	}
 
+	cancelSafeFlush()
 	return AgentWorkflowOutput{
-		Response: "Maximum iterations reached.",
-		Messages: messages,
+		Response:    "Maximum iterations reached.",
+		NewMessages: messages[newStart:],
+		Error:       fmt.Sprintf("stopped after %d iterations without a final answer", maxReActIterations),
 	}, nil
+}
+
+// truncateToolResult shortens an oversized tool result, keeping its head and
+// its tail: the head says what the output is, the tail usually carries the error
+// or the summary line. Cuts land on rune boundaries so the result stays valid
+// UTF-8, which the JSON payloads downstream require.
+func truncateToolResult(content string) string {
+	if len(content) <= maxToolResultBytes {
+		return content
+	}
+
+	head := runeStart(content, maxToolResultBytes*2/3)
+	tail := runeStart(content, len(content)-(maxToolResultBytes-head))
+	if tail <= head {
+		tail = len(content)
+	}
+	return fmt.Sprintf("%s\n\n[... %d bytes omitted, output too large ...]\n\n%s",
+		content[:head], tail-head, content[tail:])
+}
+
+// runeStart backs i up to the first byte of the rune it falls inside.
+func runeStart(s string, i int) int {
+	if i >= len(s) {
+		return len(s)
+	}
+	for i > 0 && !utf8.RuneStart(s[i]) {
+		i--
+	}
+	return i
 }
 
 func convertMessages(messages []store.Message) []provider.ChatMessage {

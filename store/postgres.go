@@ -42,14 +42,20 @@ func (s *PostgresStore) migrate() error {
 			created_at TIMESTAMPTZ DEFAULT NOW()
 		);
 
+		-- msg_key is the idempotency key of a message within its session:
+		-- "{run id}-{turn}:{index}" for a conversation turn, "sched:{id}:{run}"
+		-- for a delivered task result. Writes are append-only and ON CONFLICT DO
+		-- NOTHING, so a replayed activity is a no-op instead of a duplicate.
+		-- Ordering is by id: nothing ever renumbers an existing row.
 		CREATE TABLE IF NOT EXISTS messages (
 			id BIGSERIAL PRIMARY KEY,
 			session_id TEXT NOT NULL,
-			seq INTEGER NOT NULL,
+			msg_key TEXT NOT NULL,
 			data JSONB NOT NULL,
 			created_at TIMESTAMPTZ DEFAULT NOW()
 		);
-		CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, seq);
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_session_key ON messages(session_id, msg_key);
+		CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id, id);
 
 		CREATE TABLE IF NOT EXISTS memory (
 			scope TEXT NOT NULL,
@@ -225,7 +231,7 @@ func (s *PostgresStore) UpdateSessionTitle(ctx context.Context, sessionID, title
 
 func (s *PostgresStore) LoadMessages(ctx context.Context, sessionID string) ([]Message, error) {
 	rows, err := s.db.QueryContext(ctx,
-		"SELECT data FROM messages WHERE session_id = $1 ORDER BY seq", sessionID)
+		"SELECT data FROM messages WHERE session_id = $1 ORDER BY id", sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -248,7 +254,7 @@ func (s *PostgresStore) LoadMessages(ctx context.Context, sessionID string) ([]M
 
 func (s *PostgresStore) LoadMessagesWithID(ctx context.Context, sessionID string) ([]MessageWithID, error) {
 	rows, err := s.db.QueryContext(ctx,
-		"SELECT id, data FROM messages WHERE session_id = $1 ORDER BY seq", sessionID)
+		"SELECT id, data FROM messages WHERE session_id = $1 ORDER BY id", sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -269,9 +275,19 @@ func (s *PostgresStore) LoadMessagesWithID(ctx context.Context, sessionID string
 	return messages, rows.Err()
 }
 
-func (s *PostgresStore) SaveMessages(ctx context.Context, sessionID string, messages []Message) error {
-	stmt, err := s.db.PrepareContext(ctx,
-		"INSERT INTO messages (session_id, seq, data) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING")
+func (s *PostgresStore) AppendMessages(ctx context.Context, sessionID, turnKey string, startIndex int, messages []Message) error {
+	if len(messages) == 0 {
+		return nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.PrepareContext(ctx,
+		"INSERT INTO messages (session_id, msg_key, data) VALUES ($1, $2, $3) ON CONFLICT (session_id, msg_key) DO NOTHING")
 	if err != nil {
 		return err
 	}
@@ -282,23 +298,24 @@ func (s *PostgresStore) SaveMessages(ctx context.Context, sessionID string, mess
 		if err != nil {
 			return err
 		}
-		if _, err := stmt.ExecContext(ctx, sessionID, i, string(data)); err != nil {
+		key := TurnMessageKey(turnKey, startIndex+i)
+		if _, err := stmt.ExecContext(ctx, sessionID, key, string(data)); err != nil {
 			return err
 		}
 	}
 
-	return nil
+	return tx.Commit()
 }
 
-func (s *PostgresStore) AppendMessage(ctx context.Context, sessionID string, msg Message) error {
+func (s *PostgresStore) AppendMessage(ctx context.Context, sessionID, key string, msg Message) error {
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return err
 	}
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO messages (session_id, seq, data)
-		VALUES ($1, COALESCE((SELECT MAX(seq) FROM messages WHERE session_id = $1), -1) + 1, $2)`,
-		sessionID, string(data))
+		INSERT INTO messages (session_id, msg_key, data)
+		VALUES ($1, $2, $3) ON CONFLICT (session_id, msg_key) DO NOTHING`,
+		sessionID, key, string(data))
 	return err
 }
 

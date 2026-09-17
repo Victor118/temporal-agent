@@ -304,6 +304,14 @@ func (h *handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// An empty message is stored as an empty user turn, which every later turn
+	// then replays to the LLM — and the API rejects a user message with no
+	// content, so the session is poisoned for good.
+	if strings.TrimSpace(req.Content) == "" {
+		http.Error(w, "Message content is required", http.StatusBadRequest)
+		return
+	}
+
 	// Find the active workflow for this session, or restart if none
 	workflowID := h.findActiveWorkflowID(r.Context(), sessionID)
 	if workflowID == "" {

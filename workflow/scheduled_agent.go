@@ -17,9 +17,14 @@ func ScheduledAgentWorkflow(ctx workflow.Context, input tool.ScheduledAgentInput
 	logger := workflow.GetLogger(ctx)
 	logger.Info("Scheduled agent starting", "schedule_id", input.ScheduleID)
 
+	// Identifies this run of the schedule: a cron fires repeatedly under the
+	// same ScheduleID, so the run timestamp separates the runs while keeping
+	// retries of one run idempotent.
+	runUnixMilli := workflow.Now(ctx).UnixMilli()
+
 	// Run the agent loop as a child workflow
 	childCtx := workflow.WithChildOptions(ctx, workflow.ChildWorkflowOptions{
-		WorkflowID: fmt.Sprintf("%s-agent-%d", input.ScheduleID, workflow.Now(ctx).UnixMilli()),
+		WorkflowID: fmt.Sprintf("%s-agent-%d", input.ScheduleID, runUnixMilli),
 		RetryPolicy: &temporal.RetryPolicy{
 			MaximumAttempts: 2,
 		},
@@ -34,9 +39,13 @@ func ScheduledAgentWorkflow(ctx workflow.Context, input tool.ScheduledAgentInput
 	}).Get(ctx, &result)
 
 	response := result.Response
-	if err != nil {
+	switch {
+	case err != nil:
 		response = fmt.Sprintf("Scheduled task failed: %s", err.Error())
 		logger.Error("Scheduled agent failed", "schedule_id", input.ScheduleID, "error", err)
+	case result.Error != "":
+		response = fmt.Sprintf("Scheduled task failed: %s", result.Error)
+		logger.Error("Scheduled agent failed", "schedule_id", input.ScheduleID, "error", result.Error)
 	}
 
 	// Deliver the result
@@ -49,9 +58,10 @@ func ScheduledAgentWorkflow(ctx workflow.Context, input tool.ScheduledAgentInput
 
 	var deliverAct *activity.DeliveryActivities
 	if err := workflow.ExecuteActivity(deliverCtx, deliverAct.DeliverResult, activity.DeliverInput{
-		UserID:     input.UserID,
-		Content:    response,
-		ScheduleID: input.ScheduleID,
+		UserID:       input.UserID,
+		Content:      response,
+		ScheduleID:   input.ScheduleID,
+		RunUnixMilli: runUnixMilli,
 	}).Get(ctx, nil); err != nil {
 		logger.Error("Failed to deliver result", "schedule_id", input.ScheduleID, "error", err)
 		return fmt.Errorf("deliver result: %w", err)

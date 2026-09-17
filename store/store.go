@@ -30,8 +30,12 @@ type Store interface {
 	// Session messages
 	LoadMessages(ctx context.Context, sessionID string) ([]Message, error)
 	LoadMessagesWithID(ctx context.Context, sessionID string) ([]MessageWithID, error)
-	SaveMessages(ctx context.Context, sessionID string, messages []Message) error
-	AppendMessage(ctx context.Context, sessionID string, msg Message) error
+	// AppendMessages appends the messages a turn produced, keyed by
+	// TurnMessageKey(turnKey, startIndex+i). Re-writing a message already stored
+	// is a no-op, so a replayed activity never duplicates or renumbers.
+	AppendMessages(ctx context.Context, sessionID, turnKey string, startIndex int, messages []Message) error
+	// AppendMessage appends one message under an explicit idempotency key.
+	AppendMessage(ctx context.Context, sessionID, key string, msg Message) error
 	DeleteMessage(ctx context.Context, sessionID string, id int64) error
 	DeleteMessagesBySession(ctx context.Context, sessionID string) error
 

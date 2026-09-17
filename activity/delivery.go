@@ -17,6 +17,9 @@ type DeliverInput struct {
 	UserID     string `json:"user_id"`
 	Content    string `json:"content"`
 	ScheduleID string `json:"schedule_id"`
+	// RunUnixMilli identifies this run of the schedule. It keys the stored
+	// message, so a retried delivery dedupes while a later cron run does not.
+	RunUnixMilli int64 `json:"run_unix_milli"`
 }
 
 func (a *DeliveryActivities) DeliverResult(ctx context.Context, input DeliverInput) error {
@@ -31,7 +34,8 @@ func (a *DeliveryActivities) DeliverResult(ctx context.Context, input DeliverInp
 		Role:    store.RoleAssistant,
 		Content: input.Content,
 	}
-	if err := a.Store.AppendMessage(ctx, sessionID, msg); err != nil {
+	key := store.ScheduledMessageKey(input.ScheduleID, input.RunUnixMilli)
+	if err := a.Store.AppendMessage(ctx, sessionID, key, msg); err != nil {
 		return fmt.Errorf("persist notification: %w", err)
 	}
 

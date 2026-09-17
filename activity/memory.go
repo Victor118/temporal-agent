@@ -34,13 +34,19 @@ func (a *MemoryActivities) LoadContext(ctx context.Context, input LoadContextInp
 	return LoadContextOutput{Messages: messages, UserMemory: userMemory}, nil
 }
 
+// PersistContextInput appends the messages a turn produced. Messages holds the
+// slice starting at StartIndex within the turn, so the agent can flush as it
+// goes and the session can re-flush the whole turn at the end: both write the
+// same keys, and the second write is a no-op.
 type PersistContextInput struct {
-	SessionID string
-	Messages  []store.Message
+	SessionID  string
+	TurnKey    string
+	StartIndex int
+	Messages   []store.Message
 }
 
 func (a *MemoryActivities) PersistContext(ctx context.Context, input PersistContextInput) error {
-	return a.Store.SaveMessages(ctx, input.SessionID, input.Messages)
+	return a.Store.AppendMessages(ctx, input.SessionID, input.TurnKey, input.StartIndex, input.Messages)
 }
 
 type LoadMemoryInput struct {

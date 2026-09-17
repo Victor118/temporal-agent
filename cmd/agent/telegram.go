@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"go.temporal.io/api/workflowservice/v1"
@@ -31,6 +32,13 @@ func (h *handler) handleTelegramWebhook(w http.ResponseWriter, r *http.Request) 
 
 	chatID := update.Message.Chat.ID
 	text := update.Message.Text
+
+	// A photo, sticker or voice note has no text. Acknowledge it so Telegram
+	// stops retrying, but never turn it into an empty user message.
+	if strings.TrimSpace(text) == "" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 
 	// Lookup user by telegram_id
 	user, err := h.store.GetUserByTelegramID(r.Context(), chatID)
