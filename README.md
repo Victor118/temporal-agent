@@ -32,8 +32,9 @@ lives — a GPU, a restricted network segment, a licensed binary, a machine
 cleared for sensitive data. Tool execution is therefore distributed by design:
 each capability is served by its own pool of workers, and every tool call is
 routed to a pool that can actually run it. A capability scales by adding
-machines to its pool and keeps working when one of them goes away, and an
-agent is never offered a tool that nothing in the fleet can execute.
+machines to its pool and keeps working when one of them goes away, and what an
+agent is offered is what the fleet publishes — not whatever the worker that
+happens to answer has locally.
 
 ## Features
 
