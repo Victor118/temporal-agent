@@ -208,9 +208,11 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 	if systemPrompt == "" {
 		systemPrompt = skillsResult.SystemPrompt
 	}
-	knownAgents := make(map[string]bool, len(skillsResult.AgentIDs))
-	for _, id := range skillsResult.AgentIDs {
-		knownAgents[id] = true
+	// The agents this one may delegate to — itself excluded, so an agent cannot
+	// spawn a copy of itself. This is the same list its prompt advertises.
+	delegatable := make(map[string]bool, len(skillsResult.DelegatableAgentIDs))
+	for _, id := range skillsResult.DelegatableAgentIDs {
+		delegatable[id] = true
 	}
 
 	// Append user memory to system prompt if available
@@ -372,7 +374,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 				d.workflowID = childWorkflowID(input.SessionID, tc.Name, tc.ID, i, j)
 
 				// Build input first — spawn_session runs on the current workflow queue
-				workflowName, childInput, err := buildChildInput(tc.Name, tc.Input, input, d.workflowID, &res, currentChain, currentAgentID, knownAgents, workflow.GetInfo(ctx).TaskQueueName)
+				workflowName, childInput, err := buildChildInput(tc.Name, tc.Input, input, d.workflowID, &res, currentChain, currentAgentID, delegatable, workflow.GetInfo(ctx).TaskQueueName)
 				if err != nil {
 					dispatches[j] = toolDispatch{unavailable: err.Error()}
 					continue
@@ -543,12 +545,14 @@ func notifyResponse(ctx workflow.Context, sessionID, channel, channelID, content
 }
 
 // buildChildInput constructs the proper input for child workflow tools.
-// For spawn_session, it builds an AgentWorkflowInput for the target agent (the
-// current one if none is given) and keeps the child on the current workflow queue;
-// an unknown agent is an error reported to the LLM.
+// For spawn_session, it builds an AgentWorkflowInput for the target agent and
+// keeps the child on the current workflow queue. The target must be one of the
+// agents this one may delegate to: a missing, unknown or self target is an error
+// reported to the LLM as a tool result, so it can pick another route. The enum in
+// the tool schema makes these cases rare; this check is what makes them impossible.
 // For ask_user, it enriches the raw input with the agent chain.
 // For other workflow tools, it passes the raw input unchanged.
-func buildChildInput(toolName string, rawInput json.RawMessage, parent AgentWorkflowInput, childID string, res *activity.ToolResolution, agentChain []string, currentAgentID string, knownAgents map[string]bool, currentQueue string) (workflowName string, input interface{}, err error) {
+func buildChildInput(toolName string, rawInput json.RawMessage, parent AgentWorkflowInput, childID string, res *activity.ToolResolution, agentChain []string, currentAgentID string, delegatable map[string]bool, currentQueue string) (workflowName string, input interface{}, err error) {
 	switch toolName {
 	case "spawn_session":
 		var spawnInput struct {
@@ -563,9 +567,12 @@ func buildChildInput(toolName string, rawInput json.RawMessage, parent AgentWork
 
 		childAgentID := spawnInput.AgentID
 		if childAgentID == "" {
-			childAgentID = currentAgentID
+			return "", nil, fmt.Errorf("spawn_session requires agent_id: name an agent from the agents directory")
 		}
-		if !knownAgents[childAgentID] {
+		if childAgentID == currentAgentID {
+			return "", nil, fmt.Errorf("an agent cannot delegate to itself: pick another agent from the directory, or do the work in this turn")
+		}
+		if !delegatable[childAgentID] {
 			return "", nil, fmt.Errorf("unknown agent_id %q: use an agent from the agents directory", childAgentID)
 		}
 

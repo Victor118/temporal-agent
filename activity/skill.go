@@ -3,11 +3,16 @@ package activity
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 
 	"github.com/victor/temporal-agent/skill"
 )
+
+// SpawnToolName is the tool through which an agent delegates to another agent.
+// Its schema is the only one specialized per agent (see Catalog.AllowedTools).
+const SpawnToolName = "spawn_session"
 
 const promptIntro = "You are a helpful AI assistant with access to tools. You MUST use your tools proactively to accomplish the user's goals — do not just describe what you could do, actually do it.\n\n"
 
@@ -23,7 +28,7 @@ var promptRules = []promptRule{
 	{[]string{"web_search", "web_fetch"}, "When the user asks for information you don't have, look it up with %s."},
 	{[]string{"read_file", "write_file", "edit_file", "list_directory", "grep", "glob"}, "When the user asks you to work with files, use %s."},
 	{[]string{"exec"}, "When the user asks you to run a command, use %s."},
-	{[]string{"spawn_session"}, "When a task requires specialized expertise, use %s to delegate to a sub-agent."},
+	{[]string{SpawnToolName}, "When a task requires specialized expertise, use %s to delegate to a sub-agent."},
 	{nil, "Always prefer action over explanation. If you can answer by using a tool, do it."},
 	{nil, "Only use the tools you are given. If a task needs a tool you don't have, say so instead of pretending."},
 	{[]string{"write_file", "edit_file"}, "NEVER write a file as a way to deliver your answer. Respond directly in the conversation. Only use %s when the user explicitly asks you to create or modify a file."},
@@ -100,13 +105,16 @@ type LoadSkillsForAgentInput struct {
 }
 
 type LoadSkillsForAgentOutput struct {
-	SystemPrompt string   `json:"system_prompt"`
-	AgentIDs     []string `json:"agent_ids"` // All known agents, used to validate spawn_session targets
+	SystemPrompt string `json:"system_prompt"`
+	// Agents this one may delegate to: the catalog minus itself. The dispatch
+	// validates spawn_session targets against this list, so it must hold exactly
+	// what the agents directory in the prompt advertises.
+	DelegatableAgentIDs []string `json:"delegatable_agent_ids"`
 }
 
 // LoadSkillsForAgent returns the full system prompt for the given agent (behaviors
 // for its allowed tools, its skills, and — if it may delegate — the directory of
-// all OTHER agents), and the IDs of all known agents.
+// all OTHER agents), and the IDs of the agents it may delegate to.
 func (a *SkillActivities) LoadSkillsForAgent(ctx context.Context, input LoadSkillsForAgentInput) (LoadSkillsForAgentOutput, error) {
 	catalog := a.catalog.Agents()
 	allowed := make(map[string]bool)
@@ -125,19 +133,23 @@ func (a *SkillActivities) LoadSkillsForAgent(ctx context.Context, input LoadSkil
 	prompt := buildSystemPrompt(matchSkills(a.skills, agentSkills), allowed)
 	a.mu.RUnlock()
 
+	// One list feeds both the prose and the validation, so they cannot drift:
+	// an agent that is not in the directory is not a legal spawn target either.
+	delegatable := delegatableAgents(catalog, input.AgentID)
+
 	// The agents directory is only useful to an agent that can delegate
-	if allowed["spawn_session"] {
-		prompt += buildAgentsDirectory(catalog, input.AgentID)
+	if allowed[SpawnToolName] {
+		prompt += buildAgentsDirectory(delegatable)
 	}
 
-	ids := make([]string, len(catalog))
-	for i, e := range catalog {
+	ids := make([]string, len(delegatable))
+	for i, e := range delegatable {
 		ids[i] = e.ID
 	}
 
 	return LoadSkillsForAgentOutput{
-		SystemPrompt: prompt,
-		AgentIDs:     ids,
+		SystemPrompt:        prompt,
+		DelegatableAgentIDs: ids,
 	}, nil
 }
 
@@ -152,16 +164,24 @@ func matchSkills(byName map[string]skill.Skill, names []string) []skill.Skill {
 	return matched
 }
 
-// buildAgentsDirectory generates a prompt section listing all available specialized agents.
-// currentAgentID is excluded from the list so an agent never spawns a copy of itself.
-func buildAgentsDirectory(catalog []AgentCatalogEntry, currentAgentID string) string {
+// delegatableAgents returns the agents currentAgentID may delegate to: every
+// other agent in the catalog, sorted by ID. Sorting matters: this list is
+// rendered into the system prompt and into the spawn_session schema, both sent
+// on every turn, and an unstable order would break the LLM prompt cache prefix.
+func delegatableAgents(catalog []AgentCatalogEntry, currentAgentID string) []AgentCatalogEntry {
 	var filtered []AgentCatalogEntry
 	for _, entry := range catalog {
 		if entry.ID != currentAgentID {
 			filtered = append(filtered, entry)
 		}
 	}
+	sort.Slice(filtered, func(i, j int) bool { return filtered[i].ID < filtered[j].ID })
+	return filtered
+}
 
+// buildAgentsDirectory generates a prompt section listing the agents that may be
+// delegated to, as returned by delegatableAgents.
+func buildAgentsDirectory(filtered []AgentCatalogEntry) string {
 	if len(filtered) == 0 {
 		return "## Specialized Agents\n\nNo specialized sub-agents are currently available. Do not invent agent IDs that are not listed here.\n\n"
 	}

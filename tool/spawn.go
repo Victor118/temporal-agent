@@ -3,12 +3,14 @@ package tool
 import "encoding/json"
 
 // RegisterSpawnTool registers the spawn_session tool that launches a sub-agent.
+// The schema published here is agent-agnostic: activity.Catalog.AllowedTools pins
+// agent_id to an enum of the legal targets when it builds an agent's tool list.
 // With session_tools empty: lightweight one-shot AgentWorkflow (no persistence).
 // With session_tools set: same AgentWorkflow but tools in the list persist through a session.
 func RegisterSpawnTool(registry *Registry, agentWorkflowFunc interface{}) {
 	registry.Register(&Tool{
 		Name:        "spawn_session",
-		Description: "Spawn a sub-agent to handle a task autonomously. Use agent_id to delegate to a specialized agent from the agents directory. If session_tools is empty, runs a one-shot agent. If session_tools lists tool names, those tools persist through a session.",
+		Description: "Delegate a task to another agent, which handles it autonomously and returns its final answer. Use agent_id to name the agent to delegate to. If session_tools is empty, runs a one-shot agent. If session_tools lists tool names, those tools persist through a session.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -18,7 +20,7 @@ func RegisterSpawnTool(registry *Registry, agentWorkflowFunc interface{}) {
 				},
 				"agent_id": {
 					"type": "string",
-					"description": "ID of the agent to delegate to, as listed in the agents directory. Each agent has its own system prompt, skills, and tools. Leave empty to spawn an agent like yourself."
+					"description": "ID of the agent to delegate to. Must be one of the IDs listed in the agents directory of your system prompt — an agent cannot delegate to itself. Each agent has its own system prompt, skills, and tools."
 				},
 				"session_tools": {
 					"type": "array",
@@ -30,7 +32,7 @@ func RegisterSpawnTool(registry *Registry, agentWorkflowFunc interface{}) {
 					"description": "Optional model override for the sub-agent"
 				}
 			},
-			"required": ["task"]
+			"required": ["agent_id", "task"]
 		}`),
 		Kind:         ToolKindWorkflow,
 		WorkflowFunc: agentWorkflowFunc,
