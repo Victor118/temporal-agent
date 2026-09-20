@@ -29,10 +29,11 @@ exactly where it stopped whenever the answer arrives.
 
 **Workers are not interchangeable.** Some tools only run where the capability
 lives — a GPU, a restricted network segment, a licensed binary, a machine
-allowed to touch sensitive data. Task queues model that directly: each worker
-declares the queue it serves and the tools it exposes there, and every tool
-call is routed to the queue that can actually run it. Scheduling follows
-capability, not just load.
+cleared for sensitive data. Tool execution is therefore distributed by design:
+each capability is served by its own pool of workers, and every tool call is
+routed to a pool that can actually run it. A capability scales by adding
+machines to its pool and keeps working when one of them goes away, and an
+agent is never offered a tool that nothing in the fleet can execute.
 
 ## Features
 
