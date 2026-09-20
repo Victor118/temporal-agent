@@ -2,6 +2,38 @@
 
 An AI agent platform orchestrated by [Temporal](https://temporal.io/), built in Go. It provides a scalable, durable execution environment for LLM-powered agents with tool use, multi-agent collaboration, and persistent memory.
 
+## Why
+
+Getting an LLM to call tools in a loop is easy. Running that loop as a
+production system is not. Temporal Agent exists to close four specific gaps.
+
+**Long-running agents crash, and crashes are expensive.** A ReAct loop that
+dies at minute eight loses every tool result it has accumulated and starts
+over. Here the loop *is* a Temporal workflow: state is durable, the LLM call
+is retried with exponential backoff, a tool call that no worker can serve
+fails in a minute instead of hanging forever, and a worker going down does not
+lose the run — it resumes on another one.
+
+**Agents that delegate can run away.** An agent never sees itself in its own
+agents directory, which rules out the trivial case, but A delegating to B,
+which delegates back to A, is still a cycle — and its cost is exponential in
+depth. Every delegation therefore carries the chain of agents that led to it;
+turning that chain into an enforced depth and cycle bound, with the refusal
+returned to the model as a normal tool outcome so it can pick another route —
+reason it through itself, or ask — instead of failing, is the next step.
+
+**Waiting for a human should cost nothing.** Approval steps, clarifications
+and escalations are measured in hours, not seconds. A blocked agent parks on
+a Temporal signal: no process held open, no polling, and the run resumes
+exactly where it stopped whenever the answer arrives.
+
+**Workers are not interchangeable.** Some tools only run where the capability
+lives — a GPU, a restricted network segment, a licensed binary, a machine
+allowed to touch sensitive data. Task queues model that directly: each worker
+declares the queue it serves and the tools it exposes there, and every tool
+call is routed to the queue that can actually run it. Scheduling follows
+capability, not just load.
+
 ## Features
 
 - **Durable AI workflows** — ReAct loop (LLM reasoning + tool execution) powered by Temporal, with automatic retries and fault tolerance
