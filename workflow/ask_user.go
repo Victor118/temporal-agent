@@ -13,6 +13,12 @@ import (
 
 const SignalUserAnswer = "user-answer"
 
+// askUserTimeout bounds how long a question waits for its answer. Approvals and
+// clarifications are measured in hours, not seconds: the workflow consumes
+// nothing while it waits, so the bound only exists to release a question the
+// user will never answer.
+const askUserTimeout = 72 * time.Hour
+
 // AskUserWorkflow is a child workflow tool that sends a question to the user
 // via SSE and blocks until the user answers (via signal) or a timeout expires.
 // It returns the user's answer as a plain string to the calling agent.
@@ -67,7 +73,7 @@ func AskUserWorkflow(ctx workflow.Context, rawInput json.RawMessage) (string, er
 
 	// Wait for the user's answer or timeout
 	answerCh := workflow.GetSignalChannel(ctx, SignalUserAnswer)
-	timer := workflow.NewTimer(ctx, 10*time.Minute)
+	timer := workflow.NewTimer(ctx, askUserTimeout)
 
 	var answer string
 	sel := workflow.NewSelector(ctx)
@@ -82,7 +88,7 @@ func AskUserWorkflow(ctx workflow.Context, rawInput json.RawMessage) (string, er
 	sel.Select(ctx)
 
 	if timedOut {
-		return "", fmt.Errorf("user did not answer within 10 minutes")
+		return "", fmt.Errorf("user did not answer within %s", askUserTimeout)
 	}
 	return answer, nil
 }

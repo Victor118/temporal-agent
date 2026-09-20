@@ -16,7 +16,9 @@ func TestLoadSkillsForAgent_PromptFollowsAllowlist(t *testing.T) {
 		{ID: "analyst", Name: "Analyst", Skills: []string{"market"}, Tools: []string{"web_*"}},
 	})
 	c.SetTools([]store.ToolRecord{
-		{Name: "exec"}, {Name: "spawn_session"}, {Name: "web_fetch"}, {Name: "write_file"},
+		{Name: "exec"},
+		{Name: SpawnToolName, InputSchema: []byte(spawnTestSchema)},
+		{Name: "web_fetch"}, {Name: "write_file"},
 	})
 	a := NewSkillActivities([]skill.Skill{{Name: "market", Content: "MARKET SKILL"}}, c)
 
@@ -45,7 +47,8 @@ func TestLoadSkillsForAgent_PromptFollowsAllowlist(t *testing.T) {
 			t.Errorf("default prompt missing %q", want)
 		}
 	}
-	if len(out.AgentIDs) != 2 {
-		t.Errorf("agent IDs = %v", out.AgentIDs)
+	// "default" may delegate to "analyst" only: itself is not a legal target.
+	if len(out.DelegatableAgentIDs) != 1 || out.DelegatableAgentIDs[0] != "analyst" {
+		t.Errorf("delegatable agent IDs = %v, want [analyst]", out.DelegatableAgentIDs)
 	}
 }

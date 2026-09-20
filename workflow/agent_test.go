@@ -126,13 +126,14 @@ func TestAgentWorkflow_RequiresAgentID(t *testing.T) {
 }
 
 func TestBuildChildInput_SpawnSession(t *testing.T) {
-	known := map[string]bool{"default": true, "market-analyst": true}
+	// What LoadSkillsForAgent returns for "default": the catalog minus itself.
+	delegatable := map[string]bool{"market-analyst": true}
 	parent := AgentWorkflowInput{Model: "m"}
 
 	t.Run("target agent runs on the current queue", func(t *testing.T) {
 		res := activity.ToolResolution{WorkflowName: "AgentWorkflow", TaskQueue: "tools-core"}
 		name, in, err := buildChildInput("spawn_session", json.RawMessage(`{"task":"t","agent_id":"market-analyst"}`),
-			parent, "child", &res, []string{"default"}, "default", known, "agent")
+			parent, "child", &res, []string{"default"}, "default", delegatable, "agent")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -142,22 +143,28 @@ func TestBuildChildInput_SpawnSession(t *testing.T) {
 		}
 	})
 
-	t.Run("no agent_id spawns the current agent", func(t *testing.T) {
+	t.Run("no agent_id is refused", func(t *testing.T) {
 		res := activity.ToolResolution{WorkflowName: "AgentWorkflow"}
-		_, in, err := buildChildInput("spawn_session", json.RawMessage(`{"task":"t"}`),
-			parent, "child", &res, nil, "default", known, "agent")
-		if err != nil {
-			t.Fatal(err)
+		_, _, err := buildChildInput("spawn_session", json.RawMessage(`{"task":"t"}`),
+			parent, "child", &res, nil, "default", delegatable, "agent")
+		if err == nil || !strings.Contains(err.Error(), "requires agent_id") {
+			t.Errorf("got error %v, want a missing agent_id error", err)
 		}
-		if got := in.(AgentWorkflowInput).AgentID; got != "default" {
-			t.Errorf("child agent = %q, want default", got)
+	})
+
+	t.Run("delegating to itself is refused", func(t *testing.T) {
+		res := activity.ToolResolution{WorkflowName: "AgentWorkflow"}
+		_, _, err := buildChildInput("spawn_session", json.RawMessage(`{"task":"t","agent_id":"default"}`),
+			parent, "child", &res, nil, "default", delegatable, "agent")
+		if err == nil || !strings.Contains(err.Error(), "cannot delegate to itself") {
+			t.Errorf("got error %v, want a self-delegation error", err)
 		}
 	})
 
 	t.Run("unknown agent is refused", func(t *testing.T) {
 		res := activity.ToolResolution{WorkflowName: "AgentWorkflow"}
 		_, _, err := buildChildInput("spawn_session", json.RawMessage(`{"task":"t","agent_id":"ghost"}`),
-			parent, "child", &res, nil, "default", known, "agent")
+			parent, "child", &res, nil, "default", delegatable, "agent")
 		if err == nil || !strings.Contains(err.Error(), `unknown agent_id "ghost"`) {
 			t.Errorf("got error %v", err)
 		}
