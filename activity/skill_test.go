@@ -32,7 +32,7 @@ func TestLoadSkillsForAgent_PromptFollowsAllowlist(t *testing.T) {
 			t.Errorf("analyst prompt missing %q", want)
 		}
 	}
-	for _, unwanted := range []string{"exec", "spawn_session", "write_file", "Specialized Agents", "web_search"} {
+	for _, unwanted := range []string{"exec", "spawn_session", "write_file", "Agents Directory", "web_search"} {
 		if strings.Contains(p, unwanted) {
 			t.Errorf("analyst prompt must not mention %q", unwanted)
 		}

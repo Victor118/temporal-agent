@@ -183,11 +183,11 @@ func delegatableAgents(catalog []AgentCatalogEntry, currentAgentID string) []Age
 // delegated to, as returned by delegatableAgents.
 func buildAgentsDirectory(filtered []AgentCatalogEntry) string {
 	if len(filtered) == 0 {
-		return "## Specialized Agents\n\nNo specialized sub-agents are currently available. Do not invent agent IDs that are not listed here.\n\n"
+		return "## Agents Directory\n\nNo other agent is currently available to delegate to. Do not invent agent IDs that are not listed here.\n\n"
 	}
 
 	var sb strings.Builder
-	sb.WriteString("## Available Specialized Agents\n\n")
+	sb.WriteString("## Agents Directory\n\n")
 	sb.WriteString("You can delegate tasks to specialized agents using the `spawn_session` tool with the agent's `agent_id`. Only use agent IDs listed below — do not invent others.\n\n")
 
 	for _, entry := range filtered {
