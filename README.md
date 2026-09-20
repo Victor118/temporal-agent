@@ -17,10 +17,10 @@ lose the run — it resumes on another one.
 **Agents that delegate can run away.** An agent never sees itself in its own
 agents directory, which rules out the trivial case, but A delegating to B,
 which delegates back to A, is still a cycle — and its cost is exponential in
-depth. Every delegation therefore carries the chain of agents that led to it;
-turning that chain into an enforced depth and cycle bound, with the refusal
-returned to the model as a normal tool outcome so it can pick another route —
-reason it through itself, or ask — instead of failing, is the next step.
+depth. Every delegation therefore carries the chain of agents that led to it.
+Enforcing a depth and cycle bound on that chain is the next step, with the
+refusal returned to the model as a normal tool outcome — so it can pick another
+route, reason it through itself, or ask, instead of failing.
 
 **Waiting for a human should cost nothing.** Approval steps, clarifications
 and escalations are measured in hours, not seconds. A blocked agent parks on
