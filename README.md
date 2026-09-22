@@ -64,7 +64,7 @@ The system runs in three modes:
 ### Agents, Tools & Task Queues
 
 - **Agents** live in the `agents` table (source of truth). `agents.yaml` only seeds agents missing from the DB. Each agent has skills and an optional tool allowlist (globs, e.g. `github_*`).
-- **Task queues are capabilities**: each worker declares in its `worker.yaml` the queue it serves and the tools it exposes there, and publishes them to the `tools` table. Every tool call is routed to its tool's queue.
+- **Task queues are capabilities**: each worker declares in its `worker.yaml` the queue it serves and the tools it exposes there, and publishes them to the `tools` table. Every tool call is routed to its tool's queue. Every tool call becomes a Temporal activity task, persisted on the queue of the capability it needs and picked up by any worker in that pool. A tool scales by adding workers to its pool; a call is never lost — if the worker running it dies, Temporal hands it to another one. Delivery is at-least-once, so tools with side effects are expected to be idempotent.
 - **Workflows** (sessions, agents, LLM calls) run on a dedicated queue (`WORKFLOW_QUEUE`).
 
 See [docs/architecture.md](docs/architecture.md) for the full model.
