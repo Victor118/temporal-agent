@@ -149,3 +149,169 @@ func TestRunClaudeCodeNeverPersistsTheSession(t *testing.T) {
 		t.Fatalf("expected the missing workspace to be reported, got %v", err)
 	}
 }
+
+// commitFile adds a file and commits it, standing in for what a coding run does.
+func commitFile(t *testing.T, dir, name, content, message string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The identity is passed per-command: these tests run in the agent image,
+	// which has none, while the Claude Code image configures one globally so
+	// a run can commit.
+	ident := []string{"-c", "user.email=test@test", "-c", "user.name=test"}
+	for _, args := range [][]string{{"add", "."}, {"commit", "--quiet", "-m", message}} {
+		cmd := exec.Command("git", append(ident, args...)...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+}
+
+func TestInspectWorkspaceReportsWhatTheRunProduced(t *testing.T) {
+	src := initRepo(t)
+	a := &ClaudeCodeActivities{Root: t.TempDir()}
+	prepared, err := a.PrepareWorkspace(context.Background(), PrepareWorkspaceInput{
+		Name: "run-1", Repo: src, Branch: "agent/thing",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Nothing yet: the branch exists but carries no commit.
+	out, err := a.InspectWorkspace(context.Background(), InspectWorkspaceInput{Dir: prepared.Dir, Base: prepared.Commit})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Commits) != 0 || out.Dirty {
+		t.Errorf("fresh workspace: commits = %v, dirty = %v", out.Commits, out.Dirty)
+	}
+	if out.Branch != "agent/thing" {
+		t.Errorf("Branch = %q, want the branch the preparation created", out.Branch)
+	}
+
+	commitFile(t, prepared.Dir, "a.txt", "a", "feat: add a")
+	commitFile(t, prepared.Dir, "b.txt", "b", "feat: add b")
+
+	out, err = a.InspectWorkspace(context.Background(), InspectWorkspaceInput{Dir: prepared.Dir, Base: prepared.Commit})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Commits) != 2 {
+		t.Fatalf("commits = %v, want 2", out.Commits)
+	}
+	// git log lists newest first.
+	if out.Commits[0].Subject != "feat: add b" || out.Commits[1].Subject != "feat: add a" {
+		t.Errorf("commits = %+v", out.Commits)
+	}
+	if len(out.Commits[0].SHA) != 40 {
+		t.Errorf("SHA = %q, want a full sha", out.Commits[0].SHA)
+	}
+	if out.Dirty {
+		t.Error("nothing uncommitted, Dirty should be false")
+	}
+}
+
+// Changes the run never committed die with the workspace, so the caller has to
+// be told rather than left to assume the commits hold everything.
+func TestInspectWorkspaceSeesUncommittedChanges(t *testing.T) {
+	src := initRepo(t)
+	a := &ClaudeCodeActivities{Root: t.TempDir()}
+	prepared, err := a.PrepareWorkspace(context.Background(), PrepareWorkspaceInput{Name: "run-1", Repo: src})
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(prepared.Dir, "README.md"), []byte("edited, never committed\n"), 0o644)
+
+	out, err := a.InspectWorkspace(context.Background(), InspectWorkspaceInput{Dir: prepared.Dir, Base: prepared.Commit})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !out.Dirty {
+		t.Error("Dirty = false, want the uncommitted edit reported")
+	}
+	if len(out.Commits) != 0 {
+		t.Errorf("commits = %v, want none", out.Commits)
+	}
+}
+
+func TestPushBranchPublishesTheBranch(t *testing.T) {
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	if out, err := exec.Command("git", "init", "--quiet", "--bare", "--initial-branch", "main", remote).CombinedOutput(); err != nil {
+		t.Fatalf("init bare: %v: %s", err, out)
+	}
+	src := initRepo(t)
+	if out, err := exec.Command("git", "-C", src, "push", "--quiet", remote, "main").CombinedOutput(); err != nil {
+		t.Fatalf("seed remote: %v: %s", err, out)
+	}
+
+	a := &ClaudeCodeActivities{Root: t.TempDir()}
+	prepared, err := a.PrepareWorkspace(context.Background(), PrepareWorkspaceInput{
+		Name: "run-1", Repo: remote, Branch: "agent/thing",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitFile(t, prepared.Dir, "a.txt", "a", "feat: add a")
+
+	if err := a.PushBranch(context.Background(), PushBranchInput{
+		Dir: prepared.Dir, Remote: remote, Branch: "agent/thing",
+	}); err != nil {
+		t.Fatalf("PushBranch: %v", err)
+	}
+
+	out, err := exec.Command("git", "-C", remote, "log", "--format=%s", "agent/thing", "-1").Output()
+	if err != nil {
+		t.Fatalf("branch not on the remote: %v", err)
+	}
+	if strings.TrimSpace(string(out)) != "feat: add a" {
+		t.Errorf("remote branch tip = %q", out)
+	}
+}
+
+// The push is the one step where a credential meets a tree the run had write
+// access to. A hook the run dropped there must not run with it.
+func TestPushBranchIgnoresHooksLeftInTheWorkspace(t *testing.T) {
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	exec.Command("git", "init", "--quiet", "--bare", "--initial-branch", "main", remote).Run()
+	src := initRepo(t)
+	exec.Command("git", "-C", src, "push", "--quiet", remote, "main").Run()
+
+	a := &ClaudeCodeActivities{Root: t.TempDir()}
+	prepared, err := a.PrepareWorkspace(context.Background(), PrepareWorkspaceInput{
+		Name: "run-1", Repo: remote, Branch: "agent/thing",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitFile(t, prepared.Dir, "a.txt", "a", "feat: add a")
+
+	marker := filepath.Join(t.TempDir(), "hook-ran")
+	hook := filepath.Join(prepared.Dir, ".git", "hooks", "pre-push")
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\ntouch "+marker+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := a.PushBranch(context.Background(), PushBranchInput{
+		Dir: prepared.Dir, Remote: remote, Branch: "agent/thing",
+	}); err != nil {
+		t.Fatalf("PushBranch: %v", err)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("a pre-push hook from the workspace ran during the credential-bearing step")
+	}
+}
+
+func TestPushBranchRejectsIncompleteInput(t *testing.T) {
+	a := &ClaudeCodeActivities{Root: t.TempDir()}
+	for _, in := range []PushBranchInput{
+		{Remote: "r", Branch: "b"},
+		{Dir: "/d", Branch: "b"},
+		{Dir: "/d", Remote: "r"},
+	} {
+		if err := a.PushBranch(context.Background(), in); err == nil {
+			t.Errorf("PushBranch(%+v) should have been refused", in)
+		}
+	}
+}

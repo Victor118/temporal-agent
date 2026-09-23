@@ -45,6 +45,9 @@ type Config struct {
 	// Root for Claude Code run workspaces: one throwaway clone per run, kept
 	// apart from WorkspacePath, which the exec and filesystem tools share.
 	ClaudeCodeWorkspace string
+	// SSH identity used to push a coding run's branch. Only the worker that
+	// serves the write queue mounts one.
+	ClaudeCodeSSHKey string
 
 	// Skills
 	SkillsRepo          string // Git repo URL for skills (e.g. "https://github.com/org/agent-skills")
@@ -112,6 +115,7 @@ func Load() *Config {
 
 		WorkspacePath:       envOr("WORKSPACE_PATH", "./workspace"),
 		ClaudeCodeWorkspace: envOr("CLAUDE_CODE_WORKSPACE", "./claude-code-runs"),
+		ClaudeCodeSSHKey:    os.Getenv("CLAUDE_CODE_SSH_KEY"),
 
 		SkillsRepo:          os.Getenv("SKILLS_REPO"),
 		SkillsBranch:        envOr("SKILLS_BRANCH", "main"),

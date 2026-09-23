@@ -1,13 +1,12 @@
-# Worker config for the Claude Code container (WORKER_CONFIG).
+# Worker config for the writing Claude Code container (WORKER_CONFIG).
 #
-# The capability this queue offers is "run Claude Code in a Go environment".
-# Only the worker whose image carries the CLI serves it, so a coding run can
-# never be routed to a container that cannot perform one.
+# This is the worker that mounts a push credential (CLAUDE_CODE_SSH_KEY). A run
+# here can reach that key by executing commands, so what bounds the damage is
+# the key's own scope — a deploy key for the repositories these runs are meant
+# to touch, never a personal identity.
 queue: tools-claude-code
 
-# This worker does not serve sessions, agents or LLM calls: it polls its own
-# queue and nothing else.
 workflows: false
 
 tools:
-  - analyze_repo
+  - implement_feature

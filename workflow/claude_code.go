@@ -53,6 +53,14 @@ type ClaudeCodeOutput struct {
 	Ref    string `json:"ref,omitempty"`
 	Commit string `json:"commit,omitempty"`
 
+	// Set by the workflows that write. Branch is named before the run starts,
+	// so it is reported even when nothing was pushed to it.
+	Branch  string                `json:"branch,omitempty"`
+	Commits []activity.CommitInfo `json:"commits,omitempty"`
+	Pushed  bool                  `json:"pushed,omitempty"`
+	// Dirty reports changes the run left uncommitted; they died with the clone.
+	Dirty bool `json:"dirty,omitempty"`
+
 	CostUSD    float64        `json:"cost_usd,omitempty"`
 	DurationMS int64          `json:"duration_ms,omitempty"`
 	NumTurns   int            `json:"num_turns,omitempty"`
@@ -180,6 +188,19 @@ func (o ClaudeCodeOutput) Summary() string {
 			ref = "default branch"
 		}
 		fmt.Fprintf(&sb, "repo: %s (%s, %s)\n", o.Repo, ref, shortCommit(o.Commit))
+	}
+	if o.Branch != "" {
+		if o.Pushed {
+			fmt.Fprintf(&sb, "branch: %s (pushed, %d commits)\n", o.Branch, len(o.Commits))
+		} else {
+			fmt.Fprintf(&sb, "branch: %s (not pushed)\n", o.Branch)
+		}
+		for _, c := range o.Commits {
+			fmt.Fprintf(&sb, "  %s %s\n", shortCommit(c.SHA), c.Subject)
+		}
+	}
+	if o.Dirty {
+		sb.WriteString("note: the run left uncommitted changes, which were discarded with the clone\n")
 	}
 	fmt.Fprintf(&sb, "run: %d turns, %s, $%.4f",
 		o.NumTurns, (time.Duration(o.DurationMS) * time.Millisecond).Round(time.Second), o.CostUSD)
