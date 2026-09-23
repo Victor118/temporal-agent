@@ -334,3 +334,23 @@ func TestRunValidatesParams(t *testing.T) {
 		})
 	}
 }
+
+// An interrupted run never reaches the CLI's result line, so its duration has
+// to come from the wall clock. Reporting "0s" to someone diagnosing a timeout
+// is worse than reporting nothing.
+func TestInterruptedRunReportsHowLongItRan(t *testing.T) {
+	r := &Runner{Binary: fakeCLI(t, "echo '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}'\nsleep 60\n")}
+	ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
+	defer cancel()
+
+	res, err := r.Run(ctx, Params{Cwd: t.TempDir(), Task: "x"})
+	if err == nil {
+		t.Fatal("expected an interruption error")
+	}
+	if res.DurationMS < 1000 {
+		t.Errorf("DurationMS = %d, want the wall time the run actually took", res.DurationMS)
+	}
+	if strings.Contains(err.Error(), "after 0s") {
+		t.Errorf("error should say how long the run lasted, got: %v", err)
+	}
+}

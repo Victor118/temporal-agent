@@ -177,6 +177,7 @@ func (r *Runner) Run(ctx context.Context, p Params) (Result, error) {
 		return Result{}, fmt.Errorf("claudecode: stderr pipe: %w", err)
 	}
 
+	start := time.Now()
 	if err := cmd.Start(); err != nil {
 		return Result{}, fmt.Errorf("claudecode: cannot start %q: %w", r.binary(), err)
 	}
@@ -195,9 +196,16 @@ func (r *Runner) Run(ctx context.Context, p Params) (Result, error) {
 	waitErr := cmd.Wait()
 	res.ExitCode = cmd.ProcessState.ExitCode()
 	res.Stderr = tail.String()
+	if res.DurationMS == 0 {
+		// The CLI reports its own duration on the result line. An interrupted
+		// run never gets there, and a run that says it took no time at all is
+		// the least useful thing to hand someone diagnosing a timeout.
+		res.DurationMS = time.Since(start).Milliseconds()
+	}
 
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return res, fmt.Errorf("claudecode: run interrupted after %s: %w", time.Duration(res.DurationMS)*time.Millisecond, ctxErr)
+		return res, fmt.Errorf("claudecode: run interrupted after %s: %w",
+			time.Since(start).Round(time.Second), ctxErr)
 	}
 	if parseErr != nil {
 		return res, parseErr
