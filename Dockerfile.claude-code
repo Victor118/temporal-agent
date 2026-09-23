@@ -21,4 +21,4 @@ RUN git config --global user.email "agent@temporal-agent.local" \
 # Runs happen in /work. /app is mounted read-only by compose: a coding run
 # must not be able to edit the agent that started it.
 WORKDIR /work
-CMD ["sh", "-c", "go build -C /app -buildvcs=false -o /usr/local/bin/agent ./cmd/agent && exec sleep infinity"]
+CMD ["sh", "-c", "go build -C /app -buildvcs=false -o /usr/local/bin/agent ./cmd/agent && exec agent worker"]

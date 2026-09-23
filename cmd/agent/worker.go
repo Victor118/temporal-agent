@@ -64,6 +64,7 @@ func runWorker(cmd *cobra.Command, args []string) {
 		From:     cfg.SMTPFrom,
 	})
 	tool.RegisterSpawnTool(registry, workflow.AgentWorkflow)
+	tool.RegisterClaudeCodeTools(registry, workflow.AnalyzeRepoWorkflow)
 	tool.RegisterAskUserTool(registry, workflow.AskUserWorkflow)
 	tool.RegisterMemoryTools(registry, st)
 
@@ -145,10 +146,12 @@ func runWorker(cmd *cobra.Command, args []string) {
 		w.RegisterWorkflow(workflow.SessionWorkflow)
 		w.RegisterWorkflow(workflow.AgentWorkflow)
 		w.RegisterWorkflow(workflow.AskUserWorkflow)
+		w.RegisterWorkflow(workflow.AnalyzeRepoWorkflow)
 		w.RegisterWorkflow(workflow.ScheduledAgentWorkflow)
 
 		w.RegisterActivity(&activity.LLMActivities{Provider: llmProvider})
 		w.RegisterActivity(&activity.MemoryActivities{Store: st})
+		w.RegisterActivity(&activity.ClaudeCodeActivities{Root: cfg.ClaudeCodeWorkspace})
 		w.RegisterActivity(&activity.ToolActivities{Registry: registry, Catalog: catalog})
 		w.RegisterActivity(&activity.NotificationActivities{Hub: notifier, Telegram: tgClient})
 		w.RegisterActivity(&activity.DeliveryActivities{Hub: notifier, Store: st})

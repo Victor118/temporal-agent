@@ -42,6 +42,9 @@ type Config struct {
 
 	// Workspace
 	WorkspacePath string
+	// Root for Claude Code run workspaces: one throwaway clone per run, kept
+	// apart from WorkspacePath, which the exec and filesystem tools share.
+	ClaudeCodeWorkspace string
 
 	// Skills
 	SkillsRepo          string // Git repo URL for skills (e.g. "https://github.com/org/agent-skills")
@@ -107,7 +110,8 @@ func Load() *Config {
 		NotifyURL:    envOr("NOTIFY_URL", "http://localhost:9999"),
 		APIKey:       os.Getenv("API_KEY"),
 
-		WorkspacePath: envOr("WORKSPACE_PATH", "./workspace"),
+		WorkspacePath:       envOr("WORKSPACE_PATH", "./workspace"),
+		ClaudeCodeWorkspace: envOr("CLAUDE_CODE_WORKSPACE", "./claude-code-runs"),
 
 		SkillsRepo:          os.Getenv("SKILLS_REPO"),
 		SkillsBranch:        envOr("SKILLS_BRANCH", "main"),

@@ -1,0 +1,13 @@
+# Worker config for the Claude Code container (WORKER_CONFIG).
+#
+# The capability this queue offers is "run Claude Code in a Go environment".
+# Only the worker whose image carries the CLI serves it, so a coding run can
+# never be routed to a container that cannot perform one.
+queue: tools-claude-code
+
+# This worker does not serve sessions, agents or LLM calls: it polls its own
+# queue and nothing else.
+workflows: false
+
+tools:
+  - analyze_repo

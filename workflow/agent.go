@@ -670,6 +670,10 @@ func workflowToolContent(result json.RawMessage) string {
 	if err := json.Unmarshal(result, &agent); err == nil && agent.Response != "" {
 		return agent.Response
 	}
+	var coding ClaudeCodeOutput
+	if err := json.Unmarshal(result, &coding); err == nil && (coding.Report != "" || coding.Error != "") {
+		return coding.Summary()
+	}
 	return string(result)
 }
 
