@@ -103,6 +103,14 @@ func runWorker(cmd *cobra.Command, args []string) {
 	workerCfg.SetActivityQueues(loadActivityQueuesFromDB(st))
 	activity.SetGlobalWorkerConfig(workerCfg)
 
+	// Fail before polling a queue this worker could not serve to the end.
+	if err := checkPushKey(cfg.ClaudeCodeSSHKey); err != nil {
+		log.Fatalf("Push key: %v", err)
+	}
+	if cfg.ClaudeCodeSSHKey != "" {
+		log.Printf("Coding runs push with the identity at %s", cfg.ClaudeCodeSSHKey)
+	}
+
 	// Temporal client
 	temporalClient, err := client.Dial(client.Options{
 		HostPort:  cfg.TemporalHost,
