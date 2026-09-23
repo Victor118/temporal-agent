@@ -45,8 +45,10 @@ type Config struct {
 	// Root for Claude Code run workspaces: one throwaway clone per run, kept
 	// apart from WorkspacePath, which the exec and filesystem tools share.
 	ClaudeCodeWorkspace string
-	// SSH identity used to push a coding run's branch. Only the worker that
-	// serves the write queue mounts one.
+	// SSH identity a coding worker uses for git: cloning a private repository,
+	// and pushing when the identity allows it. What the worker can do is a
+	// property of the identity it is given, not of the code — the read-only
+	// worker is meant to hold one that cannot write anywhere.
 	ClaudeCodeSSHKey string
 
 	// Skills

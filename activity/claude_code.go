@@ -75,7 +75,17 @@ func (a *ClaudeCodeActivities) PrepareWorkspace(ctx context.Context, in PrepareW
 		return PrepareWorkspaceOutput{}, fmt.Errorf("prepare workspace: %w", err)
 	}
 
-	if out, err := a.git(ctx, "", "clone", "--quiet", in.Repo, dir); err != nil {
+	// The clone is the only step that reaches the network, and a private
+	// repository needs the worker's identity to answer at all. A worker with
+	// no identity clones what is public or local, and nothing else.
+	//
+	// --no-hardlinks matters only when Repo is a path on this filesystem: git
+	// would otherwise link the clone's objects to the source's rather than
+	// copy them, and the run has a shell. Git never rewrites an object in
+	// place, but `echo x > .git/objects/ab/cdef…` does, and through a hard
+	// link that lands in the source repository. Ignored for a remote URL,
+	// where there is nothing to link.
+	if out, err := a.gitEnv(ctx, "", a.sshEnv(), "clone", "--quiet", "--no-hardlinks", in.Repo, dir); err != nil {
 		return PrepareWorkspaceOutput{}, fmt.Errorf("clone %s: %w: %s", in.Repo, err, out)
 	}
 	if in.Ref != "" {
@@ -175,6 +185,20 @@ func (a *ClaudeCodeActivities) workspacePath(name string) (string, error) {
 // seconds rather than at the activity's timeout.
 func (a *ClaudeCodeActivities) git(ctx context.Context, dir string, args ...string) (string, error) {
 	return a.gitEnv(ctx, dir, nil, args...)
+}
+
+// sshEnv is the environment a git command needs to authenticate to a remote,
+// or nil when this worker holds no identity.
+//
+// IdentitiesOnly stops ssh from offering every other key it can find, so a
+// command can only reach what this one key opens.
+func (a *ClaudeCodeActivities) sshEnv() []string {
+	if a.SSHKeyPath == "" {
+		return nil
+	}
+	return []string{fmt.Sprintf(
+		"GIT_SSH_COMMAND=ssh -i %s -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new",
+		a.SSHKeyPath)}
 }
 
 // gitEnv is git with extra environment entries for this command only. Anything
@@ -287,19 +311,10 @@ func (a *ClaudeCodeActivities) PushBranch(ctx context.Context, in PushBranchInpu
 		return fmt.Errorf("push: dir, remote and branch are required")
 	}
 
-	var env []string
-	if a.SSHKeyPath != "" {
-		// IdentitiesOnly stops ssh from offering every other key it can find,
-		// so this push can only reach what this key opens.
-		env = append(env, fmt.Sprintf(
-			"GIT_SSH_COMMAND=ssh -i %s -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new",
-			a.SSHKeyPath))
-	}
-
 	// An explicit refspec: a tag the run happened to name like the branch
 	// must not be what gets published.
 	ref := "refs/heads/" + in.Branch
-	out, err := a.gitEnv(ctx, in.Dir, env,
+	out, err := a.gitEnv(ctx, in.Dir, a.sshEnv(),
 		"-c", "core.hooksPath=/dev/null",
 		"push", in.Remote, ref+":"+ref)
 	if err != nil {

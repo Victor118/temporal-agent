@@ -1,9 +1,10 @@
 # Worker config for the read-only Claude Code container (WORKER_CONFIG).
 #
-# Same image as the write worker, one difference: no credential is mounted
-# here. An analysis therefore runs on a machine where nothing can be pushed,
-# which makes "read-only" a property of the environment and not only of the
-# workflow's permission mode.
+# Same image as the write worker, one difference: the git identity mounted
+# here can read and nothing else. A private repository still needs one to be
+# cloned at all, so the guarantee is not "this container holds no secret" —
+# it is that the secret it holds cannot write anywhere. A run that reads the
+# key gains what it already had.
 queue: tools-claude-code-ro
 
 # This worker does not serve sessions, agents or LLM calls: it polls its own

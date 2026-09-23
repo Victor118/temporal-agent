@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -313,5 +314,75 @@ func TestPushBranchRejectsIncompleteInput(t *testing.T) {
 		if err := a.PushBranch(context.Background(), in); err == nil {
 			t.Errorf("PushBranch(%+v) should have been refused", in)
 		}
+	}
+}
+
+// The credential is built per command. It must never reach the worker's own
+// environment, which the Claude Code subprocess inherits wholesale.
+func TestSSHEnv(t *testing.T) {
+	if env := (&ClaudeCodeActivities{}).sshEnv(); env != nil {
+		t.Errorf("sshEnv = %v, want nil when no identity is configured", env)
+	}
+
+	env := (&ClaudeCodeActivities{SSHKeyPath: "/keys/deploy"}).sshEnv()
+	if len(env) != 1 {
+		t.Fatalf("sshEnv = %v, want one entry", env)
+	}
+	for _, want := range []string{"GIT_SSH_COMMAND=", "-i /keys/deploy", "IdentitiesOnly=yes"} {
+		if !strings.Contains(env[0], want) {
+			t.Errorf("sshEnv %q missing %q", env[0], want)
+		}
+	}
+	if os.Getenv("GIT_SSH_COMMAND") != "" {
+		t.Error("GIT_SSH_COMMAND leaked into the process environment")
+	}
+}
+
+// A worker that holds an identity must still clone what needs none.
+func TestPrepareWorkspaceWithAnIdentityConfigured(t *testing.T) {
+	src := initRepo(t)
+	a := &ClaudeCodeActivities{Root: t.TempDir(), SSHKeyPath: "/keys/deploy"}
+
+	out, err := a.PrepareWorkspace(context.Background(), PrepareWorkspaceInput{Name: "run-1", Repo: src})
+	if err != nil {
+		t.Fatalf("PrepareWorkspace: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(out.Dir, "README.md")); err != nil {
+		t.Errorf("clone is missing its content: %v", err)
+	}
+}
+
+// A local clone shares its objects with the source unless told otherwise, and
+// the run has a shell: a write through a hard link lands in the repository we
+// cloned from.
+func TestPrepareWorkspaceDoesNotShareObjectsWithTheSource(t *testing.T) {
+	src := initRepo(t)
+	a := &ClaudeCodeActivities{Root: t.TempDir()}
+
+	prepared, err := a.PrepareWorkspace(context.Background(), PrepareWorkspaceInput{Name: "run-1", Repo: src})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var objects int
+	err = filepath.WalkDir(filepath.Join(prepared.Dir, ".git", "objects"), func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		objects++
+		if st, ok := info.Sys().(*syscall.Stat_t); ok && st.Nlink > 1 {
+			t.Errorf("%s has %d links: the clone shares it with the source", path, st.Nlink)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if objects == 0 {
+		t.Fatal("no loose objects found, the test proved nothing")
 	}
 }

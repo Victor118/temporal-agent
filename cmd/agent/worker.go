@@ -104,11 +104,11 @@ func runWorker(cmd *cobra.Command, args []string) {
 	activity.SetGlobalWorkerConfig(workerCfg)
 
 	// Fail before polling a queue this worker could not serve to the end.
-	if err := checkPushKey(cfg.ClaudeCodeSSHKey); err != nil {
-		log.Fatalf("Push key: %v", err)
+	if err := checkGitKey(cfg.ClaudeCodeSSHKey); err != nil {
+		log.Fatalf("Git identity: %v", err)
 	}
 	if cfg.ClaudeCodeSSHKey != "" {
-		log.Printf("Coding runs push with the identity at %s", cfg.ClaudeCodeSSHKey)
+		log.Printf("Coding runs use the git identity at %s", cfg.ClaudeCodeSSHKey)
 	}
 
 	// Temporal client
