@@ -1,0 +1,24 @@
+# Image for running the Claude Code CLI.
+#
+# Deliberately not the agent image: this is where the arbitrary commands of a
+# coding run execute, and it will grow the toolchains of whatever repos it
+# works on — which have no business in the image that builds the agent.
+FROM golang:1.24
+
+# Pinned so a rebuild gets the same CLI. The installer fetches a native binary
+# (no Node runtime) and checks it against the SHA256 in the release manifest.
+ARG CLAUDE_CODE_VERSION=2.1.280
+RUN curl -fsSL https://claude.ai/install.sh | bash -s "$CLAUDE_CODE_VERSION"
+ENV PATH="/root/.local/bin:${PATH}"
+
+# Claude Code writes the commits; pushing stays the workflow's job. Without an
+# identity in the image, the commit fails halfway through a long run with a
+# message nobody is watching for.
+RUN git config --global user.email "agent@temporal-agent.local" \
+ && git config --global user.name "Temporal Agent" \
+ && git config --global --add safe.directory '*'
+
+# Runs happen in /work. /app is mounted read-only by compose: a coding run
+# must not be able to edit the agent that started it.
+WORKDIR /work
+CMD ["sh", "-c", "go build -C /app -buildvcs=false -o /usr/local/bin/agent ./cmd/agent && exec sleep infinity"]
