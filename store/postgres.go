@@ -33,8 +33,28 @@ func NewPostgresStore(databaseURL string) (*PostgresStore, error) {
 	return s, nil
 }
 
+// migrateLockID keys the advisory lock that serializes migrations: the server
+// and every worker migrate at startup, and two concurrent ALTER TABLE on the
+// same table deadlock.
+const migrateLockID = 7_431_906_215
+
 func (s *PostgresStore) migrate() error {
-	_, err := s.db.Exec(`
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec("SELECT pg_advisory_xact_lock($1)", migrateLockID); err != nil {
+		return fmt.Errorf("migration lock: %w", err)
+	}
+	if _, err := tx.Exec(schema); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+const schema = `
 		CREATE TABLE IF NOT EXISTS users (
 			id TEXT PRIMARY KEY,
 			name TEXT NOT NULL DEFAULT '',
@@ -94,10 +114,22 @@ func (s *PostgresStore) migrate() error {
 			name          TEXT NOT NULL,
 			description   TEXT NOT NULL DEFAULT '',
 			skills        JSONB NOT NULL DEFAULT '[]',
-			tools         JSONB,
+			tools         JSONB NOT NULL DEFAULT '[]',
 			created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		);
+		-- tools is a deny-by-default allowlist: [] grants nothing, ["*"] grants
+		-- everything. A NULL once meant "every tool"; close it on older tables.
+		-- Guarded so a migrated table is not locked again on every startup.
+		DO $$
+		BEGIN
+			IF EXISTS (SELECT 1 FROM information_schema.columns
+			           WHERE table_name = 'agents' AND column_name = 'tools' AND is_nullable = 'YES') THEN
+				UPDATE agents SET tools = '[]' WHERE tools IS NULL;
+				ALTER TABLE agents ALTER COLUMN tools SET DEFAULT '[]';
+				ALTER TABLE agents ALTER COLUMN tools SET NOT NULL;
+			END IF;
+		END $$;
 
 		CREATE TABLE IF NOT EXISTS skills_version (
 			id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
@@ -124,9 +156,7 @@ func (s *PostgresStore) migrate() error {
 			task_queue TEXT NOT NULL,
 			updated_at TIMESTAMPTZ DEFAULT NOW()
 		);
-	`)
-	return err
-}
+`
 
 func (s *PostgresStore) GetUserByTelegramID(ctx context.Context, telegramID int64) (*User, error) {
 	var u User
@@ -451,39 +481,36 @@ func (s *PostgresStore) GetAgent(ctx context.Context, agentID string) (*Agent, e
 }
 
 // marshalAgentLists encodes skills and tools for storage.
-// A nil Tools slice is stored as SQL NULL (no allowlist).
-func marshalAgentLists(agent Agent) (skills string, tools sql.NullString, err error) {
+// A nil Tools slice is stored as [] (no tool allowed), never as NULL.
+func marshalAgentLists(agent Agent) (skills, tools string, err error) {
 	if agent.Skills == nil {
 		agent.Skills = []string{}
 	}
+	if agent.Tools == nil {
+		agent.Tools = []string{}
+	}
 	b, err := json.Marshal(agent.Skills)
 	if err != nil {
-		return "", tools, err
+		return "", "", err
 	}
-	if agent.Tools != nil {
-		t, err := json.Marshal(agent.Tools)
-		if err != nil {
-			return "", tools, err
-		}
-		tools = sql.NullString{String: string(t), Valid: true}
+	t, err := json.Marshal(agent.Tools)
+	if err != nil {
+		return "", "", err
 	}
-	return string(b), tools, nil
+	return string(b), string(t), nil
 }
 
 func scanAgent(row interface{ Scan(...any) error }) (*Agent, error) {
 	var a Agent
-	var skillsJSON string
-	var toolsJSON sql.NullString
+	var skillsJSON, toolsJSON string
 	if err := row.Scan(&a.ID, &a.Name, &a.Description, &skillsJSON, &toolsJSON); err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal([]byte(skillsJSON), &a.Skills); err != nil {
 		return nil, fmt.Errorf("agent %s: decode skills: %w", a.ID, err)
 	}
-	if toolsJSON.Valid {
-		if err := json.Unmarshal([]byte(toolsJSON.String), &a.Tools); err != nil {
-			return nil, fmt.Errorf("agent %s: decode tools: %w", a.ID, err)
-		}
+	if err := json.Unmarshal([]byte(toolsJSON), &a.Tools); err != nil {
+		return nil, fmt.Errorf("agent %s: decode tools: %w", a.ID, err)
 	}
 	return &a, nil
 }

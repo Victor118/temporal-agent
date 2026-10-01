@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"regexp"
 
 	"gopkg.in/yaml.v3"
@@ -88,7 +89,7 @@ type AgentDefinition struct {
 	Name        string   `yaml:"name" json:"name"`
 	Description string   `yaml:"description" json:"description"`
 	Skills      []string `yaml:"skills" json:"skills"`
-	Tools       []string `yaml:"tools" json:"tools"` // Allowed tool name globs; omitted = all tools
+	Tools       []string `yaml:"tools" json:"tools"` // Allowed tool name globs; omitted = no tool, "*" = all
 }
 
 func Load() *Config {
@@ -171,8 +172,20 @@ func LoadAgentDefinitions(path string) ([]AgentDefinition, error) {
 		if a.Name == "" {
 			return nil, fmt.Errorf("%s: agent %q missing name", path, a.ID)
 		}
+		for _, g := range a.Tools {
+			if err := checkGlob(g); err != nil {
+				return nil, fmt.Errorf("%s: agent %q: invalid tool pattern %q: %w", path, a.ID, g, err)
+			}
+		}
 	}
 	return doc.Agents, nil
+}
+
+// checkGlob rejects a malformed tool pattern. Matching never reports it, so an
+// unchecked typo would silently match nothing instead of failing at load time.
+func checkGlob(g string) error {
+	_, err := path.Match(g, "")
+	return err
 }
 
 // parseMCPServers parses MCP_SERVERS env var as JSON array.

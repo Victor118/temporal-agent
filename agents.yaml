@@ -1,17 +1,47 @@
+# Seed only: agents missing from the DB are inserted at startup, existing ones
+# are never modified.
+#
+# tools is an allowlist of tool name globs, denied by default: an agent without
+# it gets no tool at all. "*" grants every tool and must be written explicitly.
 agents:
   - id: default
     name: Default Agent
     description: General-purpose assistant for everyday tasks.
     skills: []
+    tools:
+      - read_file
+      - list_directory
+      - glob
+      - grep
+      - web_search
+      - web_fetch
+      - ask_user
+      - save_user_memory
+      - schedule_task
+      - list_schedules
+      - cancel_schedule
+      - spawn_session
 
   - id: market-analyst
     name: Market Analyst
     description: Analyzes financial markets, performs trading research, summarizes market trends.
     skills:
       - market-research
+    tools:
+      - web_search
+      - web_fetch
+      - ask_user
+      - save_user_memory
 
   - id: code-reviewer
     name: Code Reviewer
     description: Reviews code changes, suggests improvements, checks for bugs and code quality.
     skills:
       - code-review
+    tools:
+      - read_file
+      - list_directory
+      - glob
+      - grep
+      - analyze_repo
+      - ask_user

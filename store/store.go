@@ -82,7 +82,7 @@ type Agent struct {
 	Name        string   `json:"name"`
 	Description string   `json:"description"`
 	Skills      []string `json:"skills"`
-	Tools       []string `json:"tools"` // Allowed tool name globs; nil = no allowlist (all tools)
+	Tools       []string `json:"tools"` // Allowed tool name globs; empty = no tool, "*" = all
 }
 
 // ToolRecord is a tool published by a worker: where it runs and its contract.

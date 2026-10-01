@@ -55,7 +55,9 @@ aux redémarrages, aux pannes de workers et aux attentes longues.
 
 6. **L'allowlist est appliquée par le code, pas par le prompt.**
    Un appel à un outil hors allowlist (hallucination, injection) produit un
-   `tool_result` d'erreur sans exécuter d'activity.
+   `tool_result` d'erreur sans exécuter d'activity. L'accès est refusé par
+   défaut : un agent sans allowlist, avec `[]`, ou inconnu n'a aucun outil ;
+   tout donner exige un `"*"` explicite.
 
 ## Composants
 
@@ -220,7 +222,6 @@ diagnostic.
 
 ## Questions ouvertes
 
-- Agent sans champ `tools` : tous les outils ou aucun ?
 - Un processus peut-il exposer plusieurs queues d'outils ?
 - Outils présents dans chaque binaire (fs, exec) : activés seulement là où
   `worker.yaml` les déclare ?

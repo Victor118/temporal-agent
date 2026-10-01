@@ -12,7 +12,7 @@ import (
 func TestLoadSkillsForAgent_PromptFollowsAllowlist(t *testing.T) {
 	c := NewCatalog()
 	c.SetAgents([]AgentCatalogEntry{
-		{ID: "default", Name: "Default"},
+		{ID: "default", Name: "Default", Tools: []string{"*"}},
 		{ID: "analyst", Name: "Analyst", Skills: []string{"market"}, Tools: []string{"web_*"}},
 	})
 	c.SetTools([]store.ToolRecord{

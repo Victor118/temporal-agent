@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log"
 	"os"
 	"reflect"
@@ -78,11 +77,7 @@ func initCatalog(st store.Store) *activity.Catalog {
 		log.Println("Warning: agents catalog is empty")
 	}
 	for _, a := range agents {
-		tools := "all"
-		if a.Tools != nil {
-			tools = fmt.Sprint(a.Tools)
-		}
-		log.Printf("Agent %q: skills %v, tools %s", a.ID, a.Skills, tools)
+		log.Printf("Agent %q: skills %v, tools %v", a.ID, a.Skills, a.Tools)
 	}
 	return catalog
 }

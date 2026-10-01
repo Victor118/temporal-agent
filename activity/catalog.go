@@ -50,17 +50,22 @@ func (c *Catalog) Tools() []store.ToolRecord {
 
 // AllowedTools returns the tools agentID may use, in catalog order (sorted by
 // name, so the prompt prefix stays stable), with how to dispatch each one.
-// An agent without an allowlist, or unknown, gets every tool.
+// Access is denied by default: an empty allowlist, or an unknown agent, gets
+// no tool at all. Granting everything takes an explicit "*".
 func (c *Catalog) AllowedTools(agentID string) ListToolsOutput {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
 	var allowlist []string
+	known := false
 	for _, a := range c.agents {
 		if a.ID == agentID {
-			allowlist = a.Tools
+			allowlist, known = a.Tools, true
 			break
 		}
+	}
+	if !known {
+		log.Printf("Warning: agent %q not in catalog, no tool allowed", agentID)
 	}
 
 	out := ListToolsOutput{
@@ -70,7 +75,7 @@ func (c *Catalog) AllowedTools(agentID string) ListToolsOutput {
 	delegatable := delegatableAgents(c.agents, agentID)
 
 	for _, t := range c.tools {
-		if allowlist != nil && !tool.MatchAny(allowlist, t.Name) {
+		if !tool.MatchAny(allowlist, t.Name) {
 			continue
 		}
 		schema := t.InputSchema

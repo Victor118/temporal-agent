@@ -15,9 +15,10 @@ const spawnTestSchema = `{"type":"object","properties":{"task":{"type":"string"}
 func testCatalog() *Catalog {
 	c := NewCatalog()
 	c.SetAgents([]AgentCatalogEntry{
-		{ID: "open"},
+		{ID: "open", Tools: []string{"*"}},
 		{ID: "restricted", Tools: []string{"github_*", "web_fetch"}},
 		{ID: "none", Tools: []string{}},
+		{ID: "unset"}, // Tools nil: what an agent without a tools field decodes to
 	})
 	c.SetTools([]store.ToolRecord{
 		{Name: "exec", Kind: "activity", TaskQueue: "tools-core"},
@@ -41,9 +42,12 @@ func TestCatalog_AllowedTools(t *testing.T) {
 	c := testCatalog()
 	cases := map[string][]string{
 		"open":       {"exec", "github_list", "spawn_session", "web_fetch"},
-		"unknown":    {"exec", "github_list", "spawn_session", "web_fetch"},
 		"restricted": {"github_list", "web_fetch"},
-		"none":       nil,
+		// Denied by default: no allowlist, an empty one, or an unknown agent
+		// grants nothing.
+		"none":    nil,
+		"unset":   nil,
+		"unknown": nil,
 	}
 	for agent, want := range cases {
 		out := c.AllowedTools(agent)
@@ -107,7 +111,7 @@ func TestCatalog_SpawnSchemaPinsDelegationTargets(t *testing.T) {
 	}
 
 	// Every other agent, sorted, and never the agent itself.
-	want := []string{"none", "restricted"}
+	want := []string{"none", "restricted", "unset"}
 	if !reflect.DeepEqual(doc.Properties.AgentID.Enum, want) {
 		t.Errorf("enum = %v, want %v", doc.Properties.AgentID.Enum, want)
 	}
@@ -129,7 +133,7 @@ func TestCatalog_SpawnSchemaIsStable(t *testing.T) {
 
 func TestCatalog_SpawnDroppedWithoutTargets(t *testing.T) {
 	c := NewCatalog()
-	c.SetAgents([]AgentCatalogEntry{{ID: "solo"}})
+	c.SetAgents([]AgentCatalogEntry{{ID: "solo", Tools: []string{"*"}}})
 	c.SetTools([]store.ToolRecord{
 		{Name: "exec", Kind: "activity", TaskQueue: "tools-core"},
 		{Name: SpawnToolName, Kind: "workflow", TaskQueue: "tools-core",
