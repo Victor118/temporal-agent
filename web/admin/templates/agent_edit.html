@@ -22,14 +22,33 @@
       <label for="f-desc">Description <span class="hint">montrée aux agents qui peuvent lui déléguer</span></label>
       <input type="text" id="f-desc" name="description" value="{{.Description}}">
 
+      {{/* Every keystroke or click in here refreshes the preview. */}}
+      <div hx-get="/admin/allowlist/preview" hx-trigger="input delay:300ms" hx-include="#agent-form" hx-target="#allowlist-preview">
       <label for="f-skills">Skills <span class="hint">un par ligne</span></label>
-      <textarea id="f-skills" name="skills" rows="3"
-        hx-get="/admin/allowlist/preview" hx-trigger="input changed delay:300ms" hx-include="#agent-form" hx-target="#allowlist-preview">{{.Skills}}</textarea>
+      <textarea id="f-skills" name="skills" rows="3">{{.Skills}}</textarea>
       {{with .AvailableSkills}}<p class="note">Disponibles : {{range .}}<span class="chip">{{.}}</span>{{end}}</p>{{end}}
 
-      <label for="f-tools">Allowlist <span class="hint">un motif par ligne : <code>read_file</code>, <code>github_*</code>, <code>*</code> pour tout. Vide = aucun tool.</span></label>
-      <textarea id="f-tools" name="tools" rows="8"
-        hx-get="/admin/allowlist/preview" hx-trigger="input changed delay:300ms" hx-include="#agent-form" hx-target="#allowlist-preview">{{.Tools}}</textarea>
+      <label>Tools <span class="hint">aucun coché = aucun tool</span></label>
+      <div class="picker">
+      {{range .Picker}}
+        <div class="picker-queue mono">{{.Queue}}</div>
+        {{range .Tools}}
+        <label class="pick" title="{{.Description}}">
+          <input type="checkbox" name="tool" value="{{.Name}}" {{if .Checked}}checked{{end}}>
+          <code>{{.Name}}</code>
+          {{if .Sensitive}}<span class="badge b-bad">sensible</span>{{end}}
+          <span id="via-{{.Name}}" class="via">{{with .Via}}via <code>{{.}}</code>{{end}}</span>
+          <span class="desc">{{.Description}}</span>
+        </label>
+        {{end}}
+      {{else}}
+        <p class="empty">Aucun tool publié : aucun worker n'a encore démarré.</p>
+      {{end}}
+      </div>
+
+      <label for="f-globs">Motifs avancés <span class="hint">un par ligne : <code>github_*</code>, <code>*</code> pour tout, ou le nom d'un tool absent de la liste</span></label>
+      <textarea id="f-globs" name="globs" rows="3">{{.Globs}}</textarea>
+      </div>
 
       <div class="actions">
         <button class="primary" type="submit">{{if .New}}Créer{{else}}Enregistrer{{end}}</button>
@@ -55,8 +74,18 @@
 
 {{/* What the allowlist being typed grants, from the dashboard's own computation. */}}
 {{define "allowlist_preview"}}
-{{with .}}
-{{range .Globs}}
+{{if .OOB}}{{range .Picker}}{{range .Tools}}<span id="via-{{.Name}}" class="via" hx-swap-oob="true">{{with .Via}}via <code>{{.}}</code>{{end}}</span>{{end}}{{end}}{{end}}
+{{with .Agent}}
+{{if .Tools}}
+<p class="note">
+  <b>{{len .Tools}}</b> tool{{if gt (len .Tools) 1}}s{{end}} accessible{{if gt (len .Tools) 1}}s{{end}}{{with .SensitiveCount}}, dont <span class="badge b-bad">{{.}} sensible{{if gt . 1}}s{{end}}</span>{{end}} :
+</p>
+<div>{{range .Tools}}<span class="chip{{if .Sensitive}} sens{{end}}">{{.Name}}</span>{{end}}</div>
+{{else}}
+<p class="empty">Aucun tool : rien n'est coché et aucun motif ne s'applique.</p>
+{{end}}
+
+{{range .Globs}}{{if not .Trivial}}
 <div class="glob">
   <code>{{.Pattern}}</code>
   <div>
@@ -64,15 +93,7 @@
     {{else}}{{range .Matches}}<span class="chip">{{.}}</span>{{else}}<span class="badge b-warn">ne correspond à aucun tool publié</span>{{end}}{{end}}
   </div>
 </div>
-{{else}}
-<p class="empty">Allowlist vide : aucun tool.</p>
-{{end}}
-
-<p class="note">
-  <b>{{len .Tools}}</b> tool{{if gt (len .Tools) 1}}s{{end}} accessible{{if gt (len .Tools) 1}}s{{end}}
-  {{with .SensitiveCount}}, dont <span class="badge b-bad">{{.}} sensible{{if gt . 1}}s{{end}}</span>{{end}} :
-</p>
-<div>{{range .Tools}}<span class="chip{{if .Sensitive}} sens{{end}}">{{.Name}}</span>{{end}}</div>
+{{end}}{{end}}
 
 {{range .DelegatesTo}}{{if .Extra}}
 <p class="note">En déléguant à <code>{{.AgentID}}</code>, il atteint aussi :

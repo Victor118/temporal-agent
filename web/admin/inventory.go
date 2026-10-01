@@ -258,6 +258,12 @@ func globView(pattern string, tools []store.ToolRecord) GlobView {
 	return gv
 }
 
+// Trivial reports whether the pattern is a plain tool name matching only
+// itself: it says nothing a checked box does not already show.
+func (g GlobView) Trivial() bool {
+	return !g.Invalid && len(g.Matches) == 1 && g.Matches[0] == g.Pattern
+}
+
 func firstMatch(globs []string, name string) string {
 	for _, g := range globs {
 		if ok, _ := path.Match(g, name); ok {

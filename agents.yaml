@@ -21,6 +21,7 @@ agents:
       - list_schedules
       - cancel_schedule
       - spawn_session
+      - analyze_repo
 
   - id: market-analyst
     name: Market Analyst

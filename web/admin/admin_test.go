@@ -221,19 +221,20 @@ func TestCreateAgent(t *testing.T) {
 	c := login(t, h)
 
 	w := do(h, http.MethodPost, "/admin/agents", url.Values{
-		"id": {"writer"}, "name": {"Writer"}, "skills": {"a\n\nb\na"}, "tools": {" read_file \nweb_*\n"},
+		"id": {"writer"}, "name": {"Writer"}, "skills": {"a\n\nb\na"}, "tool": {"read_file", "exec"}, "globs": {" web_* \nread_file\n"},
 	}, c)
 	if w.Code != http.StatusSeeOther || !strings.HasPrefix(w.Header().Get("Location"), "/admin/agents/writer?saved=") {
 		t.Fatalf("create: %d %q %s", w.Code, w.Header().Get("Location"), w.Body)
 	}
 	got, _ := st.GetAgent(context.Background(), "writer")
-	if !reflect.DeepEqual(got.Tools, []string{"read_file", "web_*"}) || !reflect.DeepEqual(got.Skills, []string{"a", "b"}) {
+	// Checked tools first, then the patterns, without the duplicate.
+	if !reflect.DeepEqual(got.Tools, []string{"read_file", "exec", "web_*"}) || !reflect.DeepEqual(got.Skills, []string{"a", "b"}) {
 		t.Errorf("stored %+v", got)
 	}
 
 	// An empty allowlist is stored as [], never nil: nil would read as "no
 	// allowlist" to older code.
-	do(h, http.MethodPost, "/admin/agents", url.Values{"id": {"quiet"}, "name": {"Quiet"}, "tools": {"\n  \n"}}, c)
+	do(h, http.MethodPost, "/admin/agents", url.Values{"id": {"quiet"}, "name": {"Quiet"}, "globs": {"\n  \n"}}, c)
 	if q, _ := st.GetAgent(context.Background(), "quiet"); q == nil || q.Tools == nil || len(q.Tools) != 0 {
 		t.Errorf("quiet = %+v", q)
 	}
@@ -242,7 +243,7 @@ func TestCreateAgent(t *testing.T) {
 		"duplicate":    {"id": {"coder"}, "name": {"Again"}},
 		"invalid id":   {"id": {"Bad_ID"}, "name": {"Bad"}},
 		"no name":      {"id": {"nameless"}},
-		"invalid glob": {"id": {"globby"}, "name": {"Globby"}, "tools": {"read_[file"}},
+		"invalid glob": {"id": {"globby"}, "name": {"Globby"}, "globs": {"read_[file"}},
 	} {
 		before := len(st.agents)
 		w := do(h, http.MethodPost, "/admin/agents", form, c)
@@ -257,7 +258,7 @@ func TestUpdateAgent_Revision(t *testing.T) {
 	h := handler(a)
 	c := login(t, h)
 
-	form := url.Values{"name": {"Coder 2"}, "tools": {"exec\nread_file"}, "revision": {"1"}}
+	form := url.Values{"name": {"Coder 2"}, "tool": {"exec", "read_file"}, "revision": {"1"}}
 	if w := do(h, http.MethodPost, "/admin/agents/coder", form, c); w.Code != http.StatusSeeOther {
 		t.Fatalf("update: %d %s", w.Code, w.Body)
 	}
@@ -306,13 +307,31 @@ func TestAllowlistPreview(t *testing.T) {
 	h := handler(a)
 	c := login(t, h)
 
-	w := do(h, http.MethodGet, "/admin/allowlist/preview", url.Values{"id": {"default"}, "tools": {"exec\nnope_*"}}, c)
+	w := do(h, http.MethodGet, "/admin/allowlist/preview", url.Values{"id": {"default"}, "tool": {"exec"}, "globs": {"nope_*\nread_*"}}, c)
 	body := w.Body.String()
 	if w.Code != 200 || !strings.Contains(body, `chip sens">exec`) || !strings.Contains(body, "ne correspond à aucun tool") {
 		t.Errorf("preview: %d %s", w.Code, body)
 	}
+	// The picker's "via" badges are refreshed out of band, not re-rendered.
+	if !strings.Contains(body, `id="via-read_file" class="via" hx-swap-oob="true">via <code>read_*</code>`) {
+		t.Errorf("preview misses the via badge of read_file: %s", body)
+	}
 	// A new agent whose ID is not typed yet still gets a preview.
-	if w := do(h, http.MethodGet, "/admin/allowlist/preview", url.Values{"tools": {"*"}}, c); !strings.Contains(w.Body.String(), "2</b> tools") {
+	if w := do(h, http.MethodGet, "/admin/allowlist/preview", url.Values{"globs": {"*"}}, c); !strings.Contains(w.Body.String(), "2</b> tools") {
 		t.Errorf("preview without id: %s", w.Body)
+	}
+}
+
+func TestFormFromAgent_SplitsAllowlist(t *testing.T) {
+	tools := []store.ToolRecord{{Name: "exec"}, {Name: "read_file"}}
+	f := formFromAgent(store.Agent{ID: "a", Tools: []string{"read_file", "github_*", "implement_feature"}}, tools)
+
+	// A published name is a checkbox. A pattern, or a tool whose worker is
+	// down, stays text: saving the form must give the same allowlist back.
+	if !reflect.DeepEqual(f.Picked, []string{"read_file"}) || f.Globs != "github_*\nimplement_feature" {
+		t.Errorf("picked %v, globs %q", f.Picked, f.Globs)
+	}
+	if got := f.allowlist(); !reflect.DeepEqual(got, []string{"read_file", "github_*", "implement_feature"}) {
+		t.Errorf("round trip = %v", got)
 	}
 }

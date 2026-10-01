@@ -32,37 +32,85 @@ type agentForm struct {
 	Name        string
 	Description string
 	Skills      string // one per line
-	Tools       string // one glob per line
-	Revision    int64
-	Error       string
-	IsDefault   bool
+	// The allowlist, split in two: published tools checked by name, and
+	// everything else (patterns, names of tools not published right now), one
+	// per line. Saving joins them back.
+	Picked    []string
+	Globs     string
+	Revision  int64
+	Error     string
+	IsDefault bool
 	// Known skills, offered as suggestions.
 	AvailableSkills []string
-	// Preview is the agent as the allowlist being typed would make it.
-	Preview *AgentView
+	Picker          []PickerGroup
+	Preview         previewData
 }
 
-func formFromAgent(a store.Agent) agentForm {
-	return agentForm{
+// PickerGroup is one queue's tools in the allowlist picker.
+type PickerGroup struct {
+	Queue string
+	Tools []PickerTool
+}
+
+type PickerTool struct {
+	*ToolView
+	Checked bool
+	Via     string // the advanced pattern that already grants the tool
+}
+
+// previewData is what the allowlist being edited grants.
+type previewData struct {
+	Agent  *AgentView
+	Picker []PickerGroup
+	// OOB is set on a live refresh: the response then also updates the "via"
+	// badges of the picker, out of band, without re-rendering its checkboxes.
+	OOB bool
+}
+
+// formFromAgent fills the form from a stored agent. An entry naming a
+// published tool becomes a checkbox; anything else stays text, so that saving
+// never drops a pattern or a tool whose worker happens to be down.
+func formFromAgent(a store.Agent, tools []store.ToolRecord) agentForm {
+	published := make(map[string]bool, len(tools))
+	for _, t := range tools {
+		published[t.Name] = true
+	}
+	f := agentForm{
 		ID:          a.ID,
 		Name:        a.Name,
 		Description: a.Description,
 		Skills:      strings.Join(a.Skills, "\n"),
-		Tools:       strings.Join(a.Tools, "\n"),
 		Revision:    a.Revision,
 	}
+	var globs []string
+	for _, g := range a.Tools {
+		if published[g] {
+			f.Picked = append(f.Picked, g)
+		} else {
+			globs = append(globs, g)
+		}
+	}
+	f.Globs = strings.Join(globs, "\n")
+	return f
 }
 
 func formFromRequest(r *http.Request) agentForm {
+	r.ParseForm()
 	rev, _ := strconv.ParseInt(r.FormValue("revision"), 10, 64)
 	return agentForm{
 		ID:          strings.TrimSpace(r.FormValue("id")),
 		Name:        strings.TrimSpace(r.FormValue("name")),
 		Description: strings.TrimSpace(r.FormValue("description")),
 		Skills:      r.FormValue("skills"),
-		Tools:       r.FormValue("tools"),
+		Picked:      r.Form["tool"],
+		Globs:       r.FormValue("globs"),
 		Revision:    rev,
 	}
+}
+
+// allowlist is what the form grants: the checked tools, then the patterns.
+func (f agentForm) allowlist() []string {
+	return lines(strings.Join(f.Picked, "\n") + "\n" + f.Globs)
 }
 
 // agent turns the form into an agent, validated like a seed entry.
@@ -72,7 +120,7 @@ func (f agentForm) agent() (store.Agent, error) {
 		Name:        f.Name,
 		Description: f.Description,
 		Skills:      lines(f.Skills),
-		Tools:       lines(f.Tools),
+		Tools:       f.allowlist(),
 	}
 	if err := def.Validate(); err != nil {
 		return store.Agent{}, err
@@ -105,8 +153,28 @@ func (a *Admin) renderForm(w http.ResponseWriter, r *http.Request, f agentForm) 
 		f.AvailableSkills = append(f.AvailableSkills, s.Name)
 	}
 	f.IsDefault = !f.New && f.ID == a.cfg.DefaultAgentID
-	f.Preview = preview(snap.in, f)
+	f.Picker = buildPicker(snap.inv, f)
+	f.Preview = previewData{Agent: preview(snap.in, f), Picker: f.Picker}
 	a.pages.page(w, "agent_edit", pageData{Nav: "agents", Inv: snap.inv, Data: f})
+}
+
+// buildPicker lists the published tools by queue, checked as in the form, and
+// marked when one of the form's patterns already grants them.
+func buildPicker(inv *Inventory, f agentForm) []PickerGroup {
+	globs := lines(f.Globs)
+	var groups []PickerGroup
+	for _, qt := range inv.ToolsByQueue() {
+		g := PickerGroup{Queue: qt.Queue.Name}
+		for _, tv := range qt.Tools {
+			g.Tools = append(g.Tools, PickerTool{
+				ToolView: tv,
+				Checked:  slices.Contains(f.Picked, tv.Name),
+				Via:      firstMatch(globs, tv.Name),
+			})
+		}
+		groups = append(groups, g)
+	}
+	return groups
 }
 
 // preview builds the inventory as if the form were saved, so what it shows
@@ -116,7 +184,7 @@ func preview(in Inputs, f agentForm) *AgentView {
 	if id == "" {
 		id = previewID
 	}
-	candidate := store.Agent{ID: id, Name: f.Name, Skills: lines(f.Skills), Tools: lines(f.Tools)}
+	candidate := store.Agent{ID: id, Name: f.Name, Skills: lines(f.Skills), Tools: f.allowlist()}
 
 	agents := make([]store.Agent, 0, len(in.Agents)+1)
 	replaced := false
@@ -149,7 +217,12 @@ func (a *Admin) editAgentForm(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	a.renderForm(w, r, formFromAgent(*ag))
+	tools, err := a.cfg.Store.ListTools(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	a.renderForm(w, r, formFromAgent(*ag, tools))
 }
 
 func (a *Admin) createAgent(w http.ResponseWriter, r *http.Request) {
@@ -221,7 +294,12 @@ func (a *Admin) allowlistPreview(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	a.pages.execute(w, "agent_edit", "allowlist_preview", preview(snap.in, formFromRequest(r)))
+	f := formFromRequest(r)
+	a.pages.execute(w, "agent_edit", "allowlist_preview", previewData{
+		Agent:  preview(snap.in, f),
+		Picker: buildPicker(snap.inv, f),
+		OOB:    true,
+	})
 }
 
 func (a *Admin) reloadSkills(w http.ResponseWriter, r *http.Request) {

@@ -127,7 +127,6 @@ button.danger { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 5
 .error { background: var(--bad-bg); border: 1px solid color-mix(in srgb, var(--bad) 40%, var(--border)); padding: 10px 14px; border-radius: 8px; margin-bottom: 16px; }
 
 form.edit label { display: block; font-weight: 600; color: var(--heading); margin: 14px 0 4px; }
-form.edit label:first-child { margin-top: 0; }
 form.edit .hint { color: var(--muted); font-size: 12.5px; font-weight: 400; }
 form.edit input[type=text], form.edit textarea, .login input[type=password] {
   font: inherit; width: 100%; background: var(--bg); color: var(--text);
@@ -140,3 +139,11 @@ form.edit input[readonly] { color: var(--muted); }
 
 .login { max-width: 360px; margin: 12vh auto 0; }
 .login form { display: flex; flex-direction: column; gap: 10px; }
+
+.picker { border: 1px solid var(--border-strong); border-radius: 6px; max-height: 360px; overflow-y: auto; padding: 4px 0; }
+.picker-queue { font-size: 11.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; padding: 8px 10px 2px; }
+form.edit label.pick { display: flex; align-items: center; gap: 8px; margin: 0; padding: 4px 10px; font-weight: 400; color: var(--text); cursor: pointer; min-width: 0; }
+form.edit label.pick:hover { background: rgba(127,127,127,.06); }
+.pick code { flex-shrink: 0; }
+.pick .via { color: var(--info); font-size: 12px; flex-shrink: 0; }
+.pick .desc { color: var(--muted); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }

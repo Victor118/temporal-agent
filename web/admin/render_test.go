@@ -21,8 +21,9 @@ func TestRender_AllPages(t *testing.T) {
 		"queues":   nil,
 		"skills":   nil,
 		"skill":    inv.Skill("present"),
-		"agent_edit": agentForm{ID: "boss", Name: "Boss", Tools: "read_file\nspawn_session",
-			Error: "boom", Preview: inv.Agent("boss")},
+		"agent_edit": agentForm{ID: "boss", Name: "Boss", Picked: []string{"read_file"}, Globs: "spawn_*",
+			Error: "boom", Picker: buildPicker(inv, agentForm{Picked: []string{"read_file"}, Globs: "spawn_*"}),
+			Preview: previewData{Agent: inv.Agent("boss")}},
 	}
 	for name, data := range pages {
 		w := httptest.NewRecorder()
@@ -37,7 +38,8 @@ func TestRender_AllPages(t *testing.T) {
 	}
 
 	preview := httptest.NewRecorder()
-	r.execute(preview, "agent_edit", "allowlist_preview", inv.Agent("boss"))
+	r.execute(preview, "agent_edit", "allowlist_preview", previewData{Agent: inv.Agent("boss"), OOB: true,
+		Picker: buildPicker(inv, agentForm{Globs: "spawn_*"})})
 	if preview.Code != 200 || !strings.Contains(preview.Body.String(), "spawn_session") {
 		t.Errorf("allowlist preview: status %d, body %s", preview.Code, preview.Body)
 	}
