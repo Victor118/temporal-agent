@@ -18,12 +18,13 @@ var templateFS embed.FS
 // pageNames are the templates/<name>.html pages. Each gets its own template
 // set (base + partials + the page), so every page can define "content"
 // without colliding with the others.
-var pageNames = []string{"overview", "agents", "agent", "tools", "tool", "queues", "skills", "skill"}
+var pageNames = []string{"overview", "agents", "agent", "agent_edit", "tools", "tool", "queues", "skills", "skill", "login"}
 
 type pageData struct {
-	Nav  string
-	Inv  *Inventory
-	Data any
+	Nav   string
+	Inv   *Inventory
+	Data  any
+	Flash string // one-line confirmation of the last action
 }
 
 type renderer struct {
@@ -51,7 +52,7 @@ func (r *renderer) fragment(w http.ResponseWriter, page, block string, data page
 
 // execute renders into a buffer first, so a template error yields a 500
 // instead of half a page.
-func (r *renderer) execute(w http.ResponseWriter, set, block string, data pageData) {
+func (r *renderer) execute(w http.ResponseWriter, set, block string, data any) {
 	var buf bytes.Buffer
 	if err := r.sets[set].ExecuteTemplate(&buf, block, data); err != nil {
 		log.Printf("admin: render %s/%s: %v", set, block, err)

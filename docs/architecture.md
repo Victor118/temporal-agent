@@ -190,8 +190,9 @@ diagnostic.
 
 ## État actuel (écarts avec la cible)
 
-- **Back-office en lecture seule** (`/admin`) : rien n'édite encore les agents
-  ni leur allowlist, seul le seed `agents.yaml` les alimente.
+- **Back-office** (`/admin`) : édite les agents (allowlist comprise), protégé
+  par un mot de passe unique (`ADMIN_API_KEY`). Pas encore de comptes
+  utilisateurs ni d'historique des modifications.
 - **Tous les workflows et activities sont enregistrés sur toutes les queues**
   d'un worker, y compris sa queue d'outils. Les outils de type workflow
   (`ask_user`) tournent donc sur la queue de l'outil.
@@ -207,7 +208,7 @@ diagnostic.
 2. **Backend minimal** (fait)
    - table `tools`, publiée par les workers depuis `worker.yaml` ;
    - table `agents` qui fait foi (+ colonne `tools`), écrite par le serveur
-     seul, seed depuis `agents.yaml` (insertion des agents absents).
+     seul, seed depuis `agents.yaml` (appliqué seulement si la table est vide).
 3. **Dispatch par outil** (fait) : catalogue en mémoire sur les workers,
    `ListTools(agentID)`, allowlist appliquée, routage vers la queue de l'outil.
 4. **Agent identifié par `agent_id`** (fait) : `spawn_session(agent_id)`,
@@ -216,7 +217,9 @@ diagnostic.
    Sessions d'outils à état sur la queue des outils, validées.
 5. **UI en lecture seule** (fait) : `/admin`, agents, outils par queue, queues
    et leurs pollers, skills, alertes de configuration.
-6. **UI d'édition des agents** : skills, allowlist, description.
+6. **UI d'édition des agents** (fait) : création, nom, description, skills,
+   allowlist avec aperçu, suppression ; seed seulement sur table vide ;
+   révision pour refuser une modification faite sur une copie périmée.
 7. **`ClaudeCodeWorkflow`.**
 8. **Arbre d'exécution et questions utilisateur** (`agent_executions`,
    `user_questions`, refonte d'`AskUserWorkflow`).

@@ -21,6 +21,8 @@ func TestRender_AllPages(t *testing.T) {
 		"queues":   nil,
 		"skills":   nil,
 		"skill":    inv.Skill("present"),
+		"agent_edit": agentForm{ID: "boss", Name: "Boss", Tools: "read_file\nspawn_session",
+			Error: "boom", Preview: inv.Agent("boss")},
 	}
 	for name, data := range pages {
 		w := httptest.NewRecorder()
@@ -34,9 +36,24 @@ func TestRender_AllPages(t *testing.T) {
 		}
 	}
 
-	for _, f := range []struct{ set, block string }{{"queues", "queue_cards"}, {"agent", "prompt"}} {
+	preview := httptest.NewRecorder()
+	r.execute(preview, "agent_edit", "allowlist_preview", inv.Agent("boss"))
+	if preview.Code != 200 || !strings.Contains(preview.Body.String(), "spawn_session") {
+		t.Errorf("allowlist preview: status %d, body %s", preview.Code, preview.Body)
+	}
+
+	login := httptest.NewRecorder()
+	r.execute(login, "login", "login", pageData{Data: loginData{Enabled: true, Error: "nope"}})
+	if login.Code != 200 || !strings.Contains(login.Body.String(), `name="password"`) {
+		t.Errorf("login: status %d, body %s", login.Code, login.Body)
+	}
+
+	for _, f := range []struct {
+		set, block string
+		data       any
+	}{{"queues", "queue_cards", nil}, {"agent", "prompt", "PROMPT"}} {
 		w := httptest.NewRecorder()
-		r.fragment(w, f.set, f.block, pageData{Inv: inv, Data: "PROMPT"})
+		r.fragment(w, f.set, f.block, pageData{Inv: inv, Data: f.data})
 		if w.Code != 200 || strings.Contains(w.Body.String(), "<html") {
 			t.Errorf("%s/%s: status %d, body %q", f.set, f.block, w.Code, w.Body)
 		}

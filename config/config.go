@@ -40,6 +40,7 @@ type Config struct {
 	InternalAddr string // Internal endpoint for worker→server notifications
 	NotifyURL    string // Base URL the worker POSTs notifications to
 	APIKey       string // Shared secret for auth (required in production)
+	AdminAPIKey  string // Back-office password; empty = back-office closed
 
 	// Workspace
 	WorkspacePath string
@@ -115,6 +116,7 @@ func Load() *Config {
 		InternalAddr: envOr("INTERNAL_ADDR", ":9999"),
 		NotifyURL:    envOr("NOTIFY_URL", "http://localhost:9999"),
 		APIKey:       os.Getenv("API_KEY"),
+		AdminAPIKey:  os.Getenv("ADMIN_API_KEY"),
 
 		WorkspacePath:       envOr("WORKSPACE_PATH", "./workspace"),
 		ClaudeCodeWorkspace: envOr("CLAUDE_CODE_WORKSPACE", "./claude-code-runs"),
@@ -162,28 +164,37 @@ func LoadAgentDefinitions(path string) ([]AgentDefinition, error) {
 
 	seen := make(map[string]bool, len(doc.Agents))
 	for i, a := range doc.Agents {
-		if !agentIDPattern.MatchString(a.ID) {
-			return nil, fmt.Errorf("%s: agent[%d] invalid id %q (must match %s)", path, i, a.ID, agentIDPattern.String())
+		if err := a.Validate(); err != nil {
+			return nil, fmt.Errorf("%s: agent[%d]: %w", path, i, err)
 		}
 		if seen[a.ID] {
 			return nil, fmt.Errorf("%s: duplicate agent id %q", path, a.ID)
 		}
 		seen[a.ID] = true
-		if a.Name == "" {
-			return nil, fmt.Errorf("%s: agent %q missing name", path, a.ID)
-		}
-		for _, g := range a.Tools {
-			if err := checkGlob(g); err != nil {
-				return nil, fmt.Errorf("%s: agent %q: invalid tool pattern %q: %w", path, a.ID, g, err)
-			}
-		}
 	}
 	return doc.Agents, nil
 }
 
-// checkGlob rejects a malformed tool pattern. Matching never reports it, so an
-// unchecked typo would silently match nothing instead of failing at load time.
-func checkGlob(g string) error {
+// Validate checks an agent definition on its own, wherever it comes from: the
+// seed file or the back-office.
+func (a AgentDefinition) Validate() error {
+	if !agentIDPattern.MatchString(a.ID) {
+		return fmt.Errorf("invalid id %q (must match %s)", a.ID, agentIDPattern.String())
+	}
+	if a.Name == "" {
+		return fmt.Errorf("agent %q missing name", a.ID)
+	}
+	for _, g := range a.Tools {
+		if err := CheckToolGlob(g); err != nil {
+			return fmt.Errorf("agent %q: invalid tool pattern %q: %w", a.ID, g, err)
+		}
+	}
+	return nil
+}
+
+// CheckToolGlob rejects a malformed tool pattern. Matching never reports it, so
+// an unchecked typo would silently match nothing instead of failing on save.
+func CheckToolGlob(g string) error {
 	_, err := path.Match(g, "")
 	return err
 }

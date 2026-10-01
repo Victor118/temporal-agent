@@ -23,41 +23,61 @@ var staticFS embed.FS
 
 // Config wires the back-office to the server's state.
 type Config struct {
-	Store          store.Store
-	Temporal       client.Client
-	Skills         func() []skill.Skill // the skills the server currently holds
-	SkillsSource   string               // where they come from, "" = not loaded
-	DefaultAgentID string
-	WorkflowQueue  string
+	Store        store.Store
+	Temporal     client.Client
+	Skills       func() []skill.Skill // the skills the server currently holds
+	SkillsSource string               // where they come from, "" = not loaded
+	// SkillsReloadable: the skills come from a repo that the server and the
+	// workers reload when skills_version moves.
+	SkillsReloadable bool
+	DefaultAgentID   string
+	WorkflowQueue    string
+	AdminKey         string // the back-office password; "" = closed
 }
 
 type Admin struct {
-	cfg    Config
-	prober *queueProber
-	pages  *renderer
+	cfg      Config
+	prober   *queueProber
+	pages    *renderer
+	sessions *sessionStore
 }
 
 func New(cfg Config) *Admin {
-	return &Admin{cfg: cfg, prober: newQueueProber(cfg.Temporal), pages: newRenderer()}
+	return &Admin{cfg: cfg, prober: newQueueProber(cfg.Temporal), pages: newRenderer(), sessions: newSessionStore()}
 }
 
 // Routes returns the back-office router, to be mounted under /admin.
 func (a *Admin) Routes() http.Handler {
 	r := chi.NewRouter()
+	r.Use(sameOrigin)
 
 	static, _ := fs.Sub(staticFS, "static")
 	r.Handle("/static/*", http.StripPrefix("/admin/static/", shortCache(http.FileServer(http.FS(static)))))
+	r.Get("/login", a.loginPage)
+	r.Post("/login", a.login)
 
-	r.Get("/", a.overview)
-	r.Get("/agents", a.agents)
-	r.Get("/agents/{id}", a.agent)
-	r.Get("/agents/{id}/prompt", a.agentPrompt)
-	r.Get("/tools", a.tools)
-	r.Get("/tools/{name}", a.tool)
-	r.Get("/queues", a.queues)
-	r.Get("/queues/status", a.queuesStatus)
-	r.Get("/skills", a.skills)
-	r.Get("/skills/{name}", a.skill)
+	r.Group(func(r chi.Router) {
+		r.Use(a.requireLogin)
+		r.Post("/logout", a.logout)
+
+		r.Get("/", a.overview)
+		r.Get("/agents", a.agents)
+		r.Get("/agents/new", a.newAgentForm)
+		r.Post("/agents", a.createAgent)
+		r.Get("/agents/{id}", a.agent)
+		r.Get("/agents/{id}/edit", a.editAgentForm)
+		r.Post("/agents/{id}", a.updateAgent)
+		r.Post("/agents/{id}/delete", a.deleteAgent)
+		r.Get("/agents/{id}/prompt", a.agentPrompt)
+		r.Get("/allowlist/preview", a.allowlistPreview)
+		r.Get("/tools", a.tools)
+		r.Get("/tools/{name}", a.tool)
+		r.Get("/queues", a.queues)
+		r.Get("/queues/status", a.queuesStatus)
+		r.Get("/skills", a.skills)
+		r.Post("/skills/reload", a.reloadSkills)
+		r.Get("/skills/{name}", a.skill)
+	})
 	return r
 }
 
@@ -70,12 +90,11 @@ func shortCache(next http.Handler) http.Handler {
 	})
 }
 
-// snapshot is one consistent read of the configuration.
+// snapshot is one consistent read of the configuration: the raw inputs, and
+// the inventory built from them.
 type snapshot struct {
-	inv    *Inventory
-	agents []store.Agent
-	tools  []store.ToolRecord
-	skills []skill.Skill
+	in  Inputs
+	inv *Inventory
 }
 
 func (a *Admin) load(ctx context.Context) (*snapshot, error) {
@@ -108,7 +127,7 @@ func (a *Admin) load(ctx context.Context) (*snapshot, error) {
 		names = append(names, e.TaskQueue)
 	}
 
-	inv := BuildInventory(Inputs{
+	in := Inputs{
 		Agents:         agents,
 		Tools:          tools,
 		Queues:         a.prober.statuses(ctx, names),
@@ -118,8 +137,8 @@ func (a *Admin) load(ctx context.Context) (*snapshot, error) {
 		ActivityQueues: routes,
 		DefaultAgentID: a.cfg.DefaultAgentID,
 		WorkflowQueue:  a.cfg.WorkflowQueue,
-	})
-	return &snapshot{inv: inv, agents: agents, tools: tools, skills: skills}, nil
+	}
+	return &snapshot{in: in, inv: BuildInventory(in)}, nil
 }
 
 // page loads the snapshot and renders a full page, or reports the failure.
@@ -135,7 +154,7 @@ func (a *Admin) page(w http.ResponseWriter, r *http.Request, name, nav string, d
 		http.NotFound(w, r)
 		return
 	}
-	a.pages.page(w, name, pageData{Nav: nav, Inv: snap.inv, Data: d})
+	a.pages.page(w, name, pageData{Nav: nav, Inv: snap.inv, Data: d, Flash: flash(r)})
 }
 
 func (a *Admin) overview(w http.ResponseWriter, r *http.Request) {
@@ -171,7 +190,7 @@ func (a *Admin) queues(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Admin) skills(w http.ResponseWriter, r *http.Request) {
-	a.page(w, r, "skills", "skills", func(*Inventory) (any, bool) { return nil, true })
+	a.page(w, r, "skills", "skills", func(*Inventory) (any, bool) { return a.cfg.SkillsReloadable, true })
 }
 
 func (a *Admin) skill(w http.ResponseWriter, r *http.Request) {
@@ -209,8 +228,8 @@ func (a *Admin) agentPrompt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	catalog, _ := newCatalog(snap.agents, snap.tools)
-	out, err := activity.NewSkillActivities(snap.skills, catalog).
+	catalog, _ := newCatalog(snap.in.Agents, snap.in.Tools)
+	out, err := activity.NewSkillActivities(snap.in.Skills, catalog).
 		LoadSkillsForAgent(r.Context(), activity.LoadSkillsForAgentInput{AgentID: id})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)

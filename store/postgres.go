@@ -115,9 +115,13 @@ const schema = `
 			description   TEXT NOT NULL DEFAULT '',
 			skills        JSONB NOT NULL DEFAULT '[]',
 			tools         JSONB NOT NULL DEFAULT '[]',
+			revision      BIGINT NOT NULL DEFAULT 1,
 			created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		);
+		-- revision is bumped on every update, so an edit made from a stale copy
+		-- is refused instead of silently overwriting a newer one.
+		ALTER TABLE agents ADD COLUMN IF NOT EXISTS revision BIGINT NOT NULL DEFAULT 1;
 		-- tools is a deny-by-default allowlist: [] grants nothing, ["*"] grants
 		-- everything. A NULL once meant "every tool"; close it on older tables.
 		-- Guarded so a migrated table is not locked again on every startup.
@@ -413,26 +417,7 @@ func (s *PostgresStore) UpdateTaskLogStatus(ctx context.Context, scheduleID, sta
 }
 
 // agentColumns is the column list shared by agent queries, in scanAgent order.
-const agentColumns = "agent_id, name, description, skills, tools, created_at, updated_at"
-
-// UpsertAgent creates or replaces an agent definition.
-func (s *PostgresStore) UpsertAgent(ctx context.Context, agent Agent) error {
-	skillsJSON, toolsJSON, err := marshalAgentLists(agent)
-	if err != nil {
-		return err
-	}
-	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO agents (agent_id, name, description, skills, tools, updated_at)
-		VALUES ($1, $2, $3, $4, $5, NOW())
-		ON CONFLICT (agent_id) DO UPDATE SET
-			name = EXCLUDED.name,
-			description = EXCLUDED.description,
-			skills = EXCLUDED.skills,
-			tools = EXCLUDED.tools,
-			updated_at = NOW()`,
-		agent.ID, agent.Name, agent.Description, skillsJSON, toolsJSON)
-	return err
-}
+const agentColumns = "agent_id, name, description, skills, tools, revision, created_at, updated_at"
 
 // InsertAgentIfAbsent inserts the agent only if no agent with the same ID exists.
 // Existing rows are never modified. Returns true if the agent was inserted.
@@ -480,6 +465,61 @@ func (s *PostgresStore) GetAgent(ctx context.Context, agentID string) (*Agent, e
 	return a, err
 }
 
+// CreateAgent inserts a new agent. It fails with ErrAgentExists if the ID is
+// taken.
+func (s *PostgresStore) CreateAgent(ctx context.Context, agent Agent) error {
+	inserted, err := s.InsertAgentIfAbsent(ctx, agent)
+	if err != nil {
+		return err
+	}
+	if !inserted {
+		return ErrAgentExists
+	}
+	return nil
+}
+
+// UpdateAgent replaces an agent's definition if its revision is still
+// expectedRevision, and returns the new revision. It fails with ErrAgentNotFound
+// or, when the agent changed since it was read, ErrAgentConflict.
+func (s *PostgresStore) UpdateAgent(ctx context.Context, agent Agent, expectedRevision int64) (int64, error) {
+	skillsJSON, toolsJSON, err := marshalAgentLists(agent)
+	if err != nil {
+		return 0, err
+	}
+	var revision int64
+	err = s.db.QueryRowContext(ctx, `
+		UPDATE agents SET name = $2, description = $3, skills = $4, tools = $5,
+			revision = revision + 1, updated_at = NOW()
+		WHERE agent_id = $1 AND revision = $6
+		RETURNING revision`,
+		agent.ID, agent.Name, agent.Description, skillsJSON, toolsJSON, expectedRevision).Scan(&revision)
+	if err != sql.ErrNoRows {
+		return revision, err
+	}
+	current, err := s.GetAgent(ctx, agent.ID)
+	if err != nil {
+		return 0, err
+	}
+	if current == nil {
+		return 0, ErrAgentNotFound
+	}
+	return 0, ErrAgentConflict
+}
+
+// DeleteAgent removes an agent. It fails with ErrAgentNotFound if there is none.
+func (s *PostgresStore) DeleteAgent(ctx context.Context, agentID string) error {
+	res, err := s.db.ExecContext(ctx, "DELETE FROM agents WHERE agent_id = $1", agentID)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return err
+	} else if n == 0 {
+		return ErrAgentNotFound
+	}
+	return nil
+}
+
 // CountSessionsByAgent returns the number of sessions per agent ID.
 func (s *PostgresStore) CountSessionsByAgent(ctx context.Context) (map[string]int, error) {
 	rows, err := s.db.QueryContext(ctx, "SELECT agent_id, count(*) FROM sessions GROUP BY agent_id")
@@ -523,7 +563,7 @@ func marshalAgentLists(agent Agent) (skills, tools string, err error) {
 func scanAgent(row interface{ Scan(...any) error }) (*Agent, error) {
 	var a Agent
 	var skillsJSON, toolsJSON string
-	if err := row.Scan(&a.ID, &a.Name, &a.Description, &skillsJSON, &toolsJSON, &a.CreatedAt, &a.UpdatedAt); err != nil {
+	if err := row.Scan(&a.ID, &a.Name, &a.Description, &skillsJSON, &toolsJSON, &a.Revision, &a.CreatedAt, &a.UpdatedAt); err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal([]byte(skillsJSON), &a.Skills); err != nil {

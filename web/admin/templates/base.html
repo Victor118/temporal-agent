@@ -19,9 +19,10 @@
     <a href="/admin/skills" {{if eq .Nav "skills"}}class="active"{{end}}>Skills <span class="count">{{len .Inv.Skills}}</span></a>
     <div class="sep"></div>
     <a href="/" hx-boost="false">← Chat</a>
-    <div class="foot">Lecture seule</div>
+    <form method="post" action="/admin/logout"><button class="linkbtn" type="submit">Déconnexion</button></form>
   </nav>
   <main>
+{{with .Flash}}<div class="banner flash">{{.}}</div>{{end}}
 {{template "content" .}}
   </main>
 </div>

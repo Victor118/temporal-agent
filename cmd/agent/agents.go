@@ -13,9 +13,10 @@ import (
 	"github.com/victor/temporal-agent/store"
 )
 
-// seedAgents imports agents from the seed file that don't exist in the DB yet.
-// Existing agents are never modified: the DB is the source of truth.
-// A missing seed file is not an error; an invalid one is.
+// seedAgents imports the seed file into an empty agents table. Once the table
+// holds anything, the DB is the source of truth and the file is ignored:
+// otherwise an agent deleted from the back-office would come back on the next
+// start. A missing seed file is not an error; an invalid one is.
 func seedAgents(st store.Store, path string) error {
 	defs, err := config.LoadAgentDefinitions(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -28,6 +29,15 @@ func seedAgents(st store.Store, path string) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+
+	existing, err := st.ListAgents(ctx)
+	if err != nil {
+		return err
+	}
+	if len(existing) > 0 {
+		log.Printf("Agents table holds %d agents, seed %s not applied", len(existing), path)
+		return nil
+	}
 
 	for _, def := range defs {
 		inserted, err := st.InsertAgentIfAbsent(ctx, store.Agent{

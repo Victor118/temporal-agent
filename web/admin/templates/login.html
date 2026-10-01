@@ -1,0 +1,32 @@
+{{define "title"}}Connexion{{end}}
+{{define "content"}}{{end}}
+
+{{define "login"}}<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Connexion · Admin</title>
+<link rel="stylesheet" href="/admin/static/admin.css">
+</head>
+<body>
+<main class="login">
+  <h1>Configuration</h1>
+  {{with .Data}}
+  {{if .Enabled}}
+  <p class="lead">Mot de passe du back-office (<code>ADMIN_API_KEY</code>).</p>
+  {{with .Error}}<div class="error">{{.}}</div>{{end}}
+  <form method="post" action="/admin/login">
+    <input type="hidden" name="next" value="{{.Next}}">
+    <input type="password" name="password" autocomplete="current-password" required autofocus>
+    <button class="primary" type="submit">Se connecter</button>
+  </form>
+  {{else}}
+  <p class="lead">Le back-office est fermé : définis <code>ADMIN_API_KEY</code> dans l'environnement du serveur, puis redémarre-le.</p>
+  {{end}}
+  {{end}}
+  <p class="note"><a class="link" href="/">← Retour au chat</a></p>
+</main>
+</body>
+</html>
+{{end}}

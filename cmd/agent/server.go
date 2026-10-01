@@ -58,12 +58,15 @@ func runServer(cmd *cobra.Command, args []string) {
 	// Back-office
 	skills, skillsSource := serverSkills(context.Background(), cfg, st)
 	adminUI := admin.New(admin.Config{
-		Store:          st,
-		Temporal:       temporalClient,
-		Skills:         skills,
-		SkillsSource:   skillsSource,
-		DefaultAgentID: cfg.DefaultAgentID,
-		WorkflowQueue:  cfg.WorkflowQueue,
+		Store:        st,
+		Temporal:     temporalClient,
+		Skills:       skills,
+		SkillsSource: skillsSource,
+		// The server and the workers reload the repo when skills_version moves.
+		SkillsReloadable: cfg.SkillsRepo != "",
+		DefaultAgentID:   cfg.DefaultAgentID,
+		WorkflowQueue:    cfg.WorkflowQueue,
+		AdminKey:         cfg.AdminAPIKey,
 	})
 
 	// Handler
@@ -86,6 +89,9 @@ func runServer(cmd *cobra.Command, args []string) {
 	publicRouter.Post("/auth/logout", h.logout)
 	publicRouter.Post("/webhooks/skills", h.handleSkillsWebhook)
 	publicRouter.Post("/webhooks/telegram", h.handleTelegramWebhook)
+
+	// Back-office: its own admin password, independent of the chat's API_KEY
+	publicRouter.Mount("/admin", adminUI.Routes())
 
 	// Authenticated routes
 	publicRouter.Group(func(r chi.Router) {
@@ -111,9 +117,6 @@ func runServer(cmd *cobra.Command, args []string) {
 		r.Get("/api/admin/activity-queues", h.listActivityQueues)
 		r.Put("/api/admin/activity-queues", h.setActivityQueue)
 		r.Delete("/api/admin/activity-queues/{activityName}", h.deleteActivityQueue)
-
-		// Back-office (read-only configuration dashboard)
-		r.Mount("/admin", adminUI.Routes())
 	})
 
 	// Internal API (receives SSE notifications from workers)

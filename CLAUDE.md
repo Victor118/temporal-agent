@@ -13,7 +13,7 @@
 
 - 3 modes : `agent server`, `agent worker`, `agent dev` (les deux combinés)
 - Server = API HTTP + SSE hub + catalogue agents + skills versioning
-- Back-office `/admin` (htmx + `html/template`, `web/admin`) : lecture seule de la config. Le JSON du panneau admin du chat est sous `/api/admin`
+- Back-office `/admin` (htmx + `html/template`, `web/admin`) : config des agents (lecture + édition). Mot de passe `ADMIN_API_KEY` (vide = fermé), distinct de `API_KEY` du chat. Le JSON du panneau admin du chat est sous `/api/admin`
 - Worker = Temporal worker + activities + tools publiés sur sa queue (`worker.yaml`)
 - Communication worker → serveur via `/internal/notify` ; le reste passe par PostgreSQL (agents, tools, skills_version)
 
@@ -27,7 +27,7 @@
 ## Agents, Tools & Task Queues
 
 - Modèle cible et état : `docs/architecture.md`
-- Agent = persona logique identifiée par `agent_id` (prompt, skills, allowlist d'outils). Table `agents` = source de vérité ; `agents.yaml` = seed (insère les agents absents, n'écrase jamais)
+- Agent = persona logique identifiée par `agent_id` (prompt, skills, allowlist d'outils). Table `agents` = source de vérité, éditée via `/admin` ; `agents.yaml` = seed, appliqué seulement si la table est vide
 - Queue = capacité, jamais un agent ni une machine. Chaque worker lit `worker.yaml` (`WORKER_CONFIG`) : `queue`, `tools` (globs), `mcp`, `workflows`, et publie ses tools dans la table `tools`
 - Sans `worker.yaml` : le worker sert workflows + tous les tools sur `WORKFLOW_QUEUE` (défaut `agent`)
 - Workflows (Session/Agent/LLM) sur `WORKFLOW_QUEUE`. Chaque appel d'outil part sur la queue de l'outil (`ExecuteTool` générique, queue fixée dans `ActivityOptions`)

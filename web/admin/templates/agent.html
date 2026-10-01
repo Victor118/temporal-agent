@@ -2,10 +2,13 @@
 {{define "content"}}
 {{with .Data}}
 <div class="crumbs"><a href="/admin/agents">Agents</a> /</div>
+<div class="head">
 <h1>{{.Name}} <span class="id">{{.ID}}</span>
   {{if .IsDefault}}<span class="badge b-info">défaut</span>{{end}}
   {{template "allowlist_mode" .}}
 </h1>
+<div class="toolbar"><a class="btn" href="/admin/agents/{{.ID}}/edit">Modifier</a></div>
+</div>
 <p class="lead">{{with .Description}}{{.}}{{else}}<span class="empty">Pas de description.</span>{{end}}<br>
   <span class="sub">{{.Sessions}} session{{if gt .Sessions 1}}s{{end}} · créé {{ago .CreatedAt}} · modifié {{ago .UpdatedAt}}</span></p>
 

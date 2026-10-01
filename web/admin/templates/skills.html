@@ -1,6 +1,9 @@
 {{define "title"}}Skills{{end}}
 {{define "content"}}
+<div class="head">
 <h1>Skills</h1>
+{{if .Data}}<form class="toolbar" method="post" action="/admin/skills/reload"><button type="submit">Recharger depuis le dépôt</button></form>{{end}}
+</div>
 <p class="lead">
   {{with .Inv.SkillsSource}}Skills chargés par le serveur depuis <code>{{.}}</code>.
   {{else}}Le serveur ne charge aucun skill : <code>SKILLS_REPO</code> n'est pas configuré.{{end}}

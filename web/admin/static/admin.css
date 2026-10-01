@@ -118,3 +118,25 @@ pre { background: var(--code-bg); border: 1px solid var(--border); border-radius
 .empty { color: var(--muted); font-style: italic; }
 .refresh { color: var(--faint); font-size: 12px; margin-left: auto; }
 .htmx-request .refresh { color: var(--accent); }
+
+.btn.primary, button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.danger { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 50%, var(--border)); }
+.linkbtn { background: none; border: 0; color: var(--muted); padding: 7px 10px; font-size: 14px; }
+.linkbtn:hover { color: var(--text); }
+.banner.flash { background: var(--ok-bg); border-color: color-mix(in srgb, var(--ok) 35%, var(--border)); }
+.error { background: var(--bad-bg); border: 1px solid color-mix(in srgb, var(--bad) 40%, var(--border)); padding: 10px 14px; border-radius: 8px; margin-bottom: 16px; }
+
+form.edit label { display: block; font-weight: 600; color: var(--heading); margin: 14px 0 4px; }
+form.edit label:first-child { margin-top: 0; }
+form.edit .hint { color: var(--muted); font-size: 12.5px; font-weight: 400; }
+form.edit input[type=text], form.edit textarea, .login input[type=password] {
+  font: inherit; width: 100%; background: var(--bg); color: var(--text);
+  border: 1px solid var(--border-strong); border-radius: 6px; padding: 7px 10px;
+}
+form.edit textarea { font-family: var(--mono); font-size: 13px; min-height: 120px; resize: vertical; }
+form.edit input[readonly] { color: var(--muted); }
+.actions { display: flex; gap: 8px; align-items: center; margin-top: 16px; flex-wrap: wrap; }
+.actions .spacer { flex: 1; }
+
+.login { max-width: 360px; margin: 12vh auto 0; }
+.login form { display: flex; flex-direction: column; gap: 10px; }

@@ -1,7 +1,10 @@
 {{define "title"}}Agents{{end}}
 {{define "content"}}
+<div class="head">
 <h1>Agents</h1>
-<p class="lead">Table <code>agents</code>, qui fait foi. <code>agents.yaml</code> n'insère que les agents absents au démarrage du serveur.</p>
+<div class="toolbar"><a class="btn primary" href="/admin/agents/new">Nouvel agent</a></div>
+</div>
+<p class="lead">Table <code>agents</code>, qui fait foi. <code>agents.yaml</code> ne sert qu'à remplir une table vide, au démarrage du serveur.</p>
 
 <div class="card">
 <div class="tablewrap">

@@ -1,5 +1,5 @@
-# Seed only: agents missing from the DB are inserted at startup, existing ones
-# are never modified.
+# Seed only: imported at startup into an EMPTY agents table. Once the table
+# holds anything, edit agents in the back-office (/admin); this file is ignored.
 #
 # tools is an allowlist of tool name globs, denied by default: an agent without
 # it gets no tool at all. "*" grants every tool and must be written explicitly.

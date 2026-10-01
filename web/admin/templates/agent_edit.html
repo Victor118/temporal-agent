@@ -1,0 +1,86 @@
+{{define "title"}}{{if .Data.New}}Nouvel agent{{else}}Modifier {{.Data.ID}}{{end}}{{end}}
+{{define "content"}}
+{{with .Data}}
+<div class="crumbs"><a href="/admin/agents">Agents</a> /{{if not .New}} <a href="/admin/agents/{{.ID}}">{{.ID}}</a> /{{end}}</div>
+<h1>{{if .New}}Nouvel agent{{else}}Modifier <span class="id">{{.ID}}</span>{{end}}</h1>
+<p class="lead">Les workers relisent les agents toutes les 30 s. Un tour déjà commencé garde l'ancienne configuration.</p>
+
+{{with .Error}}<div class="error">{{.}}</div>{{end}}
+
+<div class="grid2">
+  <div class="card">
+    <form class="edit" id="agent-form" method="post" action="/admin/agents{{if not .New}}/{{.ID}}{{end}}">
+      <input type="hidden" name="revision" value="{{.Revision}}">
+
+      <label for="f-id">Identifiant <span class="hint">minuscules, chiffres et tirets ; définitif</span></label>
+      <input type="text" id="f-id" name="id" value="{{.ID}}" {{if .New}}required autofocus{{else}}readonly{{end}}
+        pattern="[a-z]([a-z0-9\-]*[a-z0-9])?">
+
+      <label for="f-name">Nom</label>
+      <input type="text" id="f-name" name="name" value="{{.Name}}" required>
+
+      <label for="f-desc">Description <span class="hint">montrée aux agents qui peuvent lui déléguer</span></label>
+      <input type="text" id="f-desc" name="description" value="{{.Description}}">
+
+      <label for="f-skills">Skills <span class="hint">un par ligne</span></label>
+      <textarea id="f-skills" name="skills" rows="3"
+        hx-get="/admin/allowlist/preview" hx-trigger="input changed delay:300ms" hx-include="#agent-form" hx-target="#allowlist-preview">{{.Skills}}</textarea>
+      {{with .AvailableSkills}}<p class="note">Disponibles : {{range .}}<span class="chip">{{.}}</span>{{end}}</p>{{end}}
+
+      <label for="f-tools">Allowlist <span class="hint">un motif par ligne : <code>read_file</code>, <code>github_*</code>, <code>*</code> pour tout. Vide = aucun tool.</span></label>
+      <textarea id="f-tools" name="tools" rows="8"
+        hx-get="/admin/allowlist/preview" hx-trigger="input changed delay:300ms" hx-include="#agent-form" hx-target="#allowlist-preview">{{.Tools}}</textarea>
+
+      <div class="actions">
+        <button class="primary" type="submit">{{if .New}}Créer{{else}}Enregistrer{{end}}</button>
+        <a class="btn" href="{{if .New}}/admin/agents{{else}}/admin/agents/{{.ID}}{{end}}">Annuler</a>
+      </div>
+    </form>
+    {{if and (not .New) (not .IsDefault)}}
+    <form class="actions" method="post" action="/admin/agents/{{.ID}}/delete"
+      hx-confirm="Supprimer l'agent {{.ID}} ? Ses sessions encore ouvertes n'auront plus accès à aucun tool.">
+      <span class="spacer"></span>
+      <button class="danger" type="submit">Supprimer l'agent</button>
+    </form>
+    {{end}}
+  </div>
+
+  <div class="card">
+    <h2>Aperçu</h2>
+    <div id="allowlist-preview">{{template "allowlist_preview" .Preview}}</div>
+  </div>
+</div>
+{{end}}
+{{end}}
+
+{{/* What the allowlist being typed grants, from the dashboard's own computation. */}}
+{{define "allowlist_preview"}}
+{{with .}}
+{{range .Globs}}
+<div class="glob">
+  <code>{{.Pattern}}</code>
+  <div>
+    {{if .Invalid}}<span class="badge b-bad">motif invalide</span>
+    {{else}}{{range .Matches}}<span class="chip">{{.}}</span>{{else}}<span class="badge b-warn">ne correspond à aucun tool publié</span>{{end}}{{end}}
+  </div>
+</div>
+{{else}}
+<p class="empty">Allowlist vide : aucun tool.</p>
+{{end}}
+
+<p class="note">
+  <b>{{len .Tools}}</b> tool{{if gt (len .Tools) 1}}s{{end}} accessible{{if gt (len .Tools) 1}}s{{end}}
+  {{with .SensitiveCount}}, dont <span class="badge b-bad">{{.}} sensible{{if gt . 1}}s{{end}}</span>{{end}} :
+</p>
+<div>{{range .Tools}}<span class="chip{{if .Sensitive}} sens{{end}}">{{.Name}}</span>{{end}}</div>
+
+{{range .DelegatesTo}}{{if .Extra}}
+<p class="note">En déléguant à <code>{{.AgentID}}</code>, il atteint aussi :
+  {{range .Extra}}<span class="chip{{if .Sensitive}} sens{{end}}">{{.Name}}</span>{{end}}</p>
+{{end}}{{end}}
+
+{{range .Skills}}{{if not .Present}}
+<p class="note"><span class="badge b-warn">skill {{.Name}} non chargé</span></p>
+{{end}}{{end}}
+{{end}}
+{{end}}

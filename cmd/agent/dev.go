@@ -179,6 +179,7 @@ func runDev(cmd *cobra.Command, args []string) {
 		SkillsSource:   skillStore.Dir,
 		DefaultAgentID: cfg.DefaultAgentID,
 		WorkflowQueue:  cfg.WorkflowQueue,
+		AdminKey:       cfg.AdminAPIKey,
 	})
 
 	// HTTP server
@@ -200,6 +201,9 @@ func runDev(cmd *cobra.Command, args []string) {
 	r.Post("/auth/login", h.login)
 	r.Post("/auth/logout", h.logout)
 	r.Post("/webhooks/telegram", h.handleTelegramWebhook)
+
+	// Back-office: its own admin password, independent of the chat's API_KEY
+	r.Mount("/admin", adminUI.Routes())
 
 	// Authenticated routes
 	r.Group(func(g chi.Router) {
@@ -225,9 +229,6 @@ func runDev(cmd *cobra.Command, args []string) {
 		g.Get("/api/admin/activity-queues", h.listActivityQueues)
 		g.Put("/api/admin/activity-queues", h.setActivityQueue)
 		g.Delete("/api/admin/activity-queues/{activityName}", h.deleteActivityQueue)
-
-		// Back-office (read-only configuration dashboard)
-		g.Mount("/admin", adminUI.Routes())
 	})
 
 	srv := &http.Server{Addr: cfg.HTTPAddr, Handler: r}

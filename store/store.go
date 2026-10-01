@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 )
 
@@ -49,10 +50,12 @@ type Store interface {
 	UpdateTaskLogStatus(ctx context.Context, scheduleID, status string) error
 
 	// Agent catalog
-	UpsertAgent(ctx context.Context, agent Agent) error
 	InsertAgentIfAbsent(ctx context.Context, agent Agent) (bool, error)
 	ListAgents(ctx context.Context) ([]Agent, error)
 	GetAgent(ctx context.Context, agentID string) (*Agent, error)
+	CreateAgent(ctx context.Context, agent Agent) error
+	UpdateAgent(ctx context.Context, agent Agent, expectedRevision int64) (int64, error)
+	DeleteAgent(ctx context.Context, agentID string) error
 	CountSessionsByAgent(ctx context.Context) (map[string]int, error)
 
 	// Tool catalog (published by workers)
@@ -78,12 +81,19 @@ type ActivityQueueEntry struct {
 	TaskQueue    string `json:"task_queue"`
 }
 
+var (
+	ErrAgentExists   = errors.New("agent already exists")
+	ErrAgentNotFound = errors.New("agent not found")
+	ErrAgentConflict = errors.New("agent changed since it was read")
+)
+
 type Agent struct {
 	ID          string    `json:"id"`
 	Name        string    `json:"name"`
 	Description string    `json:"description"`
 	Skills      []string  `json:"skills"`
-	Tools       []string  `json:"tools"` // Allowed tool name globs; empty = no tool, "*" = all
+	Tools       []string  `json:"tools"`    // Allowed tool name globs; empty = no tool, "*" = all
+	Revision    int64     `json:"revision"` // bumped on every update
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }
