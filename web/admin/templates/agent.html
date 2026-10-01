@@ -58,7 +58,7 @@
   <div class="card">
     <h2>Délégation</h2>
     {{if .DelegatesTo}}
-    <p class="sub">Peut déléguer via <code>spawn_session</code> à :</p>
+    <p class="sub">Peut déléguer à :</p>
     {{range .DelegatesTo}}
     <div class="glob">
       <a class="link mono" href="/admin/agents/{{.AgentID}}">{{.AgentID}}</a>

@@ -228,7 +228,7 @@ func (a *Admin) agentPrompt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	catalog, _ := newCatalog(snap.in.Agents, snap.in.Tools)
+	catalog := newCatalog(snap.in.Agents, snap.in.Tools)
 	out, err := activity.NewSkillActivities(snap.in.Skills, catalog).
 		LoadSkillsForAgent(r.Context(), activity.LoadSkillsForAgentInput{AgentID: id})
 	if err != nil {

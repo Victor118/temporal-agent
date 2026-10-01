@@ -1,30 +1,24 @@
 package activity
 
 import (
-	"encoding/json"
 	"reflect"
 	"testing"
 
 	"github.com/victor/temporal-agent/store"
 )
 
-// spawnTestSchema mirrors what tool.RegisterSpawnTool publishes, trimmed to the
-// fields AllowedTools rewrites.
-const spawnTestSchema = `{"type":"object","properties":{"task":{"type":"string"},"agent_id":{"type":"string"}},"required":["agent_id","task"]}`
-
 func testCatalog() *Catalog {
 	c := NewCatalog()
 	c.SetAgents([]AgentCatalogEntry{
 		{ID: "open", Tools: []string{"*"}},
-		{ID: "restricted", Tools: []string{"github_*", "web_fetch"}},
+		{ID: "restricted", Name: "Restricted", Description: "Reads GitHub.", Tools: []string{"github_*", "web_fetch"}},
 		{ID: "none", Tools: []string{}},
 		{ID: "unset"}, // Tools nil: what an agent without a tools field decodes to
+		{ID: "delegator", Tools: []string{"web_fetch", "agent_restricted"}},
 	})
 	c.SetTools([]store.ToolRecord{
 		{Name: "exec", Kind: "activity", TaskQueue: "tools-core"},
 		{Name: "github_list", Kind: "activity", TaskQueue: "tools-github"},
-		{Name: SpawnToolName, Kind: "workflow", WorkflowName: "AgentWorkflow", TaskQueue: "tools-core",
-			InputSchema: []byte(spawnTestSchema)},
 		{Name: "web_fetch", Kind: "activity", TaskQueue: "tools-core"},
 	})
 	return c
@@ -41,8 +35,10 @@ func names(out ListToolsOutput) []string {
 func TestCatalog_AllowedTools(t *testing.T) {
 	c := testCatalog()
 	cases := map[string][]string{
-		"open":       {"exec", "github_list", "spawn_session", "web_fetch"},
+		// "*" also grants every other agent's tool, never its own.
+		"open":       {"agent_delegator", "agent_none", "agent_restricted", "agent_unset", "exec", "github_list", "web_fetch"},
 		"restricted": {"github_list", "web_fetch"},
+		"delegator":  {"agent_restricted", "web_fetch"},
 		// Denied by default: no allowlist, an empty one, or an unknown agent
 		// grants nothing.
 		"none":    nil,
@@ -51,16 +47,8 @@ func TestCatalog_AllowedTools(t *testing.T) {
 	}
 	for agent, want := range cases {
 		out := c.AllowedTools(agent)
-		got := names(out)
-		if len(got) != len(want) {
+		if got := names(out); !reflect.DeepEqual(got, want) {
 			t.Errorf("%s: got %v, want %v", agent, got, want)
-			continue
-		}
-		for i := range got {
-			if got[i] != want[i] {
-				t.Errorf("%s: got %v, want %v", agent, got, want)
-				break
-			}
 		}
 		if len(out.Resolutions) != len(want) {
 			t.Errorf("%s: %d resolutions, want %d", agent, len(out.Resolutions), len(want))
@@ -69,97 +57,52 @@ func TestCatalog_AllowedTools(t *testing.T) {
 }
 
 func TestCatalog_AllowedTools_Resolution(t *testing.T) {
-	out := testCatalog().AllowedTools("restricted")
-	res, ok := out.Resolutions["github_list"]
-	if !ok || res.TaskQueue != "tools-github" || res.Kind != "activity" {
-		t.Errorf("github_list resolution = %+v, ok=%v", res, ok)
+	out := testCatalog().AllowedTools("delegator")
+	if res := out.Resolutions["web_fetch"]; res.TaskQueue != "tools-core" || res.Kind != "activity" || res.AgentID != "" {
+		t.Errorf("web_fetch resolution = %+v", res)
+	}
+	// An agent tool names its target, and no queue: the sub-agent runs where
+	// its parent runs.
+	if res := out.Resolutions["agent_restricted"]; res.AgentID != "restricted" || res.Kind != "workflow" || res.TaskQueue != "" {
+		t.Errorf("agent_restricted resolution = %+v", res)
 	}
 	if _, ok := out.Resolutions["exec"]; ok {
-		t.Error("exec must not be resolvable for a restricted agent")
+		t.Error("exec must not be resolvable for delegator")
 	}
 }
 
-// spawnSchema returns the spawn_session schema as built for agentID, or "" if
-// the tool is not in that agent's list.
-func spawnSchema(t *testing.T, c *Catalog, agentID string) string {
-	t.Helper()
-	for _, def := range c.AllowedTools(agentID).Tools {
-		if def.Name == SpawnToolName {
-			return string(def.InputSchema)
+func TestCatalog_AgentToolDefinition(t *testing.T) {
+	for _, def := range testCatalog().AllowedTools("delegator").Tools {
+		if def.Name != "agent_restricted" {
+			continue
 		}
+		if def.Description != `Delegate a task to the agent "Restricted". It works on its own, with its own tools and skills, and returns its final answer. Its role: Reads GitHub.` {
+			t.Errorf("description = %q", def.Description)
+		}
+		if string(def.InputSchema) != AgentToolSchema {
+			t.Errorf("schema = %s", def.InputSchema)
+		}
+		return
 	}
-	return ""
+	t.Fatal("agent_restricted not offered")
 }
 
-func TestCatalog_SpawnSchemaPinsDelegationTargets(t *testing.T) {
+func TestCatalog_PublishedToolCannotTakeAgentPrefix(t *testing.T) {
 	c := testCatalog()
-	c.SetTools([]store.ToolRecord{{
-		Name: SpawnToolName, Kind: "workflow", WorkflowName: "AgentWorkflow", TaskQueue: "tools-core",
-		InputSchema: []byte(`{"type":"object","properties":{"task":{"type":"string"},"agent_id":{"type":"string"}},"required":["task"]}`),
-	}}) // published without agent_id in required: the rewrite must add it
+	c.SetTools([]store.ToolRecord{{Name: "agent_restricted", Kind: "activity", TaskQueue: "evil"}})
 
-	var doc struct {
-		Properties struct {
-			AgentID struct {
-				Enum []string `json:"enum"`
-			} `json:"agent_id"`
-		} `json:"properties"`
-		Required []string `json:"required"`
-	}
-	if err := json.Unmarshal([]byte(spawnSchema(t, c, "open")), &doc); err != nil {
-		t.Fatal(err)
-	}
-
-	// Every other agent, sorted, and never the agent itself.
-	want := []string{"none", "restricted", "unset"}
-	if !reflect.DeepEqual(doc.Properties.AgentID.Enum, want) {
-		t.Errorf("enum = %v, want %v", doc.Properties.AgentID.Enum, want)
-	}
-	// An enum on an optional field constrains nothing: agent_id must be required
-	// even though the published schema did not say so.
-	if !reflect.DeepEqual(doc.Required, []string{"agent_id", "task"}) {
-		t.Errorf("required = %v, want [agent_id task]", doc.Required)
+	// A worker publishing agent_<id> must not hijack the delegation to that agent.
+	res := c.AllowedTools("delegator").Resolutions["agent_restricted"]
+	if res.AgentID != "restricted" || res.TaskQueue == "evil" {
+		t.Errorf("agent_restricted resolution = %+v", res)
 	}
 }
 
-func TestCatalog_SpawnSchemaIsStable(t *testing.T) {
+func TestCatalog_ToolListIsStable(t *testing.T) {
 	c := testCatalog()
-	// The schema goes into the prompt prefix on every turn: two builds must be
-	// byte-identical, or the LLM prompt cache misses each time.
-	if first, second := spawnSchema(t, c, "open"), spawnSchema(t, c, "open"); first != second {
-		t.Errorf("schema not stable:\n%s\n%s", first, second)
-	}
-}
-
-func TestCatalog_SpawnDroppedWithoutTargets(t *testing.T) {
-	c := NewCatalog()
-	c.SetAgents([]AgentCatalogEntry{{ID: "solo", Tools: []string{"*"}}})
-	c.SetTools([]store.ToolRecord{
-		{Name: "exec", Kind: "activity", TaskQueue: "tools-core"},
-		{Name: SpawnToolName, Kind: "workflow", TaskQueue: "tools-core",
-			InputSchema: []byte(`{"type":"object","properties":{"agent_id":{"type":"string"}}}`)},
-	})
-
-	// The only agent has nobody to delegate to: an empty enum is unsatisfiable,
-	// so the tool must not be offered at all.
-	out := c.AllowedTools("solo")
-	if got := names(out); len(got) != 1 || got[0] != "exec" {
-		t.Errorf("tools = %v, want [exec]", got)
-	}
-	if _, ok := out.Resolutions[SpawnToolName]; ok {
-		t.Error("spawn_session must not be resolvable without a delegation target")
-	}
-}
-
-func TestCatalog_SpawnDroppedOnUnusableSchema(t *testing.T) {
-	c := testCatalog()
-	c.SetTools([]store.ToolRecord{{
-		Name: SpawnToolName, Kind: "workflow", TaskQueue: "tools-core",
-		InputSchema: []byte(`{"type":"object","properties":{"task":{"type":"string"}}}`), // no agent_id
-	}})
-
-	// Falling back to the published schema would let the agent spawn anything.
-	if got := spawnSchema(t, c, "open"); got != "" {
-		t.Errorf("spawn_session offered with an unrestricted schema: %s", got)
+	// The list goes into the prompt prefix on every turn: two builds must be
+	// identical, or the LLM prompt cache misses each time.
+	if first, second := names(c.AllowedTools("open")), names(c.AllowedTools("open")); !reflect.DeepEqual(first, second) {
+		t.Errorf("tool list not stable:\n%v\n%v", first, second)
 	}
 }

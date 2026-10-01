@@ -317,21 +317,23 @@ func TestAllowlistPreview(t *testing.T) {
 		t.Errorf("preview misses the via badge of read_file: %s", body)
 	}
 	// A new agent whose ID is not typed yet still gets a preview.
-	if w := do(h, http.MethodGet, "/admin/allowlist/preview", url.Values{"globs": {"*"}}, c); !strings.Contains(w.Body.String(), "2</b> tools") {
+	if w := do(h, http.MethodGet, "/admin/allowlist/preview", url.Values{"globs": {"*"}}, c); !strings.Contains(w.Body.String(), "4</b> tools") {
 		t.Errorf("preview without id: %s", w.Body)
 	}
 }
 
 func TestFormFromAgent_SplitsAllowlist(t *testing.T) {
 	tools := []store.ToolRecord{{Name: "exec"}, {Name: "read_file"}}
-	f := formFromAgent(store.Agent{ID: "a", Tools: []string{"read_file", "github_*", "implement_feature"}}, tools)
+	agents := []store.Agent{{ID: "a"}, {ID: "b"}}
+	f := formFromAgent(store.Agent{ID: "a", Tools: []string{"read_file", "agent_b", "github_*", "implement_feature", "agent_gone"}}, tools, agents)
 
-	// A published name is a checkbox. A pattern, or a tool whose worker is
-	// down, stays text: saving the form must give the same allowlist back.
-	if !reflect.DeepEqual(f.Picked, []string{"read_file"}) || f.Globs != "github_*\nimplement_feature" {
+	// A published name, or another agent's tool, is a checkbox. A pattern, or
+	// a tool that is not there right now, stays text: saving the form must
+	// give the same allowlist back.
+	if !reflect.DeepEqual(f.Picked, []string{"read_file", "agent_b"}) || f.Globs != "github_*\nimplement_feature\nagent_gone" {
 		t.Errorf("picked %v, globs %q", f.Picked, f.Globs)
 	}
-	if got := f.allowlist(); !reflect.DeepEqual(got, []string{"read_file", "github_*", "implement_feature"}) {
+	if got := f.allowlist(); !reflect.DeepEqual(got, []string{"read_file", "agent_b", "github_*", "implement_feature", "agent_gone"}) {
 		t.Errorf("round trip = %v", got)
 	}
 }

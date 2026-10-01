@@ -70,3 +70,37 @@ func TestAgentLifecycle(t *testing.T) {
 		t.Errorf("second delete: %v, want ErrAgentNotFound", err)
 	}
 }
+
+func TestMigrate_SpawnSessionBecomesAgentTools(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	const id = "zz-migrate-test"
+	s.DeleteAgent(ctx, id)
+	t.Cleanup(func() { s.DeleteAgent(ctx, id) })
+
+	if err := s.CreateAgent(ctx, Agent{ID: id, Name: "Old", Tools: []string{"read_file", "spawn_session"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO tools (name, task_queue, input_schema, kind, schema_hash)
+		VALUES ('spawn_session', 'agent', '{}', 'workflow', 'x') ON CONFLICT (name) DO NOTHING`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Migrations run at every start: running it twice must be harmless.
+	for range 2 {
+		if err := s.migrate(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	a, _ := s.GetAgent(ctx, id)
+	if !reflect.DeepEqual(a.Tools, []string{"read_file", "agent_*"}) || a.Revision != 2 {
+		t.Errorf("after migration: tools %v, revision %d", a.Tools, a.Revision)
+	}
+	tools, _ := s.ListTools(ctx)
+	for _, tr := range tools {
+		if tr.Name == "spawn_session" {
+			t.Error("the spawn_session row survived the migration")
+		}
+	}
+}

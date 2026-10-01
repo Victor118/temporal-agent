@@ -122,6 +122,11 @@ const schema = `
 		-- revision is bumped on every update, so an edit made from a stale copy
 		-- is refused instead of silently overwriting a newer one.
 		ALTER TABLE agents ADD COLUMN IF NOT EXISTS revision BIGINT NOT NULL DEFAULT 1;
+		-- spawn_session gave way to one agent_<id> tool per agent, generated from
+		-- this table. An allowlist that granted it keeps delegating to everyone,
+		-- now spelled agent_*.
+		UPDATE agents SET tools = (tools - 'spawn_session') || '["agent_*"]', revision = revision + 1
+			WHERE tools ? 'spawn_session';
 		-- tools is a deny-by-default allowlist: [] grants nothing, ["*"] grants
 		-- everything. A NULL once meant "every tool"; close it on older tables.
 		-- Guarded so a migrated table is not locked again on every startup.
@@ -154,6 +159,9 @@ const schema = `
 			updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		);
 		CREATE INDEX IF NOT EXISTS idx_tools_task_queue ON tools(task_queue);
+		-- The spawn_session row the workers published: nothing else deletes from
+		-- tools, and no worker publishes it any more.
+		DELETE FROM tools WHERE name = 'spawn_session';
 
 		CREATE TABLE IF NOT EXISTS activity_queues (
 			activity_name TEXT PRIMARY KEY,

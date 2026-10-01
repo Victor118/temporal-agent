@@ -31,7 +31,7 @@ sequenceDiagram
 
     Note over GA: ReAct loop
     GA->>LLM: CallLLM(system + history + tools)
-    LLM-->>GA: tool_calls = [spawn_session×2, ...]
+    LLM-->>GA: tool_calls = [agent_market-analyst, agent_code-reviewer, ...]
 
     par Spécialiste 1
         GA->>SA1: ChildWorkflow on "market-analyst" queue
@@ -70,15 +70,15 @@ sequenceDiagram
   task queues différentes (`agent-default`, `market-analyst`, `code-reviewer`).
   La queue détermine les skills chargés via
   `workflow.GetInfo(ctx).TaskQueueName` → `LoadSkillsForQueue`.
-- **`spawn_session`** est un *tool* implémenté comme **child workflow**
-  (cf. `buildChildInput` dans `workflow/agent.go`), pas une activity. Le LLM
-  choisit la queue cible via le champ `task_queue` de son tool input.
+- **Chaque agent est un *tool*** `agent_<id>`, implémenté comme **child
+  workflow** (cf. `buildChildInput` dans `workflow/agent.go`), pas une
+  activity. L'enfant tourne sur la queue de workflows du parent.
 - **`ask_user`** est aussi un child workflow (`AskUserWorkflow`) qui bloque sur
   un signal Temporal. Son `WorkflowID` suit la convention
   `{sessionID}-tool-ask_user-{N}` pour que le SSE puisse router la question
   vers la bonne session UI même quand c'est un sous-agent qui la pose.
 - Côté UI, le user voit **3 events SSE** dans l'ordre :
-  `tool_calls` (le générique a appelé `spawn_session` ×2), `ask_user`
+  `tool_calls` (le générique a appelé deux agents), `ask_user`
   (du sous-agent), puis `message` (la synthèse finale).
 - La persistance est faite **uniquement par `SessionWorkflow`** après chaque
   turn, pas par les `AgentWorkflow` enfants. Les sous-agents n'ont pas de

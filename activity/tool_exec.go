@@ -31,6 +31,8 @@ type ToolResolution struct {
 	WorkflowName  string `json:"workflow_name,omitempty"`
 	TaskQueue     string `json:"task_queue"`
 	FireAndForget bool   `json:"fire_and_forget,omitempty"`
+	// AgentID is set on an agent_<id> tool: the agent the call delegates to.
+	AgentID string `json:"agent_id,omitempty"`
 }
 
 type ListToolsInput struct {

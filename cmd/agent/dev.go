@@ -68,7 +68,6 @@ func runDev(cmd *cobra.Command, args []string) {
 		Password: cfg.SMTPPassword,
 		From:     cfg.SMTPFrom,
 	})
-	tool.RegisterSpawnTool(registry, workflow.AgentWorkflow)
 	tool.RegisterAskUserTool(registry, workflow.AskUserWorkflow)
 	tool.RegisterMemoryTools(registry, st)
 

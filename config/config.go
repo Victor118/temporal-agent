@@ -144,6 +144,8 @@ func Load() *Config {
 // Single-letter IDs are allowed (e.g. "x").
 var agentIDPattern = regexp.MustCompile(`^[a-z]([a-z0-9-]*[a-z0-9])?$`)
 
+const maxAgentIDLen = 58
+
 // LoadAgentDefinitions reads and validates the agents seed file.
 func LoadAgentDefinitions(path string) ([]AgentDefinition, error) {
 	raw, err := os.ReadFile(path)
@@ -180,6 +182,11 @@ func LoadAgentDefinitions(path string) ([]AgentDefinition, error) {
 func (a AgentDefinition) Validate() error {
 	if !agentIDPattern.MatchString(a.ID) {
 		return fmt.Errorf("invalid id %q (must match %s)", a.ID, agentIDPattern.String())
+	}
+	// The agent is also a tool, agent_<id>, and the LLM API caps tool names at
+	// 64 characters.
+	if len(a.ID) > maxAgentIDLen {
+		return fmt.Errorf("id %q too long (%d characters, at most %d)", a.ID, len(a.ID), maxAgentIDLen)
 	}
 	if a.Name == "" {
 		return fmt.Errorf("agent %q missing name", a.ID)

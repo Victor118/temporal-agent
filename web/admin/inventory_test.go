@@ -12,13 +12,11 @@ import (
 	"github.com/victor/temporal-agent/taskqueue"
 )
 
-const spawnSchema = `{"type":"object","properties":{"task":{"type":"string"},"agent_id":{"type":"string"}},"required":["agent_id","task"]}`
-
 func testInputs() Inputs {
 	fresh := []taskqueue.Poller{{Identity: "1@w", LastAccess: time.Now()}}
 	return Inputs{
 		Agents: []store.Agent{
-			{ID: "boss", Name: "Boss", Tools: []string{"read_file", "spawn_session"}, Skills: []string{"present", "ghost"}},
+			{ID: "boss", Name: "Boss", Tools: []string{"read_file", "agent_*"}, Skills: []string{"present", "ghost"}},
 			{ID: "coder", Name: "Coder", Tools: []string{"read_file", "exec", "nope_*"}},
 			{ID: "root", Name: "Root", Tools: []string{"*"}},
 			{ID: "mute", Name: "Mute", Tools: []string{}},
@@ -27,7 +25,6 @@ func testInputs() Inputs {
 			{Name: "exec", Kind: "activity", TaskQueue: "tools"},
 			{Name: "orphan", Kind: "activity", TaskQueue: "gone"},
 			{Name: "read_file", Kind: "activity", TaskQueue: "tools"},
-			{Name: "spawn_session", Kind: "workflow", TaskQueue: "agent", InputSchema: []byte(spawnSchema)},
 		},
 		Queues: map[string]taskqueue.Status{
 			"agent": {Queue: "agent", Workflow: fresh},
@@ -60,9 +57,9 @@ func hasAlert(inv *Inventory, level, fragment string) bool {
 func TestBuildInventory_EffectiveTools(t *testing.T) {
 	inv := BuildInventory(testInputs())
 	cases := map[string][]string{
-		"boss":  {"read_file", "spawn_session"},
+		"boss":  {"agent_coder", "agent_mute", "agent_root", "read_file"},
 		"coder": {"exec", "read_file"},
-		"root":  {"exec", "orphan", "read_file", "spawn_session"},
+		"root":  {"agent_boss", "agent_coder", "agent_mute", "exec", "orphan", "read_file"},
 		"mute":  nil,
 	}
 	for id, want := range cases {
@@ -88,11 +85,11 @@ func TestBuildInventory_Availability(t *testing.T) {
 	inv := BuildInventory(in)
 
 	for name, want := range map[string]string{
-		"read_file":     "up",
-		"spawn_session": "up",
-		"orphan":        "down",
-		"z":             "unknown",
-		"zz":            "down",
+		"read_file":   "up",
+		"agent_coder": "up", // runs on the workflow queue
+		"orphan":      "down",
+		"z":           "unknown",
+		"zz":          "down",
 	} {
 		if got := inv.Tool(name).Availability; got != want {
 			t.Errorf("%s: availability = %s, want %s", name, got, want)
@@ -110,28 +107,40 @@ func TestBuildInventory_Delegation(t *testing.T) {
 	inv := BuildInventory(testInputs())
 	boss := inv.Agent("boss")
 
+	extras := map[string][]string{}
 	var targets []string
-	var coder Delegation
 	for _, d := range boss.DelegatesTo {
 		targets = append(targets, d.AgentID)
-		if d.AgentID == "coder" {
-			coder = d
+		for _, tv := range d.Extra {
+			extras[d.AgentID] = append(extras[d.AgentID], tv.Name)
 		}
 	}
 	if !reflect.DeepEqual(targets, []string{"coder", "mute", "root"}) {
 		t.Errorf("boss delegates to %v", targets)
 	}
-	if !reflect.DeepEqual(coder.ExtraSensitive, []string{"exec"}) {
-		t.Errorf("delegating to coder adds %v, want [exec]", coder.ExtraSensitive)
+	// What each call can end up using that boss cannot, transitively: root
+	// may itself call coder, and calling back boss adds nothing.
+	want := map[string][]string{"coder": {"exec"}, "root": {"exec", "orphan"}}
+	if !reflect.DeepEqual(extras, want) {
+		t.Errorf("extras = %v, want %v", extras, want)
 	}
-	if !hasAlert(inv, LevelWarning, "L'agent boss peut déléguer à coder") {
+	if !hasAlert(inv, LevelWarning, "L'agent boss peut déléguer à coder et atteindre ainsi exec") {
 		t.Error("missing escalation alert")
 	}
 	if got := inv.Agent("coder").CalledBy; !reflect.DeepEqual(got, []string{"boss", "root"}) {
 		t.Errorf("coder called by %v", got)
 	}
 	if inv.Agent("coder").DelegatesTo != nil {
-		t.Error("an agent without spawn_session delegates to nobody")
+		t.Error("an agent granted no agent tool delegates to nobody")
+	}
+	if got := inv.Tool("agent_coder").Agents; !reflect.DeepEqual(got, []string{"boss", "root"}) {
+		t.Errorf("agent_coder callable by %v", got)
+	}
+	// "agent_*" matches every other agent's tool, not boss's own.
+	for _, g := range boss.Globs {
+		if g.Pattern == "agent_*" && !reflect.DeepEqual(g.Matches, []string{"agent_coder", "agent_root", "agent_mute"}) {
+			t.Errorf("agent_* matches %v", g.Matches)
+		}
 	}
 }
 

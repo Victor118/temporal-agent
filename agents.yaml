@@ -3,6 +3,8 @@
 #
 # tools is an allowlist of tool name globs, denied by default: an agent without
 # it gets no tool at all. "*" grants every tool and must be written explicitly.
+# Each agent is also a tool, agent_<id>, to delegate to it: "agent_*" allows
+# delegating to every other agent.
 agents:
   - id: default
     name: Default Agent
@@ -20,7 +22,7 @@ agents:
       - schedule_task
       - list_schedules
       - cancel_schedule
-      - spawn_session
+      - agent_*
       - analyze_repo
 
   - id: market-analyst

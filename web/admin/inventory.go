@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"encoding/json"
 	"fmt"
 	"path"
 	"slices"
@@ -39,8 +40,11 @@ type Inputs struct {
 // Inventory is the dashboard's view of the configuration, with the
 // inconsistencies found in it.
 type Inventory struct {
-	Agents        []*AgentView
-	Tools         []*ToolView
+	Agents []*AgentView
+	Tools  []*ToolView // published by the workers
+	// AgentTools are the agent_<id> tools, generated from the agents: calling
+	// one delegates to that agent.
+	AgentTools    []*ToolView
 	Queues        []*QueueView
 	Skills        []*SkillView
 	MissingSkills []*MissingSkill
@@ -79,8 +83,10 @@ type AgentTool struct {
 	Via string // first glob of the allowlist that matches the tool
 }
 
-// Delegation is a spawn_session target, with the tools the target can use
-// that the delegating agent cannot: what delegation adds to its reach.
+// Delegation is an agent this one may call, with the tools that call can end
+// up using — the target's own, and those of the agents it may call in turn —
+// that the delegating agent cannot use itself: what delegation adds to its
+// reach.
 type Delegation struct {
 	AgentID        string
 	Extra          []*ToolView
@@ -94,6 +100,7 @@ type SkillRef struct {
 
 type ToolView struct {
 	store.ToolRecord
+	Target    string // for an agent_<id> tool, the agent it delegates to
 	Sensitive bool
 	Agents    []string
 	// Availability: "up", "down" or "unknown", from the pollers of the type the
@@ -155,9 +162,27 @@ func BuildInventory(in Inputs) *Inventory {
 		inv.skills[s.Name] = sv
 	}
 
+	for _, a := range in.Agents {
+		entry := catalogEntry(a)
+		tv := &ToolView{
+			ToolRecord: store.ToolRecord{
+				Name:        activity.AgentToolName(a.ID),
+				Kind:        "agent",
+				Description: activity.AgentToolDescription(entry),
+				InputSchema: json.RawMessage(activity.AgentToolSchema),
+				// A sub-agent runs on its parent's workflow queue.
+				TaskQueue: in.WorkflowQueue,
+			},
+			Target: a.ID,
+		}
+		tv.Availability = availability(tv.ToolRecord, in.Queues)
+		inv.AgentTools = append(inv.AgentTools, tv)
+		inv.tools[tv.Name] = tv
+	}
+
 	// The effective tools are computed by activity.Catalog itself, never
 	// re-derived here.
-	catalog, entries := newCatalog(in.Agents, in.Tools)
+	catalog := newCatalog(in.Agents, in.Tools)
 
 	missing := make(map[string]*MissingSkill)
 	for _, a := range in.Agents {
@@ -167,8 +192,19 @@ func BuildInventory(in Inputs) *Inventory {
 			Sessions:  in.Sessions[a.ID],
 			AllTools:  slices.Contains(a.Tools, "*"),
 		}
+		// What a pattern can match: the published tools, and the agent tools
+		// of every agent but this one.
+		var grantable []string
+		for _, t := range in.Tools {
+			grantable = append(grantable, t.Name)
+		}
+		for _, o := range in.Agents {
+			if o.ID != a.ID {
+				grantable = append(grantable, activity.AgentToolName(o.ID))
+			}
+		}
 		for _, g := range a.Tools {
-			av.Globs = append(av.Globs, globView(g, in.Tools))
+			av.Globs = append(av.Globs, globView(g, grantable))
 		}
 		for _, def := range catalog.AllowedTools(a.ID).Tools {
 			tv := inv.tools[def.Name]
@@ -199,22 +235,25 @@ func BuildInventory(in Inputs) *Inventory {
 	}
 
 	for _, av := range inv.Agents {
-		if !av.hasTool(activity.SpawnToolName) {
-			continue
+		own := make(map[string]bool)
+		for _, t := range av.Tools {
+			own[t.Name] = true
 		}
-		for _, id := range activity.DelegatableAgentIDs(entries, av.ID) {
-			target := inv.agents[id]
-			d := Delegation{AgentID: id}
-			for _, t := range target.Tools {
-				if !av.hasTool(t.Name) {
-					d.Extra = append(d.Extra, t.ToolView)
-					if t.Sensitive {
-						d.ExtraSensitive = append(d.ExtraSensitive, t.Name)
+		for _, t := range av.Tools {
+			if t.Target == "" {
+				continue
+			}
+			d := Delegation{AgentID: t.Target}
+			for _, tv := range inv.reach(t.Target, map[string]bool{av.ID: true}) {
+				if !own[tv.Name] {
+					d.Extra = append(d.Extra, tv)
+					if tv.Sensitive {
+						d.ExtraSensitive = append(d.ExtraSensitive, tv.Name)
 					}
 				}
 			}
 			av.DelegatesTo = append(av.DelegatesTo, d)
-			target.CalledBy = append(target.CalledBy, av.ID)
+			inv.agents[t.Target].CalledBy = append(inv.agents[t.Target].CalledBy, av.ID)
 		}
 	}
 
@@ -224,15 +263,48 @@ func BuildInventory(in Inputs) *Inventory {
 }
 
 // newCatalog builds, from the same rows, the catalog the workers build.
-func newCatalog(agents []store.Agent, tools []store.ToolRecord) (*activity.Catalog, []activity.AgentCatalogEntry) {
+func newCatalog(agents []store.Agent, tools []store.ToolRecord) *activity.Catalog {
 	entries := make([]activity.AgentCatalogEntry, len(agents))
 	for i, a := range agents {
-		entries[i] = activity.AgentCatalogEntry{ID: a.ID, Name: a.Name, Description: a.Description, Skills: a.Skills, Tools: a.Tools}
+		entries[i] = catalogEntry(a)
 	}
 	catalog := activity.NewCatalog()
 	catalog.SetAgents(entries)
 	catalog.SetTools(tools)
-	return catalog, entries
+	return catalog
+}
+
+func catalogEntry(a store.Agent) activity.AgentCatalogEntry {
+	return activity.AgentCatalogEntry{ID: a.ID, Name: a.Name, Description: a.Description, Skills: a.Skills, Tools: a.Tools}
+}
+
+// reach returns the published tools agent id can end up using: its own, and
+// through delegation those of every agent it may call, transitively. Agents in
+// seen are skipped, which also stops cycles.
+func (inv *Inventory) reach(id string, seen map[string]bool) []*ToolView {
+	if seen[id] {
+		return nil
+	}
+	seen[id] = true
+	var out []*ToolView
+	added := make(map[string]bool)
+	add := func(tv *ToolView) {
+		if !added[tv.Name] {
+			added[tv.Name] = true
+			out = append(out, tv)
+		}
+	}
+	for _, t := range inv.agents[id].Tools {
+		if t.Target == "" {
+			add(t.ToolView)
+			continue
+		}
+		for _, tv := range inv.reach(t.Target, seen) {
+			add(tv)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }
 
 func (av *AgentView) hasTool(name string) bool {
@@ -244,15 +316,15 @@ func (av *AgentView) hasTool(name string) bool {
 	return false
 }
 
-func globView(pattern string, tools []store.ToolRecord) GlobView {
+func globView(pattern string, names []string) GlobView {
 	gv := GlobView{Pattern: pattern}
 	if _, err := path.Match(pattern, ""); err != nil {
 		gv.Invalid = true
 		return gv
 	}
-	for _, t := range tools {
-		if ok, _ := path.Match(pattern, t.Name); ok {
-			gv.Matches = append(gv.Matches, t.Name)
+	for _, name := range names {
+		if ok, _ := path.Match(pattern, name); ok {
+			gv.Matches = append(gv.Matches, name)
 		}
 	}
 	return gv
@@ -281,7 +353,7 @@ func availability(t store.ToolRecord, queues map[string]taskqueue.Status) string
 		return "unknown"
 	}
 	served := st.ActivityServed()
-	if t.Kind == "workflow" {
+	if t.Kind == "workflow" || t.Kind == "agent" {
 		served = st.WorkflowServed()
 	}
 	if served {

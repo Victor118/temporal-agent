@@ -168,10 +168,16 @@ Les workers de ces queues activent `EnableSessionWorker`.
 
 ### Sous-agent
 
-`spawn_session(agent_id, task)` lance un `AgentWorkflow` enfant sur la queue des
-workflows, contexte isolé, avec **l'allowlist de l'agent enfant** (jamais celle
-du parent). Un `agent_id` inconnu est refusé ; sans `agent_id`, l'enfant est le
-même agent que le parent. Le parent ne reçoit que la réponse finale.
+Chaque agent est aussi un outil, `agent_<id>(task, model?)`, généré par le
+catalogue depuis la table `agents` (aucun worker ne le publie). L'appeler lance
+un `AgentWorkflow` enfant sur la queue de workflows du parent, contexte isolé,
+avec **l'allowlist de l'agent enfant** (jamais celle du parent). Le parent ne
+reçoit que la réponse finale.
+
+La délégation passe donc par l'allowlist comme le reste : `agent_code-reviewer`
+autorise un agent, `agent_*` tous les autres. Un agent ne reçoit jamais son
+propre outil. La cible vient du nom de l'outil, pas d'un paramètre rempli par
+le LLM : il n'y a pas d'`agent_id` à inventer.
 
 ### Workflow déterministe : Claude Code
 
@@ -190,6 +196,9 @@ diagnostic.
 
 ## État actuel (écarts avec la cible)
 
+- **Pas de sessions d'outils à état** : `session_tools` est parti avec
+  `spawn_session` (il ne fonctionnait pas : pas d'`EnableSessionWorker`). À
+  refaire avec un flag « outil à état » sur le tool.
 - **Back-office** (`/admin`) : édite les agents (allowlist comprise), protégé
   par un mot de passe unique (`ADMIN_API_KEY`). Pas encore de comptes
   utilisateurs ni d'historique des modifications.
@@ -211,7 +220,8 @@ diagnostic.
      seul, seed depuis `agents.yaml` (appliqué seulement si la table est vide).
 3. **Dispatch par outil** (fait) : catalogue en mémoire sur les workers,
    `ListTools(agentID)`, allowlist appliquée, routage vers la queue de l'outil.
-4. **Agent identifié par `agent_id`** (fait) : `spawn_session(agent_id)`,
+4. **Agent identifié par `agent_id`** (fait) : délégation par agent (aujourd'hui
+   un outil `agent_<id>` par agent, qui a remplacé `spawn_session(agent_id)`),
    sessions avec `agent_id`, queue de workflows dédiée (`WORKFLOW_QUEUE`),
    suppression de `default_queue`, `TASK_QUEUES`, `TASK_QUEUE_MCP`.
    Sessions d'outils à état sur la queue des outils, validées.

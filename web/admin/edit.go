@@ -13,6 +13,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/victor/temporal-agent/activity"
 	"github.com/victor/temporal-agent/config"
 	"github.com/victor/temporal-agent/store"
 )
@@ -70,10 +71,15 @@ type previewData struct {
 // formFromAgent fills the form from a stored agent. An entry naming a
 // published tool becomes a checkbox; anything else stays text, so that saving
 // never drops a pattern or a tool whose worker happens to be down.
-func formFromAgent(a store.Agent, tools []store.ToolRecord) agentForm {
+func formFromAgent(a store.Agent, tools []store.ToolRecord, agents []store.Agent) agentForm {
 	published := make(map[string]bool, len(tools))
 	for _, t := range tools {
 		published[t.Name] = true
+	}
+	for _, o := range agents {
+		if o.ID != a.ID {
+			published[activity.AgentToolName(o.ID)] = true
+		}
 	}
 	f := agentForm{
 		ID:          a.ID,
@@ -174,6 +180,22 @@ func buildPicker(inv *Inventory, f agentForm) []PickerGroup {
 		}
 		groups = append(groups, g)
 	}
+
+	// The agents this one may delegate to: every other agent, as a tool.
+	agents := PickerGroup{Queue: "Agents (délégation)"}
+	for _, tv := range inv.AgentTools {
+		if tv.Target == f.ID {
+			continue
+		}
+		agents.Tools = append(agents.Tools, PickerTool{
+			ToolView: tv,
+			Checked:  slices.Contains(f.Picked, tv.Name),
+			Via:      firstMatch(globs, tv.Name),
+		})
+	}
+	if len(agents.Tools) > 0 {
+		groups = append(groups, agents)
+	}
 	return groups
 }
 
@@ -222,7 +244,12 @@ func (a *Admin) editAgentForm(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	a.renderForm(w, r, formFromAgent(*ag, tools))
+	agents, err := a.cfg.Store.ListAgents(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	a.renderForm(w, r, formFromAgent(*ag, tools, agents))
 }
 
 func (a *Admin) createAgent(w http.ResponseWriter, r *http.Request) {

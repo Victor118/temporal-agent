@@ -3,6 +3,7 @@ package activity
 import (
 	"context"
 	"fmt"
+	"path"
 	"sort"
 	"strings"
 	"sync"
@@ -10,15 +11,12 @@ import (
 	"github.com/victor/temporal-agent/skill"
 )
 
-// SpawnToolName is the tool through which an agent delegates to another agent.
-// Its schema is the only one specialized per agent (see Catalog.AllowedTools).
-const SpawnToolName = "spawn_session"
-
 const promptIntro = "You are a helpful AI assistant with access to tools. You MUST use your tools proactively to accomplish the user's goals — do not just describe what you could do, actually do it.\n\n"
 
 // promptRule is a behavior guideline shown only if the agent may use at least
-// one of its tools (%s is replaced by the allowed ones). A rule without tools
-// is always shown.
+// one of its tools (%s is replaced by the allowed ones). A tool may be a glob,
+// which lists every allowed tool it matches. A rule without tools is always
+// shown.
 type promptRule struct {
 	tools []string
 	text  string
@@ -28,7 +26,7 @@ var promptRules = []promptRule{
 	{[]string{"web_search", "web_fetch"}, "When the user asks for information you don't have, look it up with %s."},
 	{[]string{"read_file", "write_file", "edit_file", "list_directory", "grep", "glob"}, "When the user asks you to work with files, use %s."},
 	{[]string{"exec"}, "When the user asks you to run a command, use %s."},
-	{[]string{SpawnToolName}, "When a task requires specialized expertise, use %s to delegate to a sub-agent."},
+	{[]string{AgentToolPrefix + "*"}, "When a task requires specialized expertise, delegate it to the agent suited for it: %s. The agent does not see this conversation, so give it the full context."},
 	{nil, "Always prefer action over explanation. If you can answer by using a tool, do it."},
 	{nil, "Only use the tools you are given. If a task needs a tool you don't have, say so instead of pretending."},
 	{[]string{"write_file", "edit_file"}, "NEVER write a file as a way to deliver your answer. Respond directly in the conversation. Only use %s when the user explicitly asks you to create or modify a file."},
@@ -47,9 +45,20 @@ func buildBehaviors(allowed map[string]bool) string {
 		}
 		var names []string
 		for _, t := range r.tools {
-			if allowed[t] {
-				names = append(names, t)
+			if !strings.ContainsAny(t, "*?[") {
+				if allowed[t] {
+					names = append(names, t)
+				}
+				continue
 			}
+			var matched []string
+			for name := range allowed {
+				if ok, _ := path.Match(t, name); ok {
+					matched = append(matched, name)
+				}
+			}
+			sort.Strings(matched) // the prompt is a cached prefix: keep it stable
+			names = append(names, matched...)
 		}
 		if len(names) > 0 {
 			sb.WriteString("- " + fmt.Sprintf(r.text, strings.Join(names, ", ")) + "\n")
@@ -106,15 +115,11 @@ type LoadSkillsForAgentInput struct {
 
 type LoadSkillsForAgentOutput struct {
 	SystemPrompt string `json:"system_prompt"`
-	// Agents this one may delegate to: the catalog minus itself. The dispatch
-	// validates spawn_session targets against this list, so it must hold exactly
-	// what the agents directory in the prompt advertises.
-	DelegatableAgentIDs []string `json:"delegatable_agent_ids"`
 }
 
-// LoadSkillsForAgent returns the full system prompt for the given agent (behaviors
-// for its allowed tools, its skills, and — if it may delegate — the directory of
-// all OTHER agents), and the IDs of the agents it may delegate to.
+// LoadSkillsForAgent returns the system prompt for the given agent: behaviors
+// for its allowed tools, then its skills. The agents it may delegate to need no
+// section of their own: each agent_<id> tool carries its agent's description.
 func (a *SkillActivities) LoadSkillsForAgent(ctx context.Context, input LoadSkillsForAgentInput) (LoadSkillsForAgentOutput, error) {
 	catalog := a.catalog.Agents()
 	allowed := make(map[string]bool)
@@ -133,24 +138,7 @@ func (a *SkillActivities) LoadSkillsForAgent(ctx context.Context, input LoadSkil
 	prompt := buildSystemPrompt(matchSkills(a.skills, agentSkills), allowed)
 	a.mu.RUnlock()
 
-	// One list feeds both the prose and the validation, so they cannot drift:
-	// an agent that is not in the directory is not a legal spawn target either.
-	delegatable := delegatableAgents(catalog, input.AgentID)
-
-	// The agents directory is only useful to an agent that can delegate
-	if allowed[SpawnToolName] {
-		prompt += buildAgentsDirectory(delegatable)
-	}
-
-	ids := make([]string, len(delegatable))
-	for i, e := range delegatable {
-		ids[i] = e.ID
-	}
-
-	return LoadSkillsForAgentOutput{
-		SystemPrompt:        prompt,
-		DelegatableAgentIDs: ids,
-	}, nil
+	return LoadSkillsForAgentOutput{SystemPrompt: prompt}, nil
 }
 
 // matchSkills returns the skills named in names, in order, skipping unknown ones.
@@ -162,59 +150,6 @@ func matchSkills(byName map[string]skill.Skill, names []string) []skill.Skill {
 		}
 	}
 	return matched
-}
-
-// delegatableAgents returns the agents currentAgentID may delegate to: every
-// other agent in the catalog, sorted by ID. Sorting matters: this list is
-// rendered into the system prompt and into the spawn_session schema, both sent
-// on every turn, and an unstable order would break the LLM prompt cache prefix.
-func delegatableAgents(catalog []AgentCatalogEntry, currentAgentID string) []AgentCatalogEntry {
-	var filtered []AgentCatalogEntry
-	for _, entry := range catalog {
-		if entry.ID != currentAgentID {
-			filtered = append(filtered, entry)
-		}
-	}
-	sort.Slice(filtered, func(i, j int) bool { return filtered[i].ID < filtered[j].ID })
-	return filtered
-}
-
-// DelegatableAgentIDs returns the IDs agentID may delegate to, exactly as the
-// spawn_session schema and the dispatch see them.
-func DelegatableAgentIDs(catalog []AgentCatalogEntry, agentID string) []string {
-	delegatable := delegatableAgents(catalog, agentID)
-	ids := make([]string, len(delegatable))
-	for i, e := range delegatable {
-		ids[i] = e.ID
-	}
-	return ids
-}
-
-// buildAgentsDirectory generates a prompt section listing the agents that may be
-// delegated to, as returned by delegatableAgents.
-func buildAgentsDirectory(filtered []AgentCatalogEntry) string {
-	if len(filtered) == 0 {
-		return "## Agents Directory\n\nNo other agent is currently available to delegate to. Do not invent agent IDs that are not listed here.\n\n"
-	}
-
-	var sb strings.Builder
-	sb.WriteString("## Agents Directory\n\n")
-	sb.WriteString("You can delegate tasks to specialized agents using the `spawn_session` tool with the agent's `agent_id`. Only use agent IDs listed below — do not invent others.\n\n")
-
-	for _, entry := range filtered {
-		sb.WriteString(fmt.Sprintf("- **%s** (`agent_id=%s`)", entry.Name, entry.ID))
-		if entry.Description != "" {
-			sb.WriteString(" — " + entry.Description)
-		}
-		if len(entry.Skills) > 0 {
-			sb.WriteString(fmt.Sprintf(" _(skills: %s)_", strings.Join(entry.Skills, ", ")))
-		}
-		sb.WriteString("\n")
-	}
-	sb.WriteString("\nIMPORTANT: The `agent_id` parameter must be the exact value shown above (e.g. `market-analyst`), NOT a skill name.\n")
-	sb.WriteString("\n")
-
-	return sb.String()
 }
 
 // buildSystemPrompt builds an agent's base prompt: behaviors for its allowed

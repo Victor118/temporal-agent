@@ -8,10 +8,12 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	"github.com/stretchr/testify/mock"
 	enumspb "go.temporal.io/api/enums/v1"
 	sdkactivity "go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
+	"go.temporal.io/sdk/workflow"
 
 	"github.com/victor/temporal-agent/activity"
 	"github.com/victor/temporal-agent/provider"
@@ -125,74 +127,128 @@ func TestAgentWorkflow_RequiresAgentID(t *testing.T) {
 	}
 }
 
-func TestBuildChildInput_SpawnSession(t *testing.T) {
-	// What LoadSkillsForAgent returns for "default": the catalog minus itself.
-	delegatable := map[string]bool{"market-analyst": true}
+func TestBuildChildInput_AgentTool(t *testing.T) {
 	parent := AgentWorkflowInput{Model: "m"}
+	analyst := func() activity.ToolResolution {
+		return activity.ToolResolution{Kind: "workflow", AgentID: "market-analyst"}
+	}
 
-	t.Run("target agent runs on the current queue", func(t *testing.T) {
-		res := activity.ToolResolution{WorkflowName: "AgentWorkflow", TaskQueue: "tools-core"}
-		name, in, err := buildChildInput("spawn_session", json.RawMessage(`{"task":"t","agent_id":"market-analyst"}`),
-			parent, "child", &res, []string{"default"}, "default", delegatable, "agent")
+	t.Run("the target comes from the resolution and runs on the current queue", func(t *testing.T) {
+		res := analyst()
+		_, in, err := buildChildInput("agent_market-analyst", json.RawMessage(`{"task":"t"}`),
+			parent, "child", &res, []string{"default"}, "default", "agent")
 		if err != nil {
 			t.Fatal(err)
 		}
 		child := in.(AgentWorkflowInput)
-		if name != "AgentWorkflow" || child.AgentID != "market-analyst" || child.Model != "m" || res.TaskQueue != "agent" {
-			t.Errorf("name=%q child=%+v queue=%q", name, child, res.TaskQueue)
+		if child.AgentID != "market-analyst" || child.UserMessage != "t" || child.Model != "m" || child.SessionID != "child" || res.TaskQueue != "agent" {
+			t.Errorf("child=%+v queue=%q", child, res.TaskQueue)
 		}
 	})
 
-	t.Run("no agent_id is refused", func(t *testing.T) {
-		res := activity.ToolResolution{WorkflowName: "AgentWorkflow"}
-		_, _, err := buildChildInput("spawn_session", json.RawMessage(`{"task":"t"}`),
-			parent, "child", &res, nil, "default", delegatable, "agent")
-		if err == nil || !strings.Contains(err.Error(), "requires agent_id") {
-			t.Errorf("got error %v, want a missing agent_id error", err)
+	t.Run("the call may pick its own model", func(t *testing.T) {
+		res := analyst()
+		_, in, _ := buildChildInput("agent_market-analyst", json.RawMessage(`{"task":"t","model":"other"}`),
+			parent, "child", &res, nil, "default", "agent")
+		if child := in.(AgentWorkflowInput); child.Model != "other" {
+			t.Errorf("model = %q, want other", child.Model)
+		}
+	})
+
+	t.Run("an agent_id in the input is ignored", func(t *testing.T) {
+		res := analyst()
+		_, in, _ := buildChildInput("agent_market-analyst", json.RawMessage(`{"task":"t","agent_id":"root"}`),
+			parent, "child", &res, nil, "default", "agent")
+		if child := in.(AgentWorkflowInput); child.AgentID != "market-analyst" {
+			t.Errorf("agent = %q, want market-analyst", child.AgentID)
+		}
+	})
+
+	t.Run("an empty task is refused", func(t *testing.T) {
+		res := analyst()
+		_, _, err := buildChildInput("agent_market-analyst", json.RawMessage(`{"task":"  "}`),
+			parent, "child", &res, nil, "default", "agent")
+		if err == nil || !strings.Contains(err.Error(), "task is required") {
+			t.Errorf("got error %v", err)
 		}
 	})
 
 	t.Run("delegating to itself is refused", func(t *testing.T) {
-		res := activity.ToolResolution{WorkflowName: "AgentWorkflow"}
-		_, _, err := buildChildInput("spawn_session", json.RawMessage(`{"task":"t","agent_id":"default"}`),
-			parent, "child", &res, nil, "default", delegatable, "agent")
+		res := analyst()
+		_, _, err := buildChildInput("agent_market-analyst", json.RawMessage(`{"task":"t"}`),
+			parent, "child", &res, nil, "market-analyst", "agent")
 		if err == nil || !strings.Contains(err.Error(), "cannot delegate to itself") {
-			t.Errorf("got error %v, want a self-delegation error", err)
-		}
-	})
-
-	t.Run("unknown agent is refused", func(t *testing.T) {
-		res := activity.ToolResolution{WorkflowName: "AgentWorkflow"}
-		_, _, err := buildChildInput("spawn_session", json.RawMessage(`{"task":"t","agent_id":"ghost"}`),
-			parent, "child", &res, nil, "default", delegatable, "agent")
-		if err == nil || !strings.Contains(err.Error(), `unknown agent_id "ghost"`) {
 			t.Errorf("got error %v", err)
 		}
 	})
 }
 
-func TestSessionToolsQueue(t *testing.T) {
-	resolutions := map[string]activity.ToolResolution{
-		"read_file":     {Kind: "activity", TaskQueue: "tools-fs"},
-		"write_file":    {Kind: "activity", TaskQueue: "tools-fs"},
-		"web_fetch":     {Kind: "activity", TaskQueue: "tools-core"},
-		"spawn_session": {Kind: "workflow", TaskQueue: "tools-core"},
-	}
+// TestAgentWorkflow_DelegatesThroughAgentTool runs a parent that calls an
+// agent_<id> tool and checks the child it starts.
+func TestAgentWorkflow_DelegatesThroughAgentTool(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
 
-	q, err := sessionToolsQueue([]string{"read_file", "write_file"}, resolutions)
-	if err != nil || q != "tools-fs" {
-		t.Errorf("got %q, %v; want tools-fs", q, err)
-	}
+	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.ListToolsInput) (activity.ListToolsOutput, error) {
+		return activity.ListToolsOutput{
+			Tools: []provider.ToolDefinition{{Name: "agent_analyst", InputSchema: json.RawMessage(activity.AgentToolSchema)}},
+			Resolutions: map[string]activity.ToolResolution{
+				"agent_analyst": {Kind: "workflow", AgentID: "analyst"},
+			},
+		}, nil
+	}, sdkactivity.RegisterOptions{Name: "ListTools"})
+	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.LoadSkillsForAgentInput) (activity.LoadSkillsForAgentOutput, error) {
+		return activity.LoadSkillsForAgentOutput{SystemPrompt: "prompt"}, nil
+	}, sdkactivity.RegisterOptions{Name: "LoadSkillsForAgent"})
+	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.NotifyInput) error {
+		return nil
+	}, sdkactivity.RegisterOptions{Name: "NotifyStep"})
 
-	cases := map[string][]string{
-		"not available":             {"read_file", "exec"},
-		"not an activity tool":      {"spawn_session"},
-		"must share one task queue": {"read_file", "web_fetch"},
-	}
-	for want, names := range cases {
-		if _, err := sessionToolsQueue(names, resolutions); err == nil || !strings.Contains(err.Error(), want) {
-			t.Errorf("%v: got error %v, want %q", names, err, want)
+	var secondRequest provider.ChatRequest
+	calls := 0
+	env.RegisterActivityWithOptions(func(ctx context.Context, req provider.ChatRequest) (provider.ChatResponse, error) {
+		calls++
+		if calls == 1 {
+			return provider.ChatResponse{ToolCalls: []provider.ToolCallInfo{
+				{ID: "1", Name: "agent_analyst", Input: json.RawMessage(`{"task":"summarize the CAC 40"}`)},
+			}}, nil
 		}
+		secondRequest = req
+		return provider.ChatResponse{Content: "done", StopReason: "end_turn"}, nil
+	}, sdkactivity.RegisterOptions{Name: "CallLLM"})
+
+	// Parent and child are both AgentWorkflow, and the mock catches both: the
+	// parent runs the real thing, the child is replaced.
+	var child AgentWorkflowInput
+	env.OnWorkflow(AgentWorkflow, mock.Anything, mock.Anything).Return(
+		func(ctx workflow.Context, in AgentWorkflowInput) (AgentWorkflowOutput, error) {
+			if in.AgentID == "default" {
+				return AgentWorkflow(ctx, in)
+			}
+			child = in
+			return AgentWorkflowOutput{Response: "CAC 40 summary"}, nil
+		})
+
+	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{SessionID: "s1", AgentID: "default", UserMessage: "hello", Model: "m"})
+
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatalf("workflow error: %v", err)
+	}
+	if child.AgentID != "analyst" || child.UserMessage != "summarize the CAC 40" || child.Model != "m" ||
+		fmt.Sprint(child.AgentChain) != "[default]" {
+		t.Errorf("child input = %+v", child)
+	}
+	found := false
+	for _, m := range secondRequest.Messages {
+		if m.ToolResult != nil {
+			found = true
+			if m.ToolResult.IsError || m.ToolResult.Content != "CAC 40 summary" {
+				t.Errorf("tool result = %+v", m.ToolResult)
+			}
+		}
+	}
+	if !found {
+		t.Error("the sub-agent's answer never reached the parent")
 	}
 }
 
@@ -210,7 +266,7 @@ func TestWorkflowToolContent(t *testing.T) {
 }
 
 func TestChildWorkflowID(t *testing.T) {
-	if got := childWorkflowID("s1", "spawn_session", "toolu_01A", 3, 1); got != "s1-tool-spawn_session-toolu_01A" {
+	if got := childWorkflowID("s1", "agent_analyst", "toolu_01A", 3, 1); got != "s1-tool-agent_analyst-toolu_01A" {
 		t.Errorf("got %q", got)
 	}
 	if got := childWorkflowID("s1", "ask_user", "", 3, 1); got != "s1-tool-ask_user-3-1" {

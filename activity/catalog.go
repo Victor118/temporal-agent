@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/victor/temporal-agent/provider"
@@ -48,8 +49,22 @@ func (c *Catalog) Tools() []store.ToolRecord {
 	return c.tools
 }
 
-// AllowedTools returns the tools agentID may use, in catalog order (sorted by
-// name, so the prompt prefix stays stable), with how to dispatch each one.
+// AgentToolPrefix names the tool that delegates to an agent: agent_<id>. These
+// tools are generated from the agents catalog, never published by a worker, so
+// the allowlist governs delegation like any other tool: "agent_code-reviewer"
+// for one agent, "agent_*" for all of them.
+const AgentToolPrefix = "agent_"
+
+// AgentToolName returns the name of the tool that delegates to agentID.
+func AgentToolName(agentID string) string { return AgentToolPrefix + agentID }
+
+// AgentToolSchema is the input of every agent_<id> tool. The target is the
+// tool itself, so there is no agent_id to fill in, and nothing to invent.
+const AgentToolSchema = `{"type":"object","properties":{"task":{"type":"string","description":"The task for the agent, with all the context it needs: it does not see this conversation."},"model":{"type":"string","description":"Optional model override for the agent. Defaults to yours."}},"required":["task"]}`
+
+// AllowedTools returns the tools agentID may use, sorted by name so the prompt
+// prefix stays stable, with how to dispatch each one: the published tools its
+// allowlist matches, and the agent_<id> tools of the other agents it matches.
 // Access is denied by default: an empty allowlist, or an unknown agent, gets
 // no tool at all. Granting everything takes an explicit "*".
 func (c *Catalog) AllowedTools(agentID string) ListToolsOutput {
@@ -72,37 +87,20 @@ func (c *Catalog) AllowedTools(agentID string) ListToolsOutput {
 		Tools:       []provider.ToolDefinition{},
 		Resolutions: make(map[string]ToolResolution),
 	}
-	delegatable := delegatableAgents(c.agents, agentID)
 
 	for _, t := range c.tools {
-		if !tool.MatchAny(allowlist, t.Name) {
+		if strings.HasPrefix(t.Name, AgentToolPrefix) {
+			// The prefix belongs to the generated agent tools: a published tool
+			// using it would be shadowed, or would shadow an agent.
 			continue
 		}
-		schema := t.InputSchema
-		if t.Name == SpawnToolName {
-			// Delegation is restricted by value, not by tool name: the allowlist
-			// can only say whether spawn_session exists, so the legal targets are
-			// pinned in the schema the model decodes against.
-			if len(delegatable) == 0 {
-				continue // nobody to delegate to: an empty enum is unsatisfiable
-			}
-			ids := make([]string, len(delegatable))
-			for i, e := range delegatable {
-				ids[i] = e.ID
-			}
-			restricted, err := withAgentIDEnum(t.InputSchema, ids)
-			if err != nil {
-				// Publishing the unrestricted schema would silently widen what the
-				// agent may spawn, so drop the tool instead.
-				log.Printf("Warning: %s schema not restricted for agent %q, tool dropped: %v", t.Name, agentID, err)
-				continue
-			}
-			schema = restricted
+		if !tool.MatchAny(allowlist, t.Name) {
+			continue
 		}
 		out.Tools = append(out.Tools, provider.ToolDefinition{
 			Name:        t.Name,
 			Description: t.Description,
-			InputSchema: schema,
+			InputSchema: t.InputSchema,
 		})
 		out.Resolutions[t.Name] = ToolResolution{
 			Kind:          t.Kind,
@@ -111,47 +109,33 @@ func (c *Catalog) AllowedTools(agentID string) ListToolsOutput {
 			FireAndForget: t.FireAndForget,
 		}
 	}
+
+	for _, a := range c.agents {
+		name := AgentToolName(a.ID)
+		// Never itself: an agent that delegates to itself only loops.
+		if a.ID == agentID || !tool.MatchAny(allowlist, name) {
+			continue
+		}
+		out.Tools = append(out.Tools, provider.ToolDefinition{
+			Name:        name,
+			Description: AgentToolDescription(a),
+			InputSchema: json.RawMessage(AgentToolSchema),
+		})
+		// No task queue: a sub-agent runs where its parent runs, which only
+		// the dispatching workflow knows.
+		out.Resolutions[name] = ToolResolution{Kind: string(tool.ToolKindWorkflow), AgentID: a.ID}
+	}
+
+	sort.Slice(out.Tools, func(i, j int) bool { return out.Tools[i].Name < out.Tools[j].Name })
 	return out
 }
 
-// withAgentIDEnum returns schema with agent_id constrained to ids and marked
-// required. Both matter: an enum on an optional field constrains nothing, since
-// omitting the field bypasses it. It is applied on read rather than stored,
-// because the tools table is published by workers and is agent-agnostic — and
-// because a worker running an older binary may still publish a schema without
-// the required field.
-//
-// The enum only steers decoding; it is not a guarantee. buildChildInput
-// validates the target again before spawning anything.
-func withAgentIDEnum(schema json.RawMessage, ids []string) (json.RawMessage, error) {
-	var doc map[string]any
-	if err := json.Unmarshal(schema, &doc); err != nil {
-		return nil, fmt.Errorf("parse schema: %w", err)
+// AgentToolDescription is what the model reads about agent a: its tool
+// description stands in for a directory of agents in the prompt.
+func AgentToolDescription(a AgentCatalogEntry) string {
+	d := fmt.Sprintf("Delegate a task to the agent %q. It works on its own, with its own tools and skills, and returns its final answer.", a.Name)
+	if a.Description != "" {
+		d += " Its role: " + a.Description
 	}
-	props, ok := doc["properties"].(map[string]any)
-	if !ok {
-		return nil, fmt.Errorf("schema has no properties object")
-	}
-	field, ok := props["agent_id"].(map[string]any)
-	if !ok {
-		return nil, fmt.Errorf("schema has no agent_id property")
-	}
-	field["enum"] = ids
-
-	required := []string{"agent_id"}
-	if existing, ok := doc["required"].([]any); ok {
-		for _, r := range existing {
-			if name, ok := r.(string); ok && name != "agent_id" {
-				required = append(required, name)
-			}
-		}
-	}
-	sort.Strings(required) // stable output: this schema is part of the prompt prefix
-	doc["required"] = required
-
-	out, err := json.Marshal(doc)
-	if err != nil {
-		return nil, fmt.Errorf("encode schema: %w", err)
-	}
-	return out, nil
+	return d
 }

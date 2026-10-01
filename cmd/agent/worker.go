@@ -63,7 +63,6 @@ func runWorker(cmd *cobra.Command, args []string) {
 		Password: cfg.SMTPPassword,
 		From:     cfg.SMTPFrom,
 	})
-	tool.RegisterSpawnTool(registry, workflow.AgentWorkflow)
 	tool.RegisterClaudeCodeTools(registry, workflow.AnalyzeRepoWorkflow, workflow.ImplementFeatureWorkflow)
 	tool.RegisterAskUserTool(registry, workflow.AskUserWorkflow)
 	tool.RegisterMemoryTools(registry, st)

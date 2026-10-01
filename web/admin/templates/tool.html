@@ -19,8 +19,8 @@
       <tr><td class="sub">Schéma</td><td class="mono">{{shortHash .SchemaHash}}</td></tr>
       <tr><td class="sub">Publié</td><td>{{ago .UpdatedAt}}</td></tr>
     </table>
-    {{if eq .Name "spawn_session"}}
-    <p class="note">Le sous-agent tourne sur la queue de workflows du parent. Le schéma est restreint par agent : <code>agent_id</code> n'accepte que ses cibles de délégation.</p>
+    {{with .Target}}
+    <p class="note">Généré depuis l'agent <a class="link" href="/admin/agents/{{.}}">{{.}}</a> : l'appeler lui délègue une tâche. Le sous-agent tourne sur la queue de workflows de l'appelant.</p>
     {{end}}
   </div>
   <div class="card">

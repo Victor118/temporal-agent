@@ -30,4 +30,25 @@
 {{else}}
 <div class="card"><p class="empty">Aucun tool publié : aucun worker n'a encore démarré.</p></div>
 {{end}}
+
+{{with .Inv.AgentTools}}
+<div class="card">
+  <div class="queuehead"><span class="q">Agents</span><span class="badge b-info">délégation</span></div>
+  <p class="note">Un tool par agent, généré depuis la table <code>agents</code> : l'appeler lui délègue une tâche. Le sous-agent tourne sur la queue de workflows de l'appelant.</p>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Tool</th><th>Agent</th><th>Peut être appelé par</th></tr></thead>
+    <tbody>
+    {{range .}}
+    <tr>
+      <td><a class="link mono" href="/admin/tools/{{.Name}}">{{.Name}}</a></td>
+      <td><a class="chip" href="/admin/agents/{{.Target}}">{{.Target}}</a></td>
+      <td>{{range .Agents}}<a class="chip" href="/admin/agents/{{.}}">{{.}}</a>{{else}}<span class="sub">personne</span>{{end}}</td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  </div>
+</div>
+{{end}}
 {{end}}
