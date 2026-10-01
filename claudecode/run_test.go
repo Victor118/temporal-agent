@@ -354,3 +354,36 @@ func TestInterruptedRunReportsHowLongItRan(t *testing.T) {
 		t.Errorf("error should say how long the run lasted, got: %v", err)
 	}
 }
+
+// The run inherits the CLI's environment, so the worker's secrets must not
+// reach it; what the CLI needs to work must.
+func TestRunKeepsWorkerSecretsOut(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://agent:secret@db/agent")
+	t.Setenv("CLAUDE_CODE_SSH_KEY", "/keys/id")
+	t.Setenv("ANTHROPIC_API_KEY", "sk-test")
+	t.Setenv("CLAUDE_CONFIG_DIR", "/config")
+
+	script := `
+printf '{"type":"result","subtype":"success","is_error":false,"result":"db=%s key=%s api=%s config=%s extra=%s home=%s","session_id":"s"}\n' \
+  "$DATABASE_URL" "$CLAUDE_CODE_SSH_KEY" "$ANTHROPIC_API_KEY" "$CLAUDE_CONFIG_DIR" "$EXTRA" "$HOME"
+`
+	res, err := run(t, script, Params{Env: []string{"EXTRA=given"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := fmt.Sprintf("db= key= api=sk-test config=/config extra=given home=%s", os.Getenv("HOME"))
+	if res.Report != want {
+		t.Errorf("CLI saw %q\nwant      %q", res.Report, want)
+	}
+}
+
+func TestCLIEnv(t *testing.T) {
+	got := cliEnv([]string{
+		"PATH=/bin", "HOME=/root", "LC_ALL=C", "ANTHROPIC_BASE_URL=http://proxy", "GOPATH=/go",
+		"DATABASE_URL=postgres://x", "LLM_API_KEY=k", "TEMPORAL_HOST=t", "PATHX=no", "=weird",
+	})
+	want := []string{"PATH=/bin", "HOME=/root", "LC_ALL=C", "ANTHROPIC_BASE_URL=http://proxy", "GOPATH=/go"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("cliEnv = %v, want %v", got, want)
+	}
+}

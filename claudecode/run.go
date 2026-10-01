@@ -58,8 +58,9 @@ type Params struct {
 	// Right for a workspace that gets deleted at the end of the run.
 	NoSessionPersistence bool `json:"no_session_persistence,omitempty"`
 
-	// Env adds "KEY=value" entries on top of the process environment. This is
-	// how context reaches an MCP server the CLI spawns.
+	// Env adds "KEY=value" entries to the CLI's environment, which otherwise
+	// holds only what cliEnv keeps from the worker's. This is how context
+	// reaches an MCP server the CLI spawns.
 	Env []string `json:"env,omitempty"`
 }
 
@@ -156,7 +157,7 @@ func (r *Runner) Run(ctx context.Context, p Params) (Result, error) {
 	// command that carries a context.
 	cmd := exec.CommandContext(ctx, r.binary(), buildArgs(p)...)
 	cmd.Dir = p.Cwd
-	cmd.Env = append(os.Environ(), p.Env...)
+	cmd.Env = append(cliEnv(os.Environ()), p.Env...)
 	// The task goes in on stdin rather than argv: it is arbitrary user text of
 	// arbitrary length, and argv has a limit.
 	cmd.Stdin = strings.NewReader(p.Task)
@@ -282,4 +283,44 @@ func buildArgs(p Params) []string {
 		args = append(args, "--no-session-persistence")
 	}
 	return args
+}
+
+// cliEnvNames and cliEnvPrefixes are what the CLI keeps from the worker's
+// environment: what a process needs to run, the CLI's own settings, and the
+// toolchain's (GOPATH, GOTOOLCHAIN: without them a run's `go test` fetches
+// modules, or a whole toolchain, all over again). Anything else stays out,
+// whatever an operator adds to the worker later.
+var (
+	cliEnvNames = map[string]bool{
+		"PATH": true, "HOME": true, "USER": true, "LOGNAME": true, "SHELL": true,
+		"TERM": true, "LANG": true, "TZ": true, "TMPDIR": true,
+		"CLAUDE_CONFIG_DIR": true, "NODE_EXTRA_CA_CERTS": true,
+		"HTTP_PROXY": true, "HTTPS_PROXY": true, "NO_PROXY": true,
+		"http_proxy": true, "https_proxy": true, "no_proxy": true,
+	}
+	cliEnvPrefixes = []string{"LC_", "ANTHROPIC_", "GO"}
+)
+
+// cliEnv filters environ down to what the CLI may see. The worker holds
+// credentials the run must not: DATABASE_URL first, with full rights on the
+// platform's database. And the CLI hands its environment down to every shell
+// it opens, so whatever it receives, the run can read.
+func cliEnv(environ []string) []string {
+	var kept []string
+	for _, kv := range environ {
+		name, _, _ := strings.Cut(kv, "=")
+		if cliEnvNames[name] || hasAnyPrefix(name, cliEnvPrefixes) {
+			kept = append(kept, kv)
+		}
+	}
+	return kept
+}
+
+func hasAnyPrefix(s string, prefixes []string) bool {
+	for _, p := range prefixes {
+		if strings.HasPrefix(s, p) {
+			return true
+		}
+	}
+	return false
 }
