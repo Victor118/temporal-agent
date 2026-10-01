@@ -1,0 +1,33 @@
+{{define "title"}}Agents{{end}}
+{{define "content"}}
+<h1>Agents</h1>
+<p class="lead">Table <code>agents</code>, qui fait foi. <code>agents.yaml</code> n'insère que les agents absents au démarrage du serveur.</p>
+
+<div class="card">
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Agent</th><th>Allowlist</th><th>Tools</th><th>Skills</th><th>Délègue à</th><th>Sessions</th></tr></thead>
+  <tbody>
+  {{range .Inv.Agents}}
+  <tr>
+    <td>
+      <a class="link" href="/admin/agents/{{.ID}}">{{.Name}}</a>
+      {{if .IsDefault}}<span class="badge b-info">défaut</span>{{end}}
+      <div class="sub mono">{{.ID}}</div>
+      {{with .Description}}<div class="sub">{{.}}</div>{{end}}
+    </td>
+    <td class="nowrap">{{template "allowlist_mode" .}}</td>
+    <td class="nowrap">{{len .Tools}}
+      {{with .SensitiveCount}}<span class="badge b-bad">{{.}} sensible{{if gt . 1}}s{{end}}</span>{{end}}</td>
+    <td>{{range .Skills}}<span class="chip{{if not .Present}} dead{{end}}">{{.Name}}</span>{{else}}<span class="sub">—</span>{{end}}</td>
+    <td>{{range .DelegatesTo}}<a class="chip" href="/admin/agents/{{.AgentID}}">{{.AgentID}}</a>{{else}}<span class="sub">—</span>{{end}}</td>
+    <td>{{.Sessions}}</td>
+  </tr>
+  {{else}}
+  <tr><td colspan="6" class="empty">Aucun agent en base.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+</div>
+</div>
+{{end}}

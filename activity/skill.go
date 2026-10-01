@@ -65,7 +65,7 @@ type AgentCatalogEntry struct {
 	Name        string   `json:"name"`
 	Description string   `json:"description"`
 	Skills      []string `json:"skills"`
-	Tools       []string `json:"tools"` // Allowed tool name globs; nil = all tools
+	Tools       []string `json:"tools"` // Allowed tool name globs; empty = no tool, "*" = all
 }
 
 // SkillActivities provides per-agent system prompt loading as a Temporal activity.
@@ -177,6 +177,17 @@ func delegatableAgents(catalog []AgentCatalogEntry, currentAgentID string) []Age
 	}
 	sort.Slice(filtered, func(i, j int) bool { return filtered[i].ID < filtered[j].ID })
 	return filtered
+}
+
+// DelegatableAgentIDs returns the IDs agentID may delegate to, exactly as the
+// spawn_session schema and the dispatch see them.
+func DelegatableAgentIDs(catalog []AgentCatalogEntry, agentID string) []string {
+	delegatable := delegatableAgents(catalog, agentID)
+	ids := make([]string, len(delegatable))
+	for i, e := range delegatable {
+		ids[i] = e.ID
+	}
+	return ids
 }
 
 // buildAgentsDirectory generates a prompt section listing the agents that may be

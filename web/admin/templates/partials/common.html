@@ -1,0 +1,26 @@
+{{define "alerts"}}
+{{range .}}
+<div class="alert {{if eq .Level "danger"}}bad{{else}}warn{{end}}">
+  <span class="ico">{{if eq .Level "danger"}}!{{else}}⚠{{end}}</span>
+  <span class="msg">{{.Message}}</span>
+  {{if .Link}}<a class="link nowrap" href="{{.Link}}">Voir</a>{{end}}
+</div>
+{{else}}
+<p class="empty">Aucune incohérence détectée.</p>
+{{end}}
+{{end}}
+
+{{/* Availability of a tool: whether a worker takes its tasks. */}}
+{{define "avail"}}
+{{if eq . "up"}}<span class="badge b-ok"><span class="dot ok"></span>servie</span>
+{{else if eq . "down"}}<span class="badge b-bad"><span class="dot bad"></span>aucun worker</span>
+{{else}}<span class="badge b-muted"><span class="dot unk"></span>inconnu</span>{{end}}
+{{end}}
+
+{{define "allowlist_mode"}}
+{{if .AllTools}}<span class="badge b-bad">tous les tools</span>
+{{else if not .Agent.Tools}}<span class="badge b-muted">aucun tool</span>
+{{else}}<span class="badge b-info">{{len .Agent.Tools}} motif{{if gt (len .Agent.Tools) 1}}s{{end}}</span>{{end}}
+{{end}}
+
+{{define "kind"}}<span class="badge b-muted">{{.}}</span>{{end}}

@@ -1,0 +1,39 @@
+{{define "title"}}Skills{{end}}
+{{define "content"}}
+<h1>Skills</h1>
+<p class="lead">
+  {{with .Inv.SkillsSource}}Skills chargés par le serveur depuis <code>{{.}}</code>.
+  {{else}}Le serveur ne charge aucun skill : <code>SKILLS_REPO</code> n'est pas configuré.{{end}}
+  Chaque worker charge les siens : ce qu'il voit peut différer.
+</p>
+
+<div class="card">
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Skill</th><th>Description</th><th>Agents</th></tr></thead>
+  <tbody>
+  {{range .Inv.Skills}}
+  <tr>
+    <td><a class="link mono" href="/admin/skills/{{.Name}}">{{.Name}}</a></td>
+    <td class="sub">{{.Description}}</td>
+    <td>{{range .Agents}}<a class="chip" href="/admin/agents/{{.}}">{{.}}</a>{{else}}<span class="sub">—</span>{{end}}</td>
+  </tr>
+  {{else}}
+  <tr><td colspan="3" class="empty">Aucun skill chargé.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+</div>
+</div>
+
+{{with .Inv.MissingSkills}}
+<div class="card">
+  <h2>Référencés mais absents</h2>
+  {{range .}}
+  <div class="glob"><span class="chip dead">{{.Name}}</span>
+    <div>{{range .Agents}}<a class="chip" href="/admin/agents/{{.}}">{{.}}</a>{{end}}</div></div>
+  {{end}}
+  <p class="note">Un skill absent est ignoré sans erreur quand le prompt est construit.</p>
+</div>
+{{end}}
+{{end}}

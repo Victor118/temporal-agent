@@ -1,0 +1,30 @@
+{{define "base"}}<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{template "title" .}} · Admin</title>
+<link rel="stylesheet" href="/admin/static/admin.css">
+<script src="/admin/static/htmx-2.0.4.min.js"></script>
+</head>
+<body hx-boost="true">
+<div class="app">
+  <nav class="side">
+    <div class="brand">Temporal Agent<small>Configuration</small></div>
+    <a href="/admin/" {{if eq .Nav "overview"}}class="active"{{end}}>Vue d'ensemble
+      {{with .Inv.Alerts}}<span class="count">{{len .}}</span>{{end}}</a>
+    <a href="/admin/agents" {{if eq .Nav "agents"}}class="active"{{end}}>Agents <span class="count">{{len .Inv.Agents}}</span></a>
+    <a href="/admin/tools" {{if eq .Nav "tools"}}class="active"{{end}}>Tools <span class="count">{{len .Inv.Tools}}</span></a>
+    <a href="/admin/queues" {{if eq .Nav "queues"}}class="active"{{end}}>Queues <span class="count">{{len .Inv.Queues}}</span></a>
+    <a href="/admin/skills" {{if eq .Nav "skills"}}class="active"{{end}}>Skills <span class="count">{{len .Inv.Skills}}</span></a>
+    <div class="sep"></div>
+    <a href="/" hx-boost="false">← Chat</a>
+    <div class="foot">Lecture seule</div>
+  </nav>
+  <main>
+{{template "content" .}}
+  </main>
+</div>
+</body>
+</html>
+{{end}}

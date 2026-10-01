@@ -53,6 +53,7 @@ type Store interface {
 	InsertAgentIfAbsent(ctx context.Context, agent Agent) (bool, error)
 	ListAgents(ctx context.Context) ([]Agent, error)
 	GetAgent(ctx context.Context, agentID string) (*Agent, error)
+	CountSessionsByAgent(ctx context.Context) (map[string]int, error)
 
 	// Tool catalog (published by workers)
 	UpsertTool(ctx context.Context, tool ToolRecord) error
@@ -78,11 +79,13 @@ type ActivityQueueEntry struct {
 }
 
 type Agent struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	Skills      []string `json:"skills"`
-	Tools       []string `json:"tools"` // Allowed tool name globs; empty = no tool, "*" = all
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Description string    `json:"description"`
+	Skills      []string  `json:"skills"`
+	Tools       []string  `json:"tools"` // Allowed tool name globs; empty = no tool, "*" = all
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 // ToolRecord is a tool published by a worker: where it runs and its contract.

@@ -343,6 +343,7 @@
                     <div id="notification-list"></div>
                 </div>
             </div>
+            <a href="/admin/" style="background:#2a2a2a;color:#e0e0e0;border-radius:6px;padding:6px 12px;font-size:12px;text-decoration:none;">Configuration</a>
             <button id="btn-admin" onclick="showScreen('admin')" style="display:none;background:#2a2a2a;color:#e0e0e0;border:none;border-radius:6px;padding:6px 12px;font-size:12px;cursor:pointer;">Admin</button>
             <button id="btn-back" onclick="showSessionList()" style="display:none;background:#2a2a2a;color:#e0e0e0;border:none;border-radius:6px;padding:6px 12px;font-size:12px;cursor:pointer;">Sessions</button>
             <span id="user-info" style="font-size:12px;color:#666;"></span>
@@ -844,8 +845,8 @@
         // --- Admin: Activity Queue Routing ---
         async function loadAdminData() {
             const [mappingsResp, queuesResp] = await Promise.all([
-                fetch('/admin/activity-queues'),
-                fetch('/admin/queues'),
+                fetch('/api/admin/activity-queues'),
+                fetch('/api/admin/queues'),
             ]);
             const mappings = await mappingsResp.json();
             const queues = await queuesResp.json();
@@ -878,7 +879,7 @@
             const taskQueue = document.getElementById('aq-queue').value;
             if (!activityName || !taskQueue) return;
 
-            await fetch('/admin/activity-queues', {
+            await fetch('/api/admin/activity-queues', {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ activity_name: activityName, task_queue: taskQueue }),
@@ -887,7 +888,7 @@
         });
 
         async function deleteActivityQueue(activityName) {
-            await fetch('/admin/activity-queues/' + encodeURIComponent(activityName), { method: 'DELETE' });
+            await fetch('/api/admin/activity-queues/' + encodeURIComponent(activityName), { method: 'DELETE' });
             loadAdminData();
         }
 

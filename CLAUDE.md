@@ -13,6 +13,7 @@
 
 - 3 modes : `agent server`, `agent worker`, `agent dev` (les deux combinés)
 - Server = API HTTP + SSE hub + catalogue agents + skills versioning
+- Back-office `/admin` (htmx + `html/template`, `web/admin`) : lecture seule de la config. Le JSON du panneau admin du chat est sous `/api/admin`
 - Worker = Temporal worker + activities + tools publiés sur sa queue (`worker.yaml`)
 - Communication worker → serveur via `/internal/notify` ; le reste passe par PostgreSQL (agents, tools, skills_version)
 

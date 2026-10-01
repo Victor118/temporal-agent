@@ -24,6 +24,7 @@ import (
 	"github.com/victor/temporal-agent/telegram"
 	"github.com/victor/temporal-agent/tool"
 	"github.com/victor/temporal-agent/web"
+	"github.com/victor/temporal-agent/web/admin"
 	"github.com/victor/temporal-agent/workflow"
 )
 
@@ -170,6 +171,16 @@ func runDev(cmd *cobra.Command, args []string) {
 		}(w)
 	}
 
+	// Back-office — shows the skills dev mode loaded from ./skills
+	adminUI := admin.New(admin.Config{
+		Store:          st,
+		Temporal:       temporalClient,
+		Skills:         func() []skill.Skill { return skills },
+		SkillsSource:   skillStore.Dir,
+		DefaultAgentID: cfg.DefaultAgentID,
+		WorkflowQueue:  cfg.WorkflowQueue,
+	})
+
 	// HTTP server
 	h := &handler{
 		temporalClient: temporalClient,
@@ -209,11 +220,14 @@ func runDev(cmd *cobra.Command, args []string) {
 		g.Get("/sessions/{id}/stream", h.stream)
 		g.Post("/sessions/{id}/answer", h.answerQuestion)
 
-		// Admin routes
-		g.Get("/admin/queues", h.listKnownQueues)
-		g.Get("/admin/activity-queues", h.listActivityQueues)
-		g.Put("/admin/activity-queues", h.setActivityQueue)
-		g.Delete("/admin/activity-queues/{activityName}", h.deleteActivityQueue)
+		// Admin JSON API (used by the chat's admin panel)
+		g.Get("/api/admin/queues", h.listKnownQueues)
+		g.Get("/api/admin/activity-queues", h.listActivityQueues)
+		g.Put("/api/admin/activity-queues", h.setActivityQueue)
+		g.Delete("/api/admin/activity-queues/{activityName}", h.deleteActivityQueue)
+
+		// Back-office (read-only configuration dashboard)
+		g.Mount("/admin", adminUI.Routes())
 	})
 
 	srv := &http.Server{Addr: cfg.HTTPAddr, Handler: r}

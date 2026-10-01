@@ -1,0 +1,31 @@
+{{define "title"}}Queues{{end}}
+{{define "content"}}
+<h1>Queues</h1>
+<p class="lead">Une queue est une capacité, servie par un ou plusieurs workers. Les pollers viennent de Temporal : un worker vu il y a moins de 5 min compte comme actif.</p>
+{{template "queue_cards" .}}
+{{end}}
+
+{{define "queue_cards"}}
+<div id="queue-cards" hx-get="/admin/queues/status" hx-trigger="every 15s" hx-swap="outerHTML">
+{{range .Inv.Queues}}
+<div class="card" id="q-{{.Name}}">
+  <div class="queuehead">
+    <span class="q">{{.Name}}</span>
+    {{if .IsWorkflowQueue}}<span class="badge b-info">workflows</span>{{end}}
+    {{if not .Known}}<span class="badge b-muted"><span class="dot unk"></span>Temporal injoignable</span>
+    {{else if .Status.Served}}<span class="badge b-ok"><span class="dot ok"></span>servie</span>
+    {{else}}<span class="badge b-bad"><span class="dot bad"></span>aucun worker</span>{{end}}
+  </div>
+  {{if .Known}}
+  <div class="pollers">
+    Activities : {{range .Status.Activity}}<span class="chip">{{.Identity}} · {{ago .LastAccess}}</span>{{else}}aucun poller{{end}}<br>
+    Workflows : {{range .Status.Workflow}}<span class="chip">{{.Identity}} · {{ago .LastAccess}}</span>{{else}}aucun poller{{end}}
+  </div>
+  {{end}}
+  {{with .Tools}}<p class="note">Tools : {{range .}}<a class="chip" href="/admin/tools/{{.}}">{{.}}</a>{{end}}</p>{{end}}
+  {{with .ActivityRoutes}}<p class="note">Activities routées ici par <code>activity_queues</code> : {{range .}}<span class="chip">{{.}}</span>{{end}}</p>{{end}}
+</div>
+{{end}}
+<p class="refresh">Rafraîchi toutes les 15 s</p>
+</div>
+{{end}}

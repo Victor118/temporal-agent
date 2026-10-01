@@ -1,0 +1,33 @@
+{{define "title"}}Tools{{end}}
+{{define "content"}}
+<h1>Tools</h1>
+<p class="lead">Table <code>tools</code>, publiée par chaque worker depuis son <code>worker.yaml</code>. Un appel part sur la queue du tool.</p>
+
+{{range .Inv.ToolsByQueue}}
+<div class="card">
+  <div class="queuehead">
+    <a class="q" href="/admin/queues#q-{{.Queue.Name}}">{{.Queue.Name}}</a>
+    {{if .Queue.IsWorkflowQueue}}<span class="badge b-info">workflows</span>{{end}}
+  </div>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Tool</th><th>Type</th><th>État</th><th>Agents</th><th>Publié</th></tr></thead>
+    <tbody>
+    {{range .Tools}}
+    <tr>
+      <td><a class="link mono" href="/admin/tools/{{.Name}}">{{.Name}}</a>
+        {{if .Sensitive}}<span class="badge b-bad">sensible</span>{{end}}</td>
+      <td>{{template "kind" .Kind}}</td>
+      <td>{{template "avail" .Availability}}</td>
+      <td>{{range .Agents}}<a class="chip" href="/admin/agents/{{.}}">{{.}}</a>{{else}}<span class="badge b-warn">aucun</span>{{end}}</td>
+      <td class="nowrap sub">{{ago .UpdatedAt}}</td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  </div>
+</div>
+{{else}}
+<div class="card"><p class="empty">Aucun tool publié : aucun worker n'a encore démarré.</p></div>
+{{end}}
+{{end}}

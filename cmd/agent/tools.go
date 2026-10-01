@@ -8,17 +8,13 @@ import (
 	"slices"
 	"time"
 
-	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/client"
 
 	"github.com/victor/temporal-agent/config"
 	"github.com/victor/temporal-agent/store"
+	"github.com/victor/temporal-agent/taskqueue"
 	"github.com/victor/temporal-agent/tool"
 )
-
-// queuePollerFreshness is how recent a poller must be for its queue to count
-// as served. Temporal itself drops pollers unseen for about 5 minutes.
-const queuePollerFreshness = 5 * time.Minute
 
 // loadWorkerConfig reads the worker config file. Without a file, the worker
 // serves everything on the workflow queue: workflows, all tools, and every
@@ -150,17 +146,10 @@ func publishTools(st store.Store, tc client.Client, registry *tool.Registry, que
 // queueServed reports whether Temporal has seen a recent poller on the queue.
 // If Temporal can't be queried, the queue is assumed served (don't take over).
 func queueServed(ctx context.Context, tc client.Client, queue string) bool {
-	for _, typ := range []enumspb.TaskQueueType{enumspb.TASK_QUEUE_TYPE_ACTIVITY, enumspb.TASK_QUEUE_TYPE_WORKFLOW} {
-		resp, err := tc.DescribeTaskQueue(ctx, queue, typ)
-		if err != nil {
-			log.Printf("Warning: failed to describe task queue %q: %v", queue, err)
-			return true
-		}
-		for _, p := range resp.GetPollers() {
-			if time.Since(p.GetLastAccessTime().AsTime()) < queuePollerFreshness {
-				return true
-			}
-		}
+	status := taskqueue.Describe(ctx, tc, queue)
+	if status.Err != nil {
+		log.Printf("Warning: failed to describe task queue %q: %v", queue, status.Err)
+		return true
 	}
-	return false
+	return status.Served()
 }

@@ -1,0 +1,18 @@
+{{define "title"}}{{.Data.Name}}{{end}}
+{{define "content"}}
+{{with .Data}}
+<div class="crumbs"><a href="/admin/skills">Skills</a> /</div>
+<h1><span class="mono">{{.Name}}</span></h1>
+<p class="lead">{{.Description}}</p>
+
+<div class="card">
+  <h2>Agents</h2>
+  {{range .Agents}}<a class="chip" href="/admin/agents/{{.}}">{{.}}</a>{{else}}<p class="empty">Aucun agent ne l'utilise.</p>{{end}}
+</div>
+
+<div class="card">
+  <h2>Contenu</h2>
+  <pre>{{.Content}}</pre>
+</div>
+{{end}}
+{{end}}

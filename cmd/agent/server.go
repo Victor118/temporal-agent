@@ -18,6 +18,7 @@ import (
 	"github.com/victor/temporal-agent/sse"
 	"github.com/victor/temporal-agent/store"
 	"github.com/victor/temporal-agent/web"
+	"github.com/victor/temporal-agent/web/admin"
 )
 
 var serverCmd = &cobra.Command{
@@ -53,6 +54,17 @@ func runServer(cmd *cobra.Command, args []string) {
 	if err := seedAgents(st, cfg.AgentsFile); err != nil {
 		log.Fatalf("Failed to seed agents: %v", err)
 	}
+
+	// Back-office
+	skills, skillsSource := serverSkills(context.Background(), cfg, st)
+	adminUI := admin.New(admin.Config{
+		Store:          st,
+		Temporal:       temporalClient,
+		Skills:         skills,
+		SkillsSource:   skillsSource,
+		DefaultAgentID: cfg.DefaultAgentID,
+		WorkflowQueue:  cfg.WorkflowQueue,
+	})
 
 	// Handler
 	h := &handler{
@@ -94,11 +106,14 @@ func runServer(cmd *cobra.Command, args []string) {
 		r.Get("/sessions/{id}/stream", h.stream)
 		r.Post("/sessions/{id}/answer", h.answerQuestion)
 
-		// Admin routes
-		r.Get("/admin/queues", h.listKnownQueues)
-		r.Get("/admin/activity-queues", h.listActivityQueues)
-		r.Put("/admin/activity-queues", h.setActivityQueue)
-		r.Delete("/admin/activity-queues/{activityName}", h.deleteActivityQueue)
+		// Admin JSON API (used by the chat's admin panel)
+		r.Get("/api/admin/queues", h.listKnownQueues)
+		r.Get("/api/admin/activity-queues", h.listActivityQueues)
+		r.Put("/api/admin/activity-queues", h.setActivityQueue)
+		r.Delete("/api/admin/activity-queues/{activityName}", h.deleteActivityQueue)
+
+		// Back-office (read-only configuration dashboard)
+		r.Mount("/admin", adminUI.Routes())
 	})
 
 	// Internal API (receives SSE notifications from workers)

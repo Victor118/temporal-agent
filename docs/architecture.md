@@ -190,8 +190,8 @@ diagnostic.
 
 ## État actuel (écarts avec la cible)
 
-- **Aucune API/UI** pour lire ou éditer les agents et leur allowlist : seul le
-  seed `agents.yaml` les alimente.
+- **Back-office en lecture seule** (`/admin`) : rien n'édite encore les agents
+  ni leur allowlist, seul le seed `agents.yaml` les alimente.
 - **Tous les workflows et activities sont enregistrés sur toutes les queues**
   d'un worker, y compris sa queue d'outils. Les outils de type workflow
   (`ask_user`) tournent donc sur la queue de l'outil.
@@ -214,7 +214,8 @@ diagnostic.
    sessions avec `agent_id`, queue de workflows dédiée (`WORKFLOW_QUEUE`),
    suppression de `default_queue`, `TASK_QUEUES`, `TASK_QUEUE_MCP`.
    Sessions d'outils à état sur la queue des outils, validées.
-5. **UI en lecture seule** : agents, outils par queue, queues actives.
+5. **UI en lecture seule** (fait) : `/admin`, agents, outils par queue, queues
+   et leurs pollers, skills, alertes de configuration.
 6. **UI d'édition des agents** : skills, allowlist, description.
 7. **`ClaudeCodeWorkflow`.**
 8. **Arbre d'exécution et questions utilisateur** (`agent_executions`,

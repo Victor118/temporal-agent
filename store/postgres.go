@@ -413,7 +413,7 @@ func (s *PostgresStore) UpdateTaskLogStatus(ctx context.Context, scheduleID, sta
 }
 
 // agentColumns is the column list shared by agent queries, in scanAgent order.
-const agentColumns = "agent_id, name, description, skills, tools"
+const agentColumns = "agent_id, name, description, skills, tools, created_at, updated_at"
 
 // UpsertAgent creates or replaces an agent definition.
 func (s *PostgresStore) UpsertAgent(ctx context.Context, agent Agent) error {
@@ -480,6 +480,26 @@ func (s *PostgresStore) GetAgent(ctx context.Context, agentID string) (*Agent, e
 	return a, err
 }
 
+// CountSessionsByAgent returns the number of sessions per agent ID.
+func (s *PostgresStore) CountSessionsByAgent(ctx context.Context) (map[string]int, error) {
+	rows, err := s.db.QueryContext(ctx, "SELECT agent_id, count(*) FROM sessions GROUP BY agent_id")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	counts := make(map[string]int)
+	for rows.Next() {
+		var id string
+		var n int
+		if err := rows.Scan(&id, &n); err != nil {
+			return nil, err
+		}
+		counts[id] = n
+	}
+	return counts, rows.Err()
+}
+
 // marshalAgentLists encodes skills and tools for storage.
 // A nil Tools slice is stored as [] (no tool allowed), never as NULL.
 func marshalAgentLists(agent Agent) (skills, tools string, err error) {
@@ -503,7 +523,7 @@ func marshalAgentLists(agent Agent) (skills, tools string, err error) {
 func scanAgent(row interface{ Scan(...any) error }) (*Agent, error) {
 	var a Agent
 	var skillsJSON, toolsJSON string
-	if err := row.Scan(&a.ID, &a.Name, &a.Description, &skillsJSON, &toolsJSON); err != nil {
+	if err := row.Scan(&a.ID, &a.Name, &a.Description, &skillsJSON, &toolsJSON, &a.CreatedAt, &a.UpdatedAt); err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal([]byte(skillsJSON), &a.Skills); err != nil {

@@ -1,0 +1,19 @@
+{{define "title"}}Vue d'ensemble{{end}}
+{{define "content"}}
+<h1>Vue d'ensemble</h1>
+<p class="lead">La configuration telle que le serveur la lit : la table <code>agents</code>, les tools publiés par les workers, et les pollers que Temporal voit sur chaque queue.</p>
+
+<div class="stats">
+  <a class="stat" href="/admin/agents"><div class="v">{{len .Inv.Agents}}</div><div class="l">agents</div></a>
+  <a class="stat" href="/admin/tools"><div class="v">{{len .Inv.Tools}}</div><div class="l">tools publiés</div></a>
+  <a class="stat" href="/admin/queues"><div class="v">{{len .Inv.Queues}}</div><div class="l">queues</div></a>
+  <a class="stat" href="/admin/skills"><div class="v">{{len .Inv.Skills}}</div><div class="l">skills chargés</div></a>
+</div>
+
+<div class="card">
+  <h2>Alertes
+    {{with .Inv.DangerCount}}<span class="badge b-bad">{{.}} critique{{if gt . 1}}s{{end}}</span>{{end}}
+  </h2>
+  {{template "alerts" .Inv.Alerts}}
+</div>
+{{end}}

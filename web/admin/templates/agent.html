@@ -1,0 +1,95 @@
+{{define "title"}}{{.Data.Name}}{{end}}
+{{define "content"}}
+{{with .Data}}
+<div class="crumbs"><a href="/admin/agents">Agents</a> /</div>
+<h1>{{.Name}} <span class="id">{{.ID}}</span>
+  {{if .IsDefault}}<span class="badge b-info">défaut</span>{{end}}
+  {{template "allowlist_mode" .}}
+</h1>
+<p class="lead">{{with .Description}}{{.}}{{else}}<span class="empty">Pas de description.</span>{{end}}<br>
+  <span class="sub">{{.Sessions}} session{{if gt .Sessions 1}}s{{end}} · créé {{ago .CreatedAt}} · modifié {{ago .UpdatedAt}}</span></p>
+
+<div class="card">
+  <h2>Allowlist</h2>
+  {{range .Globs}}
+  <div class="glob">
+    <code>{{.Pattern}}</code>
+    <div>
+      {{if .Invalid}}<span class="badge b-bad">motif invalide</span>
+      {{else}}{{range .Matches}}<a class="chip" href="/admin/tools/{{.}}">{{.}}</a>{{else}}<span class="badge b-warn">ne correspond à aucun tool publié</span>{{end}}{{end}}
+    </div>
+  </div>
+  {{else}}
+  <p class="empty">Allowlist vide : cet agent n'a accès à aucun tool.</p>
+  {{end}}
+  <p class="note">Accès refusé par défaut : seul ce qui correspond à un motif est autorisé, et <code>*</code> autorise tout.</p>
+</div>
+
+<div class="card">
+  <h2>Tools accessibles <span class="badge b-muted">{{len .Tools}}</span></h2>
+  {{if .Tools}}
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Tool</th><th>Type</th><th>Queue</th><th>État</th><th>Autorisé par</th></tr></thead>
+    <tbody>
+    {{range .Tools}}
+    <tr>
+      <td><a class="link mono" href="/admin/tools/{{.Name}}">{{.Name}}</a>
+        {{if .Sensitive}}<span class="badge b-bad">sensible</span>{{end}}</td>
+      <td>{{template "kind" .Kind}}</td>
+      <td><a class="mono" href="/admin/queues#q-{{.TaskQueue}}">{{.TaskQueue}}</a></td>
+      <td>{{template "avail" .Availability}}</td>
+      <td><code>{{.Via}}</code></td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  </div>
+  {{else}}
+  <p class="empty">Aucun tool.</p>
+  {{end}}
+  <p class="note">Calculé par le même catalogue que les workers. Ils relisent la base toutes les 30 s.</p>
+</div>
+
+<div class="grid2">
+  <div class="card">
+    <h2>Délégation</h2>
+    {{if .DelegatesTo}}
+    <p class="sub">Peut déléguer via <code>spawn_session</code> à :</p>
+    {{range .DelegatesTo}}
+    <div class="glob">
+      <a class="link mono" href="/admin/agents/{{.AgentID}}">{{.AgentID}}</a>
+      <div>{{range .Extra}}<a class="chip{{if .Sensitive}} sens{{end}}" href="/admin/tools/{{.Name}}">+ {{.Name}}</a>{{else}}<span class="sub">aucun tool en plus</span>{{end}}</div>
+    </div>
+    {{end}}
+    <p class="note">« + » : tools que la cible peut utiliser et que cet agent n'a pas.</p>
+    {{else}}
+    <p class="empty">Ne peut pas déléguer.</p>
+    {{end}}
+    {{with .CalledBy}}<p class="note">Peut être appelé par : {{range .}}<a class="chip" href="/admin/agents/{{.}}">{{.}}</a>{{end}}</p>{{end}}
+  </div>
+
+  <div class="card">
+    <h2>Skills</h2>
+    {{range .Skills}}
+    <div>{{if .Present}}<a class="chip" href="/admin/skills/{{.Name}}">{{.Name}}</a>
+      {{else}}<span class="chip dead">{{.Name}}</span> <span class="badge b-warn">non chargé</span>{{end}}</div>
+    {{else}}
+    <p class="empty">Aucun skill.</p>
+    {{end}}
+  </div>
+</div>
+
+<div class="card">
+  <details class="prompt" hx-get="/admin/agents/{{.ID}}/prompt" hx-trigger="toggle once" hx-target="find .prompt-body">
+    <summary>Prompt système</summary>
+    <div class="prompt-body"><p class="note">Chargement…</p></div>
+  </details>
+</div>
+{{end}}
+{{end}}
+
+{{define "prompt"}}
+<pre>{{.Data}}</pre>
+<p class="note">Construit par <code>LoadSkillsForAgent</code> avec les skills du serveur, sans la mémoire de l'utilisateur, que le workflow ajoute à chaque tour.</p>
+{{end}}
