@@ -36,6 +36,7 @@ type Store interface {
 	GetSession(ctx context.Context, sessionID string) (*Session, error)
 	GetActiveSessionByChannel(ctx context.Context, userID, channel, channelID string) (*Session, error)
 	ListSessionsByUser(ctx context.Context, userID string) ([]Session, error)
+	ListSessionStats(ctx context.Context, userID string) (map[string]SessionStats, error)
 	UpdateSessionTitle(ctx context.Context, sessionID, title string) error
 	DeleteSession(ctx context.Context, sessionID string) error
 	IsSessionMember(ctx context.Context, sessionID, userID string) (bool, error)

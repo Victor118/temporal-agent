@@ -1,0 +1,32 @@
+{{define "tree"}}
+<div class="tree-head">
+  <span class="eyebrow">Sessions</span>
+  <form hx-post="/s/new"><button type="submit" aria-label="Nouvelle session" title="Nouvelle session">+</button></form>
+</div>
+{{/* Refreshed in place: the container stays, so does its scroll. */}}
+<div class="tree-body" hx-get="/tree{{with .Node}}?current={{.Session.SessionID}}{{end}}" hx-trigger="every 8s" hx-swap="innerHTML">
+  {{template "tree-items" .}}
+</div>
+<div class="legend">
+  <span><i class="dot active"></i>active</span>
+  <span><i class="dot working"></i>l'agent travaille</span>
+  <span><i class="dot waiting"></i>attend une réponse</span>
+  <span><i class="dot idle"></i>en veille</span>
+</div>
+{{end}}
+
+{{define "tree-items"}}
+{{range .Roots}}<div class="tree-root">{{template "tree-node" .}}</div>
+{{else}}<div class="tree-empty">Aucune session. Crée-en une avec +.</div>{{end}}
+{{end}}
+
+{{define "tree-node"}}
+<a class="node{{if .Current}} current{{end}}{{if eq .Depth 0}} root{{end}}" href="/s/{{.Session.SessionID}}" title="{{.Title}} — {{statusLabel .Status}}">
+  <span class="dot {{.Status}}"></span>
+  <span class="title">{{if .Orphan}}↳ {{end}}{{.Title}}</span>
+  {{if eq .Status "waiting"}}<span class="raise" title="Une question attend une réponse">↑</span>
+  {{else if eq .Status "working"}}<span class="tag working">agent</span>
+  {{else if .Children}}<span class="count">{{len .Children}}</span>{{end}}
+</a>
+{{with .Children}}<div class="branch">{{range .}}{{template "tree-node" .}}{{end}}</div>{{end}}
+{{end}}

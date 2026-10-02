@@ -3,13 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"log"
+	"errors"
 	"net/http"
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"go.temporal.io/sdk/client"
 
 	"github.com/victor/temporal-agent/auth"
 	"github.com/victor/temporal-agent/store"
@@ -26,71 +24,22 @@ type forkRequest struct {
 // written by a workflow: the fork exists at once, and takes messages once the
 // summary is in.
 func (h *handler) forkSession(w http.ResponseWriter, r *http.Request) {
-	parentID := chi.URLParam(r, "id")
-	me := auth.UserFrom(r.Context())
-
 	var req forkRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.MessageID <= 0 {
 		http.Error(w, "message_id is required", http.StatusBadRequest)
 		return
 	}
-	parent, err := h.store.GetSession(r.Context(), parentID)
-	if err != nil || parent == nil {
+	f, err := h.fork(r.Context(), chi.URLParam(r, "id"), req.MessageID, auth.UserFrom(r.Context()))
+	switch {
+	case errors.Is(err, errSessionGone):
 		http.Error(w, "Session not found", http.StatusNotFound)
-		return
-	}
-	// The message must be one of this session's, and one a user can see: a
-	// user or assistant message, not a tool result.
-	msgs, err := h.store.LoadMessagesUpTo(r.Context(), parentID, req.MessageID)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to load messages: %v", err), http.StatusInternalServerError)
-		return
-	}
-	if len(msgs) == 0 || msgs[len(msgs)-1].ID != req.MessageID || !forkable(msgs[len(msgs)-1].Message) {
+	case errors.Is(err, errBadForkPoint):
 		http.Error(w, "No such message to fork from in this session", http.StatusBadRequest)
-		return
-	}
-
-	agentID, err := h.resolveAgentID(r.Context(), parent.AgentID)
-	if err != nil {
-		agentID, err = h.resolveAgentID(r.Context(), "") // the parent's agent is gone
-	}
-	if err != nil {
+	case err != nil:
 		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	default:
+		writeJSON(w, http.StatusCreated, createSessionResponse{SessionID: f.SessionID})
 	}
-
-	fork := store.Session{
-		SessionID:         newUUID(),
-		CreatedBy:         me.ID,
-		Title:             forkTitle(parent.Title),
-		AgentID:           agentID,
-		Channel:           "web",
-		ParentSessionID:   parentID,
-		ForkedAtMessageID: req.MessageID,
-		ForkedBy:          me.ID,
-	}
-	if err := h.store.CreateSession(r.Context(), fork); err != nil {
-		http.Error(w, fmt.Sprintf("Failed to create the fork: %v", err), http.StatusInternalServerError)
-		return
-	}
-	if _, err := h.temporalClient.ExecuteWorkflow(r.Context(), client.StartWorkflowOptions{
-		ID:        workflow.ForkWorkflowID(fork.SessionID),
-		TaskQueue: h.cfg.WorkflowQueue,
-	}, workflow.ForkSessionWorkflow, workflow.ForkSessionInput{
-		ForkSessionID:   fork.SessionID,
-		ParentSessionID: parentID,
-		UpToMessageID:   req.MessageID,
-		Model:           h.cfg.SummaryModel,
-	}); err != nil {
-		// Without the workflow, the fork would wait for a summary forever.
-		h.store.DeleteSession(context.Background(), fork.SessionID)
-		http.Error(w, fmt.Sprintf("Failed to start the summary: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	log.Printf("Session %s forked at message %d into %s by %s", parentID, req.MessageID, fork.SessionID, me.ID)
-	writeJSON(w, http.StatusCreated, createSessionResponse{SessionID: fork.SessionID})
 }
 
 func forkable(m store.Message) bool {

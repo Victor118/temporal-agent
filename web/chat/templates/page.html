@@ -1,0 +1,93 @@
+{{define "head"}}
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/static/chat.css">
+<script src="/static/htmx-2.0.4.min.js"></script>
+<script src="/static/htmx-ext-sse-2.2.2.js"></script>
+{{end}}
+
+{{define "page"}}<!doctype html>
+<html lang="fr">
+<head>
+<title>{{if .Node}}{{.Node.Title}} · {{end}}temporal-agent</title>
+{{template "head"}}
+</head>
+<body hx-boost="true">
+<div class="app" id="app">
+  {{template "topbar" .}}
+  <div class="columns">
+    <aside class="col-tree">{{template "tree" .}}</aside>
+    <main class="col-main">
+      {{if not .Node}}{{template "welcome" .}}
+      {{else if eq .View "map"}}{{template "map" .}}
+      {{else}}
+      <div style="display:contents" hx-ext="sse" sse-connect="/sessions/{{.Node.Session.SessionID}}/stream">
+        {{template "thread" .}}
+        {{template "composer" .}}
+      </div>
+      {{end}}
+    </main>
+    {{if .Node}}<aside class="col-rail">{{template "rail" .}}</aside>{{end}}
+  </div>
+</div>
+<script>
+// The thread opens at its end, or on the message a link points to (#m<id>).
+function toHash() {
+  var t = location.hash && document.querySelector(location.hash);
+  if (!t) return false;
+  t.scrollIntoView({block: 'center'});
+  t.classList.add('highlight');
+  setTimeout(function () { t.classList.remove('highlight'); }, 2500);
+  return true;
+}
+function toBottom() {
+  var t = document.getElementById('thread');
+  if (t) t.scrollTop = t.scrollHeight;
+}
+document.addEventListener('DOMContentLoaded', function () { toHash() || toBottom(); });
+document.body.addEventListener('htmx:afterSettle', function (e) {
+  var target = e.detail.target;
+  if (target && target.id === 'thread') toBottom();
+  else if (target === document.body) toHash() || toBottom();
+});
+</script>
+</body>
+</html>{{end}}
+
+{{define "topbar"}}
+<header class="topbar">
+  <div class="left">
+    <button class="btn ghost only-narrow tree-toggle" type="button" onclick="document.getElementById('app').classList.toggle('show-tree')" aria-label="Sessions">☰</button>
+    <a href="/" class="logo" aria-label="Accueil"></a>
+    <span class="brand">temporal-agent</span>
+    {{with .Crumbs}}
+    <span class="vsep"></span>
+    <nav class="crumbs">
+      {{range $i, $c := .}}{{if $i}}<span class="slash">/</span>{{end}}{{if $c.Current}}<span class="here">{{$c.Title}}</span>{{else}}<a href="/s/{{$c.Session.SessionID}}">{{$c.Title}}</a>{{end}}{{end}}
+    </nav>
+    {{end}}
+  </div>
+  <div class="right">
+    {{with .Node}}
+    <div class="views">
+      <a href="/s/{{.Session.SessionID}}" class="{{if ne $.View "map"}}on{{end}}">Fil</a>
+      <a href="/s/{{.Session.SessionID}}/map" class="{{if eq $.View "map"}}on{{end}}">Carte</a>
+    </div>
+    <div class="avatars">{{range $.Members}}<div class="avatar" style="background:{{.Color}}" title="{{.Name}}">{{.Initials}}</div>{{end}}</div>
+    <button class="btn only-narrow rail-toggle" type="button" onclick="document.getElementById('app').classList.toggle('show-rail')">Détails</button>
+    {{end}}
+    {{if .Notifications}}<a class="btn" href="/notifications">Notifications · {{.Notifications}}</a>{{end}}
+    {{if .IsAdmin}}<a class="btn ghost" href="/admin/" hx-boost="false">Configuration</a>{{end}}
+    <span class="me">{{.Me.Name}}</span>
+    <form method="post" action="/logout"><button class="btn ghost" type="submit">Déconnexion</button></form>
+  </div>
+</header>
+{{end}}
+
+{{define "welcome"}}
+<div class="welcome">
+  <h2>Aucune session ouverte</h2>
+  <p class="note">Une session est une conversation avec l'agent, que tu peux partager et forker.</p>
+  <form hx-post="/s/new"><button class="btn primary" type="submit">Nouvelle session</button></form>
+</div>
+{{end}}

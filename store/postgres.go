@@ -248,7 +248,7 @@ func (s *PostgresStore) LoadMessagesWithID(ctx context.Context, sessionID string
 // all of them when lastID is 0.
 func (s *PostgresStore) LoadMessagesUpTo(ctx context.Context, sessionID string, lastID int64) ([]MessageWithID, error) {
 	rows, err := s.db.QueryContext(ctx,
-		"SELECT id, data FROM messages WHERE session_id = $1 AND ($2 = 0 OR id <= $2) ORDER BY id", sessionID, lastID)
+		"SELECT id, created_at, data FROM messages WHERE session_id = $1 AND ($2 = 0 OR id <= $2) ORDER BY id", sessionID, lastID)
 	if err != nil {
 		return nil, err
 	}
@@ -258,9 +258,11 @@ func (s *PostgresStore) LoadMessagesUpTo(ctx context.Context, sessionID string, 
 	for rows.Next() {
 		var m MessageWithID
 		var data string
-		if err := rows.Scan(&m.ID, &data); err != nil {
+		var createdAt sql.NullTime
+		if err := rows.Scan(&m.ID, &createdAt, &data); err != nil {
 			return nil, err
 		}
+		m.CreatedAt = createdAt.Time
 		if err := json.Unmarshal([]byte(data), &m.Message); err != nil {
 			return nil, err
 		}

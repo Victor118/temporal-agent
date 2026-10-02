@@ -13,6 +13,15 @@ import (
 
 const SignalUserAnswer = "user-answer"
 
+// QueryQuestion returns the PendingQuestion an AskUserWorkflow waits on.
+const QueryQuestion = "question"
+
+// PendingQuestion is a question waiting for an answer.
+type PendingQuestion struct {
+	Question   string   `json:"question"`
+	AgentChain []string `json:"agent_chain,omitempty"`
+}
+
 // askUserTimeout bounds how long a question waits for its answer. Approvals and
 // clarifications are measured in hours, not seconds: the workflow consumes
 // nothing while it waits, so the bound only exists to release a question the
@@ -41,6 +50,14 @@ func AskUserWorkflow(ctx workflow.Context, rawInput json.RawMessage) (string, er
 		return "", fmt.Errorf("cannot extract session ID from workflow ID: %s", wfID)
 	}
 	sessionID := wfID[:idx]
+
+	// A page rendered while the question waits reads it from here: the SSE
+	// event below reaches only the members watching at that moment.
+	if err := workflow.SetQueryHandler(ctx, QueryQuestion, func() (PendingQuestion, error) {
+		return PendingQuestion{Question: input.Question, AgentChain: input.AgentChain}, nil
+	}); err != nil {
+		return "", fmt.Errorf("set query handler: %w", err)
+	}
 
 	// Notify the client via SSE so it can display the question with agent context
 	payload := map[string]interface{}{

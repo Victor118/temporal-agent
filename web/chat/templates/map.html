@@ -1,0 +1,34 @@
+{{define "map"}}
+{{with .Map}}
+<div class="map-wrap">
+  <div class="map-head">
+    <h1>{{.Root.Title}}</h1>
+    <div class="note">{{plural (len .Nodes) "session"}} dans cet arbre</div>
+  </div>
+  <div class="map" style="width:{{.Width}}px;height:{{.Height}}px">
+    <svg width="{{.Width}}" height="{{.Height}}" aria-hidden="true">{{range .Edges}}<path d="{{.}}"/>{{end}}</svg>
+    {{range .Nodes}}
+    <a class="mnode {{.Status}}{{if .Current}} current{{end}}" href="/s/{{.Session.SessionID}}" style="left:{{.X}}px;top:{{.Y}}px">
+      <div class="kind"><span class="dot {{.Status}}"></span>{{kindLabel .TreeNode}} · {{statusLabel .Status}}</div>
+      <div class="t" title="{{.Title}}">{{.Title}}</div>
+      <div class="s">{{plural .Stats.Members "participant"}} · {{plural .Stats.Messages "message"}}</div>
+    </a>
+    {{end}}
+  </div>
+  <div class="map-legend">
+    <div>
+      <div class="ttl">Brief, à la création</div>
+      <div class="note">Un fork naît d'une synthèse de son parent jusqu'au message choisi, jamais d'une copie du fil. Rien n'est recopié ensuite.</div>
+    </div>
+    <div>
+      <div class="ttl">↑ Question en attente</div>
+      <div class="note">L'agent d'une session attend la réponse d'un membre pour continuer.</div>
+    </div>
+    <div>
+      <div class="ttl">En veille</div>
+      <div class="note">Aucun workflow ne tourne : la session se réveille au prochain message.</div>
+    </div>
+  </div>
+</div>
+{{end}}
+{{end}}

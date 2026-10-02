@@ -230,6 +230,41 @@ func (s *PostgresStore) ListSessionsByUser(ctx context.Context, userID string) (
 	return sessions, rows.Err()
 }
 
+// SessionStats counts what a session holds, for an overview of many sessions.
+type SessionStats struct {
+	Members      int       `json:"members"`
+	Messages     int       `json:"messages"`
+	LastActivity time.Time `json:"last_activity"` // latest message, or creation
+}
+
+// ListSessionStats returns the stats of the sessions userID is a member of,
+// by session ID, in one query.
+func (s *PostgresStore) ListSessionStats(ctx context.Context, userID string) (map[string]SessionStats, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT s.session_id,
+			(SELECT count(*) FROM session_members x WHERE x.session_id = s.session_id),
+			(SELECT count(*) FROM messages msg WHERE msg.session_id = s.session_id),
+			COALESCE((SELECT max(msg.created_at) FROM messages msg WHERE msg.session_id = s.session_id), s.created_at)
+		FROM sessions s JOIN session_members m ON m.session_id = s.session_id
+		WHERE m.user_id = $1`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	stats := make(map[string]SessionStats)
+	for rows.Next() {
+		var id string
+		var st SessionStats
+		var last sql.NullTime
+		if err := rows.Scan(&id, &st.Members, &st.Messages, &last); err != nil {
+			return nil, err
+		}
+		st.LastActivity = last.Time
+		stats[id] = st
+	}
+	return stats, rows.Err()
+}
+
 // DeleteSession removes a session, its members and its messages.
 func (s *PostgresStore) DeleteSession(ctx context.Context, sessionID string) error {
 	return s.inTx(ctx, func(tx *sql.Tx) error {

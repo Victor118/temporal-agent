@@ -114,46 +114,12 @@ func (h *handler) createSession(w http.ResponseWriter, r *http.Request) {
 	if r.Body != nil {
 		json.NewDecoder(r.Body).Decode(&req)
 	}
-
-	me := auth.UserFrom(r.Context())
-	sessionID := newUUID()
-	model := req.Model // Explicit choice only; empty = worker default (LLM_MODEL)
-
-	agentID, err := h.resolveAgentID(r.Context(), req.AgentID)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	_, err = h.temporalClient.ExecuteWorkflow(r.Context(), client.StartWorkflowOptions{
-		ID:        "session-" + sessionID,
-		TaskQueue: h.cfg.WorkflowQueue,
-	}, workflow.SessionWorkflow, workflow.SessionWorkflowInput{
-		SessionID:    sessionID,
-		AgentID:      agentID,
-		SystemPrompt: req.SystemPrompt, // Optional override; empty = load from agent skills
-		Model:        model,
-	})
+	sessionID, err := h.openSession(r.Context(), auth.UserFrom(r.Context()), req.AgentID, req.SystemPrompt, req.Model)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to create session: %v", err), http.StatusInternalServerError)
 		return
 	}
-
-	// Persist session metadata: without it nobody is a member, so nobody
-	// could open the session.
-	if err := h.store.CreateSession(r.Context(), store.Session{
-		SessionID: sessionID,
-		CreatedBy: me.ID,
-		AgentID:   agentID,
-		Channel:   "web",
-	}); err != nil {
-		http.Error(w, fmt.Sprintf("Failed to persist session: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(createSessionResponse{SessionID: sessionID})
+	writeJSON(w, http.StatusCreated, createSessionResponse{SessionID: sessionID})
 }
 
 // listSessions returns the sessions the logged-in user is a member of.
@@ -188,29 +154,16 @@ func (h *handler) listSessions(w http.ResponseWriter, r *http.Request) {
 // deleteSession deletes a session for every member. Only its creator may: the
 // others leave it instead.
 func (h *handler) deleteSession(w http.ResponseWriter, r *http.Request) {
-	sessionID := chi.URLParam(r, "id")
-	sess, err := h.store.GetSession(r.Context(), sessionID)
-	if err != nil || sess == nil {
+	switch err := h.removeSession(r.Context(), chi.URLParam(r, "id"), auth.UserFrom(r.Context()).ID); {
+	case errors.Is(err, errSessionGone):
 		http.Error(w, "Session not found", http.StatusNotFound)
-		return
-	}
-	if sess.CreatedBy != auth.UserFrom(r.Context()).ID {
+	case errors.Is(err, errNotCreator):
 		http.Error(w, "Only the session's creator can delete it; leave it instead", http.StatusForbidden)
-		return
-	}
-
-	// Terminate any running Temporal workflows for this session
-	workflowID := h.findActiveWorkflowID(r.Context(), sessionID)
-	if workflowID != "" {
-		_ = h.temporalClient.TerminateWorkflow(r.Context(), workflowID, "", "session deleted by user")
-	}
-
-	if err := h.store.DeleteSession(r.Context(), sessionID); err != nil {
+	case err != nil:
 		http.Error(w, fmt.Sprintf("Failed to delete session: %v", err), http.StatusInternalServerError)
-		return
+	default:
+		w.WriteHeader(http.StatusNoContent)
 	}
-
-	w.WriteHeader(http.StatusNoContent)
 }
 
 // isWorkflowRunning checks if a Temporal workflow is still running.
@@ -750,22 +703,14 @@ func (h *handler) addMember(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "email is required", http.StatusBadRequest)
 		return
 	}
-	u, err := h.store.GetUserByEmail(r.Context(), req.Email)
-	if err != nil {
-		http.Error(w, "Internal error", http.StatusInternalServerError)
-		return
-	}
-	if u == nil || u.DisabledAt != nil {
+	switch err := h.inviteByEmail(r.Context(), chi.URLParam(r, "id"), req.Email, auth.UserFrom(r.Context()).ID); {
+	case errors.Is(err, errNoSuchUser):
 		http.Error(w, "No active user with this email", http.StatusNotFound)
-		return
-	}
-	sessionID := chi.URLParam(r, "id")
-	if err := h.store.AddSessionMember(r.Context(), sessionID, u.ID, auth.UserFrom(r.Context()).ID); err != nil {
+	case err != nil:
 		http.Error(w, fmt.Sprintf("Failed to add member: %v", err), http.StatusInternalServerError)
-		return
+	default:
+		h.listMembers(w, r)
 	}
-	log.Printf("Session %s: %s added %s", sessionID, auth.UserFrom(r.Context()).ID, u.ID)
-	h.listMembers(w, r)
 }
 
 // removeMember lets a member leave the session. Members cannot remove each
@@ -776,18 +721,9 @@ func (h *handler) removeMember(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "A member can only remove themselves", http.StatusForbidden)
 		return
 	}
-	if err := h.store.RemoveSessionMember(r.Context(), sessionID, userID); err != nil {
+	if err := h.leave(r.Context(), sessionID, userID); err != nil {
 		http.Error(w, fmt.Sprintf("Failed to leave: %v", err), http.StatusInternalServerError)
 		return
-	}
-	members, err := h.store.ListSessionMembers(r.Context(), sessionID)
-	if err == nil && len(members) == 0 {
-		if wf := h.findActiveWorkflowID(r.Context(), sessionID); wf != "" {
-			_ = h.temporalClient.TerminateWorkflow(r.Context(), wf, "", "last member left")
-		}
-		if err := h.store.DeleteSession(r.Context(), sessionID); err != nil {
-			log.Printf("Session %s: delete after last member left: %v", sessionID, err)
-		}
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

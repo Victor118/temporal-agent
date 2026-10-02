@@ -1,0 +1,116 @@
+{{define "thread"}}
+{{$sid := .Node.Session.SessionID}}
+{{/* Reloaded on every event of the session's stream; also polled while the
+     agent works, in case an event is missed. */}}
+<div id="thread" hx-get="/s/{{$sid}}/thread" hx-swap="outerHTML"
+     hx-trigger="sse:message, sse:user_message, sse:ask_user, sse:fork_ready, sse:fork_failed, sse:tool_calls{{if or .Working .SummaryPending}}, every 4s{{end}}">
+<div class="thread-inner">
+  {{with .Parent}}
+  <div class="divider"><span>forké depuis {{if .Accessible}}<a href="/s/{{.SessionID}}#m{{.MessageID}}">{{.Title}}</a>{{else}}une session à laquelle tu n'as pas accès{{end}}</span></div>
+  {{end}}
+  {{if .SummaryPending}}<div class="working-line"><span class="dot"></span>Résumé de la session parente en cours…</div>{{end}}
+  {{if .SummaryFailed}}<div class="note">Le résumé de la session parente n'a pas pu être écrit : ce fork démarre sans.</div>{{end}}
+
+  {{range .Thread}}{{template "item" itemOf $ .}}{{end}}
+
+  {{if and (not .Thread) (not .SummaryPending)}}<div class="empty-thread">Rien encore. Écris le premier message.</div>{{end}}
+
+  {{if .Working}}
+  <div class="working-line">
+    <span class="dot"></span>L'agent travaille…
+    <form hx-post="/s/{{$sid}}/cancel" hx-target="#thread" hx-swap="outerHTML"><button class="btn ghost" type="submit">Arrêter</button></form>
+  </div>
+  {{end}}
+  {{with .Error}}<div class="composer-error">{{.}}</div>{{end}}
+</div>
+</div>
+{{if .Fragment}}{{template "composer" .}}{{end}}
+{{end}}
+
+{{define "item"}}
+{{$sid := .Page.Node.Session.SessionID}}
+{{with .Item}}
+{{if eq .Kind "brief"}}
+<details class="brief" id="brief">
+  <summary>Brief hérité de la session parente — une synthèse, pas son verbatim</summary>
+  <div class="prose">{{.HTML}}</div>
+</details>
+
+{{else if eq .Kind "human"}}
+<div class="msg" id="m{{.ID}}">
+  <div class="avatar lg" style="background:{{.Author.Color}}">{{.Author.Initials}}</div>
+  <div class="msg-body">
+    <div class="msg-head"><span class="who">{{.Author.Name}}</span><span class="when">{{clock .Time}}</span></div>
+    <div class="msg-text">{{withMention .Text}}</div>
+    {{template "forks" .}}
+  </div>
+  {{template "fork-action" itemOf $.Page .}}
+</div>
+
+{{else if eq .Kind "agent"}}
+<div class="msg" id="m{{.ID}}">
+  <div class="agent-mark"></div>
+  <div class="msg-body">
+    <div class="msg-head"><span class="who">agent</span><span class="agent-meta">{{$.Page.Agent.ID}}</span><span class="when">{{clock .Time}}</span></div>
+    <div class="agent-card">
+      <div class="prose">{{.HTML}}</div>
+      {{with .Tools}}<div class="tools">{{range .}}<span class="tool">{{.}}</span>{{end}}</div>{{end}}
+    </div>
+    {{template "forks" .}}
+  </div>
+  {{template "fork-action" itemOf $.Page .}}
+</div>
+
+{{else if eq .Kind "question"}}
+<div class="notice waiting">
+  <div class="arrow">↑</div>
+  <div style="flex-grow:1">
+    <div class="ttl">L'agent attend une réponse{{with .AgentChain}} — {{range $i, $a := .}}{{if $i}} › {{end}}{{$a}}{{end}}{{end}}</div>
+    <div class="txt">{{.Text}}</div>
+    <form hx-post="/s/{{$sid}}/answer" hx-target="#thread" hx-swap="outerHTML">
+      <input type="hidden" name="workflow_id" value="{{.WorkflowID}}">
+      <input class="input" name="answer" placeholder="Ta réponse" required autocomplete="off">
+      <button class="btn" type="submit">Répondre</button>
+    </form>
+  </div>
+</div>
+{{end}}
+{{end}}
+{{end}}
+
+{{define "forks"}}
+{{with .Forks}}<div class="forks">⑂ {{len .}} fork{{if gt (len .) 1}}s{{end}} : {{range $i, $f := .}}{{if $i}}, {{end}}<a href="/s/{{$f.SessionID}}">{{$f.Title}}</a>{{end}}</div>{{end}}
+{{end}}
+
+{{define "fork-action"}}
+{{if not .Page.SummaryPending}}
+<div class="msg-actions">
+  <form hx-post="/s/{{.Page.Node.Session.SessionID}}/fork" hx-confirm="Démarrer une nouvelle session à partir de ce message ? Elle part d'un résumé de la conversation jusqu'ici.">
+    <input type="hidden" name="message_id" value="{{.Item.ID}}">
+    <button class="btn" type="submit" title="Nouvelle session à partir de ce message">⑂ Forker ici</button>
+  </form>
+</div>
+{{end}}
+{{end}}
+
+{{define "composer"}}
+{{$sid := .Node.Session.SessionID}}
+<div class="composer" id="composer"{{if .Fragment}} hx-swap-oob="true"{{end}}>
+  <form class="composer-box" hx-post="/s/{{$sid}}/messages" hx-target="#thread" hx-swap="outerHTML"
+        hx-on::after-request="if (event.detail.successful) this.reset()">
+    <textarea name="content" rows="2" required {{if .SummaryPending}}disabled{{end}}
+      placeholder="{{if .AgentOnMention}}Écrire dans ce fil — @agent pour le solliciter{{else}}Écrire à l'agent…{{end}}"
+      onkeydown="if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); this.form.requestSubmit(); }"></textarea>
+    <div class="composer-bar">
+      <div>
+        {{if and .LastMessageID (not .SummaryPending)}}
+        <button class="btn" type="button" hx-post="/s/{{$sid}}/fork" hx-vals='{"message_id": "{{.LastMessageID}}"}'
+                hx-confirm="Démarrer une nouvelle session à partir du dernier message ?">Forker un fil</button>
+        {{end}}
+      </div>
+      <span class="hint">{{if .AgentOnMention}}L'agent ne répond qu'à <code>@agent</code>{{else}}Entrée pour envoyer, Maj+Entrée pour aller à la ligne{{end}}</span>
+      <button class="btn primary" type="submit" {{if .SummaryPending}}disabled{{end}}>Envoyer</button>
+    </div>
+  </form>
+</div>
+{{end}}

@@ -1,0 +1,38 @@
+{{define "login"}}<!doctype html>
+<html lang="fr">
+<head><title>Connexion · temporal-agent</title>{{template "head"}}</head>
+<body>
+<main class="center">
+  <div class="logo"></div>
+  <h1>Connexion</h1>
+  <p class="note">temporal-agent</p>
+  {{with .Error}}<div class="error">{{.}}</div>{{end}}
+  <form method="post" action="/login">
+    <input type="hidden" name="next" value="{{.Next}}">
+    <input class="input" type="email" name="email" value="{{.Email}}" placeholder="Email" autocomplete="username" required {{if not .Email}}autofocus{{end}}>
+    <input class="input" type="password" name="password" placeholder="Mot de passe" autocomplete="current-password" required {{if .Email}}autofocus{{end}}>
+    <button class="btn primary" type="submit">Se connecter</button>
+  </form>
+</main>
+</body>
+</html>{{end}}
+
+{{define "notifications"}}<!doctype html>
+<html lang="fr">
+<head><title>Notifications · temporal-agent</title>{{template "head"}}</head>
+<body hx-boost="true">
+<main class="page">
+  <p><a href="/">← Retour aux sessions</a></p>
+  <h1 style="font-size:20px">Notifications</h1>
+  <p class="note">Les résultats des tâches planifiées.</p>
+  {{range .Items}}
+  <div class="notif">
+    <div class="prose">{{.HTML}}</div>
+    <form method="post" action="/notifications/{{.ID}}/delete"><button class="btn ghost" type="submit" aria-label="Supprimer">×</button></form>
+  </div>
+  {{else}}
+  <p class="note">Aucune notification.</p>
+  {{end}}
+</main>
+</body>
+</html>{{end}}

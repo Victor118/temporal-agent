@@ -3,6 +3,7 @@ package store
 import (
 	"encoding/json"
 	"fmt"
+	"time"
 )
 
 type Role string
@@ -44,7 +45,8 @@ type Message struct {
 const KindForkSummary = "fork_summary"
 
 type MessageWithID struct {
-	ID int64 `json:"id"`
+	ID        int64     `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
 	Message
 }
 

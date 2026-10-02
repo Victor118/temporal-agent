@@ -9,6 +9,7 @@ import (
 	"github.com/victor/temporal-agent/auth"
 	"github.com/victor/temporal-agent/web"
 	"github.com/victor/temporal-agent/web/admin"
+	"github.com/victor/temporal-agent/web/chat"
 )
 
 // publicRouter is the public HTTP API, shared by `agent server` and `agent dev`.
@@ -18,12 +19,46 @@ func publicRouter(h *handler, adminUI *admin.Admin) http.Handler {
 	r.Use(middleware.Recoverer)
 
 	// Unauthenticated routes. Webhooks authenticate themselves.
-	r.Get("/", web.HandleIndex)
+	r.Handle("/static/*", http.StripPrefix("/static/", chat.Static()))
 	r.Post("/webhooks/skills", h.handleSkillsWebhook)
 	r.Post("/webhooks/telegram", h.handleTelegramWebhook)
 
 	// Back-office: its own login page, open to admins only
 	r.Mount("/admin", adminUI.Routes())
+
+	// The interface: pages, and the fragments htmx swaps in
+	r.Group(func(r chi.Router) {
+		r.Use(auth.SameOrigin)
+		r.Get("/login", h.loginPage)
+		r.Post("/login", h.loginForm)
+		r.Post("/logout", h.logoutForm)
+
+		r.Group(func(r chi.Router) {
+			r.Use(h.requireUserPage)
+			r.Get("/", h.home)
+			r.Get("/tree", h.treeFragment)
+			r.Post("/s/new", h.newSessionForm)
+			r.Get("/notifications", h.notificationsPage)
+			r.Post("/notifications/{notifID}/delete", h.deleteNotificationForm)
+			// The former single-page chat, kept while the interface settles.
+			r.Get("/classic", web.HandleIndex)
+
+			r.Route("/s/{id}", func(r chi.Router) {
+				r.Use(h.requireMember)
+				r.Get("/", h.sessionPage)
+				r.Get("/map", h.mapPage)
+				r.Get("/thread", h.threadFragment)
+				r.Post("/messages", h.sendForm)
+				r.Post("/fork", h.forkForm)
+				r.Post("/members", h.inviteForm)
+				r.Post("/agent-mode", h.agentModeForm)
+				r.Post("/leave", h.leaveForm)
+				r.Post("/delete", h.deleteForm)
+				r.Post("/answer", h.answerForm)
+				r.Post("/cancel", h.cancelForm)
+			})
+		})
+	})
 
 	r.Group(func(r chi.Router) {
 		r.Use(auth.SameOrigin)

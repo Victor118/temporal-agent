@@ -1,0 +1,66 @@
+{{define "rail"}}
+{{$sid := .Node.Session.SessionID}}
+<div class="rail-inner" id="rail">
+  <section>
+    <div class="eyebrow">Ce nœud</div>
+    <div class="node-title">{{.Node.Title}}</div>
+    <div class="note">{{kindLabel .Node}}, ouverte il y a {{ago .Node.Session.CreatedAt}} · {{statusLabel .Node.Status}}</div>
+  </section>
+
+  <section>
+    <div class="eyebrow">Participants</div>
+    <div class="people">
+      {{range .Members}}
+      <div class="person">
+        <div class="avatar sm" style="background:{{.Color}}">{{.Initials}}</div>
+        <div>{{.Name}}{{if ne .Name .Email}}<div class="email">{{.Email}}</div>{{end}}</div>
+      </div>
+      {{end}}
+    </div>
+    <form class="invite" hx-post="/s/{{$sid}}/members" hx-target="#rail" hx-swap="outerHTML">
+      <input class="input" type="email" name="email" placeholder="Inviter par email" required>
+      <button class="btn" type="submit">Inviter</button>
+    </form>
+    {{with .Error}}<div class="error">{{.}}</div>{{end}}
+  </section>
+
+  <section>
+    <div class="eyebrow">Agent</div>
+    <div class="card">
+      <div class="ttl">{{.Agent.Name}}</div>
+      <div class="meta"><div>{{.Agent.ID}}</div></div>
+      {{with .Agent.Description}}<div class="note" style="margin-top:6px">{{.}}</div>{{end}}
+      <form hx-post="/s/{{$sid}}/agent-mode" hx-trigger="change" hx-target="#rail" hx-swap="outerHTML">
+        <select class="input" name="mode" aria-label="Quand l'agent répond">
+          <option value="auto" {{if eq .AgentMode "auto"}}selected{{end}}>Répond : auto</option>
+          <option value="always" {{if eq .AgentMode "always"}}selected{{end}}>Répond : à chaque message</option>
+          <option value="mention" {{if eq .AgentMode "mention"}}selected{{end}}>Répond : sur @agent</option>
+        </select>
+      </form>
+      <div class="note" style="margin-top:6px">{{if eq .AgentMode "auto"}}Auto : à chaque message quand tu es seul, sur @agent dès que vous êtes plusieurs.{{else if eq .AgentMode "mention"}}L'agent ne répond qu'aux messages qui le mentionnent.{{else}}L'agent répond à chaque message.{{end}}</div>
+    </div>
+  </section>
+
+  {{with .Parent}}
+  <section>
+    <div class="eyebrow">Hérité du parent</div>
+    <div class="inherited">
+      <div class="note">Cette session est née d'une synthèse de {{if .Accessible}}<a href="/s/{{.SessionID}}#m{{.MessageID}}">{{.Title}}</a>{{else}}sa session parente{{end}}, pas d'une copie du fil.</div>
+      <a href="#brief" hx-boost="false" onclick="var b = document.getElementById('brief'); if (b) b.open = true;" style="font-size:12px;display:inline-block;margin-top:7px">Voir le brief</a>
+    </div>
+  </section>
+  {{end}}
+
+  <section class="rail-actions">
+    {{if .IsCreator}}
+    <form hx-post="/s/{{$sid}}/delete" hx-confirm="Supprimer cette session et ses messages, pour tous ses membres ?">
+      <button class="btn danger" type="submit">Supprimer la session</button>
+    </form>
+    {{else}}
+    <form hx-post="/s/{{$sid}}/leave" hx-confirm="Quitter cette session ? Les autres membres la gardent.">
+      <button class="btn" type="submit">Quitter la session</button>
+    </form>
+    {{end}}
+  </section>
+</div>
+{{end}}
