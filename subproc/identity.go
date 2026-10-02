@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 )
 
@@ -137,68 +136,6 @@ func (id *Identity) Give(root string) error {
 		}
 		return os.Lchown(path, int(id.UID), int(id.GID))
 	})
-}
-
-// running counts, per uid, the commands of this worker that run as it.
-var running = struct {
-	sync.Mutex
-	n map[uint32]int
-}{n: map[uint32]int{}}
-
-// Hold counts a command about to start as id until release is called, once it
-// has been waited for. release then ends every process of id's if no other
-// command of this worker runs as id (KillStrays): what left the command's
-// process group (setsid, a daemon) and would outlive it otherwise. A nil id
-// holds nothing.
-func (id *Identity) Hold() (release func()) {
-	if id == nil {
-		return func() {}
-	}
-	running.Lock()
-	running.n[id.UID]++
-	running.Unlock()
-	return func() {
-		running.Lock()
-		defer running.Unlock()
-		if running.n[id.UID]--; running.n[id.UID] == 0 {
-			delete(running.n, id.UID)
-			id.killAll()
-		}
-	}
-}
-
-// KillStrays ends every process of id's, unless a command of this worker runs
-// as id (Hold): none of them is then the worker's. It is what makes "nothing
-// the run started still runs" true before the worker relies on it.
-//
-// It takes id to be the worker's alone (RUN_AS_UID is a user of its own, as
-// in the images): any process of id's in this pid namespace is ended. A nil
-// id, or the worker's own user, ends nothing.
-func (id *Identity) KillStrays() {
-	if id == nil {
-		return
-	}
-	running.Lock()
-	defer running.Unlock()
-	if running.n[id.UID] == 0 {
-		id.killAll()
-	}
-}
-
-// killAll ends every process of id's, with the lock held: no command of the
-// worker may start as id meanwhile. kill(-1) from a process running as id
-// reaches exactly those, and none can fork past it: the kernel signals them
-// all under the lock that fork takes.
-func (id *Identity) killAll() {
-	if int(id.UID) == geteuid() {
-		return
-	}
-	cmd := exec.Command("/bin/sh", "-c", "kill -9 -1")
-	cmd.Dir = "/"
-	cmd.Env = []string{"PATH=/usr/bin:/bin"}
-	id.Apply(cmd)
-	// Its status only says whether there was anything to end.
-	cmd.Run()
 }
 
 // GiveFile hands the open file f over to id. It acts on what f is, not on a

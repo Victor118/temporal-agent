@@ -42,6 +42,9 @@ type ClaudeCodeActivities struct {
 	// does: not the worker's, whose credentials the run's shell would reach.
 	// nil runs it as the worker's user, refused when that is root.
 	RunAs *subproc.Identity
+	// Runs counts the commands the worker runs as RunAs (subproc.Runs, the
+	// worker's one, shared with exec): required with RunAs.
+	Runs RunCounter
 	// ClaudeConfigDir is the operator's CLI configuration (CLAUDE_CONFIG_DIR):
 	// each run starts from a copy of its own, next to its workspace, and only
 	// a renewed login comes back (claudecode.SeedConfigDir, KeepCredentials).
@@ -53,6 +56,14 @@ type ClaudeCodeActivities struct {
 	// repository is the model's choice, and a push goes out with this
 	// worker's identity: what it may reach is the operator's decision.
 	AllowedRepos []string
+}
+
+// RunCounter is what the coding activities need of subproc.Runs: a run
+// counted while the CLI works, and the processes a run left behind ended
+// before a clone is taken back, when no run is under way.
+type RunCounter interface {
+	Hold() (release func())
+	KillStrays()
 }
 
 type PrepareWorkspaceInput struct {
@@ -192,13 +203,15 @@ func (a *ClaudeCodeActivities) restoreGitConfig(dir string) (changed bool, err e
 // in it.
 //
 // Such a process is ended first, unless another command of this worker runs
-// as RunAs (KillStrays): a concurrent run's processes are not this one's to
-// end, and the ownership taken back below does not rely on it.
+// as RunAs (Runs.KillStrays): a concurrent run's processes are not this one's
+// to end, and the ownership taken back below does not rely on it.
 func (a *ClaudeCodeActivities) reclaim(dir string) error {
 	if a.RunAs == nil {
 		return nil
 	}
-	a.RunAs.KillStrays()
+	if a.Runs != nil {
+		a.Runs.KillStrays()
+	}
 	if err := subproc.Reclaim(dir); err != nil {
 		return err
 	}
@@ -414,6 +427,9 @@ func (a *ClaudeCodeActivities) RunClaudeCode(ctx context.Context, in RunClaudeCo
 		runner = *a.Runner
 	}
 	runner.RunAs = a.RunAs
+	if a.Runs != nil {
+		runner.Runs = a.Runs
+	}
 	return runner.Run(ctx, claudecode.Params{
 		ConfigDir:          configDir,
 		Cwd:                in.Dir,

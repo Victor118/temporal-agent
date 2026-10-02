@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/victor/temporal-agent/subproc"
 	"github.com/victor/temporal-agent/subproc/subproctest"
 )
 
@@ -404,7 +405,7 @@ func TestRunAsAnotherUser(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := &Runner{Binary: bin, RunAs: id}
+	r := &Runner{Binary: bin, RunAs: id, Runs: subproc.NewRuns(id)}
 	res, err := r.Run(context.Background(), Params{Cwd: subproctest.Dir(t, id), Task: "x"})
 	if err != nil {
 		t.Fatal(err)
@@ -429,7 +430,7 @@ printf '{"type":"result","subtype":"success","is_error":false,"result":"done","s
 		t.Fatal(err)
 	}
 
-	r := &Runner{Binary: bin, RunAs: id}
+	r := &Runner{Binary: bin, RunAs: id, Runs: subproc.NewRuns(id)}
 	if _, err := r.Run(context.Background(), Params{Cwd: subproctest.Dir(t, id), Task: "x"}); err != nil {
 		t.Fatal(err)
 	}
@@ -468,5 +469,14 @@ printf '{"type":"result","subtype":"success","is_error":false,"result":"done","s
 	if processRunning(pid) {
 		syscall.Kill(pid, syscall.SIGKILL)
 		t.Errorf("process %d, which held the output, outlived the run", pid)
+	}
+}
+
+// A CLI run as another user without a count of the runs is refused: what it
+// left running would never be ended.
+func TestRunRefusesAnIdentityWithoutRuns(t *testing.T) {
+	r := &Runner{Binary: fakeCLI(t, successStream), RunAs: &subproc.Identity{UID: 10001, GID: 10001}}
+	if _, err := r.Run(context.Background(), Params{Cwd: t.TempDir(), Task: "x"}); err == nil || !strings.Contains(err.Error(), "Runner.Runs") {
+		t.Errorf("err = %v, want a refusal", err)
 	}
 }

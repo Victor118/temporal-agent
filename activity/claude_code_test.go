@@ -161,6 +161,7 @@ func TestRunClaudeCodeNeverPersistsTheSession(t *testing.T) {
 	// The workspace is deleted at the end of the run, so a transcript on disk
 	// would only outlive the tree it talks about.
 	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: t.TempDir(), RunAs: subproctest.Identity(t)}
+	a.Runs = subproc.NewRuns(a.RunAs)
 	_, err := a.RunClaudeCode(context.Background(), RunClaudeCodeInput{Dir: filepath.Join(a.Root, "nope"), Task: "x"})
 	if err == nil || !strings.Contains(err.Error(), "cwd") {
 		t.Fatalf("expected the missing workspace to be reported, got %v", err)
@@ -704,7 +705,7 @@ func TestWorkspaceChangesHandsWithTheRun(t *testing.T) {
 	src := initRepo(t)
 	exec.Command("git", "-C", src, "push", "--quiet", remote, "main").Run()
 
-	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: subproctest.Dir(t, nil), RunAs: id}
+	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: subproctest.Dir(t, nil), RunAs: id, Runs: subproc.NewRuns(id)}
 	prepared, err := a.PrepareWorkspace(context.Background(), PrepareWorkspaceInput{Name: "run-1", Repo: remote, Branch: "agent/thing"})
 	if err != nil {
 		t.Fatal(err)
@@ -871,7 +872,7 @@ printf '{"type":"result","subtype":"success","is_error":false,"result":"seen=%s 
 		t.Fatal(err)
 	}
 	a := &ClaudeCodeActivities{
-		AllowedRepos: testRepos, Root: subproctest.Dir(t, nil), RunAs: id,
+		AllowedRepos: testRepos, Root: subproctest.Dir(t, nil), RunAs: id, Runs: subproc.NewRuns(id),
 		ClaudeConfigDir: base, Runner: &claudecode.Runner{Binary: bin},
 	}
 
@@ -971,7 +972,7 @@ func TestInspectWorkspaceRefusesARefTheRunLinkedElsewhere(t *testing.T) {
 	}
 	id := subproctest.Identity(t)
 	src := initRepo(t)
-	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: subproctest.Dir(t, nil), RunAs: id}
+	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: subproctest.Dir(t, nil), RunAs: id, Runs: subproc.NewRuns(id)}
 	prepared, err := a.PrepareWorkspace(context.Background(), PrepareWorkspaceInput{Name: "run-1", Repo: src, Branch: "agent/thing"})
 	if err != nil {
 		t.Fatal(err)

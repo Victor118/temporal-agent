@@ -81,8 +81,9 @@ func requireRoot(t *testing.T) {
 }
 
 // testUID is the user this test binary runs commands as: one of its own, as
-// subproctest.UID is for the others (Hold ends every process of a user once
-// none of its commands runs, and the packages' tests run at the same time).
+// subproctest.UID is for the others. A sweep (Runs) ends every process of a
+// user, whichever process started it, and the packages' tests run at the
+// same time.
 var testUID = uint32(40000 + os.Getpid()%20000)
 
 // nobody is an identity the tests can switch to, with a home of its own.
@@ -214,69 +215,6 @@ func TestKillGroup_AfterACommandReturns(t *testing.T) {
 	if alive(pid) {
 		t.Errorf("the background process %d survived its command", pid)
 	}
-}
-
-// What left the command's group (setsid) is ended once no other command runs
-// as the same user, and only then.
-func TestHold_EndsStraysWhenTheLastCommandIsDone(t *testing.T) {
-	requireRoot(t)
-	id := nobody(t)
-
-	first := id.Hold()
-	second := id.Hold()
-	startAs(t, id, "setsid sleep 301 >/dev/null 2>&1 < /dev/null &")
-	time.Sleep(100 * time.Millisecond)
-	if runningAs(id) == 0 {
-		t.Fatal("the detached process is not running: the test would prove nothing")
-	}
-	first()
-	id.KillStrays()
-	if runningAs(id) == 0 {
-		t.Fatal("a process was ended while a command still ran as its user")
-	}
-	second()
-	deadline := time.Now().Add(2 * time.Second)
-	for runningAs(id) > 0 && time.Now().Before(deadline) {
-		time.Sleep(20 * time.Millisecond)
-	}
-	if n := runningAs(id); n > 0 {
-		t.Errorf("%d processes outlived the last command", n)
-	}
-
-	// With nothing held, KillStrays ends them at once.
-	startAs(t, id, "setsid sleep 302 >/dev/null 2>&1 < /dev/null &")
-	time.Sleep(100 * time.Millisecond)
-	id.KillStrays()
-	deadline = time.Now().Add(2 * time.Second)
-	for runningAs(id) > 0 && time.Now().Before(deadline) {
-		time.Sleep(20 * time.Millisecond)
-	}
-	if n := runningAs(id); n > 0 {
-		t.Errorf("%d processes outlived KillStrays", n)
-	}
-}
-
-// Ending the strays never ends the worker: not when the identity is the
-// worker's own user, nor with no identity.
-func TestKillStrays_NeverTheWorker(t *testing.T) {
-	requireRoot(t)
-	var none *Identity
-	none.KillStrays()
-	none.Hold()()
-
-	id := nobody(t)
-	startAs(t, id, "setsid sleep 303 >/dev/null 2>&1 < /dev/null &")
-	defer id.KillStrays()
-	time.Sleep(100 * time.Millisecond)
-	defer func(f func() int) { geteuid = f }(geteuid)
-	geteuid = func() int { return int(id.UID) } // the worker runs as id
-	id.KillStrays()
-	id.Hold()()
-	time.Sleep(100 * time.Millisecond)
-	if runningAs(id) == 0 {
-		t.Error("the worker's own user's processes were ended")
-	}
-	geteuid = os.Geteuid
 }
 
 // ownerAndMode is p's owner and mode, p's own and not a link's target.

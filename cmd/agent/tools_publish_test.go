@@ -21,7 +21,7 @@ func (p *publishedTools) UpsertTool(_ context.Context, r store.ToolRecord) error
 func TestPublishTools_CarriesTheProperties(t *testing.T) {
 	r := tool.NewRegistry()
 	tool.RegisterMemoryTools(r, nil)
-	tool.RegisterExecTool(r, t.TempDir(), nil)
+	tool.RegisterExecTool(r, t.TempDir(), nil, nil)
 	tool.RegisterAskUserTool(r, func() {})
 	p := &publishedTools{records: map[string]store.ToolRecord{}}
 	publishTools(p, nil, r, "tools")

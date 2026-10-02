@@ -141,6 +141,17 @@ type Runner struct {
 	// RunAs is the user the CLI runs as; nil = this process's. Whether that
 	// is acceptable is the caller's decision (subproc.CheckRunAs).
 	RunAs *subproc.Identity
+	// Runs counts the run while the CLI works, and ends every process of
+	// RunAs's once no command of the worker runs as it (subproc.Runs, shared
+	// with the rest of the worker). Required with RunAs: what a run left
+	// running would otherwise never be ended.
+	Runs Holder
+}
+
+// Holder counts a command while it runs, and once none runs, ends every
+// process of the user it ran as (subproc.Runs).
+type Holder interface {
+	Hold() (release func())
 }
 
 // Run executes one Claude Code run and blocks until the CLI exits.
@@ -151,7 +162,7 @@ type Runner struct {
 // signalled, not just the CLI, because it spawns shells of its own that would
 // otherwise outlive it; when the CLI exits, what is left of the group is
 // killed, and with RunAs, every process of that user once no other command of
-// this worker runs as it (subproc.Identity.Hold). Its output is waited on for
+// this worker runs as it (Runs). Its output is waited on for
 // killGrace at most once it has exited, whatever still holds it open.
 func (r *Runner) Run(ctx context.Context, p Params) (Result, error) {
 	if p.Cwd == "" {
@@ -159,6 +170,9 @@ func (r *Runner) Run(ctx context.Context, p Params) (Result, error) {
 	}
 	if strings.TrimSpace(p.Task) == "" {
 		return Result{}, errors.New("claudecode: task is required")
+	}
+	if r.RunAs != nil && r.Runs == nil {
+		return Result{}, errors.New("claudecode: a CLI run as another user needs a count of the runs (Runner.Runs)")
 	}
 	if fi, err := os.Stat(p.Cwd); err != nil {
 		return Result{}, fmt.Errorf("claudecode: cwd %q: %w", p.Cwd, err)
@@ -198,8 +212,9 @@ func (r *Runner) Run(ctx context.Context, p Params) (Result, error) {
 	cmd.Stderr = &tail
 
 	start := time.Now()
-	release := r.RunAs.Hold()
-	defer release()
+	if r.Runs != nil {
+		defer r.Runs.Hold()()
+	}
 	if err := cmd.Start(); err != nil {
 		return Result{}, fmt.Errorf("claudecode: cannot start %q: %w", r.binary(), err)
 	}

@@ -18,18 +18,26 @@ import (
 // process group is killed.
 const execKillGrace = 2 * time.Second
 
+// Holder counts a command while it runs, and once none runs, ends every
+// process of the user it ran as (subproc.Runs).
+type Holder interface {
+	Hold() (release func())
+}
+
 // RegisterExecTool registers exec, which runs a shell command chosen by the
 // model in the workspace, as runAs.
 //
 // The command sees a filtered environment and its whole process group dies
 // when it returns or at the timeout, whichever comes first; once no command
-// runs as runAs, every process of runAs's does (subproc.Identity.Hold), one
-// that left the group included. Run as runAs, a user of its own, it cannot read the worker's
+// runs as runAs, every process of runAs's does (runs, shared with whatever
+// else of the worker runs commands as runAs), one that left the group
+// included. A runAs without runs refuses every command: what one left
+// running would never be ended. Run as runAs, a user of its own, it cannot read the worker's
 // /proc/<pid>/environ nor its 0600 files, which hold what the filtered
 // environment leaves out. It is still not a sandbox: it can leave the
 // workspace, and read whatever that user can. A worker running as root with
 // no runAs refuses every command (subproc.CheckRunAs): they would run as root.
-func RegisterExecTool(r *Registry, workspacePath string, runAs *subproc.Identity) {
+func RegisterExecTool(r *Registry, workspacePath string, runAs *subproc.Identity, runs Holder) {
 	r.Register(&Tool{
 		Name:        "exec",
 		Description: "Execute a shell command in the workspace. The command runs with the workspace as the working directory. Processes it starts in the background are stopped when it returns.",
@@ -55,6 +63,9 @@ func RegisterExecTool(r *Registry, workspacePath string, runAs *subproc.Identity
 			if err := subproc.CheckRunAs(runAs); err != nil {
 				return "", fmt.Errorf("exec: %w", err)
 			}
+			if runAs != nil && runs == nil {
+				return "", errors.New("exec: commands run as RUN_AS_UID need a count of them (subproc.Runs)")
+			}
 
 			timeout := time.Duration(params.TimeoutSeconds) * time.Second
 			if timeout <= 0 || timeout > 300*time.Second {
@@ -70,7 +81,7 @@ func RegisterExecTool(r *Registry, workspacePath string, runAs *subproc.Identity
 			runAs.Apply(cmd)
 			subproc.KillGroupOnCancel(cmd, syscall.SIGKILL, execKillGrace)
 
-			release := runAs.Hold()
+			release := hold(runs)
 			output, err := cmd.CombinedOutput()
 			subproc.KillGroup(cmd)
 			release()
@@ -98,4 +109,12 @@ func RegisterExecTool(r *Registry, workspacePath string, runAs *subproc.Identity
 			return strings.TrimSpace(result), nil
 		},
 	})
+}
+
+// hold counts a command with runs, if there are any to count it with.
+func hold(runs Holder) (release func()) {
+	if runs == nil {
+		return func() {}
+	}
+	return runs.Hold()
 }

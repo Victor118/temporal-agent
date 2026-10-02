@@ -73,8 +73,12 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 		return nil, fmt.Errorf("RUN_AS_UID: %w", err)
 	}
 
+	// One count of the commands run as runAs for the whole process: exec and
+	// the coding runs share it, or one would end the other's processes.
+	runs := subproc.NewRuns(runAs)
+
 	workerConf := loadWorkerConfig(cfg)
-	registry := buildRegistry(cfg, st, tc, workerConf, runAs)
+	registry := buildRegistry(cfg, st, tc, workerConf, runAs, runs)
 
 	skills := loadSkills(opts.skills)
 	catalog := initCatalog(st)
@@ -119,7 +123,7 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 		w.RegisterActivity(&activity.LLMActivities{Provider: llmProvider})
 		w.RegisterActivity(&activity.ForkActivities{Store: st, LLM: llmProvider, Private: catalog})
 		w.RegisterActivity(&activity.MemoryActivities{Store: st})
-		w.RegisterActivity(&activity.ClaudeCodeActivities{Root: cfg.ClaudeCodeWorkspace, SSHKeyPath: cfg.ClaudeCodeSSHKey, AllowedRepos: cfg.ClaudeCodeRepos, RunAs: runAs, ClaudeConfigDir: cfg.ClaudeConfigDir})
+		w.RegisterActivity(&activity.ClaudeCodeActivities{Root: cfg.ClaudeCodeWorkspace, SSHKeyPath: cfg.ClaudeCodeSSHKey, AllowedRepos: cfg.ClaudeCodeRepos, RunAs: runAs, Runs: runs, ClaudeConfigDir: cfg.ClaudeConfigDir})
 		w.RegisterActivity(&activity.ToolActivities{Registry: registry, Catalog: catalog})
 		w.RegisterActivity(&activity.NotificationActivities{Notifiers: notifiers})
 		w.RegisterActivity(&activity.DeliveryActivities{Web: opts.web, Store: st})
@@ -148,12 +152,12 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 
 // buildRegistry registers the tools this process can run. Which of them it
 // exposes is the worker config's decision (exposeTools).
-func buildRegistry(cfg *config.Config, st store.Store, tc client.Client, wc *config.WorkerConfig, runAs *subproc.Identity) *tool.Registry {
+func buildRegistry(cfg *config.Config, st store.Store, tc client.Client, wc *config.WorkerConfig, runAs *subproc.Identity, runs *subproc.Runs) *tool.Registry {
 	registry := tool.NewRegistry()
 	tool.RegisterFilesystemTools(registry, cfg.WorkspacePath, runAs)
 	tool.RegisterGrepTool(registry, cfg.WorkspacePath)
 	tool.RegisterGlobTool(registry, cfg.WorkspacePath)
-	tool.RegisterExecTool(registry, cfg.WorkspacePath, runAs)
+	tool.RegisterExecTool(registry, cfg.WorkspacePath, runAs, runs)
 	tool.RegisterWebTools(registry)
 	tool.RegisterWebSearchTool(registry, cfg.BraveSearchAPIKey)
 	tool.RegisterEmailTool(registry, tool.SMTPConfig{

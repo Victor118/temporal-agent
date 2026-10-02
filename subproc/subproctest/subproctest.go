@@ -15,9 +15,9 @@ import (
 
 // UID is the user the tests of this test binary run commands as when they run
 // as root: one with no account, of this binary's own. Once none of a worker's
-// commands runs as a user, every process of that user is ended
-// (subproc.Identity.Hold), and the test binaries of several packages run at
-// the same time: they must not end each other's commands.
+// commands runs as a user, every process of that user is ended (subproc.Runs),
+// whichever process started it, and the test binaries of several packages run
+// at the same time: they must not end each other's commands.
 var UID = uint32(40000 + os.Getpid()%20000)
 
 // Identity returns the identity a test's commands run as: UID when the test

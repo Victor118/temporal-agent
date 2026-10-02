@@ -107,7 +107,7 @@ func newDebugRunner(cfg *config.Config, binary string) (*claudecode.Runner, erro
 	if err := runAs.PrepareHome(); err != nil {
 		return nil, fmt.Errorf("RUN_AS_UID: %w", err)
 	}
-	return &claudecode.Runner{Binary: binary, RunAs: runAs}, nil
+	return &claudecode.Runner{Binary: binary, RunAs: runAs, Runs: subproc.NewRuns(runAs)}, nil
 }
 
 // debugConfigDir is the CLI's configuration for a manual run: a copy of the
