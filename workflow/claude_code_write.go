@@ -73,6 +73,10 @@ type ImplementFeatureInput struct {
 // push. That split is not stylistic: the push is the only step that holds a
 // credential, and it is the one step no LLM takes part in.
 func ImplementFeatureWorkflow(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCodeOutput, error) {
+	return withContent(implementFeature(ctx, rawInput))
+}
+
+func implementFeature(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCodeOutput, error) {
 	var input ImplementFeatureInput
 	if err := json.Unmarshal(rawInput, &input); err != nil {
 		return ClaudeCodeOutput{}, temporal.NewNonRetryableApplicationError(

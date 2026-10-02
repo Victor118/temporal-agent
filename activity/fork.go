@@ -46,6 +46,9 @@ type TranscriptReader interface {
 type ForkActivities struct {
 	Store TranscriptReader
 	LLM   provider.LLMProvider
+	// Private tells which tool inputs stay out of the summary: it may go to
+	// another user's fork. Without it, every tool input does.
+	Private tool.PrivateInputs
 }
 
 type SummarizeConversationInput struct {
@@ -74,7 +77,7 @@ func (a *ForkActivities) SummarizeConversation(ctx context.Context, in Summarize
 			fmt.Sprintf("message %d not found in session %s", in.UpToMessageID, in.SessionID), "MessageNotFound", nil)
 	}
 
-	transcript, truncated := buildTranscript(msgs)
+	transcript, truncated := buildTranscript(msgs, a.Private)
 	content, _ := json.Marshal("Conversation to summarize:\n\n" + transcript)
 	resp, err := a.LLM.Chat(ctx, provider.ChatRequest{
 		Model:     in.Model,
@@ -99,10 +102,10 @@ func (a *ForkActivities) SummarizeConversation(ctx context.Context, in Summarize
 // buildTranscript renders messages as plain text for the summarizer, keeping
 // the end when the whole does not fit: the latest turns are what the fork
 // continues from.
-func buildTranscript(msgs []store.MessageWithID) (string, bool) {
+func buildTranscript(msgs []store.MessageWithID, private tool.PrivateInputs) (string, bool) {
 	var entries []string
 	for _, m := range msgs {
-		if e := transcriptEntry(m.Message); e != "" {
+		if e := transcriptEntry(m.Message, private); e != "" {
 			entries = append(entries, e)
 		}
 	}
@@ -120,7 +123,7 @@ func buildTranscript(msgs []store.MessageWithID) (string, bool) {
 	return strings.Join(entries, sep), truncated
 }
 
-func transcriptEntry(m store.Message) string {
+func transcriptEntry(m store.Message, private tool.PrivateInputs) string {
 	text := decodeText(m.Content)
 	switch {
 	case m.Kind == store.KindForkSummary:
@@ -138,7 +141,7 @@ func transcriptEntry(m store.Message) string {
 		for _, tc := range m.ToolCalls {
 			// Shown as the session's members see it: a user's memory stays out
 			// of the summary, which may go to someone else's fork.
-			input := tool.DisplayInput(tc.Name, tc.Input)
+			input := tool.DisplayInput(private == nil || private.PrivateInput(tc.Name), tc.Input)
 			parts = append(parts, "Assistant called "+tc.Name+" "+clip(string(input), maxSummaryToolInputBytes))
 		}
 		return strings.Join(parts, "\n")

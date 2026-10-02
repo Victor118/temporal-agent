@@ -36,7 +36,8 @@ func RegisterEmailTool(r *Registry, cfg SMTPConfig) {
 			},
 			"required": ["to", "subject", "body"]
 		}`),
-		Kind: ToolKindActivity,
+		Kind:      ToolKindActivity,
+		Sensitive: true,
 		Execute: func(ctx context.Context, input json.RawMessage) (string, error) {
 			var params struct {
 				To      []string `json:"to"`

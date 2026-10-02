@@ -32,6 +32,7 @@ type readStore interface {
 	ListForks(ctx context.Context, sessionID, userID string) ([]store.Session, error)
 	GetAgent(ctx context.Context, agentID string) (*store.Agent, error)
 	LoadMessagesWithID(ctx context.Context, sessionID string) ([]store.MessageWithID, error)
+	ListTools(ctx context.Context) ([]store.ToolRecord, error)
 	DeleteMessage(ctx context.Context, sessionID string, id int64) error
 	DeleteMessagesBySession(ctx context.Context, sessionID string) error
 }
@@ -265,6 +266,15 @@ func (a *api) getHistory(w http.ResponseWriter, r *http.Request) {
 		ToolCalls interface{} `json:"tool_calls,omitempty"`
 	}
 
+	// Which inputs to hide comes from the published tools. Unreadable, every
+	// input is hidden rather than a user's memory shown.
+	var private tool.PrivateInputs = allPrivate{}
+	if records, err := a.store.ListTools(r.Context()); err == nil {
+		private = tool.PrivateSetOf(records)
+	} else {
+		log.Printf("history: list tools: %v", err)
+	}
+
 	var history []historyEntry
 	for _, msg := range messages {
 		content := decodeContent(msg.Content)
@@ -284,7 +294,7 @@ func (a *api) getHistory(w http.ResponseWriter, r *http.Request) {
 				}
 				calls := make([]tc, len(msg.ToolCalls))
 				for i, t := range msg.ToolCalls {
-					calls[i] = tc{Name: t.Name, Input: tool.DisplayInput(t.Name, t.Input)}
+					calls[i] = tc{Name: t.Name, Input: tool.DisplayInput(private.PrivateInput(t.Name), t.Input)}
 				}
 				history = append(history, historyEntry{ID: msg.ID, Type: "tool_calls", ToolCalls: calls})
 			}
@@ -570,6 +580,11 @@ func (a *api) deleteAllNotifications(w http.ResponseWriter, r *http.Request) {
 func (a *api) streamNotifications(w http.ResponseWriter, r *http.Request) {
 	a.streamTopic(w, r, notificationsOf(auth.UserFrom(r.Context()).ID))
 }
+
+// allPrivate hides every tool input.
+type allPrivate struct{}
+
+func (allPrivate) PrivateInput(string) bool { return true }
 
 // decodeContent returns a stored message's text: it is kept as a JSON string.
 func decodeContent(content string) string {

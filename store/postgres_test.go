@@ -307,3 +307,53 @@ func TestTaskLogsBelongToTheirUser(t *testing.T) {
 		t.Errorf("get a missing task: %+v, %v", got, err)
 	}
 }
+
+func TestToolProperties(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	names := []string{"zz-private", "save_user_memory", "exec", "ask_user"}
+	cleanup := func() {
+		for _, n := range names {
+			s.db.ExecContext(ctx, "DELETE FROM tools WHERE name = $1", n)
+		}
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+
+	rec := ToolRecord{Name: "zz-private", TaskQueue: "q", InputSchema: []byte(`{}`), Kind: "activity",
+		PrivateInput: true, Sensitive: true, NeedsCallContext: true, SchemaHash: "h"}
+	if err := s.UpsertTool(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	tools, err := s.ListTools(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, got := range tools {
+		if got.Name == "zz-private" && !(got.PrivateInput && got.Sensitive && got.NeedsCallContext) {
+			t.Errorf("read back %+v", got)
+		}
+	}
+
+	// Rows published before the columns existed get the properties the code
+	// used to hardcode, so a user's memory stays hidden across the upgrade.
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE tools DROP COLUMN sensitive, DROP COLUMN private_input, DROP COLUMN needs_call_context`); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"save_user_memory", "exec", "ask_user"} {
+		if _, err := s.db.ExecContext(ctx, `INSERT INTO tools (name, task_queue, input_schema, kind, schema_hash) VALUES ($1, 'q', '{}', 'activity', 'h')`, n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.migrate(); err != nil {
+		t.Fatal(err)
+	}
+	tools, _ = s.ListTools(ctx)
+	got := map[string]ToolRecord{}
+	for _, r := range tools {
+		got[r.Name] = r
+	}
+	if !got["save_user_memory"].PrivateInput || !got["exec"].Sensitive || !got["ask_user"].NeedsCallContext || got["exec"].PrivateInput {
+		t.Errorf("backfilled %+v", got)
+	}
+}

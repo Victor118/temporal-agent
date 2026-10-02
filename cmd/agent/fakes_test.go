@@ -39,7 +39,7 @@ func (f *routeStore) GetUserByTelegramID(context.Context, int64) (*store.User, e
 	return nil, nil
 }
 func (f *routeStore) IncrementSkillsVersion(context.Context) (int64, error) { return 1, nil }
-func (f *routeStore) ListTools(context.Context) ([]store.ToolRecord, error) { return nil, nil }
+func (f *routeStore) ListTools(context.Context) ([]store.ToolRecord, error) { return f.tools, nil }
 func (f *routeStore) ListActivityQueues(context.Context) ([]store.ActivityQueueEntry, error) {
 	return nil, nil
 }

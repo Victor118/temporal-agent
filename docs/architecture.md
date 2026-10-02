@@ -135,7 +135,7 @@ tools: [github_*]
 | Table | Contenu | Écrivain |
 |---|---|---|
 | `agents` | définition des agents (+ `tools` allowlist) | serveur |
-| `tools` | outil → queue, schéma, kind, `schema_hash` | workers |
+| `tools` | outil → queue, schéma, kind, propriétés (`sensitive`, `private_input`, `needs_call_context`), `schema_hash` | workers |
 | `messages`, `sessions`, `memory`, `users`, `task_logs` | données runtime | workflows / serveur |
 | `skills_version` | signal de rechargement des skills | serveur |
 | `agent_executions`, `user_questions` | arbre d'exécution, questions (prévu) | workflows |

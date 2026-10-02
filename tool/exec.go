@@ -43,7 +43,8 @@ func RegisterExecTool(r *Registry, workspacePath string) {
 			},
 			"required": ["command"]
 		}`),
-		Kind: ToolKindActivity,
+		Kind:      ToolKindActivity,
+		Sensitive: true,
 		Execute: func(ctx context.Context, input json.RawMessage) (string, error) {
 			var params struct {
 				Command        string `json:"command"`

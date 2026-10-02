@@ -168,7 +168,7 @@ func runWorker(cmd *cobra.Command, args []string) {
 		w.RegisterWorkflow(workflow.ForkSessionWorkflow)
 
 		w.RegisterActivity(&activity.LLMActivities{Provider: llmProvider})
-		w.RegisterActivity(&activity.ForkActivities{Store: st, LLM: llmProvider})
+		w.RegisterActivity(&activity.ForkActivities{Store: st, LLM: llmProvider, Private: catalog})
 		w.RegisterActivity(&activity.MemoryActivities{Store: st})
 		w.RegisterActivity(&activity.ClaudeCodeActivities{Root: cfg.ClaudeCodeWorkspace, SSHKeyPath: cfg.ClaudeCodeSSHKey, AllowedRepos: cfg.ClaudeCodeRepos})
 		w.RegisterActivity(&activity.ToolActivities{Registry: registry, Catalog: catalog})

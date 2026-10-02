@@ -81,6 +81,7 @@ func RegisterClaudeCodeTools(registry *Registry, analyzeWorkflowFunc, implementW
 			"required": ["repo", "task"]
 		}`),
 		Kind:         ToolKindWorkflow,
+		Sensitive:    true,
 		WorkflowFunc: implementWorkflowFunc,
 	})
 }

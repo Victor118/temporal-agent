@@ -34,6 +34,21 @@ type Tool struct {
 	WorkflowFunc  interface{}     `json:"-"` // Workflow function for ToolKindWorkflow
 	TaskQueue     string          `json:"-"` // Target task queue for workflow tools
 	FireAndForget bool            `json:"-"` // If true, don't wait for workflow result
+
+	// What the tool is, published with it so that every process — the
+	// server included, which runs no tool — knows it from the tools table
+	// rather than from a list of names kept somewhere else.
+
+	// Sensitive: it changes the outside world (runs commands, writes files,
+	// pushes code, sends mail). Shown in the back-office; the allowlist is
+	// what grants or denies it.
+	Sensitive bool `json:"-"`
+	// PrivateInput: its input is the user's alone, and is not shown to the
+	// session's other members, nor put in a summary for someone else's fork.
+	PrivateInput bool `json:"-"`
+	// NeedsCallContext: a workflow tool that receives the caller's context
+	// (CallContext) in its input, alongside what the model wrote.
+	NeedsCallContext bool `json:"-"`
 }
 
 // WorkflowName returns the function name used by Temporal to identify the workflow.
@@ -59,6 +74,7 @@ func (t *Tool) SchemaHash() string {
 		string(t.Kind),
 		t.WorkflowName(),
 		fmt.Sprint(t.FireAndForget),
+		fmt.Sprint(t.Sensitive, t.PrivateInput, t.NeedsCallContext),
 	} {
 		h.Write([]byte(part))
 		h.Write([]byte{0})

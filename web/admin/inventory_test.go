@@ -22,7 +22,7 @@ func testInputs() Inputs {
 			{ID: "mute", Name: "Mute", Tools: []string{}},
 		},
 		Tools: []store.ToolRecord{
-			{Name: "exec", Kind: "activity", TaskQueue: "tools"},
+			{Name: "exec", Kind: "activity", TaskQueue: "tools", Sensitive: true},
 			{Name: "orphan", Kind: "activity", TaskQueue: "gone"},
 			{Name: "read_file", Kind: "activity", TaskQueue: "tools"},
 		},

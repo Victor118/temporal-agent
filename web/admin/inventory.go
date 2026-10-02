@@ -14,16 +14,6 @@ import (
 	"github.com/victor/temporal-agent/taskqueue"
 )
 
-// sensitiveTools can change the outside world: run commands, write files, push
-// code, send mail. Display only — the allowlist is what grants or denies them.
-var sensitiveTools = map[string]bool{
-	"exec":              true,
-	"write_file":        true,
-	"edit_file":         true,
-	"implement_feature": true,
-	"send_email":        true,
-}
-
 // Inputs is everything the dashboard reads, gathered by the handlers.
 type Inputs struct {
 	Agents         []store.Agent
@@ -151,7 +141,9 @@ func BuildInventory(in Inputs) *Inventory {
 	}
 
 	for _, t := range in.Tools {
-		tv := &ToolView{ToolRecord: t, Sensitive: sensitiveTools[t.Name]}
+		// A sensitive tool changes the outside world, as its worker publishes
+		// it. Display only — the allowlist is what grants or denies it.
+		tv := &ToolView{ToolRecord: t, Sensitive: t.Sensitive}
 		tv.Availability = availability(t, in.Queues)
 		inv.Tools = append(inv.Tools, tv)
 		inv.tools[t.Name] = tv

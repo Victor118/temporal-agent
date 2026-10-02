@@ -106,3 +106,24 @@ func TestCatalog_ToolListIsStable(t *testing.T) {
 		t.Errorf("tool list not stable:\n%v\n%v", first, second)
 	}
 }
+
+// What a tool is travels from its record to the workflow that dispatches it.
+func TestCatalog_ToolProperties(t *testing.T) {
+	c := NewCatalog()
+	c.SetAgents([]AgentCatalogEntry{{ID: "open", Tools: []string{"*"}}})
+	c.SetTools([]store.ToolRecord{
+		{Name: "ask_user", Kind: "workflow", WorkflowName: "AskUserWorkflow", NeedsCallContext: true},
+		{Name: "save_user_memory", Kind: "activity", PrivateInput: true},
+		{Name: "web_fetch", Kind: "activity"},
+	})
+	res := c.AllowedTools("open").Resolutions
+	if !res["ask_user"].NeedsCallContext || res["web_fetch"].NeedsCallContext {
+		t.Errorf("call context: %+v", res)
+	}
+	if !res["save_user_memory"].PrivateInput || res["web_fetch"].PrivateInput {
+		t.Errorf("private input: %+v", res)
+	}
+	if !c.PrivateInput("save_user_memory") || c.PrivateInput("web_fetch") || c.PrivateInput("unknown") {
+		t.Error("PrivateInput answers wrong")
+	}
+}

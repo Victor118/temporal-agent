@@ -108,14 +108,17 @@ func publishTools(st toolPublisher, tc taskqueue.Describer, registry *tool.Regis
 	published := 0
 	for _, t := range registry.All() {
 		rec := store.ToolRecord{
-			Name:          t.Name,
-			TaskQueue:     queue,
-			Description:   t.Description,
-			InputSchema:   t.InputSchema,
-			Kind:          string(t.Kind),
-			WorkflowName:  t.WorkflowName(),
-			FireAndForget: t.FireAndForget,
-			SchemaHash:    t.SchemaHash(),
+			Name:             t.Name,
+			TaskQueue:        queue,
+			Description:      t.Description,
+			InputSchema:      t.InputSchema,
+			Kind:             string(t.Kind),
+			WorkflowName:     t.WorkflowName(),
+			FireAndForget:    t.FireAndForget,
+			Sensitive:        t.Sensitive,
+			PrivateInput:     t.PrivateInput,
+			NeedsCallContext: t.NeedsCallContext,
+			SchemaHash:       t.SchemaHash(),
 		}
 		if len(rec.InputSchema) == 0 {
 			rec.InputSchema = []byte(`{"type":"object","properties":{}}`)

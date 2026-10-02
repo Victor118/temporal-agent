@@ -9,6 +9,7 @@ import (
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/victor/temporal-agent/activity"
+	"github.com/victor/temporal-agent/tool"
 )
 
 const SignalUserAnswer = "user-answer"
@@ -30,16 +31,15 @@ const askUserTimeout = 72 * time.Hour
 
 // AskUserWorkflow is a child workflow tool that sends a question to the user
 // via SSE and blocks until the user answers (via signal) or a timeout expires.
-// It returns the user's answer as a plain string to the calling agent.
-func AskUserWorkflow(ctx workflow.Context, rawInput json.RawMessage) (string, error) {
+// It returns the user's answer to the calling agent. The agent chain and the
+// channel come from the caller (tool.CallContext), the question from the model.
+func AskUserWorkflow(ctx workflow.Context, rawInput json.RawMessage) (tool.Result, error) {
 	var input struct {
-		Question   string   `json:"question"`
-		AgentChain []string `json:"agent_chain,omitempty"`
-		Channel    string   `json:"channel,omitempty"`
-		ChannelID  string   `json:"channel_id,omitempty"`
+		Question string `json:"question"`
+		tool.CallContext
 	}
 	if err := json.Unmarshal(rawInput, &input); err != nil {
-		return "", fmt.Errorf("parse input: %w", err)
+		return tool.Result{}, fmt.Errorf("parse input: %w", err)
 	}
 
 	// Extract session ID from workflow ID convention: "{sessionID}-tool-ask_user-{N}"
@@ -47,7 +47,7 @@ func AskUserWorkflow(ctx workflow.Context, rawInput json.RawMessage) (string, er
 	wfID := info.WorkflowExecution.ID
 	idx := strings.Index(wfID, "-tool-")
 	if idx == -1 {
-		return "", fmt.Errorf("cannot extract session ID from workflow ID: %s", wfID)
+		return tool.Result{}, fmt.Errorf("cannot extract session ID from workflow ID: %s", wfID)
 	}
 	sessionID := wfID[:idx]
 
@@ -56,7 +56,7 @@ func AskUserWorkflow(ctx workflow.Context, rawInput json.RawMessage) (string, er
 	if err := workflow.SetQueryHandler(ctx, QueryQuestion, func() (PendingQuestion, error) {
 		return PendingQuestion{Question: input.Question, AgentChain: input.AgentChain}, nil
 	}); err != nil {
-		return "", fmt.Errorf("set query handler: %w", err)
+		return tool.Result{}, fmt.Errorf("set query handler: %w", err)
 	}
 
 	// Notify the client via SSE so it can display the question with agent context
@@ -86,7 +86,7 @@ func AskUserWorkflow(ctx workflow.Context, rawInput json.RawMessage) (string, er
 			},
 		},
 	).Get(ctx, nil); err != nil {
-		return "", fmt.Errorf("notify user: %w", err)
+		return tool.Result{}, fmt.Errorf("notify user: %w", err)
 	}
 
 	// Wait for the user's answer or timeout
@@ -106,7 +106,7 @@ func AskUserWorkflow(ctx workflow.Context, rawInput json.RawMessage) (string, er
 	sel.Select(ctx)
 
 	if timedOut {
-		return "", fmt.Errorf("user did not answer within %s", askUserTimeout)
+		return tool.Result{}, fmt.Errorf("user did not answer within %s", askUserTimeout)
 	}
-	return answer, nil
+	return tool.Result{Content: answer}, nil
 }

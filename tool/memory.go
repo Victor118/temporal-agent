@@ -8,19 +8,6 @@ import (
 	"github.com/victor/temporal-agent/store"
 )
 
-// privateInputTools are the tools whose input is not shown in the session's
-// transcript: everyone in a shared session sees the tool calls, and a user's
-// memory is theirs alone.
-var privateInputTools = map[string]bool{"save_user_memory": true}
-
-// DisplayInput is the input of a tool call as the session's members see it.
-func DisplayInput(toolName string, input json.RawMessage) json.RawMessage {
-	if privateInputTools[toolName] {
-		return json.RawMessage(`{"content":"(private)"}`)
-	}
-	return input
-}
-
 // MemorySaver writes a scope's memory.
 type MemorySaver interface {
 	SaveMemory(ctx context.Context, scope store.MemoryScope, scopeID string, content string) error
@@ -45,6 +32,9 @@ Write the memory as a concise, structured note. Each call REPLACES the previous 
 			"required": ["content"]
 		}`),
 		Kind: ToolKindActivity,
+		// Everyone in a shared session sees the tool calls, and a user's
+		// memory is theirs alone.
+		PrivateInput: true,
 		Execute: func(ctx context.Context, input json.RawMessage) (string, error) {
 			var params struct {
 				Content string `json:"content"`

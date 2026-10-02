@@ -58,7 +58,8 @@
 ## Conventions
 
 - `SystemPrompt` dans les workflow inputs = override manuel ; si vide, prompt construit depuis l'agent (`agent_id`)
-- Les tool results remontent comme string au parent
+- Les tool results remontent comme string au parent. Un workflow-tool renvoie un `tool.Result` (`content`, `is_error`) ou un type qui en porte les champs (`ClaudeCodeOutput.Content`) ; seul un sous-agent (`agent_<id>`) est décodé par type (`AgentWorkflowOutput.Response`)
+- Ce qu'est un outil est déclaré avec lui (`tool.Tool`) et publié dans la table `tools` : `Sensitive` (affiché dans `/admin`), `PrivateInput` (entrée cachée aux membres et aux résumés de fork, ex. `save_user_memory`), `NeedsCallContext` (le workflow-tool reçoit `tool.CallContext` : chaîne d'agents, canal, ex. `ask_user`). Aucune liste de noms d'outils dans le code
 - Tout sous-processus lancé pour un modèle (`exec`, Claude Code) passe par `subproc` : environnement en liste blanche (`subproc.Env`), groupe de processus tué à l'annulation. `exec` n'est pas un bac à sable (même utilisateur que le worker) : ne l'exposer que sur un worker sans secret
 - Claude Code : `repo` (et `ref`/`base`) viennent du modèle. Le worker n'accepte que les dépôts de `CLAUDE_CODE_REPOS` (globs, vide = tout refusé), vérifiés dans `PrepareWorkspace` et `PushBranch` (là où vit la clé), refuse ce qui commence par `-`, et passe `--` / `--end-of-options` à git
 - `web_fetch` ne se connecte qu'à des adresses publiques (vérifiées dans le dialer, après résolution DNS et à chaque redirection), en http(s) uniquement

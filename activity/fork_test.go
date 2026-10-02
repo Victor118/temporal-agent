@@ -11,9 +11,12 @@ import (
 
 	"github.com/victor/temporal-agent/provider"
 	"github.com/victor/temporal-agent/store"
+	"github.com/victor/temporal-agent/tool"
 )
 
 func text(s string) string { b, _ := json.Marshal(s); return string(b) }
+
+var memoryIsPrivate = tool.PrivateSet{"save_user_memory": true}
 
 func TestBuildTranscript(t *testing.T) {
 	long := strings.Repeat("x", 5000)
@@ -26,7 +29,7 @@ func TestBuildTranscript(t *testing.T) {
 		{ID: 5, Message: store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{Content: "boom", IsError: true}}},
 		{ID: 6, Message: store.Message{Role: store.RoleAssistant,
 			ToolCalls: []store.ToolCall{{Name: "save_user_memory", Input: json.RawMessage(`{"content":"Alice's secret"}`)}}}},
-	})
+	}, memoryIsPrivate)
 	if truncated {
 		t.Error("a short conversation reported truncated")
 	}
@@ -59,7 +62,7 @@ func TestBuildTranscript_KeepsTheEnd(t *testing.T) {
 	}
 	msgs = append(msgs, store.MessageWithID{ID: 1001, Message: store.Message{Role: store.RoleUser, Content: text("the last word")}})
 
-	got, truncated := buildTranscript(msgs)
+	got, truncated := buildTranscript(msgs, memoryIsPrivate)
 	if !truncated || !strings.HasPrefix(got, "[The beginning of the conversation is omitted") {
 		t.Error("an oversized conversation must say its beginning is cut")
 	}
@@ -102,7 +105,7 @@ func TestSummarizeConversation(t *testing.T) {
 		{ID: 12, Message: store.Message{Role: store.RoleUser, Content: text("after the fork point")}},
 	}}
 	llm := &fakeLLM{reply: "  The summary.  "}
-	a := &ForkActivities{Store: st, LLM: llm}
+	a := &ForkActivities{Store: st, LLM: llm, Private: memoryIsPrivate}
 
 	out, err := a.SummarizeConversation(context.Background(), SummarizeConversationInput{SessionID: "p", UpToMessageID: 11, Model: "small"})
 	if err != nil || out.Summary != "The summary." {
@@ -126,5 +129,17 @@ func TestSummarizeConversation(t *testing.T) {
 	llm.reply = "   "
 	if _, err := a.SummarizeConversation(context.Background(), SummarizeConversationInput{SessionID: "p", UpToMessageID: 11}); err == nil {
 		t.Error("an empty summary must be an error")
+	}
+}
+
+// Without knowing which inputs are private, a summary shows none: it may go
+// to another user's fork.
+func TestBuildTranscript_HidesInputsWithoutTheCatalog(t *testing.T) {
+	got, _ := buildTranscript([]store.MessageWithID{
+		{ID: 1, Message: store.Message{Role: store.RoleAssistant,
+			ToolCalls: []store.ToolCall{{Name: "web_fetch", Input: json.RawMessage(`{"url":"https://example.com/secret"}`)}}}},
+	}, nil)
+	if strings.Contains(got, "example.com") {
+		t.Errorf("an input shown without the catalog: %q", got)
 	}
 }

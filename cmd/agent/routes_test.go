@@ -33,6 +33,7 @@ type routeStore struct {
 	messages map[string][]store.MessageWithID
 	created  []store.Session
 	appended []store.Message
+	tools    []store.ToolRecord
 }
 
 func (f *routeStore) user(match func(store.User) bool) *store.User {
@@ -452,5 +453,22 @@ func TestRoutes_MessagesCallTheAgentOnlyWhenMeant(t *testing.T) {
 	}
 	if w := call(t, h, http.MethodPut, "/sessions/s1/agent-mode", `{"mode":"sometimes"}`, bob); w.Code != http.StatusBadRequest {
 		t.Errorf("unknown mode: %d", w.Code)
+	}
+}
+
+// The history hides a private input, as the tool's worker published it.
+func TestRoutes_HistoryHidesPrivateInputs(t *testing.T) {
+	h, st := newRouteTest(t)
+	st.tools = []store.ToolRecord{{Name: "save_user_memory", PrivateInput: true}, {Name: "web_fetch"}}
+	st.messages = map[string][]store.MessageWithID{"s1": {
+		{ID: 1, Message: store.Message{Role: store.RoleAssistant, ToolCalls: []store.ToolCall{
+			{Name: "save_user_memory", Input: json.RawMessage(`{"content":"Alice's secret"}`)},
+			{Name: "web_fetch", Input: json.RawMessage(`{"url":"https://example.com"}`)},
+		}}},
+	}}
+	bob := logIn(t, h, "bob@example.com")
+	w := call(t, h, http.MethodGet, "/sessions/s1/history", "", bob)
+	if w.Code != 200 || strings.Contains(w.Body.String(), "Alice's secret") || !strings.Contains(w.Body.String(), "example.com") {
+		t.Errorf("history %d %s", w.Code, w.Body)
 	}
 }

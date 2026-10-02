@@ -103,10 +103,12 @@ func (c *Catalog) AllowedTools(agentID string) ListToolsOutput {
 			InputSchema: t.InputSchema,
 		})
 		out.Resolutions[t.Name] = ToolResolution{
-			Kind:          t.Kind,
-			WorkflowName:  t.WorkflowName,
-			TaskQueue:     t.TaskQueue,
-			FireAndForget: t.FireAndForget,
+			Kind:             t.Kind,
+			WorkflowName:     t.WorkflowName,
+			TaskQueue:        t.TaskQueue,
+			FireAndForget:    t.FireAndForget,
+			PrivateInput:     t.PrivateInput,
+			NeedsCallContext: t.NeedsCallContext,
 		}
 	}
 
@@ -128,6 +130,15 @@ func (c *Catalog) AllowedTools(agentID string) ListToolsOutput {
 
 	sort.Slice(out.Tools, func(i, j int) bool { return out.Tools[i].Name < out.Tools[j].Name })
 	return out
+}
+
+// PrivateInput reports whether a published tool keeps its input from the
+// session's members (tool.PrivateInputs).
+func (c *Catalog) PrivateInput(name string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	i := sort.Search(len(c.tools), func(i int) bool { return c.tools[i].Name >= name })
+	return i < len(c.tools) && c.tools[i].Name == name && c.tools[i].PrivateInput
 }
 
 // AgentToolDescription is what the model reads about agent a: its tool

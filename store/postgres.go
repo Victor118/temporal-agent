@@ -203,6 +203,24 @@ const schema = `
 			updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		);
 		CREATE INDEX IF NOT EXISTS idx_tools_task_queue ON tools(task_queue);
+		-- What a tool is, published with it (tool.Tool): sensitive, private
+		-- input, needs the caller's context. These were lists of names in the
+		-- code; the rows published before they became columns get them here,
+		-- once, so a server reading them keeps hiding a user's memory until
+		-- the workers publish again.
+		DO $$
+		BEGIN
+			IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+			               WHERE table_name = 'tools' AND column_name = 'private_input') THEN
+				ALTER TABLE tools ADD COLUMN sensitive BOOLEAN NOT NULL DEFAULT FALSE;
+				ALTER TABLE tools ADD COLUMN private_input BOOLEAN NOT NULL DEFAULT FALSE;
+				ALTER TABLE tools ADD COLUMN needs_call_context BOOLEAN NOT NULL DEFAULT FALSE;
+				UPDATE tools SET sensitive = TRUE
+					WHERE name IN ('exec', 'write_file', 'edit_file', 'implement_feature', 'send_email');
+				UPDATE tools SET private_input = TRUE WHERE name = 'save_user_memory';
+				UPDATE tools SET needs_call_context = TRUE WHERE name = 'ask_user';
+			END IF;
+		END $$;
 		-- The spawn_session row the workers published: nothing else deletes from
 		-- tools, and no worker publishes it any more.
 		DELETE FROM tools WHERE name = 'spawn_session';
@@ -569,8 +587,9 @@ func scanAgent(row interface{ Scan(...any) error }) (*Agent, error) {
 // Callers decide beforehand whether taking over another queue's tool is allowed.
 func (s *PostgresStore) UpsertTool(ctx context.Context, t ToolRecord) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO tools (name, task_queue, description, input_schema, kind, workflow_name, fire_and_forget, schema_hash)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		INSERT INTO tools (name, task_queue, description, input_schema, kind, workflow_name, fire_and_forget,
+		                   sensitive, private_input, needs_call_context, schema_hash)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		ON CONFLICT (name) DO UPDATE SET
 			task_queue = EXCLUDED.task_queue,
 			description = EXCLUDED.description,
@@ -578,17 +597,20 @@ func (s *PostgresStore) UpsertTool(ctx context.Context, t ToolRecord) error {
 			kind = EXCLUDED.kind,
 			workflow_name = EXCLUDED.workflow_name,
 			fire_and_forget = EXCLUDED.fire_and_forget,
+			sensitive = EXCLUDED.sensitive,
+			private_input = EXCLUDED.private_input,
+			needs_call_context = EXCLUDED.needs_call_context,
 			schema_hash = EXCLUDED.schema_hash,
 			updated_at = NOW()`,
 		t.Name, t.TaskQueue, t.Description, string(t.InputSchema), t.Kind, t.WorkflowName,
-		t.FireAndForget, t.SchemaHash)
+		t.FireAndForget, t.Sensitive, t.PrivateInput, t.NeedsCallContext, t.SchemaHash)
 	return err
 }
 
 func (s *PostgresStore) ListTools(ctx context.Context) ([]ToolRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT name, task_queue, description, input_schema, kind, workflow_name,
-		       fire_and_forget, schema_hash, updated_at
+		       fire_and_forget, sensitive, private_input, needs_call_context, schema_hash, updated_at
 		FROM tools ORDER BY name`)
 	if err != nil {
 		return nil, err
@@ -600,7 +622,7 @@ func (s *PostgresStore) ListTools(ctx context.Context) ([]ToolRecord, error) {
 		var t ToolRecord
 		var schema string
 		if err := rows.Scan(&t.Name, &t.TaskQueue, &t.Description, &schema, &t.Kind, &t.WorkflowName,
-			&t.FireAndForget, &t.SchemaHash, &t.UpdatedAt); err != nil {
+			&t.FireAndForget, &t.Sensitive, &t.PrivateInput, &t.NeedsCallContext, &t.SchemaHash, &t.UpdatedAt); err != nil {
 			return nil, err
 		}
 		t.InputSchema = json.RawMessage(schema)

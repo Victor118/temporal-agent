@@ -46,6 +46,10 @@ type AnalyzeRepoInput struct {
 // failed rather than failing the workflow, so a partial report survives — the
 // same reason AgentWorkflow reports its failures in its output.
 type ClaudeCodeOutput struct {
+	// Content is what the calling agent reads (tool.Result): Summary(), set
+	// once the run is over.
+	Content string `json:"content"`
+
 	Report string `json:"report"`
 	Error  string `json:"error,omitempty"`
 
@@ -74,6 +78,18 @@ type ClaudeCodeOutput struct {
 // to look at and what to find out; the code decides how, which is what keeps
 // "read-only" a property of the system rather than a promise in a prompt.
 func AnalyzeRepoWorkflow(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCodeOutput, error) {
+	return withContent(analyzeRepo(ctx, rawInput))
+}
+
+// withContent fills in what the calling agent reads of a coding run's output.
+func withContent(out ClaudeCodeOutput, err error) (ClaudeCodeOutput, error) {
+	if err == nil {
+		out.Content = out.Summary()
+	}
+	return out, err
+}
+
+func analyzeRepo(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCodeOutput, error) {
 	var input AnalyzeRepoInput
 	if err := json.Unmarshal(rawInput, &input); err != nil {
 		return ClaudeCodeOutput{}, temporal.NewNonRetryableApplicationError(

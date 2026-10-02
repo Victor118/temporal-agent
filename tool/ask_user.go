@@ -21,5 +21,8 @@ func RegisterAskUserTool(registry *Registry, askUserWorkflowFunc interface{}) {
 		}`),
 		Kind:         ToolKindWorkflow,
 		WorkflowFunc: askUserWorkflowFunc,
+		// The question goes to the user where they are, with the chain of
+		// agents that asks it.
+		NeedsCallContext: true,
 	})
 }

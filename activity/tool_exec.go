@@ -34,6 +34,10 @@ type ToolResolution struct {
 	FireAndForget bool   `json:"fire_and_forget,omitempty"`
 	// AgentID is set on an agent_<id> tool: the agent the call delegates to.
 	AgentID string `json:"agent_id,omitempty"`
+	// PrivateInput: the call's input is hidden from the session's members.
+	PrivateInput bool `json:"private_input,omitempty"`
+	// NeedsCallContext: the workflow tool gets tool.CallContext in its input.
+	NeedsCallContext bool `json:"needs_call_context,omitempty"`
 }
 
 type ListToolsInput struct {

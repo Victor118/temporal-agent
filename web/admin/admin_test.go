@@ -186,7 +186,7 @@ func newTestAdmin(t *testing.T) (*Admin, *fakeStore) {
 			{ID: "coder", Name: "Coder", Tools: []string{"exec"}, Revision: 1},
 		},
 		tools: []store.ToolRecord{
-			{Name: "exec", Kind: "activity", TaskQueue: "tools"},
+			{Name: "exec", Kind: "activity", TaskQueue: "tools", Sensitive: true},
 			{Name: "read_file", Kind: "activity", TaskQueue: "tools"},
 		},
 		users: []store.User{

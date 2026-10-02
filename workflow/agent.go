@@ -335,12 +335,13 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 		}
 		messages = append(messages, assistantMsg)
 
-		notifyToolCalls(ctx, input.SessionID, replyChannel, replyChannelID, response.ToolCalls)
+		notifyToolCalls(ctx, input.SessionID, replyChannel, replyChannelID, response.ToolCalls, toolList.Resolutions)
 
 		// Execute all tools in parallel, each on its tool's task queue
 		type toolDispatch struct {
 			future        workflow.Future
 			kind          tool.ToolKind
+			agent         bool // an agent_<id> tool: the child is an AgentWorkflow
 			fireAndForget bool
 			workflowID    string
 			taskQueue     string
@@ -354,13 +355,13 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 				dispatches[j] = toolDispatch{unavailable: fmt.Sprintf("Tool %q is not available to this agent.", tc.Name)}
 				continue
 			}
-			d := toolDispatch{kind: tool.ToolKind(res.Kind), fireAndForget: res.FireAndForget, taskQueue: res.TaskQueue}
+			d := toolDispatch{kind: tool.ToolKind(res.Kind), agent: res.AgentID != "", fireAndForget: res.FireAndForget, taskQueue: res.TaskQueue}
 
 			if d.kind == tool.ToolKindWorkflow {
 				d.workflowID = childWorkflowID(input.SessionID, tc.Name, tc.ID, i, j)
 
 				// Build input first — a sub-agent runs on the current workflow queue
-				childWorkflow, childInput, err := buildChildInput(tc.Name, tc.Input, input, d.workflowID, &res, currentChain, currentAgentID, workflow.GetInfo(ctx).TaskQueueName)
+				childWorkflow, childInput, err := buildChildInput(tc.Input, input, d.workflowID, &res, currentChain, currentAgentID, workflow.GetInfo(ctx).TaskQueueName)
 				if err != nil {
 					dispatches[j] = toolDispatch{unavailable: err.Error()}
 					continue
@@ -402,8 +403,10 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 				if err := d.future.Get(ctx, &result); err != nil {
 					content = fmt.Sprintf("Workflow failed: %s", err.Error())
 					isError = true
+				} else if d.agent {
+					content = subAgentContent(result)
 				} else {
-					content = workflowToolContent(result)
+					content, isError = tool.DecodeResult(result)
 				}
 			} else {
 				var result activity.ExecuteToolOutput
@@ -618,26 +621,24 @@ func notifyResponse(ctx workflow.Context, sessionID, channel, channelID, content
 // keeps the child on the current workflow queue. The target comes from the
 // tool's resolution, never from the model's input: the catalog only offers the
 // agents the allowlist grants, so there is no target left to validate.
-// For ask_user, it enriches the raw input with the agent chain.
-// For other workflow tools, it passes the raw input unchanged.
-func buildChildInput(toolName string, rawInput json.RawMessage, parent AgentWorkflowInput, childID string, res *activity.ToolResolution, agentChain []string, currentAgentID string, currentQueue string) (childWorkflow interface{}, input interface{}, err error) {
+// A tool published as needing the call context (ask_user) gets the agent chain
+// and the user's channel added to its input. Any other gets the raw input.
+func buildChildInput(rawInput json.RawMessage, parent AgentWorkflowInput, childID string, res *activity.ToolResolution, agentChain []string, currentAgentID string, currentQueue string) (childWorkflow interface{}, input interface{}, err error) {
 	if res.AgentID != "" {
 		return subAgentInput(rawInput, parent, childID, res, agentChain, currentAgentID, currentQueue)
 	}
-	switch toolName {
-	case "ask_user":
-		// Enrich the raw input with agent chain and channel info
-		var enriched map[string]interface{}
-		json.Unmarshal(rawInput, &enriched)
-		enriched["agent_chain"] = agentChain
-		enriched["channel"] = parent.Channel
-		enriched["channel_id"] = parent.ChannelID
-		enrichedJSON, _ := json.Marshal(enriched)
-		return res.WorkflowName, json.RawMessage(enrichedJSON), nil
-
-	default:
-		return res.WorkflowName, rawInput, nil
+	if res.NeedsCallContext {
+		in, err := tool.WithCallContext(rawInput, tool.CallContext{
+			AgentChain: agentChain,
+			Channel:    parent.Channel,
+			ChannelID:  parent.ChannelID,
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		return res.WorkflowName, in, nil
 	}
+	return res.WorkflowName, rawInput, nil
 }
 
 // subAgentInput starts res.AgentID as a one-shot sub-agent: no session history,
@@ -684,10 +685,10 @@ func subAgentInput(rawInput json.RawMessage, parent AgentWorkflowInput, childID 
 	}, nil
 }
 
-func notifyToolCalls(ctx workflow.Context, sessionID, channel, channelID string, toolCalls []provider.ToolCallInfo) {
+func notifyToolCalls(ctx workflow.Context, sessionID, channel, channelID string, toolCalls []provider.ToolCallInfo, resolutions map[string]activity.ToolResolution) {
 	shown := make([]provider.ToolCallInfo, len(toolCalls))
 	for i, tc := range toolCalls {
-		tc.Input = tool.DisplayInput(tc.Name, tc.Input)
+		tc.Input = tool.DisplayInput(resolutions[tc.Name].PrivateInput, tc.Input)
 		shown[i] = tc
 	}
 	data, _ := json.Marshal(map[string]interface{}{
@@ -720,21 +721,13 @@ func isScheduleToStartTimeout(err error) bool {
 	return errors.As(err, &timeoutErr) && timeoutErr.TimeoutType() == enumspb.TIMEOUT_TYPE_SCHEDULE_TO_START
 }
 
-// workflowToolContent turns a workflow tool result into tool_result content:
-// a string result is used as is, an agent result gives its final response,
-// anything else is passed as raw JSON.
-func workflowToolContent(result json.RawMessage) string {
-	var text string
-	if err := json.Unmarshal(result, &text); err == nil {
-		return text
-	}
+// subAgentContent is what the parent reads of a sub-agent's run: its final
+// response. A sub-agent is the parent's own workflow type, so this is the one
+// result decoded by type; every other workflow tool returns a tool.Result.
+func subAgentContent(result json.RawMessage) string {
 	var agent AgentWorkflowOutput
 	if err := json.Unmarshal(result, &agent); err == nil && agent.Response != "" {
 		return agent.Response
-	}
-	var coding ClaudeCodeOutput
-	if err := json.Unmarshal(result, &coding); err == nil && (coding.Report != "" || coding.Error != "") {
-		return coding.Summary()
 	}
 	return string(result)
 }
