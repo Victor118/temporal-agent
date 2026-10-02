@@ -59,6 +59,7 @@
 - `SystemPrompt` dans les workflow inputs = override manuel ; si vide, prompt construit depuis l'agent (`agent_id`)
 - Les tool results remontent comme string au parent
 - Tout sous-processus lancé pour un modèle (`exec`, Claude Code) passe par `subproc` : environnement en liste blanche (`subproc.Env`), groupe de processus tué à l'annulation. `exec` n'est pas un bac à sable (même utilisateur que le worker) : ne l'exposer que sur un worker sans secret
+- Claude Code : `repo` (et `ref`/`base`) viennent du modèle. Le worker n'accepte que les dépôts de `CLAUDE_CODE_REPOS` (globs, vide = tout refusé), vérifiés dans `PrepareWorkspace` et `PushBranch` (là où vit la clé), refuse ce qui commence par `-`, et passe `--` / `--end-of-options` à git
 - `web_fetch` ne se connecte qu'à des adresses publiques (vérifiées dans le dialer, après résolution DNS et à chaque redirection), en http(s) uniquement
 - Les notifications SSE passent par `/internal/notify` (prod) ou in-memory hub (dev)
 - ask_user fonctionne pour les sous-agents (SSE route vers le bon sessionID via le workflowID)

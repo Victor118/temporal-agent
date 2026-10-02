@@ -10,8 +10,10 @@ import (
 	"time"
 
 	"go.temporal.io/sdk/activity"
+	"go.temporal.io/sdk/temporal"
 
 	"github.com/victor/temporal-agent/claudecode"
+	"github.com/victor/temporal-agent/tool"
 )
 
 // gitHeartbeat is how often a long git operation reports it is still alive.
@@ -32,6 +34,11 @@ type ClaudeCodeActivities struct {
 	// is a property of the machine that holds it, and a path in a workflow
 	// input would be recorded in the execution history for good.
 	SSHKeyPath string
+	// AllowedRepos are the repositories this worker clones and pushes to, as
+	// globs (path.Match: * stops at a slash). Empty refuses them all. The
+	// repository is the model's choice, and a push goes out with this
+	// worker's identity: what it may reach is the operator's decision.
+	AllowedRepos []string
 }
 
 type PrepareWorkspaceInput struct {
@@ -62,8 +69,12 @@ func (a *ClaudeCodeActivities) PrepareWorkspace(ctx context.Context, in PrepareW
 	if err != nil {
 		return PrepareWorkspaceOutput{}, err
 	}
-	if in.Repo == "" {
-		return PrepareWorkspaceOutput{}, fmt.Errorf("prepare workspace: repo is required")
+	if err := a.checkRepo(in.Repo); err != nil {
+		return PrepareWorkspaceOutput{}, fmt.Errorf("prepare workspace: %w", err)
+	}
+	if strings.HasPrefix(in.Ref, "-") || strings.HasPrefix(in.Branch, "-") {
+		return PrepareWorkspaceOutput{}, temporal.NewNonRetryableApplicationError(
+			fmt.Sprintf("prepare workspace: invalid ref %q or branch %q", in.Ref, in.Branch), "InvalidInput", nil)
 	}
 
 	// A retried attempt finds the previous one's half-written clone. Start over
@@ -85,12 +96,19 @@ func (a *ClaudeCodeActivities) PrepareWorkspace(ctx context.Context, in PrepareW
 	// place, but `echo x > .git/objects/ab/cdef…` does, and through a hard
 	// link that lands in the source repository. Ignored for a remote URL,
 	// where there is nothing to link.
-	if out, err := a.gitEnv(ctx, "", a.sshEnv(), "clone", "--quiet", "--no-hardlinks", in.Repo, dir); err != nil {
+	//
+	// "--" ends the options: a repo starting with a dash is refused above, and
+	// this keeps it so.
+	if out, err := a.gitEnv(ctx, "", a.sshEnv(), "clone", "--quiet", "--no-hardlinks", "--", in.Repo, dir); err != nil {
 		return PrepareWorkspaceOutput{}, fmt.Errorf("clone %s: %w: %s", in.Repo, err, out)
 	}
 	if in.Ref != "" {
+		sha, err := a.resolveRef(ctx, dir, in.Ref)
+		if err != nil {
+			return PrepareWorkspaceOutput{}, err
+		}
 		// Detached: an analysis run reads a state, it does not continue a branch.
-		if out, err := a.git(ctx, dir, "checkout", "--quiet", "--detach", in.Ref); err != nil {
+		if out, err := a.git(ctx, dir, "checkout", "--quiet", "--detach", sha); err != nil {
 			return PrepareWorkspaceOutput{}, fmt.Errorf("checkout %s: %w: %s", in.Ref, err, out)
 		}
 	}
@@ -105,6 +123,35 @@ func (a *ClaudeCodeActivities) PrepareWorkspace(ctx context.Context, in PrepareW
 		}
 	}
 	return PrepareWorkspaceOutput{Dir: dir, Commit: strings.TrimSpace(commit), Branch: in.Branch}, nil
+}
+
+// checkRepo refuses a repository this worker must not clone or push to: one
+// git would read as an option (--upload-pack=…, --config=…), and anything
+// AllowedRepos does not name.
+func (a *ClaudeCodeActivities) checkRepo(repo string) error {
+	switch {
+	case repo == "":
+		return temporal.NewNonRetryableApplicationError("repo is required", "InvalidInput", nil)
+	case strings.HasPrefix(repo, "-") || strings.ContainsAny(repo, "\x00\n\r"):
+		return temporal.NewNonRetryableApplicationError(fmt.Sprintf("invalid repository %q", repo), "InvalidInput", nil)
+	case !tool.MatchAny(a.AllowedRepos, repo):
+		return temporal.NewNonRetryableApplicationError(
+			fmt.Sprintf("repository %q is not one this worker may use (CLAUDE_CODE_REPOS)", repo), "RepoNotAllowed", nil)
+	}
+	return nil
+}
+
+// resolveRef turns a branch, tag or commit into a commit of the clone. A
+// branch other than the default one only exists as origin/<name> in a fresh
+// clone. --end-of-options keeps a ref from being read as an option.
+func (a *ClaudeCodeActivities) resolveRef(ctx context.Context, dir, ref string) (string, error) {
+	for _, candidate := range []string{ref, "origin/" + ref} {
+		out, err := a.git(ctx, dir, "rev-parse", "--quiet", "--verify", "--end-of-options", candidate+"^{commit}")
+		if err == nil {
+			return strings.TrimSpace(out), nil
+		}
+	}
+	return "", temporal.NewNonRetryableApplicationError(fmt.Sprintf("unknown ref %q", ref), "UnknownRef", nil)
 }
 
 type CleanupWorkspaceInput struct {
@@ -310,13 +357,19 @@ func (a *ClaudeCodeActivities) PushBranch(ctx context.Context, in PushBranchInpu
 	if in.Dir == "" || in.Remote == "" || in.Branch == "" {
 		return fmt.Errorf("push: dir, remote and branch are required")
 	}
+	if err := a.checkRepo(in.Remote); err != nil {
+		return fmt.Errorf("push: %w", err)
+	}
+	if strings.HasPrefix(in.Branch, "-") {
+		return temporal.NewNonRetryableApplicationError(fmt.Sprintf("push: invalid branch %q", in.Branch), "InvalidInput", nil)
+	}
 
 	// An explicit refspec: a tag the run happened to name like the branch
 	// must not be what gets published.
 	ref := "refs/heads/" + in.Branch
 	out, err := a.gitEnv(ctx, in.Dir, a.sshEnv(),
 		"-c", "core.hooksPath=/dev/null",
-		"push", in.Remote, ref+":"+ref)
+		"push", "--", in.Remote, ref+":"+ref)
 	if err != nil {
 		return fmt.Errorf("push %s: %w: %s", in.Branch, err, out)
 	}

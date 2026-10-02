@@ -6,6 +6,7 @@ import (
 	"os"
 	"path"
 	"regexp"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -52,6 +53,10 @@ type Config struct {
 	// Root for Claude Code run workspaces: one throwaway clone per run, kept
 	// apart from WorkspacePath, which the exec and filesystem tools share.
 	ClaudeCodeWorkspace string
+	// ClaudeCodeRepos are the repositories a coding worker may clone and push
+	// to, as globs (path.Match syntax: * stops at a slash). Empty = none: the
+	// model picks the repository, and a push uses the worker's identity.
+	ClaudeCodeRepos []string
 	// SSH identity a coding worker uses for git: cloning a private repository,
 	// and pushing when the identity allows it. What the worker can do is a
 	// property of the identity it is given, not of the code — the read-only
@@ -130,6 +135,7 @@ func Load() *Config {
 		WorkspacePath:       envOr("WORKSPACE_PATH", "./workspace"),
 		ClaudeCodeWorkspace: envOr("CLAUDE_CODE_WORKSPACE", "./claude-code-runs"),
 		ClaudeCodeSSHKey:    os.Getenv("CLAUDE_CODE_SSH_KEY"),
+		ClaudeCodeRepos:     splitList(os.Getenv("CLAUDE_CODE_REPOS")),
 
 		SkillsRepo:          os.Getenv("SKILLS_REPO"),
 		SkillsBranch:        envOr("SKILLS_BRANCH", "main"),
@@ -225,6 +231,17 @@ func parseMCPServers(raw string) []MCPServer {
 	var servers []MCPServer
 	json.Unmarshal([]byte(raw), &servers)
 	return servers
+}
+
+// splitList reads a comma-separated list, dropping blanks.
+func splitList(raw string) []string {
+	var out []string
+	for _, item := range strings.Split(raw, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 func envOr(key, fallback string) string {

@@ -248,4 +248,5 @@ diagnostic.
 - Outils présents dans chaque binaire (fs, exec) : activés seulement là où
   `worker.yaml` les déclare ?
 - Claude Code : clone ou worktree sur miroir ; absence de commit = échec ou
-  résultat normal ; PR automatique ; liste blanche de repos.
+  résultat normal ; PR automatique. (La liste blanche de dépôts existe :
+  `CLAUDE_CODE_REPOS`, vérifiée par le worker qui clone et pousse.)

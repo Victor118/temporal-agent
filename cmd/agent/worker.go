@@ -109,6 +109,11 @@ func runWorker(cmd *cobra.Command, args []string) {
 	if cfg.ClaudeCodeSSHKey != "" {
 		log.Printf("Coding runs use the git identity at %s", cfg.ClaudeCodeSSHKey)
 	}
+	if len(cfg.ClaudeCodeRepos) == 0 {
+		log.Println("CLAUDE_CODE_REPOS is empty: coding runs on this worker refuse every repository")
+	} else {
+		log.Printf("Coding runs may use the repositories %v", cfg.ClaudeCodeRepos)
+	}
 
 	// Temporal client
 	temporalClient, err := client.Dial(client.Options{
@@ -164,7 +169,7 @@ func runWorker(cmd *cobra.Command, args []string) {
 		w.RegisterActivity(&activity.LLMActivities{Provider: llmProvider})
 		w.RegisterActivity(&activity.ForkActivities{Store: st, LLM: llmProvider})
 		w.RegisterActivity(&activity.MemoryActivities{Store: st})
-		w.RegisterActivity(&activity.ClaudeCodeActivities{Root: cfg.ClaudeCodeWorkspace, SSHKeyPath: cfg.ClaudeCodeSSHKey})
+		w.RegisterActivity(&activity.ClaudeCodeActivities{Root: cfg.ClaudeCodeWorkspace, SSHKeyPath: cfg.ClaudeCodeSSHKey, AllowedRepos: cfg.ClaudeCodeRepos})
 		w.RegisterActivity(&activity.ToolActivities{Registry: registry, Catalog: catalog})
 		w.RegisterActivity(&activity.NotificationActivities{Hub: notifier, Telegram: tgClient})
 		w.RegisterActivity(&activity.DeliveryActivities{Hub: notifier, Store: st})

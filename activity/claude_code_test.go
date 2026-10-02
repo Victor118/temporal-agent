@@ -10,6 +10,13 @@ import (
 	"testing"
 )
 
+// testRepos lets the tests clone and push to the repositories they make under
+// the temp directory.
+var testRepos = []string{
+	filepath.Join(os.TempDir(), "*", "*"),
+	filepath.Join(os.TempDir(), "*", "*", "*"),
+}
+
 // initRepo makes a tiny git repository to clone from.
 func initRepo(t *testing.T) string {
 	t.Helper()
@@ -38,7 +45,7 @@ func initRepo(t *testing.T) string {
 
 func TestPrepareWorkspaceClonesAndResolvesHEAD(t *testing.T) {
 	src := initRepo(t)
-	a := &ClaudeCodeActivities{Root: t.TempDir()}
+	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: t.TempDir()}
 
 	out, err := a.PrepareWorkspace(context.Background(), PrepareWorkspaceInput{Name: "run-1", Repo: src})
 	if err != nil {
@@ -59,7 +66,7 @@ func TestPrepareWorkspaceClonesAndResolvesHEAD(t *testing.T) {
 // rather than fail or clone into a dirty tree.
 func TestPrepareWorkspaceIsRepeatable(t *testing.T) {
 	src := initRepo(t)
-	a := &ClaudeCodeActivities{Root: t.TempDir()}
+	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: t.TempDir()}
 
 	first, err := a.PrepareWorkspace(context.Background(), PrepareWorkspaceInput{Name: "run-1", Repo: src})
 	if err != nil {
@@ -84,10 +91,10 @@ func TestPrepareWorkspaceRejectsBadInput(t *testing.T) {
 		input PrepareWorkspaceInput
 	}{
 		{"no root", &ClaudeCodeActivities{}, PrepareWorkspaceInput{Name: "run-1", Repo: src}},
-		{"no repo", &ClaudeCodeActivities{Root: t.TempDir()}, PrepareWorkspaceInput{Name: "run-1"}},
-		{"name escapes root", &ClaudeCodeActivities{Root: t.TempDir()}, PrepareWorkspaceInput{Name: "../evil", Repo: src}},
-		{"name is a path", &ClaudeCodeActivities{Root: t.TempDir()}, PrepareWorkspaceInput{Name: "a/b", Repo: src}},
-		{"unknown ref", &ClaudeCodeActivities{Root: t.TempDir()}, PrepareWorkspaceInput{Name: "run-1", Repo: src, Ref: "nope"}},
+		{"no repo", &ClaudeCodeActivities{AllowedRepos: testRepos, Root: t.TempDir()}, PrepareWorkspaceInput{Name: "run-1"}},
+		{"name escapes root", &ClaudeCodeActivities{AllowedRepos: testRepos, Root: t.TempDir()}, PrepareWorkspaceInput{Name: "../evil", Repo: src}},
+		{"name is a path", &ClaudeCodeActivities{AllowedRepos: testRepos, Root: t.TempDir()}, PrepareWorkspaceInput{Name: "a/b", Repo: src}},
+		{"unknown ref", &ClaudeCodeActivities{AllowedRepos: testRepos, Root: t.TempDir()}, PrepareWorkspaceInput{Name: "run-1", Repo: src, Ref: "nope"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -106,7 +113,7 @@ func TestCleanupWorkspaceRefusesAnythingOutsideRoot(t *testing.T) {
 	if err := os.MkdirAll(outside, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	a := &ClaudeCodeActivities{Root: root}
+	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: root}
 
 	for _, dir := range []string{outside, root, filepath.Join(root, "a", "b"), "/"} {
 		if err := a.CleanupWorkspace(context.Background(), CleanupWorkspaceInput{Dir: dir}); err == nil {
@@ -119,7 +126,7 @@ func TestCleanupWorkspaceRefusesAnythingOutsideRoot(t *testing.T) {
 }
 
 func TestCleanupWorkspaceDeletesTheRunDirectory(t *testing.T) {
-	a := &ClaudeCodeActivities{Root: t.TempDir()}
+	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: t.TempDir()}
 	dir := filepath.Join(a.Root, "run-1")
 	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0o755); err != nil {
 		t.Fatal(err)
@@ -144,7 +151,7 @@ func TestCleanupWorkspaceDeletesTheRunDirectory(t *testing.T) {
 func TestRunClaudeCodeNeverPersistsTheSession(t *testing.T) {
 	// The workspace is deleted at the end of the run, so a transcript on disk
 	// would only outlive the tree it talks about.
-	a := &ClaudeCodeActivities{Root: t.TempDir()}
+	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: t.TempDir()}
 	_, err := a.RunClaudeCode(context.Background(), RunClaudeCodeInput{Dir: filepath.Join(a.Root, "nope"), Task: "x"})
 	if err == nil || !strings.Contains(err.Error(), "cwd") {
 		t.Fatalf("expected the missing workspace to be reported, got %v", err)
@@ -172,7 +179,7 @@ func commitFile(t *testing.T, dir, name, content, message string) {
 
 func TestInspectWorkspaceReportsWhatTheRunProduced(t *testing.T) {
 	src := initRepo(t)
-	a := &ClaudeCodeActivities{Root: t.TempDir()}
+	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: t.TempDir()}
 	prepared, err := a.PrepareWorkspace(context.Background(), PrepareWorkspaceInput{
 		Name: "run-1", Repo: src, Branch: "agent/thing",
 	})
@@ -218,7 +225,7 @@ func TestInspectWorkspaceReportsWhatTheRunProduced(t *testing.T) {
 // be told rather than left to assume the commits hold everything.
 func TestInspectWorkspaceSeesUncommittedChanges(t *testing.T) {
 	src := initRepo(t)
-	a := &ClaudeCodeActivities{Root: t.TempDir()}
+	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: t.TempDir()}
 	prepared, err := a.PrepareWorkspace(context.Background(), PrepareWorkspaceInput{Name: "run-1", Repo: src})
 	if err != nil {
 		t.Fatal(err)
@@ -247,7 +254,7 @@ func TestPushBranchPublishesTheBranch(t *testing.T) {
 		t.Fatalf("seed remote: %v: %s", err, out)
 	}
 
-	a := &ClaudeCodeActivities{Root: t.TempDir()}
+	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: t.TempDir()}
 	prepared, err := a.PrepareWorkspace(context.Background(), PrepareWorkspaceInput{
 		Name: "run-1", Repo: remote, Branch: "agent/thing",
 	})
@@ -279,7 +286,7 @@ func TestPushBranchIgnoresHooksLeftInTheWorkspace(t *testing.T) {
 	src := initRepo(t)
 	exec.Command("git", "-C", src, "push", "--quiet", remote, "main").Run()
 
-	a := &ClaudeCodeActivities{Root: t.TempDir()}
+	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: t.TempDir()}
 	prepared, err := a.PrepareWorkspace(context.Background(), PrepareWorkspaceInput{
 		Name: "run-1", Repo: remote, Branch: "agent/thing",
 	})
@@ -305,7 +312,7 @@ func TestPushBranchIgnoresHooksLeftInTheWorkspace(t *testing.T) {
 }
 
 func TestPushBranchRejectsIncompleteInput(t *testing.T) {
-	a := &ClaudeCodeActivities{Root: t.TempDir()}
+	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: t.TempDir()}
 	for _, in := range []PushBranchInput{
 		{Remote: "r", Branch: "b"},
 		{Dir: "/d", Branch: "b"},
@@ -341,7 +348,7 @@ func TestSSHEnv(t *testing.T) {
 // A worker that holds an identity must still clone what needs none.
 func TestPrepareWorkspaceWithAnIdentityConfigured(t *testing.T) {
 	src := initRepo(t)
-	a := &ClaudeCodeActivities{Root: t.TempDir(), SSHKeyPath: "/keys/deploy"}
+	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: t.TempDir(), SSHKeyPath: "/keys/deploy"}
 
 	out, err := a.PrepareWorkspace(context.Background(), PrepareWorkspaceInput{Name: "run-1", Repo: src})
 	if err != nil {
@@ -357,7 +364,7 @@ func TestPrepareWorkspaceWithAnIdentityConfigured(t *testing.T) {
 // cloned from.
 func TestPrepareWorkspaceDoesNotShareObjectsWithTheSource(t *testing.T) {
 	src := initRepo(t)
-	a := &ClaudeCodeActivities{Root: t.TempDir()}
+	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: t.TempDir()}
 
 	prepared, err := a.PrepareWorkspace(context.Background(), PrepareWorkspaceInput{Name: "run-1", Repo: src})
 	if err != nil {
@@ -384,5 +391,81 @@ func TestPrepareWorkspaceDoesNotShareObjectsWithTheSource(t *testing.T) {
 	}
 	if objects == 0 {
 		t.Fatal("no loose objects found, the test proved nothing")
+	}
+}
+
+// The repository is the model's choice: one git would read as an option, or
+// one the operator did not list, is refused before git runs.
+func TestPrepareWorkspaceRefusesRepositories(t *testing.T) {
+	src := initRepo(t)
+	escaped := filepath.Join(t.TempDir(), "escaped")
+	for name, c := range map[string]struct {
+		allowed []string
+		input   PrepareWorkspaceInput
+	}{
+		"nothing allowed":   {nil, PrepareWorkspaceInput{Name: "run-1", Repo: src}},
+		"not listed":        {[]string{"https://github.com/acme/*"}, PrepareWorkspaceInput{Name: "run-1", Repo: src}},
+		"an option":         {[]string{"*"}, PrepareWorkspaceInput{Name: "run-1", Repo: "--separate-git-dir=" + escaped}},
+		"a newline":         {testRepos, PrepareWorkspaceInput{Name: "run-1", Repo: src + "\n"}},
+		"a ref option":      {testRepos, PrepareWorkspaceInput{Name: "run-1", Repo: src, Ref: "--output=" + escaped}},
+		"a branch option":   {testRepos, PrepareWorkspaceInput{Name: "run-1", Repo: src, Branch: "-f"}},
+		"glob stops at a /": {[]string{"https://github.com/acme/*"}, PrepareWorkspaceInput{Name: "run-1", Repo: "https://github.com/acme/x/../../evil/y"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			a := &ClaudeCodeActivities{AllowedRepos: c.allowed, Root: t.TempDir()}
+			if _, err := a.PrepareWorkspace(context.Background(), c.input); err == nil {
+				t.Fatal("expected a refusal")
+			}
+			if _, err := os.Stat(escaped); err == nil {
+				t.Error("git wrote outside the workspace")
+			}
+		})
+	}
+}
+
+func TestCheckRepoMatchesTheAllowlist(t *testing.T) {
+	a := &ClaudeCodeActivities{AllowedRepos: []string{"https://github.com/acme/*", "git@github.com:acme/*"}}
+	for repo, ok := range map[string]bool{
+		"https://github.com/acme/api":     true,
+		"https://github.com/acme/api.git": true,
+		"git@github.com:acme/api.git":     true,
+		"https://github.com/other/api":    false,
+		"https://github.com/acme/a/b":     false,
+		"/srv/repos/api":                  false,
+	} {
+		if err := a.checkRepo(repo); (err == nil) != ok {
+			t.Errorf("checkRepo(%q) = %v, want allowed %v", repo, err, ok)
+		}
+	}
+}
+
+// A branch of the source that is not its default one only exists as
+// origin/<name> in the clone.
+func TestPrepareWorkspaceChecksOutABranch(t *testing.T) {
+	src := initRepo(t)
+	exec.Command("git", "-C", src, "branch", "feature").Run()
+	commitFile(t, src, "later.txt", "x", "second")
+
+	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: t.TempDir()}
+	out, err := a.PrepareWorkspace(context.Background(), PrepareWorkspaceInput{Name: "run-1", Repo: src, Ref: "feature"})
+	if err != nil {
+		t.Fatalf("PrepareWorkspace: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(out.Dir, "later.txt")); err == nil {
+		t.Error("the clone is on main, not on feature")
+	}
+}
+
+func TestPushBranchRefusesAnUnlistedRemote(t *testing.T) {
+	src := initRepo(t)
+	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: t.TempDir()}
+	prepared, err := a.PrepareWorkspace(context.Background(), PrepareWorkspaceInput{Name: "run-1", Repo: src, Branch: "agent/x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, remote := range []string{"https://evil.example.com/loot.git", "--receive-pack=touch /tmp/pwned"} {
+		if err := a.PushBranch(context.Background(), PushBranchInput{Dir: prepared.Dir, Remote: remote, Branch: "agent/x"}); err == nil {
+			t.Errorf("pushed to %q", remote)
+		}
 	}
 }
