@@ -24,6 +24,14 @@ type serverStore interface {
 	activityQueueStore
 }
 
+// inboundChannel takes messages from a channel's webhook into sessions. A new
+// channel is one more implementation, mounted at /webhooks/<name>; on the way
+// out, the same name selects its activity.Notifier.
+type inboundChannel interface {
+	http.Handler
+	Name() string
+}
+
 // server holds the HTTP adapters. Each one is thin: it decodes, calls the
 // session service or reads the store, and answers in its own format.
 type server struct {
@@ -32,10 +40,11 @@ type server struct {
 	api      *api
 	ui       *ui
 	queues   *activityQueuesAPI
-	// Webhooks are mounted only with their secret configured: nil = no route.
-	telegram *telegramChannel
-	skills   *skillsWebhook
-	admin    http.Handler // the back-office, mounted under /admin
+	// channels take messages in from outside, each on its own webhook.
+	// Mounted only with their secret configured.
+	channels []inboundChannel
+	skills   *skillsWebhook // nil = no secret, no route
+	admin    http.Handler   // the back-office, mounted under /admin
 }
 
 // newServer wires the adapters over one session service.
@@ -55,7 +64,7 @@ func newServer(cfg *config.Config, st serverStore, tc session.Temporal, hub *sse
 		admin:    adminUI,
 	}
 	if cfg.TelegramWebhookSecret != "" {
-		s.telegram = &telegramChannel{sessions: sessions, users: st, secret: cfg.TelegramWebhookSecret}
+		s.channels = append(s.channels, &telegramChannel{sessions: sessions, users: st, secret: cfg.TelegramWebhookSecret})
 	}
 	if cfg.SkillsWebhookSecret != "" {
 		s.skills = &skillsWebhook{secret: cfg.SkillsWebhookSecret, store: st}
@@ -75,8 +84,8 @@ func (s *server) routes() http.Handler {
 	if s.skills != nil {
 		r.Post("/webhooks/skills", s.skills.ServeHTTP)
 	}
-	if s.telegram != nil {
-		r.Post("/webhooks/telegram", s.telegram.ServeHTTP)
+	for _, c := range s.channels {
+		r.Post("/webhooks/"+c.Name(), c.ServeHTTP)
 	}
 
 	// Back-office: its own login page, open to admins only

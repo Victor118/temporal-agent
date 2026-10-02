@@ -32,6 +32,8 @@ type telegramChannel struct {
 	secret   string // TELEGRAM_WEBHOOK_SECRET; never empty once the route is mounted
 }
 
+func (t *telegramChannel) Name() string { return telegram.Channel }
+
 func (t *telegramChannel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !secretEqual(r.Header.Get(telegramSecretHeader), t.secret) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)

@@ -124,9 +124,10 @@ func runDev(cmd *cobra.Command, args []string) {
 	refreshCatalog(st, catalog) // include the tools just published
 
 	// Telegram client (optional)
-	var tgClient activity.TelegramSender
+	// Notifiers, one per channel a session can reach its user on
+	notifiers := map[string]activity.Notifier{activity.ChannelWeb: activity.HubNotifier{Hub: hub}}
 	if cfg.TelegramBotToken != "" {
-		tgClient = telegram.NewClient(cfg.TelegramBotToken)
+		notifiers[telegram.Channel] = &telegram.Notifier{Client: telegram.NewClient(cfg.TelegramBotToken)}
 		log.Println("Telegram bot client configured")
 	}
 
@@ -148,7 +149,7 @@ func runDev(cmd *cobra.Command, args []string) {
 		w.RegisterActivity(&activity.ForkActivities{Store: st, LLM: llmProvider})
 		w.RegisterActivity(&activity.MemoryActivities{Store: st})
 		w.RegisterActivity(&activity.ToolActivities{Registry: registry, Catalog: catalog})
-		w.RegisterActivity(&activity.NotificationActivities{Hub: hub, Telegram: tgClient})
+		w.RegisterActivity(&activity.NotificationActivities{Notifiers: notifiers})
 		w.RegisterActivity(&activity.DeliveryActivities{Hub: hub, Store: st})
 		w.RegisterActivity(&activity.ScheduleActivities{Client: temporalClient.ScheduleClient(), Store: st})
 		w.RegisterActivity(skillAct)

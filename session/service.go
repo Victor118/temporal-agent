@@ -35,7 +35,7 @@ var (
 )
 
 // ChannelWeb is the channel of a session opened from the web.
-const ChannelWeb = "web"
+const ChannelWeb = activity.ChannelWeb
 
 // Store is what the service reads and writes.
 type Store interface {
