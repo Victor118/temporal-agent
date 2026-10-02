@@ -435,3 +435,38 @@ printf '{"type":"result","subtype":"success","is_error":false,"result":"done","s
 	}
 	subproctest.NoProcessLeft(t, id.UID)
 }
+
+// A process the CLI leaves running with its stdout and stderr still open does
+// not hold the run until the activity's timeout: Run returns killGrace after
+// the CLI exits, with what it reported, and the process is gone.
+func TestRunReturnsWhenTheOutputIsLeftOpen(t *testing.T) {
+	defer func(d time.Duration) { killGrace = d }(killGrace)
+	killGrace = 500 * time.Millisecond
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "child.pid")
+	script := fmt.Sprintf(`sleep 300 &
+echo $! > %q
+printf '{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"s"}\n'
+`, pidFile)
+
+	start := time.Now()
+	res, err := run(t, script, Params{Cwd: dir})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if took := time.Since(start); took > 5*time.Second {
+		t.Errorf("Run took %s, held by the output left open", took.Round(time.Millisecond))
+	}
+	if res.Report != "done" || res.Subtype != "success" {
+		t.Errorf("result = %+v, want what the CLI reported", res)
+	}
+	pid := readPID(t, pidFile)
+	deadline := time.Now().Add(5 * time.Second)
+	for processRunning(pid) && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if processRunning(pid) {
+		syscall.Kill(pid, syscall.SIGKILL)
+		t.Errorf("process %d, which held the output, outlived the run", pid)
+	}
+}

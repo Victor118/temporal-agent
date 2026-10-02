@@ -18,7 +18,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -29,10 +28,12 @@ const (
 	defaultBinary         = "claude"
 	defaultMaxReportBytes = 64 * 1024
 	maxStderrTailBytes    = 8 * 1024
-	// killGrace is how long the CLI gets to exit after SIGTERM before the
-	// process group is killed outright.
-	killGrace = 10 * time.Second
 )
+
+// killGrace is how long the CLI gets to exit after SIGTERM before the process
+// group is killed outright, and how long its output is waited on once it has
+// exited (exec.Cmd.WaitDelay). A variable: the tests shorten it.
+var killGrace = 10 * time.Second
 
 // Params describes one Claude Code run. Only Cwd and Task are required; every
 // other field maps to a CLI flag that is omitted when left empty.
@@ -150,7 +151,8 @@ type Runner struct {
 // signalled, not just the CLI, because it spawns shells of its own that would
 // otherwise outlive it; when the CLI exits, what is left of the group is
 // killed, and with RunAs, every process of that user once no other command of
-// this worker runs as it (subproc.Identity.Hold).
+// this worker runs as it (subproc.Identity.Hold). Its output is waited on for
+// killGrace at most once it has exited, whatever still holds it open.
 func (r *Runner) Run(ctx context.Context, p Params) (Result, error) {
 	if p.Cwd == "" {
 		return Result{}, errors.New("claudecode: cwd is required")
@@ -185,14 +187,15 @@ func (r *Runner) Run(ctx context.Context, p Params) (Result, error) {
 	// activity is gone.
 	subproc.KillGroupOnCancel(cmd, syscall.SIGTERM, killGrace)
 
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return Result{}, fmt.Errorf("claudecode: stdout pipe: %w", err)
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return Result{}, fmt.Errorf("claudecode: stderr pipe: %w", err)
-	}
+	// Writers, not StdoutPipe/StderrPipe: os/exec then makes the pipes and
+	// copies from them itself, and WaitDelay bounds that copy too. A process
+	// the CLI started with its stdout or stderr, and that outlives it, keeps
+	// the pipe open: read to EOF, the stream would only end with the
+	// activity's timeout; this way it ends killGrace after the CLI exits.
+	stdout, stdoutW := io.Pipe()
+	var tail stderrTail
+	cmd.Stdout = stdoutW
+	cmd.Stderr = &tail
 
 	start := time.Now()
 	release := r.RunAs.Hold()
@@ -201,18 +204,22 @@ func (r *Runner) Run(ctx context.Context, p Params) (Result, error) {
 		return Result{}, fmt.Errorf("claudecode: cannot start %q: %w", r.binary(), err)
 	}
 
-	var tail stderrTail
-	var wg sync.WaitGroup
-	wg.Add(1)
+	var res Result
+	var parseErr error
+	parsed := make(chan struct{})
 	go func() {
-		defer wg.Done()
-		io.Copy(&tail, stderr)
+		defer close(parsed)
+		res, parseErr = r.consume(ctx, stdout)
+		// Whatever follows a read error is drained: the copy writing into
+		// the pipe must not block, nor Wait with it.
+		io.Copy(io.Discard, stdout)
 	}()
 
-	res, parseErr := r.consume(ctx, stdout)
-	wg.Wait()
-
+	// ErrWaitDelay is the output held open past the CLI's exit by something
+	// it left running: the run itself is over, what it reported is in res.
 	waitErr := cmd.Wait()
+	stdoutW.Close()
+	<-parsed
 	// What the CLI's shells left running dies with the run, not only with a
 	// cancelled one: a dev server, a watcher.
 	subproc.KillGroup(cmd)
