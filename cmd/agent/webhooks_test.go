@@ -5,12 +5,14 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/victor/temporal-agent/activity"
 	"github.com/victor/temporal-agent/auth"
 	"github.com/victor/temporal-agent/config"
 	"github.com/victor/temporal-agent/sse"
@@ -163,5 +165,40 @@ func TestInternalNotify_RequiresTheKey(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A worker checks its key with an event for no session: accepted, and
+// published nowhere.
+func TestInternalNotify_AnEmptySessionIsAKeyCheck(t *testing.T) {
+	hub := sse.NewHub()
+	ch := hub.Subscribe("")
+	defer hub.Unsubscribe("", ch)
+	code := post(handleInternalNotify(hub, "k3y"), "/internal/notify", `{}`, map[string]string{"Authorization": "Bearer k3y"})
+	if code != http.StatusNoContent {
+		t.Fatalf("%d, want 204", code)
+	}
+	select {
+	case <-ch:
+		t.Error("the check was published")
+	case <-time.After(20 * time.Millisecond):
+	}
+}
+
+type checkFunc func(context.Context) error
+
+func (f checkFunc) Check(ctx context.Context) error { return f(ctx) }
+
+func TestCheckNotifier(t *testing.T) {
+	ok := checkFunc(func(context.Context) error { return nil })
+	if err := checkNotifier(ok, ""); !errors.Is(err, activity.ErrNotifyKeyRefused) {
+		t.Errorf("no key: %v", err)
+	}
+	if err := checkNotifier(ok, "k3y"); err != nil {
+		t.Errorf("accepted key: %v", err)
+	}
+	refused := checkFunc(func(context.Context) error { return activity.ErrNotifyKeyRefused })
+	if err := checkNotifier(refused, "k3y"); !errors.Is(err, activity.ErrNotifyKeyRefused) {
+		t.Errorf("refused key: %v", err)
 	}
 }

@@ -32,9 +32,9 @@ const catalogRefresh = 30 * time.Second
 
 // workerOptions is where `agent worker` and `agent dev` differ.
 type workerOptions struct {
-	// hub is where the web channel's events go: the server's in-process hub
-	// in dev mode, the server's internal API through an HTTPNotifier otherwise.
-	hub activity.SSEHub
+	// web is the web channel's notifier: the server's in-process hub in dev
+	// mode, the server's internal API through an HTTPNotifier otherwise.
+	web activity.Notifier
 	// skills is where the skills come from; nil = none.
 	skills skill.Store
 	// watchSkills reloads them when skills_version moves (a git repository).
@@ -83,7 +83,7 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 	refreshCatalog(st, catalog) // include the tools just published
 
 	// Notifiers, one per channel a session can reach its user on
-	notifiers := map[string]activity.Notifier{activity.ChannelWeb: activity.HubNotifier{Hub: opts.hub}}
+	notifiers := map[string]activity.Notifier{activity.ChannelWeb: opts.web}
 	if cfg.TelegramBotToken != "" {
 		notifiers[telegram.Channel] = &telegram.Notifier{Client: telegram.NewClient(cfg.TelegramBotToken)}
 		log.Println("Telegram bot client configured")
@@ -113,7 +113,7 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 		w.RegisterActivity(&activity.ClaudeCodeActivities{Root: cfg.ClaudeCodeWorkspace, SSHKeyPath: cfg.ClaudeCodeSSHKey, AllowedRepos: cfg.ClaudeCodeRepos})
 		w.RegisterActivity(&activity.ToolActivities{Registry: registry, Catalog: catalog})
 		w.RegisterActivity(&activity.NotificationActivities{Notifiers: notifiers})
-		w.RegisterActivity(&activity.DeliveryActivities{Hub: opts.hub, Store: st})
+		w.RegisterActivity(&activity.DeliveryActivities{Web: opts.web, Store: st})
 		w.RegisterActivity(&activity.ScheduleActivities{Client: tc.ScheduleClient(), Store: st})
 		w.RegisterActivity(skillAct)
 

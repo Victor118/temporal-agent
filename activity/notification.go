@@ -56,8 +56,9 @@ func (e *PartialDelivery) Error() string {
 
 func (e *PartialDelivery) Unwrap() error { return e.Err }
 
-// HubNotifier is the web channel: it publishes on the SSE hub — the
-// server's own in dev mode, or the server's through an HTTPNotifier.
+// HubNotifier is the web channel in a process that holds the server's SSE
+// hub (dev mode): publishing there cannot fail. A worker running apart uses
+// an HTTPNotifier.
 type HubNotifier struct {
 	Hub SSEHub
 }

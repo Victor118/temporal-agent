@@ -39,7 +39,10 @@ func handleInternalNotify(hub *sse.Hub, apiKey string) http.HandlerFunc {
 			http.Error(w, "Invalid request body", http.StatusBadRequest)
 			return
 		}
-		hub.Publish(input.SessionID, input.Event)
+		// No session: a worker checking its key at startup.
+		if input.SessionID != "" {
+			hub.Publish(input.SessionID, input.Event)
+		}
 		w.WriteHeader(http.StatusNoContent)
 	}
 }

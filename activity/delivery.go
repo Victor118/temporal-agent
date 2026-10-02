@@ -14,7 +14,8 @@ type MessageAppender interface {
 
 // DeliveryActivities handles delivering scheduled task results to users.
 type DeliveryActivities struct {
-	Hub   SSEHub
+	// Web is the web channel's notifier, which shows the result live.
+	Web   Notifier
 	Store MessageAppender
 }
 
@@ -28,8 +29,8 @@ type DeliverInput struct {
 }
 
 func (a *DeliveryActivities) DeliverResult(ctx context.Context, input DeliverInput) error {
-	if a.Hub == nil {
-		return fmt.Errorf("no notification hub configured")
+	if a.Web == nil {
+		return fmt.Errorf("no web notifier configured")
 	}
 
 	sessionID := fmt.Sprintf("notifications:%s", input.UserID)
@@ -44,11 +45,10 @@ func (a *DeliveryActivities) DeliverResult(ctx context.Context, input DeliverInp
 		return fmt.Errorf("persist notification: %w", err)
 	}
 
-	// Publish live via SSE
-	a.Hub.Publish(sessionID, SSEEvent{
+	// Show it live. A failure fails the activity, and the retry stores
+	// nothing twice: the message is keyed.
+	return a.Web.Notify(ctx, Notification{SessionID: sessionID, Event: SSEEvent{
 		Type: "notification",
 		Data: []byte(input.Content),
-	})
-
-	return nil
+	}})
 }

@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/victor/temporal-agent/activity"
 	"github.com/victor/temporal-agent/config"
 	"github.com/victor/temporal-agent/skill"
 	"github.com/victor/temporal-agent/sse"
@@ -42,7 +43,7 @@ func runDev(cmd *cobra.Command, args []string) {
 	// Skills — dev mode loads from the local filesystem, and the back-office
 	// shows the same ones.
 	skillStore := &skill.FileStore{Dir: "./skills"}
-	rt, err := newWorkerRuntime(cfg, st, temporalClient, workerOptions{hub: hub, skills: skillStore})
+	rt, err := newWorkerRuntime(cfg, st, temporalClient, workerOptions{web: activity.HubNotifier{Hub: hub}, skills: skillStore})
 	if err != nil {
 		log.Fatalf("Worker: %v", err)
 	}

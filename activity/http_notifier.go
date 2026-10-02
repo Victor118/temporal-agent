@@ -2,15 +2,21 @@ package activity
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"time"
 )
 
-// HTTPNotifier implements SSEHub by POSTing events to the server's internal endpoint.
-// Used by the worker process when running separately from the server.
+// ErrNotifyKeyRefused is the server refusing the worker's INTERNAL_API_KEY.
+var ErrNotifyKeyRefused = errors.New("the server refused this worker's INTERNAL_API_KEY")
+
+// HTTPNotifier is the web channel of a worker running apart from the server:
+// it POSTs each event to the server's internal endpoint, which publishes it
+// on its SSE hub. Unlike the hub in a dev process, a POST can fail, and the
+// failure is the activity's, so the notification's retry policy applies.
 type HTTPNotifier struct {
 	BaseURL string
 	// APIKey is the INTERNAL_API_KEY shared with the server, which refuses a
@@ -27,15 +33,23 @@ func NewHTTPNotifier(baseURL, apiKey string) *HTTPNotifier {
 	}
 }
 
-func (n *HTTPNotifier) Publish(sessionID string, event SSEEvent) {
-	if err := n.post(sessionID, event); err != nil {
-		log.Printf("Warning: failed to notify server: %v", err)
+func (n *HTTPNotifier) Notify(ctx context.Context, note Notification) error {
+	if err := n.post(ctx, NotifyInput{SessionID: note.SessionID, Event: note.Event}); err != nil {
+		return fmt.Errorf("notify server: %w", err)
 	}
+	return nil
 }
 
-func (n *HTTPNotifier) post(sessionID string, event SSEEvent) error {
-	payload, _ := json.Marshal(NotifyInput{SessionID: sessionID, Event: event})
-	req, err := http.NewRequest(http.MethodPost, n.BaseURL+"/internal/notify", bytes.NewReader(payload))
+// Check asks the server whether it accepts this worker's key, with an event
+// for no session, which the server drops. A refused key otherwise shows only
+// as notifications that never arrive.
+func (n *HTTPNotifier) Check(ctx context.Context) error {
+	return n.post(ctx, NotifyInput{})
+}
+
+func (n *HTTPNotifier) post(ctx context.Context, input NotifyInput) error {
+	payload, _ := json.Marshal(input)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, n.BaseURL+"/internal/notify", bytes.NewReader(payload))
 	if err != nil {
 		return err
 	}
@@ -46,7 +60,10 @@ func (n *HTTPNotifier) post(sessionID string, event SSEEvent) error {
 		return err
 	}
 	resp.Body.Close()
-	if resp.StatusCode/100 != 2 {
+	switch {
+	case resp.StatusCode == http.StatusUnauthorized:
+		return ErrNotifyKeyRefused
+	case resp.StatusCode/100 != 2:
 		return fmt.Errorf("status %d", resp.StatusCode)
 	}
 	return nil
