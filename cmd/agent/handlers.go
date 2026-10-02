@@ -189,9 +189,13 @@ func (h *handler) isSessionActive(ctx context.Context, sessionID string) bool {
 		return true
 	}
 	// Check for resumed workflows by listing with a query
+	query, err := runningSessionQuery(sessionID)
+	if err != nil {
+		return false
+	}
 	resp, err := h.temporalClient.ListWorkflow(ctx, &workflowservice.ListWorkflowExecutionsRequest{
 		Namespace: h.cfg.TemporalNamespace,
-		Query:     fmt.Sprintf("WorkflowId STARTS_WITH 'session-%s' AND ExecutionStatus = 'Running'", sessionID),
+		Query:     query,
 		PageSize:  1,
 	})
 	if err != nil {
@@ -206,9 +210,13 @@ func (h *handler) findActiveWorkflowID(ctx context.Context, sessionID string) st
 	if h.isWorkflowRunning(ctx, base) {
 		return base
 	}
+	query, err := runningSessionQuery(sessionID)
+	if err != nil {
+		return ""
+	}
 	resp, err := h.temporalClient.ListWorkflow(ctx, &workflowservice.ListWorkflowExecutionsRequest{
 		Namespace: h.cfg.TemporalNamespace,
-		Query:     fmt.Sprintf("WorkflowId STARTS_WITH 'session-%s' AND ExecutionStatus = 'Running'", sessionID),
+		Query:     query,
 		PageSize:  1,
 	})
 	if err != nil || len(resp.Executions) == 0 {

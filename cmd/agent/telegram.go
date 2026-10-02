@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -173,9 +172,13 @@ func (h *handler) handleTelegramWebhook(w http.ResponseWriter, r *http.Request) 
 // "<session>-tool-agent_x-<call>-tool-ask_user-…": the workflow type finds
 // them all, where an ID prefix only found the session agent's own.
 func (h *handler) tryAnswerAskUser(ctx context.Context, sessionID, answer string) bool {
+	query, err := pendingQuestionsQuery(sessionID)
+	if err != nil {
+		return false
+	}
 	resp, err := h.temporalClient.ListWorkflow(ctx, &workflowservice.ListWorkflowExecutionsRequest{
 		Namespace: h.cfg.TemporalNamespace,
-		Query:     fmt.Sprintf("WorkflowType = 'AskUserWorkflow' AND ExecutionStatus = 'Running' AND WorkflowId STARTS_WITH '%s-'", sessionID),
+		Query:     query,
 		PageSize:  1,
 	})
 	if err != nil || len(resp.Executions) == 0 {

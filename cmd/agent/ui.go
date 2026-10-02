@@ -149,9 +149,13 @@ func uuidPrefix(id string) string {
 
 // pendingQuestions returns the questions the session's agents wait on.
 func (h *handler) pendingQuestions(ctx context.Context, sessionID string) []chat.Question {
+	query, err := pendingQuestionsQuery(sessionID)
+	if err != nil {
+		return nil
+	}
 	resp, err := h.temporalClient.ListWorkflow(ctx, &workflowservice.ListWorkflowExecutionsRequest{
 		Namespace: h.cfg.TemporalNamespace,
-		Query:     fmt.Sprintf("WorkflowType = 'AskUserWorkflow' AND ExecutionStatus = 'Running' AND WorkflowId STARTS_WITH '%s-'", sessionID),
+		Query:     query,
 		PageSize:  50,
 	})
 	if err != nil {

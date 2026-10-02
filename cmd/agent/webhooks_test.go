@@ -171,7 +171,9 @@ func TestInternalNotify_RequiresTheKey(t *testing.T) {
 	}
 }
 
-// askTemporal has one question waiting, asked by a sub-agent of s1.
+const askSession = "6f1c2a9e-3b4d-4e5f-8a7b-0c1d2e3f4a5b"
+
+// askTemporal has one question waiting, asked by a sub-agent of askSession.
 type askTemporal struct {
 	fakeTemporal
 	queries []string
@@ -180,7 +182,7 @@ type askTemporal struct {
 func (f *askTemporal) ListWorkflow(_ context.Context, req *workflowservice.ListWorkflowExecutionsRequest) (*workflowservice.ListWorkflowExecutionsResponse, error) {
 	f.queries = append(f.queries, req.Query)
 	return &workflowservice.ListWorkflowExecutionsResponse{Executions: []*workflowpb.WorkflowExecutionInfo{
-		{Execution: &commonpb.WorkflowExecution{WorkflowId: "s1-tool-agent_analyst-c1-tool-ask_user-c2"}},
+		{Execution: &commonpb.WorkflowExecution{WorkflowId: askSession + "-tool-agent_analyst-c1-tool-ask_user-c2"}},
 	}}, nil
 }
 
@@ -194,13 +196,34 @@ func (f *askTemporal) SignalWorkflow(_ context.Context, workflowID, _, signal st
 func TestTryAnswerAskUser_FindsSubAgentQuestions(t *testing.T) {
 	tc := &askTemporal{}
 	h := &handler{temporalClient: tc, cfg: &config.Config{}}
-	if !h.tryAnswerAskUser(context.Background(), "s1", "yes") {
+	if !h.tryAnswerAskUser(context.Background(), askSession, "yes") {
 		t.Fatal("the answer was not delivered")
 	}
-	if len(tc.queries) != 1 || !strings.Contains(tc.queries[0], "WorkflowType = 'AskUserWorkflow'") || !strings.Contains(tc.queries[0], "STARTS_WITH 's1-'") {
+	if len(tc.queries) != 1 || !strings.Contains(tc.queries[0], "WorkflowType = 'AskUserWorkflow'") || !strings.Contains(tc.queries[0], "STARTS_WITH '"+askSession+"-'") {
 		t.Errorf("query %v", tc.queries)
 	}
-	if len(tc.signals) != 1 || tc.signals[0] != "s1-tool-agent_analyst-c1-tool-ask_user-c2" {
+	if len(tc.signals) != 1 || tc.signals[0] != askSession+"-tool-agent_analyst-c1-tool-ask_user-c2" {
 		t.Errorf("signalled %v", tc.signals)
+	}
+}
+
+// A session ID goes into a visibility query between quotes: anything but a
+// canonical UUID is refused, whatever the route checked before.
+func TestVisibilityQueriesTakeOnlyUUIDs(t *testing.T) {
+	for _, id := range []string{"", "s1", "x' OR WorkflowId STARTS_WITH '", "{" + askSession + "}", "urn:uuid:" + askSession, strings.ToUpper(askSession)} {
+		if q, err := runningSessionQuery(id); err == nil {
+			t.Errorf("runningSessionQuery(%q) = %q", id, q)
+		}
+		if q, err := pendingQuestionsQuery(id); err == nil {
+			t.Errorf("pendingQuestionsQuery(%q) = %q", id, q)
+		}
+	}
+	if _, err := pendingQuestionsQuery(askSession); err != nil {
+		t.Error(err)
+	}
+	tc := &askTemporal{}
+	h := &handler{temporalClient: tc, cfg: &config.Config{}}
+	if h.tryAnswerAskUser(context.Background(), "x' OR '1'='1", "yes") || len(tc.queries) != 0 {
+		t.Errorf("a forged session ID reached Temporal: %v", tc.queries)
 	}
 }
