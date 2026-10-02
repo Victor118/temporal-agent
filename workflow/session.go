@@ -27,6 +27,10 @@ type UserMessage struct {
 	Text     string `json:"text"`
 	UserID   string `json:"user_id"`
 	UserName string `json:"user_name"`
+	// Stored: the server has written the message to the session's history
+	// already. Every human message is stored as it arrives, whether or not it
+	// calls the agent.
+	Stored bool `json:"stored,omitempty"`
 }
 
 type SessionWorkflowInput struct {
@@ -151,15 +155,16 @@ func processTurn(actCtx, ctx workflow.Context, input SessionWorkflowInput, userM
 		SessionID: input.SessionID,
 		// The turn answers its author: their memory is loaded, tools act for
 		// them.
-		UserID:       userMessage.UserID,
-		UserName:     userMessage.UserName,
-		AgentID:      input.AgentID,
-		TurnKey:      turnKey,
-		UserMessage:  userMessage.Text,
-		SystemPrompt: input.SystemPrompt,
-		Model:        input.Model,
-		Channel:      input.Channel,
-		ChannelID:    input.ChannelID,
+		UserID:            userMessage.UserID,
+		UserName:          userMessage.UserName,
+		AgentID:           input.AgentID,
+		TurnKey:           turnKey,
+		UserMessage:       userMessage.Text,
+		UserMessageStored: userMessage.Stored,
+		SystemPrompt:      input.SystemPrompt,
+		Model:             input.Model,
+		Channel:           input.Channel,
+		ChannelID:         input.ChannelID,
 	})
 
 	// Listen for cancel signal in parallel

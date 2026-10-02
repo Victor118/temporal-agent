@@ -49,10 +49,22 @@ type Session struct {
 
 	// A fork: the session and the message it started from, and who forked it.
 	// Empty for a session that is not a fork, or whose parent was deleted.
+	// AgentMode: when a human message calls the agent (AgentMode* values).
+	AgentMode string `json:"agent_mode"`
+
 	ParentSessionID   string `json:"parent_session_id,omitempty"`
 	ForkedAtMessageID int64  `json:"forked_at_message_id,omitempty"`
 	ForkedBy          string `json:"forked_by,omitempty"`
 }
+
+// When a human message calls a session's agent.
+const (
+	// AgentModeAuto: every message while one user is alone in the session,
+	// only on @agent once several share it.
+	AgentModeAuto    = "auto"
+	AgentModeAlways  = "always"
+	AgentModeMention = "mention"
+)
 
 // SessionMember is a user of a session.
 type SessionMember struct {

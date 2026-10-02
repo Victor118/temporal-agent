@@ -32,13 +32,17 @@ const maxToolResultBytes = 96 * 1024
 const toolScheduleToStartTimeout = 60 * time.Second
 
 type AgentWorkflowInput struct {
-	SessionID    string `json:"session_id"`
-	UserID       string `json:"user_id,omitempty"`   // Author of UserMessage: whose memory is loaded, who tools act for
-	UserName     string `json:"user_name,omitempty"` // Author's name, shown to the model
-	AgentID      string `json:"agent_id"`            // Required. Logical agent identity: prompt, skills and allowed tools
-	UserMessage  string `json:"user_message"`
-	SystemPrompt string `json:"system_prompt"`
-	Model        string `json:"model"` // Explicit model; empty = the worker's default (LLM_MODEL)
+	SessionID   string `json:"session_id"`
+	UserID      string `json:"user_id,omitempty"`   // Author of UserMessage: whose memory is loaded, who tools act for
+	UserName    string `json:"user_name,omitempty"` // Author's name, shown to the model
+	AgentID     string `json:"agent_id"`            // Required. Logical agent identity: prompt, skills and allowed tools
+	UserMessage string `json:"user_message"`
+	// UserMessageStored: the message is in the session's history already (the
+	// server stores human messages as they arrive), so the turn loads it with
+	// the rest instead of adding it.
+	UserMessageStored bool   `json:"user_message_stored,omitempty"`
+	SystemPrompt      string `json:"system_prompt"`
+	Model             string `json:"model"` // Explicit model; empty = the worker's default (LLM_MODEL)
 	// TurnKey identifies the session turn this run belongs to. When set, the
 	// agent persists its messages as it produces them under that key, so a
 	// crash, a cancel or a failed LLM call cannot lose the transcript. Sub-agents
@@ -142,13 +146,15 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 	newStart := len(messages)
 	persisted := 0
 
-	contentJSON, _ := json.Marshal(input.UserMessage)
-	messages = append(messages, store.Message{
-		Role:    store.RoleUser,
-		Content: string(contentJSON),
-		UserID:  input.UserID,
-		Author:  input.UserName,
-	})
+	if !input.UserMessageStored {
+		contentJSON, _ := json.Marshal(input.UserMessage)
+		messages = append(messages, store.Message{
+			Role:    store.RoleUser,
+			Content: string(contentJSON),
+			UserID:  input.UserID,
+			Author:  input.UserName,
+		})
+	}
 
 	persistOpts := workflow.ActivityOptions{
 		StartToCloseTimeout: 30 * time.Second,
@@ -454,7 +460,38 @@ func runeStart(s string, i int) int {
 	return i
 }
 
+// deferInterleaved moves a human message that landed between an assistant's
+// tool calls and their results to after the results. Humans write to a shared
+// session while the agent works, so their messages can be stored in the middle
+// of a turn; the LLM API rejects a tool call not followed by its results.
+func deferInterleaved(messages []store.Message) []store.Message {
+	out := make([]store.Message, 0, len(messages))
+	var deferred []store.Message
+	pending := map[string]bool{} // tool call IDs awaiting their result
+	for _, m := range messages {
+		switch {
+		case m.ToolResult != nil:
+			delete(pending, m.ToolResult.ToolCallID)
+			out = append(out, m)
+		case len(pending) > 0 && m.Role == store.RoleUser:
+			deferred = append(deferred, m)
+			continue
+		default:
+			out = append(out, m)
+			for _, tc := range m.ToolCalls {
+				pending[tc.ID] = true
+			}
+		}
+		if len(pending) == 0 && len(deferred) > 0 {
+			out = append(out, deferred...)
+			deferred = nil
+		}
+	}
+	return append(out, deferred...)
+}
+
 func convertMessages(messages []store.Message) []provider.ChatMessage {
+	messages = deferInterleaved(messages)
 	result := make([]provider.ChatMessage, 0, len(messages))
 	for _, msg := range messages {
 		content := json.RawMessage(msg.Content)

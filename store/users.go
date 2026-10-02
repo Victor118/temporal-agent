@@ -142,14 +142,14 @@ func (s *PostgresStore) DeleteLoginSession(ctx context.Context, tokenHash string
 // --- Sessions and their members ---
 
 const sessionColumns = "s.session_id, s.created_by, s.title, s.agent_id, s.channel, s.channel_id, s.created_at, " +
-	"s.parent_session_id, s.forked_at_message_id, s.forked_by"
+	"s.parent_session_id, s.forked_at_message_id, s.forked_by, s.agent_mode"
 
 func scanSession(row interface{ Scan(...any) error }) (*Session, error) {
 	var sess Session
 	var parent, forkedBy sql.NullString
 	var forkedAt sql.NullInt64
 	err := row.Scan(&sess.SessionID, &sess.CreatedBy, &sess.Title, &sess.AgentID, &sess.Channel, &sess.ChannelID, &sess.CreatedAt,
-		&parent, &forkedAt, &forkedBy)
+		&parent, &forkedAt, &forkedBy, &sess.AgentMode)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -244,6 +244,12 @@ func (s *PostgresStore) DeleteSession(ctx context.Context, sessionID string) err
 		}
 		return nil
 	})
+}
+
+// SetSessionAgentMode sets when human messages call the session's agent.
+func (s *PostgresStore) SetSessionAgentMode(ctx context.Context, sessionID, mode string) error {
+	res, err := s.db.ExecContext(ctx, "UPDATE sessions SET agent_mode = $2 WHERE session_id = $1", sessionID, mode)
+	return affectedOne(res, err, errors.New("session not found"))
 }
 
 // ListForks returns the forks of a session that userID is a member of: the

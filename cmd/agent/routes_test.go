@@ -19,6 +19,7 @@ import (
 	"github.com/victor/temporal-agent/sse"
 	"github.com/victor/temporal-agent/store"
 	"github.com/victor/temporal-agent/web/admin"
+	"github.com/victor/temporal-agent/workflow"
 )
 
 // routeStore holds users, logins and one session in memory. Methods the
@@ -31,6 +32,7 @@ type routeStore struct {
 	members  []string
 	messages map[string][]store.MessageWithID
 	created  []store.Session
+	appended []store.Message
 }
 
 func (f *routeStore) user(match func(store.User) bool) *store.User {
@@ -250,6 +252,7 @@ func TestRoutes_RefuseCrossSiteWrites(t *testing.T) {
 type fakeTemporal struct {
 	client.Client
 	started []string // workflow IDs
+	signals []interface{}
 }
 
 func (f *fakeTemporal) ExecuteWorkflow(_ context.Context, opts client.StartWorkflowOptions, _ interface{}, _ ...interface{}) (client.WorkflowRun, error) {
@@ -383,5 +386,83 @@ func TestSetTitleFrom_CutsOnCharacters(t *testing.T) {
 	h.setTitleFrom("s1", strings.Repeat("é", 100))
 	if !utf8.ValidString(st.title) || st.title != strings.Repeat("é", maxTitleRunes)+"..." {
 		t.Errorf("title %q", st.title)
+	}
+}
+
+// --- Messages and @agent ---
+
+func (f *routeStore) AppendMessage(_ context.Context, sessionID, key string, m store.Message) error {
+	f.appended = append(f.appended, m)
+	return nil
+}
+
+func (f *routeStore) SetSessionAgentMode(_ context.Context, _, mode string) error {
+	f.session.AgentMode = mode
+	return nil
+}
+
+func (f *routeStore) UpdateSessionTitle(context.Context, string, string) error { return nil }
+
+func (f *fakeTemporal) ListWorkflow(context.Context, *workflowservice.ListWorkflowExecutionsRequest) (*workflowservice.ListWorkflowExecutionsResponse, error) {
+	return &workflowservice.ListWorkflowExecutionsResponse{}, nil
+}
+
+func (f *fakeTemporal) SignalWorkflow(_ context.Context, workflowID, _, signal string, arg interface{}) error {
+	f.signals = append(f.signals, arg)
+	return nil
+}
+
+func TestRoutes_MessagesCallTheAgentOnlyWhenMeant(t *testing.T) {
+	tc := &fakeTemporal{}
+	h, st := newRouteTestWith(t, tc)
+	bob := logIn(t, h, "bob@example.com")
+	send := func(text string) bool {
+		t.Helper()
+		w := call(t, h, http.MethodPost, "/sessions/s1/messages", `{"content":"`+text+`"}`, bob)
+		if w.Code != http.StatusAccepted {
+			t.Fatalf("send %q: %d %s", text, w.Code, w.Body)
+		}
+		var resp struct {
+			AgentCalled bool `json:"agent_called"`
+		}
+		json.Unmarshal(w.Body.Bytes(), &resp)
+		return resp.AgentCalled
+	}
+
+	// s1 has two members: in auto mode, they talk to each other.
+	if send("on se voit demain ?") {
+		t.Error("a plain message between two members called the agent")
+	}
+	if len(st.appended) != 1 || st.appended[0].Author != "bob@example.com" || st.appended[0].UserID != "u-bob" {
+		t.Errorf("not stored as bob's: %+v", st.appended)
+	}
+	if len(tc.signals) != 0 {
+		t.Errorf("signals %v", tc.signals)
+	}
+
+	if !send("@agent résume la discussion") {
+		t.Error("@agent did not call the agent")
+	}
+	if len(tc.signals) != 1 {
+		t.Fatalf("signals %v", tc.signals)
+	}
+	msg := tc.signals[0].(workflow.UserMessage)
+	// The turn loads the message from the store: it must not be added twice.
+	if !msg.Stored || msg.UserID != "u-bob" {
+		t.Errorf("signal %+v", msg)
+	}
+	if len(st.appended) != 2 {
+		t.Errorf("%d messages stored, want both", len(st.appended))
+	}
+
+	// The session can call the agent on every message.
+	if w := call(t, h, http.MethodPut, "/sessions/s1/agent-mode", `{"mode":"always"}`, bob); w.Code != http.StatusNoContent {
+		t.Fatalf("set mode: %d", w.Code)
+	}
+	if !send("et maintenant ?") {
+		t.Error("mode always did not call the agent")
+	}
+	if w := call(t, h, http.MethodPut, "/sessions/s1/agent-mode", `{"mode":"sometimes"}`, bob); w.Code != http.StatusBadRequest {
+		t.Errorf("unknown mode: %d", w.Code)
 	}
 }

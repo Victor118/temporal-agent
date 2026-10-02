@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
 	"go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/client"
@@ -138,46 +137,24 @@ func (h *handler) handleTelegramWebhook(w http.ResponseWriter, r *http.Request) 
 		log.Printf("Telegram: auto-created session %s for user %s", sessionID, user.ID)
 	}
 
-	// Find active workflow or restart
-	workflowID := h.findActiveWorkflowID(r.Context(), session.SessionID)
-	if workflowID == "" {
-		newWorkflowID := fmt.Sprintf("session-%s-%d", session.SessionID, time.Now().Unix())
-		_, err := h.temporalClient.ExecuteWorkflow(r.Context(), client.StartWorkflowOptions{
-			ID:        newWorkflowID,
-			TaskQueue: h.cfg.WorkflowQueue,
-		}, workflow.SessionWorkflow, workflow.SessionWorkflowInput{
-			SessionID: session.SessionID,
-			AgentID:   sessionAgentID(session, agentID),
-			Channel:   "telegram",
-			ChannelID: channelID,
-		})
-		if err != nil {
-			log.Printf("Telegram webhook: failed to resume session: %v", err)
-			http.Error(w, "Internal error", http.StatusInternalServerError)
-			return
-		}
-		workflowID = newWorkflowID
-		log.Printf("Telegram: resumed session %s with workflow %s", session.SessionID, workflowID)
-	}
-
 	// Check if there's a pending ask_user workflow waiting for an answer
 	if answered := h.tryAnswerAskUser(r.Context(), session.SessionID, text); answered {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
 
-	// Signal the workflow with the message
-	msg := workflow.UserMessage{Text: text, UserID: user.ID, UserName: user.Name()}
-	if err := h.temporalClient.SignalWorkflow(r.Context(), workflowID, "", workflow.SignalUserMessage, msg); err != nil {
-		log.Printf("Telegram webhook: failed to signal workflow: %v", err)
+	// The full record: an auto-created session above is only partly filled.
+	full, err := h.store.GetSession(r.Context(), session.SessionID)
+	if err != nil || full == nil {
+		log.Printf("Telegram webhook: load session %s: %v", session.SessionID, err)
 		http.Error(w, "Internal error", http.StatusInternalServerError)
 		return
 	}
-	h.publishUserMessage(session.SessionID, msg)
-
-	// Set title from first message
-	go h.setTitleFrom(session.SessionID, text)
-
+	if _, err := h.deliverMessage(r.Context(), full, user, text); err != nil {
+		log.Printf("Telegram webhook: %v", err)
+		http.Error(w, "Internal error", http.StatusInternalServerError)
+		return
+	}
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -201,12 +178,4 @@ func (h *handler) tryAnswerAskUser(ctx context.Context, sessionID, answer string
 
 	log.Printf("Telegram: routed answer to ask_user workflow %s", askWfID)
 	return true
-}
-
-// sessionAgentID returns the agent recorded on the session, or fallback.
-func sessionAgentID(s *store.Session, fallback string) string {
-	if s != nil && s.AgentID != "" {
-		return s.AgentID
-	}
-	return fallback
 }

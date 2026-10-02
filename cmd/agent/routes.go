@@ -48,6 +48,7 @@ func publicRouter(h *handler, adminUI *admin.Admin) http.Handler {
 				r.Get("/", h.getSessionInfo)
 				r.Post("/fork", h.forkSession)
 				r.Post("/messages", h.sendMessage)
+				r.Put("/agent-mode", h.setAgentMode)
 				r.Post("/cancel", h.cancelAgent)
 				r.Delete("/", h.deleteSession)
 				r.Get("/state", h.getState)

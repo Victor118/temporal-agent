@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 	"go.temporal.io/api/workflowservice/v1"
@@ -281,61 +280,51 @@ func (h *handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// A fork takes messages once its summary is in: a turn started before
-	// would run without the context the fork exists to carry.
-	if sess, _ := h.store.GetSession(r.Context(), sessionID); sess != nil && sess.ForkedAtMessageID != 0 {
+	sess, err := h.store.GetSession(r.Context(), sessionID)
+	if err != nil || sess == nil {
+		http.Error(w, "Session not found", http.StatusNotFound)
+		return
+	}
+	// A fork takes messages once its summary is in: the summary must be the
+	// fork's first message, and a turn started before would lack it.
+	if sess.ForkedAtMessageID != 0 {
 		if state, err := h.forkSummaryState(r.Context(), sess); err == nil && state == summaryPending {
 			http.Error(w, "The summary of the parent session is still being written", http.StatusConflict)
 			return
 		}
 	}
 
-	// Find the active workflow for this session, or restart if none
-	workflowID := h.findActiveWorkflowID(r.Context(), sessionID)
-	if workflowID == "" {
-		// Resume with the session's agent (or the default one if it's gone)
-		var sessionAgentID string
-		if sess, _ := h.store.GetSession(r.Context(), sessionID); sess != nil {
-			sessionAgentID = sess.AgentID
-		}
-		agentID, err := h.resolveAgentID(r.Context(), sessionAgentID)
-		if err != nil {
-			agentID, err = h.resolveAgentID(r.Context(), "")
-		}
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		newWorkflowID := fmt.Sprintf("session-%s-%d", sessionID, time.Now().Unix())
-		_, err = h.temporalClient.ExecuteWorkflow(r.Context(), client.StartWorkflowOptions{
-			ID:        newWorkflowID,
-			TaskQueue: h.cfg.WorkflowQueue,
-		}, workflow.SessionWorkflow, workflow.SessionWorkflowInput{
-			SessionID: sessionID,
-			AgentID:   agentID,
-		})
-		if err != nil {
-			http.Error(w, fmt.Sprintf("Failed to resume session: %v", err), http.StatusInternalServerError)
-			return
-		}
-		workflowID = newWorkflowID
-		log.Printf("Session %s resumed with workflow %s", sessionID, workflowID)
-	}
-
-	me := auth.UserFrom(r.Context())
-	msg := workflow.UserMessage{Text: req.Content, UserID: me.ID, UserName: me.Name()}
-	err := h.temporalClient.SignalWorkflow(r.Context(), workflowID, "", workflow.SignalUserMessage, msg)
+	called, err := h.deliverMessage(r.Context(), sess, auth.UserFrom(r.Context()), req.Content)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to send message: %v", err), http.StatusInternalServerError)
 		return
 	}
-	h.publishUserMessage(sessionID, msg)
+	writeJSON(w, http.StatusAccepted, map[string]bool{"agent_called": called})
+}
 
-	// Set session title from first message (only if title is still empty)
-	go h.setTitleFrom(sessionID, req.Content)
+type agentModeRequest struct {
+	Mode string `json:"mode"`
+}
 
-	w.WriteHeader(http.StatusAccepted)
+// setAgentMode sets when human messages call the session's agent. Any member
+// may.
+func (h *handler) setAgentMode(w http.ResponseWriter, r *http.Request) {
+	var req agentModeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	switch req.Mode {
+	case store.AgentModeAuto, store.AgentModeAlways, store.AgentModeMention:
+	default:
+		http.Error(w, "mode must be auto, always or mention", http.StatusBadRequest)
+		return
+	}
+	if err := h.store.SetSessionAgentMode(r.Context(), chi.URLParam(r, "id"), req.Mode); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *handler) cancelAgent(w http.ResponseWriter, r *http.Request) {
@@ -801,17 +790,6 @@ func (h *handler) removeMember(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.WriteHeader(http.StatusNoContent)
-}
-
-// publishUserMessage shows a user's message to the other members of the
-// session, live. The sender displays it already and skips its own.
-func (h *handler) publishUserMessage(sessionID string, msg workflow.UserMessage) {
-	data, _ := json.Marshal(map[string]string{
-		"content": msg.Text,
-		"user_id": msg.UserID,
-		"author":  msg.UserName,
-	})
-	h.hub.Publish(sessionID, activity.SSEEvent{Type: "user_message", Data: data})
 }
 
 // maxTitleRunes bounds a session title taken from its first message.

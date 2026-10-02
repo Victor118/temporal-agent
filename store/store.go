@@ -40,6 +40,7 @@ type Store interface {
 	DeleteSession(ctx context.Context, sessionID string) error
 	IsSessionMember(ctx context.Context, sessionID, userID string) (bool, error)
 	ListForks(ctx context.Context, sessionID, userID string) ([]Session, error)
+	SetSessionAgentMode(ctx context.Context, sessionID, mode string) error
 	ListSessionMembers(ctx context.Context, sessionID string) ([]SessionMember, error)
 	AddSessionMember(ctx context.Context, sessionID, userID, addedBy string) error
 	RemoveSessionMember(ctx context.Context, sessionID, userID string) error

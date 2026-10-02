@@ -570,3 +570,67 @@ func TestConvertMessages_NamesTheAuthor(t *testing.T) {
 		}
 	}
 }
+
+// A member wrote while the agent was between a tool call and its result: the
+// model must still see the result right after the call, or the API rejects
+// the conversation. The message comes after the results, and is kept.
+func TestDeferInterleaved(t *testing.T) {
+	call := store.Message{Role: store.RoleAssistant, ToolCalls: []store.ToolCall{{ID: "t1"}, {ID: "t2"}}}
+	r1 := store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "t1"}}
+	r2 := store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "t2"}}
+	human := store.Message{Role: store.RoleUser, Content: `"meanwhile"`, Author: "Bob"}
+	start := store.Message{Role: store.RoleUser, Content: `"go"`}
+	done := store.Message{Role: store.RoleAssistant, Content: `"done"`}
+
+	got := deferInterleaved([]store.Message{start, call, r1, human, r2, done})
+	want := []store.Message{start, call, r1, r2, human, done}
+	if len(got) != len(want) {
+		t.Fatalf("%d messages, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i].Content != want[i].Content || (got[i].ToolResult == nil) != (want[i].ToolResult == nil) ||
+			(got[i].ToolResult != nil && got[i].ToolResult.ToolCallID != want[i].ToolResult.ToolCallID) {
+			t.Errorf("message %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+// A message the server stored already is loaded with the history, not added
+// by the turn a second time.
+func TestAgentWorkflow_StoredMessageIsNotAddedAgain(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+	registerAgentStubs(env)
+	var persisted []persistCall
+	recordPersists(env, &persisted)
+
+	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.LoadContextInput) (activity.LoadContextOutput, error) {
+		return activity.LoadContextOutput{Messages: []store.Message{
+			{Role: store.RoleUser, Content: `"we talked"`, Author: "Alice"},
+			{Role: store.RoleUser, Content: `"@agent sum it up"`, Author: "Bob"},
+		}}, nil
+	}, sdkactivity.RegisterOptions{Name: "LoadContext"})
+	var seen provider.ChatRequest
+	env.RegisterActivityWithOptions(func(ctx context.Context, req provider.ChatRequest) (provider.ChatResponse, error) {
+		seen = req
+		return provider.ChatResponse{Content: "summary", StopReason: "end_turn"}, nil
+	}, sdkactivity.RegisterOptions{Name: "CallLLM"})
+
+	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{
+		SessionID: "s1", UserID: "u-bob", UserName: "Bob", AgentID: "reviewer",
+		UserMessage: "@agent sum it up", UserMessageStored: true, TurnKey: "run-1",
+	})
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen.Messages) != 2 {
+		t.Errorf("model saw %d messages, want the 2 stored ones", len(seen.Messages))
+	}
+	for _, p := range persisted {
+		for _, role := range p.roles {
+			if role == string(store.RoleUser) {
+				t.Errorf("the turn stored a user message again: %+v", p)
+			}
+		}
+	}
+}

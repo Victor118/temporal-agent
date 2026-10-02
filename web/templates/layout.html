@@ -326,7 +326,9 @@
         #members-bar { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:8px 20px; border-bottom:1px solid #2a2a2a; font-size:12px; color:#888; }
         #members-bar input { background:#1a1a1a; border:1px solid #333; border-radius:6px; color:#e0e0e0; padding:4px 8px; font-size:12px; font-family:inherit; width:200px; }
         #members-bar button { background:#2a2a2a; color:#e0e0e0; border:none; border-radius:6px; padding:4px 10px; font-size:12px; cursor:pointer; }
-        #members-bar #leave-btn { margin-left:auto; background:none; color:#888; }
+        #members-bar #leave-btn { background:none; color:#888; }
+        #agent-mode-label { margin-left:auto; display:inline-flex; align-items:center; gap:6px; }
+        #agent-mode { background:#1a1a1a; border:1px solid #333; border-radius:6px; color:#e0e0e0; padding:3px 6px; font-size:12px; font-family:inherit; }
         #members-error { color:#ef4444; }
         .member-chip { background:#1a1a1a; border:1px solid #2a2a2a; border-radius:10px; padding:2px 8px; color:#e0e0e0; }
         .message .author { display:block; font-size:11px; color:#888; margin-bottom:2px; }
@@ -440,6 +442,13 @@
                 <button type="submit">Add</button>
             </form>
             <span id="members-error"></span>
+            <label id="agent-mode-label">Agent
+                <select id="agent-mode" onchange="setAgentMode(this.value)">
+                    <option value="auto">auto</option>
+                    <option value="always">every message</option>
+                    <option value="mention">on @agent only</option>
+                </select>
+            </label>
             <button id="leave-btn" onclick="leaveSession()">Leave</button>
         </div>
         <div id="chat" style="flex:1;overflow-y:auto;padding:20px;display:flex;flex-direction:column;gap:16px;"></div>
@@ -631,6 +640,10 @@
 
         // --- Members ---
         function renderMembers(members) {
+            if (currentSessionInfo) {
+                currentSessionInfo.members = members;
+                updateComposerHint(); // a second member turns auto mode to @agent
+            }
             document.getElementById('members-list').innerHTML = 'Members: ' + members.map(m =>
                 '<span class="member-chip" title="' + escapeHtml(m.email) + '">' + escapeHtml(userName(m)) + '</span>'
             ).join(' ');
@@ -751,8 +764,35 @@
                 msg.after(marker);
             });
 
+            currentSessionInfo = info;
+            document.getElementById('agent-mode').value = info.agent_mode || 'auto';
+            updateComposerHint();
             setForkPending(info.summary === 'pending');
             if (info.summary === 'failed') setStatus('The summary of the parent session could not be written: this fork starts without it.');
+        }
+
+        // --- Agent mode ---
+        let currentSessionInfo = null;
+
+        // Whether a plain message calls the agent, or only an @agent one.
+        function agentOnMention() {
+            if (!currentSessionInfo) return false;
+            const mode = currentSessionInfo.agent_mode || 'auto';
+            return mode === 'mention' || (mode === 'auto' && (currentSessionInfo.members || []).length > 1);
+        }
+
+        function updateComposerHint() {
+            document.getElementById('message-input').placeholder = agentOnMention()
+                ? 'Write to the session — @agent to call the agent'
+                : 'Send a message...';
+        }
+
+        async function setAgentMode(mode) {
+            const resp = await api('/sessions/' + sessionID + '/agent-mode', jsonBody('PUT', { mode }));
+            if (resp.ok && currentSessionInfo) {
+                currentSessionInfo.agent_mode = mode;
+                updateComposerHint();
+            }
         }
 
         function setForkPending(pending) {
@@ -815,8 +855,14 @@
                 const data = JSON.parse(e.data);
                 if (data.user_id === currentUser.id) return;
                 appendMessage('user', data.content, data.user_id, data.author);
-                setProcessing(true);
-                setStatus(data.author + ' asked. Thinking...');
+                if (data.agent_called) {
+                    setProcessing(true);
+                    setStatus(data.author + ' called the agent. Thinking...');
+                } else {
+                    // A message between members: stored, the agent was not
+                    // called. Reload so it gets its ID (forkable).
+                    setTimeout(() => refreshSession(), 500);
+                }
             });
 
             evtSource.addEventListener('tool_calls', (e) => {
@@ -954,10 +1000,19 @@
             appendMessage('user', content, currentUser.id, userName(currentUser));
             input.value = '';
             input.style.height = 'auto';
-            setProcessing(true);
-            setStatus('Thinking...');
 
-            await api('/sessions/' + sessionID + '/messages', jsonBody('POST', { content }));
+            const resp = await api('/sessions/' + sessionID + '/messages', jsonBody('POST', { content }));
+            if (!resp.ok) {
+                setStatus('Not sent: ' + (await resp.text()));
+                return;
+            }
+            const { agent_called } = await resp.json();
+            if (agent_called) {
+                setProcessing(true);
+                setStatus('Thinking...');
+            } else {
+                setTimeout(() => refreshSession(), 500); // its ID, to fork from it
+            }
         });
 
         // Auto-resize textarea

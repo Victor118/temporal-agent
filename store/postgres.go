@@ -122,6 +122,11 @@ const schema = `
 		ALTER TABLE sessions ADD COLUMN IF NOT EXISTS forked_by TEXT;
 		CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
 
+		-- When a human message calls the agent: 'auto' (every message when one
+		-- user is alone in the session, on @agent once several are), 'always',
+		-- or 'mention' (only on @agent).
+		ALTER TABLE sessions ADD COLUMN IF NOT EXISTS agent_mode TEXT NOT NULL DEFAULT 'auto';
+
 		-- The users of a session. Any member may add others.
 		CREATE TABLE IF NOT EXISTS session_members (
 			session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
