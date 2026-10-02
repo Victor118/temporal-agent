@@ -229,6 +229,10 @@ func Reclaim(dir string) error {
 	return os.Chmod(dir, 0o755)
 }
 
+// ErrLinkedFile is a regular file of a tree that another path shares (a hard
+// link): ReclaimTree cannot take it back.
+var ErrLinkedFile = errors.New("a file another path shares (hard link)")
+
 // ReclaimTree takes the whole tree at root back, every entry Reclaim's way:
 // owned by the worker, writable by it alone. Contents a process left behind
 // could still rewrite once Reclaim has fixed the names — a configuration, a
@@ -236,10 +240,14 @@ func Reclaim(dir string) error {
 //
 // Each directory is taken back before it is listed, so that its entries can
 // no longer change under the walk; links are taken back, never followed. A
-// file with other links is left alone: its inode is another path's too,
-// maybe outside the tree, and nothing of it is the worker's to change. An
-// open descriptor survives a change of owner: what must not change once
-// reclaimed is rewritten as a new file (restoreGitConfig).
+// regular file with other links fails the walk (ErrLinkedFile): its inode is
+// another path's too, maybe outside the tree, so it is not the worker's to
+// change, and left as it is, whoever owns the other path could still rewrite
+// it. The trees taken back here (a clone's .git, the CLI's configuration)
+// have no such file of their own making: one is a sign of tampering. An open
+// descriptor survives a change of owner: what must not change once reclaimed
+// is rewritten as a new file (restoreGitConfig), or not read from the tree
+// at all (PushBranch pushes the commit it inspected, not a ref).
 func ReclaimTree(root string) error {
 	uid, gid := geteuid(), os.Getegid()
 	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -260,7 +268,7 @@ func ReclaimTree(root string) error {
 			return os.Lchown(path, uid, gid)
 		case fi.Mode().IsRegular():
 			if st, ok := fi.Sys().(*syscall.Stat_t); ok && st.Nlink > 1 {
-				return nil
+				return fmt.Errorf("%s: %w", path, ErrLinkedFile)
 			}
 			if err := os.Lchown(path, uid, gid); err != nil {
 				return err

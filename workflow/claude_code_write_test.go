@@ -98,6 +98,10 @@ func TestImplementFeatureWorkflow_HappyPath(t *testing.T) {
 	if e.pushed.Remote != "git@host:org/repo.git" || e.pushed.Branch != out.Branch {
 		t.Errorf("push = %+v", e.pushed)
 	}
+	// Nor the commit, which is the one the inspection reported.
+	if e.pushed.Commit != "abcdef1234" {
+		t.Errorf("pushed commit = %q, want the inspected one", e.pushed.Commit)
+	}
 	if len(e.cleaned) != 1 {
 		t.Errorf("cleaned = %v, want the workspace deleted", e.cleaned)
 	}
@@ -258,5 +262,19 @@ func TestImplementFeatureWorkflow_ChangedGitConfigIsNotPushed(t *testing.T) {
 	}
 	if len(e.cleaned) != 1 {
 		t.Errorf("cleaned = %v, want the workspace deleted", e.cleaned)
+	}
+}
+
+// With several commits, the push publishes the newest the inspection listed
+// (git log lists newest first): the branch as the report describes it.
+func TestImplementFeatureWorkflow_PushesTheNewestInspectedCommit(t *testing.T) {
+	inspected := oneCommit()
+	inspected.Commits = []activity.CommitInfo{{SHA: "newest", Subject: "b"}, {SHA: "oldest", Subject: "a"}}
+	e := newImplementEnv(t, claudeCodeResult{Report: "ok", Subtype: "success"}, nil, inspected, nil)
+
+	out := e.run_(t, ImplementFeatureInput{Repo: "git@host:org/repo.git", Task: "x"})
+
+	if !out.Pushed || e.pushed == nil || e.pushed.Commit != "newest" {
+		t.Errorf("Pushed = %v, push = %+v, want the newest commit", out.Pushed, e.pushed)
 	}
 }

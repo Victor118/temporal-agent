@@ -279,48 +279,75 @@ func TestKillStrays_NeverTheWorker(t *testing.T) {
 	geteuid = os.Geteuid
 }
 
+// ownerAndMode is p's owner and mode, p's own and not a link's target.
+func ownerAndMode(t *testing.T, p string) (uint32, os.FileMode) {
+	t.Helper()
+	fi, err := os.Lstat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fi.Sys().(*syscall.Stat_t).Uid, fi.Mode()
+}
+
 // ReclaimTree takes every entry of the tree back and closes it to others,
-// without following a link out of it nor changing a file another path shares.
+// without following a link out of it.
 func TestReclaimTree(t *testing.T) {
 	requireRoot(t)
 	id := nobody(t)
 	tree := filepath.Join(id.Home, "tree")
 	outside := filepath.Join(id.Home, "outside")
-	shared := filepath.Join(id.Home, "shared")
 	os.MkdirAll(filepath.Join(tree, "sub"), 0o777)
 	os.WriteFile(filepath.Join(tree, "sub", "f"), []byte("f"), 0o666)
 	os.WriteFile(outside, []byte("o"), 0o666)
-	os.WriteFile(shared, []byte("s"), 0o666)
 	os.Symlink(outside, filepath.Join(tree, "link"))
-	os.Link(shared, filepath.Join(tree, "hard"))
-	for _, p := range []string{tree, outside, shared} {
+	for _, p := range []string{tree, outside} {
 		if err := id.Give(p); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for _, p := range []string{tree, filepath.Join(tree, "sub"), filepath.Join(tree, "sub", "f"), outside, shared} {
+	for _, p := range []string{tree, filepath.Join(tree, "sub"), filepath.Join(tree, "sub", "f"), outside} {
 		os.Chmod(p, 0o777)
 	}
 
 	if err := ReclaimTree(tree); err != nil {
 		t.Fatal(err)
 	}
-	stat := func(p string) (uint32, os.FileMode) {
-		fi, err := os.Lstat(p)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return fi.Sys().(*syscall.Stat_t).Uid, fi.Mode()
-	}
 	for _, p := range []string{tree, filepath.Join(tree, "sub"), filepath.Join(tree, "sub", "f"), filepath.Join(tree, "link")} {
-		uid, mode := stat(p)
+		uid, mode := ownerAndMode(t, p)
 		if uid != 0 || (mode&os.ModeSymlink == 0 && mode.Perm()&0o022 != 0) {
 			t.Errorf("%s: uid %d, mode %v after ReclaimTree", p, uid, mode)
 		}
 	}
-	for _, p := range []string{outside, shared} {
-		if uid, mode := stat(p); uid != id.UID || mode.Perm() != 0o777 {
-			t.Errorf("%s, outside the tree, changed: uid %d, mode %v", p, uid, mode)
+	if uid, mode := ownerAndMode(t, outside); uid != id.UID || mode.Perm() != 0o777 {
+		t.Errorf("%s, outside the tree, changed: uid %d, mode %v", outside, uid, mode)
+	}
+}
+
+// A file of the tree another path shares is not taken back, which would
+// change the other path's file too, nor left as it is, the other path's
+// owner still able to rewrite it: ReclaimTree fails, naming it.
+func TestReclaimTree_RefusesAFileAnotherPathShares(t *testing.T) {
+	requireRoot(t)
+	id := nobody(t)
+	tree := filepath.Join(id.Home, "tree")
+	shared := filepath.Join(id.Home, "shared")
+	os.MkdirAll(tree, 0o777)
+	os.WriteFile(shared, []byte("s"), 0o666)
+	if err := os.Link(shared, filepath.Join(tree, "hard")); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{tree, shared} {
+		if err := id.Give(p); err != nil {
+			t.Fatal(err)
 		}
+	}
+	os.Chmod(shared, 0o666)
+
+	err := ReclaimTree(tree)
+	if !errors.Is(err, ErrLinkedFile) || !strings.Contains(err.Error(), "hard") {
+		t.Errorf("err = %v, want ErrLinkedFile naming the file", err)
+	}
+	if uid, mode := ownerAndMode(t, shared); uid != id.UID || mode.Perm() != 0o666 {
+		t.Errorf("the other path's file changed: uid %d, mode %v", uid, mode)
 	}
 }

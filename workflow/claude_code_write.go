@@ -202,10 +202,13 @@ func implementFeature(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCod
 			RetryPolicy: &temporal.RetryPolicy{MaximumAttempts: 2},
 		}),
 		ccAct.PushBranch,
+		// The newest commit the inspection listed, not the branch as it
+		// stands at the push: what is published is what out.Commits says.
 		activity.PushBranchInput{
 			Dir:    prepared.Dir,
 			Remote: input.Repo,
 			Branch: branch,
+			Commit: inspected.Commits[0].SHA,
 		},
 	).Get(ctx, nil); err != nil {
 		out.Error = joinErrors(out.Error, fmt.Sprintf("the commits were not pushed: %v", err))

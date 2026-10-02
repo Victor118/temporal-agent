@@ -3,6 +3,7 @@ package activity
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -209,7 +210,18 @@ func (a *ClaudeCodeActivities) reclaim(dir string) error {
 	// rewrite a file in it — refs, objects, info/ — between the moment the
 	// worker checks it and the moment its git reads it. The working tree
 	// stays the run's: git only reads it.
-	return subproc.ReclaimTree(gitDir)
+	//
+	// A clone made with --no-hardlinks has no file in .git that another path
+	// shares: one is a ref or an object the run linked to elsewhere — its
+	// working tree, say — to go on rewriting it once .git is the worker's.
+	if err := subproc.ReclaimTree(gitDir); err != nil {
+		if errors.Is(err, subproc.ErrLinkedFile) {
+			return temporal.NewNonRetryableApplicationError(
+				fmt.Sprintf("the run left a file in %s that another path shares", gitDir), "WorkspaceTampered", err)
+		}
+		return err
+	}
+	return nil
 }
 
 func restoreGitConfig(dir string) (changed bool, err error) {
@@ -563,21 +575,31 @@ type PushBranchInput struct {
 	// from .git/config — which the run had write access to.
 	Remote string `json:"remote"`
 	Branch string `json:"branch"`
+	// Commit is what Branch is set to on the remote: the newest commit the
+	// inspection listed (InspectWorkspaceOutput.Commits), a full SHA. Not
+	// the branch's ref in the clone, which something the run left running
+	// may have moved since.
+	Commit string `json:"commit"`
 }
 
 // PushBranch publishes the run's branch. This is the one step where a secret
 // meets a working tree that the run had write access to, so it takes nothing
 // from that tree: not the remote URL, not the git configuration (which could
-// rewrite that URL), and not the hooks git would otherwise run on the way out.
+// rewrite that URL), not the hooks git would otherwise run on the way out,
+// and not the commit to publish, which is the one the inspection reported.
 func (a *ClaudeCodeActivities) PushBranch(ctx context.Context, in PushBranchInput) error {
-	if in.Dir == "" || in.Remote == "" || in.Branch == "" {
-		return fmt.Errorf("push: dir, remote and branch are required")
+	if in.Dir == "" || in.Remote == "" || in.Branch == "" || in.Commit == "" {
+		return temporal.NewNonRetryableApplicationError(
+			"push: dir, remote, branch and commit are required", "InvalidInput", nil)
 	}
 	if err := a.checkRepo(in.Remote); err != nil {
 		return fmt.Errorf("push: %w", err)
 	}
 	if strings.HasPrefix(in.Branch, "-") {
 		return temporal.NewNonRetryableApplicationError(fmt.Sprintf("push: invalid branch %q", in.Branch), "InvalidInput", nil)
+	}
+	if !isFullSHA(in.Commit) {
+		return temporal.NewNonRetryableApplicationError(fmt.Sprintf("push: %q is not a full commit SHA", in.Commit), "InvalidInput", nil)
 	}
 	if _, err := a.workspaceDir(in.Dir); err != nil {
 		return fmt.Errorf("push: %w", err)
@@ -591,13 +613,27 @@ func (a *ClaudeCodeActivities) PushBranch(ctx context.Context, in PushBranchInpu
 			"push: the clone's git configuration changed since the inspection", "WorkspaceTampered", nil)
 	}
 
-	// An explicit refspec: a tag the run happened to name like the branch
-	// must not be what gets published.
-	ref := "refs/heads/" + in.Branch
+	// An explicit refspec, from the inspected commit to the branch: what is
+	// published is what the inspection reported, whatever the clone's refs
+	// say now, and a tag the run happened to name like the branch is not.
 	out, err := a.gitEnv(ctx, in.Dir, a.sshEnv(),
-		"push", "--", in.Remote, ref+":"+ref)
+		"push", "--", in.Remote, in.Commit+":refs/heads/"+in.Branch)
 	if err != nil {
 		return fmt.Errorf("push %s: %w: %s", in.Branch, err, out)
 	}
 	return nil
+}
+
+// isFullSHA tells whether s is a full object name, SHA-1 or SHA-256: what
+// git log prints with %H, and nothing git could read as a ref or an option.
+func isFullSHA(s string) bool {
+	if len(s) != 40 && len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }

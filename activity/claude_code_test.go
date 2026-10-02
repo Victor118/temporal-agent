@@ -186,6 +186,16 @@ func commitFile(t *testing.T, dir, name, content, message string) {
 	}
 }
 
+// headSHA is the commit dir's HEAD names.
+func headSHA(t *testing.T, dir string) string {
+	t.Helper()
+	out, err := exec.Command("git", "-C", dir, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
 func TestInspectWorkspaceReportsWhatTheRunProduced(t *testing.T) {
 	src := initRepo(t)
 	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: t.TempDir()}
@@ -273,7 +283,7 @@ func TestPushBranchPublishesTheBranch(t *testing.T) {
 	commitFile(t, prepared.Dir, "a.txt", "a", "feat: add a")
 
 	if err := a.PushBranch(context.Background(), PushBranchInput{
-		Dir: prepared.Dir, Remote: remote, Branch: "agent/thing",
+		Dir: prepared.Dir, Remote: remote, Branch: "agent/thing", Commit: headSHA(t, prepared.Dir),
 	}); err != nil {
 		t.Fatalf("PushBranch: %v", err)
 	}
@@ -312,7 +322,7 @@ func TestPushBranchIgnoresHooksLeftInTheWorkspace(t *testing.T) {
 	}
 
 	if err := a.PushBranch(context.Background(), PushBranchInput{
-		Dir: prepared.Dir, Remote: remote, Branch: "agent/thing",
+		Dir: prepared.Dir, Remote: remote, Branch: "agent/thing", Commit: headSHA(t, prepared.Dir),
 	}); err != nil {
 		t.Fatalf("PushBranch: %v", err)
 	}
@@ -323,10 +333,12 @@ func TestPushBranchIgnoresHooksLeftInTheWorkspace(t *testing.T) {
 
 func TestPushBranchRejectsIncompleteInput(t *testing.T) {
 	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: t.TempDir()}
+	sha := strings.Repeat("a", 40)
 	for _, in := range []PushBranchInput{
-		{Remote: "r", Branch: "b"},
-		{Dir: "/d", Branch: "b"},
-		{Dir: "/d", Remote: "r"},
+		{Remote: "r", Branch: "b", Commit: sha},
+		{Dir: "/d", Branch: "b", Commit: sha},
+		{Dir: "/d", Remote: "r", Commit: sha},
+		{Dir: "/d", Remote: "r", Branch: "b"},
 	} {
 		if err := a.PushBranch(context.Background(), in); err == nil {
 			t.Errorf("PushBranch(%+v) should have been refused", in)
@@ -474,7 +486,7 @@ func TestPushBranchRefusesAnUnlistedRemote(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, remote := range []string{"https://evil.example.com/loot.git", "--receive-pack=touch /tmp/pwned"} {
-		if err := a.PushBranch(context.Background(), PushBranchInput{Dir: prepared.Dir, Remote: remote, Branch: "agent/x"}); err == nil {
+		if err := a.PushBranch(context.Background(), PushBranchInput{Dir: prepared.Dir, Remote: remote, Branch: "agent/x", Commit: prepared.Commit}); err == nil {
 			t.Errorf("pushed to %q", remote)
 		}
 	}
@@ -574,7 +586,7 @@ func TestPushBranchIgnoresAPushInsteadOfLeftByTheRun(t *testing.T) {
 	if !inspected.GitConfigChanged {
 		t.Error("the changed configuration was not reported")
 	}
-	if err := a.PushBranch(context.Background(), PushBranchInput{Dir: prepared.Dir, Remote: remote, Branch: "agent/thing"}); err != nil {
+	if err := a.PushBranch(context.Background(), PushBranchInput{Dir: prepared.Dir, Remote: remote, Branch: "agent/thing", Commit: inspected.Commits[0].SHA}); err != nil {
 		t.Fatalf("PushBranch: %v", err)
 	}
 	if has(elsewhere) {
@@ -595,7 +607,7 @@ func TestPushBranchRefusesAConfigChangedAfterTheInspection(t *testing.T) {
 		t.Fatal(err)
 	}
 	appendGitConfig(t, prepared.Dir, "[credential]\n\thelper = !touch /tmp/pwned\n")
-	if err := a.PushBranch(context.Background(), PushBranchInput{Dir: prepared.Dir, Remote: src, Branch: "agent/x"}); err == nil {
+	if err := a.PushBranch(context.Background(), PushBranchInput{Dir: prepared.Dir, Remote: src, Branch: "agent/x", Commit: prepared.Commit}); err == nil {
 		t.Error("pushed from a tree whose configuration changed")
 	}
 
@@ -614,7 +626,7 @@ func TestInspectAndPushRefuseADirOutsideRoot(t *testing.T) {
 	if _, err := a.InspectWorkspace(context.Background(), InspectWorkspaceInput{Dir: src, Base: "HEAD"}); err == nil {
 		t.Error("inspected a directory outside Root")
 	}
-	if err := a.PushBranch(context.Background(), PushBranchInput{Dir: src, Remote: src, Branch: "main"}); err == nil {
+	if err := a.PushBranch(context.Background(), PushBranchInput{Dir: src, Remote: src, Branch: "main", Commit: headSHA(t, src)}); err == nil {
 		t.Error("pushed from a directory outside Root")
 	}
 }
@@ -742,7 +754,7 @@ func TestWorkspaceChangesHandsWithTheRun(t *testing.T) {
 		}
 		return nil
 	})
-	if err := a.PushBranch(context.Background(), PushBranchInput{Dir: prepared.Dir, Remote: remote, Branch: "agent/thing"}); err != nil {
+	if err := a.PushBranch(context.Background(), PushBranchInput{Dir: prepared.Dir, Remote: remote, Branch: "agent/thing", Commit: inspected.Commits[0].SHA}); err != nil {
 		t.Fatalf("PushBranch: %v", err)
 	}
 }
@@ -859,5 +871,91 @@ printf '{"type":"result","subtype":"success","is_error":false,"result":"seen=%s 
 	}
 	if _, err := os.Stat(cliConfigDir(filepath.Join(a.Root, "run-1"))); err == nil {
 		t.Error("the run's configuration outlived its workspace")
+	}
+}
+
+// bareRemote makes an empty bare repository holding src's main branch.
+func bareRemote(t *testing.T, src string) string {
+	t.Helper()
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	if out, err := exec.Command("git", "init", "--quiet", "--bare", "--initial-branch", "main", remote).CombinedOutput(); err != nil {
+		t.Fatalf("init bare: %v: %s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", src, "push", "--quiet", remote, "main").CombinedOutput(); err != nil {
+		t.Fatalf("seed remote: %v: %s", err, out)
+	}
+	return remote
+}
+
+// What is pushed is the commit the inspection listed: a branch moved after
+// it, by something the run left running, publishes nothing of its own.
+func TestPushBranchPublishesTheInspectedCommit(t *testing.T) {
+	src := initRepo(t)
+	remote := bareRemote(t, src)
+	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: t.TempDir()}
+	prepared, err := a.PrepareWorkspace(context.Background(), PrepareWorkspaceInput{Name: "run-1", Repo: remote, Branch: "agent/thing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitFile(t, prepared.Dir, "a.txt", "a", "feat: add a")
+	inspected, err := a.InspectWorkspace(context.Background(), InspectWorkspaceInput{Dir: prepared.Dir, Base: prepared.Commit})
+	if err != nil || len(inspected.Commits) != 1 {
+		t.Fatalf("inspected %+v, %v", inspected, err)
+	}
+
+	// After the inspection, the branch moves on to a commit nobody listed.
+	commitFile(t, prepared.Dir, "b.txt", "b", "feat: never inspected")
+	if headSHA(t, prepared.Dir) == inspected.Commits[0].SHA {
+		t.Fatal("the branch did not move: the test would prove nothing")
+	}
+
+	if err := a.PushBranch(context.Background(), PushBranchInput{
+		Dir: prepared.Dir, Remote: remote, Branch: "agent/thing", Commit: inspected.Commits[0].SHA,
+	}); err != nil {
+		t.Fatalf("PushBranch: %v", err)
+	}
+	out, err := exec.Command("git", "-C", remote, "rev-parse", "refs/heads/agent/thing").Output()
+	if err != nil {
+		t.Fatalf("branch not on the remote: %v", err)
+	}
+	if got := strings.TrimSpace(string(out)); got != inspected.Commits[0].SHA {
+		t.Errorf("the remote branch is at %s, want the inspected %s", got, inspected.Commits[0].SHA)
+	}
+
+	// Anything but a full SHA is refused before git sees it: a ref name
+	// would be read in the clone, an option by git.
+	for _, bad := range []string{"HEAD", "agent/thing", inspected.Commits[0].SHA[:12], "--all", strings.Repeat("g", 40)} {
+		err := a.PushBranch(context.Background(), PushBranchInput{Dir: prepared.Dir, Remote: remote, Branch: "agent/thing", Commit: bad})
+		var appErr *temporal.ApplicationError
+		if !errors.As(err, &appErr) || appErr.Type() != "InvalidInput" {
+			t.Errorf("Commit %q: err = %v, want InvalidInput", bad, err)
+		}
+	}
+}
+
+// A ref the run linked to a path of its own, to go on rewriting it once .git
+// is the worker's again, makes the inspection refuse the workspace.
+func TestInspectWorkspaceRefusesARefTheRunLinkedElsewhere(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("switching users takes root")
+	}
+	id := subproctest.Identity(t)
+	src := initRepo(t)
+	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: subproctest.Dir(t, nil), RunAs: id}
+	prepared, err := a.PrepareWorkspace(context.Background(), PrepareWorkspaceInput{Name: "run-1", Repo: src, Branch: "agent/thing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("ln", ".git/refs/heads/agent/thing", "keep")
+	cmd.Dir = prepared.Dir
+	id.Apply(cmd)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("the run could not link its ref: %v: %s", err, out)
+	}
+
+	_, err = a.InspectWorkspace(context.Background(), InspectWorkspaceInput{Dir: prepared.Dir, Base: prepared.Commit})
+	var appErr *temporal.ApplicationError
+	if !errors.As(err, &appErr) || appErr.Type() != "WorkspaceTampered" || !appErr.NonRetryable() {
+		t.Errorf("err = %v, want a non-retryable WorkspaceTampered", err)
 	}
 }
