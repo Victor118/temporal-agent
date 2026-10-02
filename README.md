@@ -184,7 +184,9 @@ agent/
   from the run's user, write the configuration the clone had before the run
   back as a new file, never run hooks or a filesystem monitor, and read no
   system or global configuration; a run that changed `.git/config` gets nothing
-  pushed.
+  pushed. A file of `.git` another path shares (a hard link the run made to
+  keep rewriting it) stops the run as tampered. What is pushed is the commit
+  the inspection listed, not whatever the branch's ref says by then.
 
 - **`web_fetch`** fetches a URL the model chose, so it only connects to public
   addresses: loopback, private, link-local (cloud metadata), CGNAT and reserved
