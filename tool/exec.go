@@ -3,6 +3,7 @@ package tool
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -20,8 +21,10 @@ const execKillGrace = 2 * time.Second
 // RegisterExecTool registers exec, which runs a shell command chosen by the
 // model in the workspace, as runAs.
 //
-// The command sees a filtered environment and its whole process group dies at
-// the timeout. Run as runAs, a user of its own, it cannot read the worker's
+// The command sees a filtered environment and its whole process group dies
+// when it returns or at the timeout, whichever comes first; once no command
+// runs as runAs, every process of runAs's does (subproc.Identity.Hold), one
+// that left the group included. Run as runAs, a user of its own, it cannot read the worker's
 // /proc/<pid>/environ nor its 0600 files, which hold what the filtered
 // environment leaves out. It is still not a sandbox: it can leave the
 // workspace, and read whatever that user can. A worker running as root with
@@ -29,7 +32,7 @@ const execKillGrace = 2 * time.Second
 func RegisterExecTool(r *Registry, workspacePath string, runAs *subproc.Identity) {
 	r.Register(&Tool{
 		Name:        "exec",
-		Description: "Execute a shell command in the workspace. The command runs with the workspace as the working directory.",
+		Description: "Execute a shell command in the workspace. The command runs with the workspace as the working directory. Processes it starts in the background are stopped when it returns.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -67,8 +70,18 @@ func RegisterExecTool(r *Registry, workspacePath string, runAs *subproc.Identity
 			runAs.Apply(cmd)
 			subproc.KillGroupOnCancel(cmd, syscall.SIGKILL, execKillGrace)
 
+			release := runAs.Hold()
 			output, err := cmd.CombinedOutput()
+			subproc.KillGroup(cmd)
+			release()
 			result := string(output)
+
+			// A process left in the background held the output open: the
+			// command itself succeeded, and what it left is gone.
+			if errors.Is(err, exec.ErrWaitDelay) {
+				err = nil
+				result += "\n(background processes do not outlive the command: they were stopped)"
+			}
 
 			if err != nil {
 				if ctx.Err() == context.DeadlineExceeded {

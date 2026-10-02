@@ -683,7 +683,7 @@ func TestWorkspaceChangesHandsWithTheRun(t *testing.T) {
 
 	// The run commits, as its own user.
 	os.WriteFile(filepath.Join(prepared.Dir, "a.txt"), []byte("a"), 0o644)
-	exec.Command("chown", "65534:65534", filepath.Join(prepared.Dir, "a.txt")).Run()
+	os.Lchown(filepath.Join(prepared.Dir, "a.txt"), int(id.UID), int(id.GID))
 	cmd := exec.Command("sh", "-c", "git add . && git -c user.email=run@test -c user.name=run commit --quiet -m 'feat: add a'")
 	cmd.Dir = prepared.Dir
 	cmd.Env = id.Env(subproc.Env(os.Environ(), nil, nil))

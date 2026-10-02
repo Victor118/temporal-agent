@@ -409,7 +409,29 @@ func TestRunAsAnotherUser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := fmt.Sprintf("uid=%d home=%s", subproctest.Nobody, id.Home); res.Report != want {
+	if want := fmt.Sprintf("uid=%d home=%s", subproctest.UID, id.Home); res.Report != want {
 		t.Errorf("CLI reported %q, want %q", res.Report, want)
 	}
+}
+
+// What the CLI's shells start in the background dies with the run, even one
+// that ends well: a dev server, a watcher, one that left the process group.
+func TestRunLeavesNothingRunning(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("switching users takes root")
+	}
+	id := subproctest.Identity(t)
+	bin := filepath.Join(subproctest.Dir(t, nil), "fake-claude")
+	script := `sleep 300 >/dev/null 2>&1 &
+setsid sleep 301 >/dev/null 2>&1 < /dev/null &
+printf '{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"s"}\n'`
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"+script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	r := &Runner{Binary: bin, RunAs: id}
+	if _, err := r.Run(context.Background(), Params{Cwd: subproctest.Dir(t, id), Task: "x"}); err != nil {
+		t.Fatal(err)
+	}
+	subproctest.NoProcessLeft(t, id.UID)
 }

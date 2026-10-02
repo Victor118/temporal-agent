@@ -53,15 +53,21 @@ func TestKillGroupOnCancel(t *testing.T) {
 func alive(pid int) bool {
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		stat, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
-		if err != nil {
-			return false
-		}
-		// "pid (comm) S ...": the state follows the closing parenthesis.
-		if i := strings.LastIndexByte(string(stat), ')'); i > 0 && strings.HasPrefix(string(stat[i+1:]), " Z") {
+		if !runs(pid) {
 			return false
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 	return true
+}
+
+// runs reports whether pid runs now: neither gone nor a zombie.
+func runs(pid int) bool {
+	stat, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if err != nil {
+		return false
+	}
+	// "pid (comm) S ...": the state follows the closing parenthesis.
+	i := strings.LastIndexByte(string(stat), ')')
+	return i < 0 || !strings.HasPrefix(string(stat[i+1:]), " Z")
 }

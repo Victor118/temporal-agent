@@ -144,7 +144,9 @@ type Runner struct {
 // input: it either finishes or hits its own limits. When ctx is cancelled —
 // an activity timeout, a cancelled workflow — the whole process group is
 // signalled, not just the CLI, because it spawns shells of its own that would
-// otherwise outlive it.
+// otherwise outlive it; when the CLI exits, what is left of the group is
+// killed, and with RunAs, every process of that user once no other command of
+// this worker runs as it (subproc.Identity.Hold).
 func (r *Runner) Run(ctx context.Context, p Params) (Result, error) {
 	if p.Cwd == "" {
 		return Result{}, errors.New("claudecode: cwd is required")
@@ -183,6 +185,8 @@ func (r *Runner) Run(ctx context.Context, p Params) (Result, error) {
 	}
 
 	start := time.Now()
+	release := r.RunAs.Hold()
+	defer release()
 	if err := cmd.Start(); err != nil {
 		return Result{}, fmt.Errorf("claudecode: cannot start %q: %w", r.binary(), err)
 	}
@@ -199,6 +203,9 @@ func (r *Runner) Run(ctx context.Context, p Params) (Result, error) {
 	wg.Wait()
 
 	waitErr := cmd.Wait()
+	// What the CLI's shells left running dies with the run, not only with a
+	// cancelled one: a dev server, a watcher.
+	subproc.KillGroup(cmd)
 	res.ExitCode = cmd.ProcessState.ExitCode()
 	res.Stderr = tail.String()
 	if res.DurationMS == 0 {

@@ -1,6 +1,7 @@
 package subproc
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func TestParseIdentity(t *testing.T) {
@@ -78,6 +80,11 @@ func requireRoot(t *testing.T) {
 	}
 }
 
+// testUID is the user this test binary runs commands as: one of its own, as
+// subproctest.UID is for the others (Hold ends every process of a user once
+// none of its commands runs, and the packages' tests run at the same time).
+var testUID = uint32(40000 + os.Getpid()%20000)
+
 // nobody is an identity the tests can switch to, with a home of its own.
 func nobody(t *testing.T) *Identity {
 	t.Helper()
@@ -86,7 +93,7 @@ func nobody(t *testing.T) *Identity {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(home) })
-	id := &Identity{UID: 65534, GID: 65534, Home: home}
+	id := &Identity{UID: testUID, GID: testUID, Home: home}
 	if err := id.PrepareHome(); err != nil {
 		t.Fatal(err)
 	}
@@ -114,10 +121,11 @@ func TestApply_TheWorkersEnvironmentIsOutOfReach(t *testing.T) {
 		t.Fatalf("the command read the worker's environment:\n%s", out)
 	}
 	lines := strings.Split(string(out), "\n")
-	if lines[0] != "65534" {
-		t.Errorf("the command ran as %q, want 65534", lines[0])
+	want := strconv.Itoa(int(testUID))
+	if lines[0] != want {
+		t.Errorf("the command ran as %q, want %s", lines[0], want)
 	}
-	if len(lines) < 2 || lines[1] != "65534" {
+	if len(lines) < 2 || lines[1] != want {
 		t.Errorf("the command's groups are %q, want its own alone", lines[1])
 	}
 }
@@ -158,4 +166,115 @@ func TestReclaim(t *testing.T) {
 	if err := Reclaim(filepath.Join(dir, "given")); err == nil {
 		t.Error("reclaimed a file as a directory")
 	}
+}
+
+// startAs starts script as id in a process group of its own, as the worker
+// starts a command, and waits for it.
+func startAs(t *testing.T, id *Identity, script string) *exec.Cmd {
+	t.Helper()
+	cmd := exec.CommandContext(context.Background(), "sh", "-c", script)
+	cmd.Dir = id.Home
+	id.Apply(cmd)
+	KillGroupOnCancel(cmd, syscall.SIGKILL, time.Second)
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+	return cmd
+}
+
+// runningAs counts the processes of id's still running, zombies aside.
+func runningAs(id *Identity) int {
+	n := 0
+	entries, _ := os.ReadDir("/proc")
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
+		}
+		var st syscall.Stat_t
+		if syscall.Stat("/proc/"+e.Name(), &st) == nil && st.Uid == id.UID && runs(pid) {
+			n++
+		}
+	}
+	return n
+}
+
+// A command that returns leaves nothing behind in its group: KillGroup ends
+// what it started in the background.
+func TestKillGroup_AfterACommandReturns(t *testing.T) {
+	requireRoot(t)
+	id := nobody(t)
+	cmd := startAs(t, id, "sleep 300 >/dev/null 2>&1 & echo $! > child.pid")
+	raw, _ := os.ReadFile(filepath.Join(id.Home, "child.pid"))
+	pid, _ := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if !alive(pid) {
+		t.Fatal("the background process is not running: the test would prove nothing")
+	}
+	KillGroup(cmd)
+	if alive(pid) {
+		t.Errorf("the background process %d survived its command", pid)
+	}
+}
+
+// What left the command's group (setsid) is ended once no other command runs
+// as the same user, and only then.
+func TestHold_EndsStraysWhenTheLastCommandIsDone(t *testing.T) {
+	requireRoot(t)
+	id := nobody(t)
+
+	first := id.Hold()
+	second := id.Hold()
+	startAs(t, id, "setsid sleep 301 >/dev/null 2>&1 < /dev/null &")
+	time.Sleep(100 * time.Millisecond)
+	if runningAs(id) == 0 {
+		t.Fatal("the detached process is not running: the test would prove nothing")
+	}
+	first()
+	id.KillStrays()
+	if runningAs(id) == 0 {
+		t.Fatal("a process was ended while a command still ran as its user")
+	}
+	second()
+	deadline := time.Now().Add(2 * time.Second)
+	for runningAs(id) > 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if n := runningAs(id); n > 0 {
+		t.Errorf("%d processes outlived the last command", n)
+	}
+
+	// With nothing held, KillStrays ends them at once.
+	startAs(t, id, "setsid sleep 302 >/dev/null 2>&1 < /dev/null &")
+	time.Sleep(100 * time.Millisecond)
+	id.KillStrays()
+	deadline = time.Now().Add(2 * time.Second)
+	for runningAs(id) > 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if n := runningAs(id); n > 0 {
+		t.Errorf("%d processes outlived KillStrays", n)
+	}
+}
+
+// Ending the strays never ends the worker: not when the identity is the
+// worker's own user, nor with no identity.
+func TestKillStrays_NeverTheWorker(t *testing.T) {
+	requireRoot(t)
+	var none *Identity
+	none.KillStrays()
+	none.Hold()()
+
+	id := nobody(t)
+	startAs(t, id, "setsid sleep 303 >/dev/null 2>&1 < /dev/null &")
+	defer id.KillStrays()
+	time.Sleep(100 * time.Millisecond)
+	defer func(f func() int) { geteuid = f }(geteuid)
+	geteuid = func() int { return int(id.UID) } // the worker runs as id
+	id.KillStrays()
+	id.Hold()()
+	time.Sleep(100 * time.Millisecond)
+	if runningAs(id) == 0 {
+		t.Error("the worker's own user's processes were ended")
+	}
+	geteuid = os.Geteuid
 }

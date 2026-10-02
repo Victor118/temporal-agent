@@ -126,7 +126,7 @@ Admins manage the other accounts in the back-office, under `/admin/users`.
 | `AGENT_DEFINITIONS_FILE` | Agents seed file (default `./agents.yaml`) |
 | `WORKER_CONFIG` | Worker config: tool queue, exposed tools, MCP servers (default `./worker.yaml`, see `worker.example.yaml`) |
 | `MCP_SERVERS` | JSON array of MCP servers, used only without a worker config |
-| `RUN_AS_UID`, `RUN_AS_GID` | User (and group, default: the uid) that `exec` and coding runs run as. Set to `10001` (`agent-run`) by both images. Empty on a worker running as root = `exec` and coding runs are refused |
+| `RUN_AS_UID`, `RUN_AS_GID` | User (and group, default: the uid) that `exec` and coding runs run as. Set to `10001` (`agent-run`) by both images. Empty on a worker running as root = `exec` and coding runs are refused. Must be a uid of its own: its processes are killed whenever no command runs |
 | `CLAUDE_CODE_REPOS` | Comma-separated globs of the repositories a coding worker (`analyze_repo`, `implement_feature`) may clone and push to, e.g. `git@github.com:acme/*,https://github.com/acme/*` (`*` stops at a `/`). Empty = every repository is refused |
 | `INTERNAL_ADDR` | Address of the internal API that receives worker notifications (default `:9999`). Keep it off the public network |
 | `NOTIFY_URL` | Base URL a worker posts its notifications to (default `http://localhost:9999`) |
@@ -159,7 +159,7 @@ agent/
 
 - **`exec`** and **coding runs** execute commands chosen by a model. They get a
   filtered environment (no `DATABASE_URL`, no API keys: see `subproc.Env`),
-  their whole process group is killed at the timeout, and they run as the user
+  their whole process group is killed when they return or time out, and they run as the user
   `RUN_AS_UID` names, never as the worker's: a command run as the worker's user
   reads the platform's credentials back from the worker's
   `/proc/<pid>/environ`, and its 0600 files (the git key). Both images create
@@ -167,8 +167,11 @@ agent/
   root without it refuses `exec` and coding runs. The worker hands it the
   workspace and `CLAUDE_CONFIG_DIR` at startup, and each clone for the length
   of a run. Its Go caches are its own (`$HOME/go`, `$HOME/.cache`): the
-  worker's are what the agent itself is built from. It is still **not a
-  sandbox**: a command can leave the workspace and read whatever that user can.
+  worker's are what the agent itself is built from. Once no command of the
+  worker runs as that user, every process of it is killed, one that left the
+  process group included: the uid must be dedicated to this. It is still **not
+  a sandbox**: a command can leave the workspace and read whatever that user
+  can.
 
 - **Coding runs** edit their clone, `.git/config` included. The worker's own
   git commands after the run (inspection, push) put back the configuration the

@@ -70,7 +70,8 @@ func hasAnyPrefix(s string, prefixes []string) bool {
 // reaches the shell: a build or a server it started keeps running after the
 // activity is gone. grace bounds how long Wait then waits for the pipes a
 // straggler may still hold. cmd must come from exec.CommandContext, the only
-// kind os/exec cancels.
+// kind os/exec cancels. Once cmd has been waited for, KillGroup ends what is
+// left of the group.
 func KillGroupOnCancel(cmd *exec.Cmd, sig syscall.Signal, grace time.Duration) {
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
@@ -78,4 +79,21 @@ func KillGroupOnCancel(cmd *exec.Cmd, sig syscall.Signal, grace time.Duration) {
 	cmd.SysProcAttr.Setpgid = true
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, sig) }
 	cmd.WaitDelay = grace
+}
+
+// KillGroup kills what is left of cmd's process group once cmd has been
+// waited for, however it ended: what the command started in the background
+// (`server &`, a watcher) and left running when it returned. Cancellation
+// alone only covers a command that did not return.
+//
+// The group is named by the leader's pid, which Wait has just released. While
+// anything is left in the group, the pid still names it and is not handed out
+// again; once nothing is, it could only name another group after the whole
+// pid range went round. cmd must have been started with KillGroupOnCancel; a
+// cmd that never started is left alone.
+func KillGroup(cmd *exec.Cmd) {
+	if cmd.Process == nil || cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setpgid {
+		return
+	}
+	syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 }

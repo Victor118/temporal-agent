@@ -173,7 +173,7 @@ func TestExec_RunsAsTheIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(result, strconv.Itoa(subproctest.Nobody)+" ") || strings.HasSuffix(result, " /go") {
+	if !strings.HasPrefix(result, strconv.Itoa(int(subproctest.UID))+" ") || strings.HasSuffix(result, " /go") {
 		t.Errorf("got %q, want nobody with a GOPATH of its own", result)
 	}
 }
@@ -205,5 +205,26 @@ func TestExec_TimeoutKillsChildren(t *testing.T) {
 			t.Fatalf("child %s still runs after the timeout", pid)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// A command that returns leaves nothing running behind it as its user: not
+// what it started in the background, which held its output or did not, nor
+// what left its process group.
+func TestExec_LeavesNothingRunning(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("switching users takes root")
+	}
+	_, r := setupExecWorkspace(t)
+	for _, command := range []string{
+		"sleep 300 & echo started",
+		"sleep 300 >/dev/null 2>&1 & echo started",
+		"setsid sleep 300 >/dev/null 2>&1 < /dev/null & echo started",
+	} {
+		result, err := execExec(t, r, map[string]interface{}{"command": command})
+		if err != nil || !strings.HasPrefix(result, "started") || strings.Contains(result, "failed") {
+			t.Errorf("%s: %q, %v", command, result, err)
+		}
+		subproctest.NoProcessLeft(t, subproctest.UID)
 	}
 }

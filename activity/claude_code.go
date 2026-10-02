@@ -182,10 +182,15 @@ func (a *ClaudeCodeActivities) restoreGitConfig(dir string) (changed bool, err e
 // runs git there. A process the run left behind still runs as RunAs: once
 // they are the worker's, it can no longer swap .git, nor the configuration
 // restoreGitConfig is about to put back.
+//
+// Such a process is ended first, unless another command of this worker runs
+// as RunAs (KillStrays): a concurrent run's processes are not this one's to
+// end, and the ownership taken back below does not rely on it.
 func (a *ClaudeCodeActivities) reclaim(dir string) error {
 	if a.RunAs == nil {
 		return nil
 	}
+	a.RunAs.KillStrays()
 	if err := subproc.Reclaim(dir); err != nil {
 		return err
 	}
