@@ -48,37 +48,87 @@ func (s Status) Stronger(o Status) Status {
 // that load no longer grows with the number of tabs.
 const statusesTTL = 3 * time.Second
 
+// statusesLoadTimeout bounds one load of the session states. The load belongs
+// to no request: every request waiting for it shares it.
+const statusesLoadTimeout = 5 * time.Second
+
 // statusCache holds the last session states read from Temporal. The zero
 // value is ready to use. The map it hands out is shared: read it, never
 // write to it.
+//
+// One load runs at a time, in the background, under its own context: a
+// request that triggered it and goes away does not cancel it for the others.
+// While it runs, requests get the previous states if there are any; only a
+// request with nothing to show waits for it.
 type statusCache struct {
 	mu    sync.Mutex
 	at    time.Time
 	value map[string]Status
+	// loading is closed when the running load ends; nil when none runs.
+	loading chan struct{}
+	// gen moves on every invalidation: a load started before one must not
+	// store states that predate the action.
+	gen uint64
 }
 
-// get returns the cached states, or loads them when they are older than
-// statusesTTL. Loading holds the lock: requests arriving meanwhile wait for
-// that one load rather than starting their own.
+// get returns the cached states, reloading them when they are older than
+// statusesTTL. It waits for a load only when it has nothing else to return,
+// and no longer than ctx allows: a cancelled request gets nil.
 func (c *statusCache) get(ctx context.Context, load func(context.Context) map[string]Status) map[string]Status {
+	for {
+		c.mu.Lock()
+		if c.value != nil && time.Since(c.at) < statusesTTL {
+			v := c.value
+			c.mu.Unlock()
+			return v
+		}
+		if c.loading == nil {
+			c.loading = make(chan struct{})
+			go c.refresh(c.gen, c.loading, load)
+		}
+		stale, done := c.value, c.loading
+		c.mu.Unlock()
+
+		if stale != nil {
+			return stale
+		}
+		select {
+		case <-done:
+			// Loaded, or invalidated meanwhile: look again.
+		case <-ctx.Done():
+			return nil
+		}
+	}
+}
+
+// refresh runs one load and stores its result, unless the states were
+// invalidated since it started.
+func (c *statusCache) refresh(gen uint64, done chan struct{}, load func(context.Context) map[string]Status) {
+	ctx, cancel := context.WithTimeout(context.Background(), statusesLoadTimeout)
+	defer cancel()
+	v := load(ctx)
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.value != nil && time.Since(c.at) < statusesTTL {
-		return c.value
-	}
-	v := load(ctx)
-	if ctx.Err() == nil { // a cancelled request read nothing worth sharing
+	if c.gen == gen {
 		c.value, c.at = v, time.Now()
 	}
-	return v
+	if c.loading == done { // not replaced by a load started after an invalidation
+		c.loading = nil
+	}
+	close(done)
 }
 
 // invalidate drops the cached states: after an action that changes them, the
-// page it renders must not show the state from before.
+// page it renders must not show the state from before — neither the cached
+// one nor one a load already running read before the action.
 func (c *statusCache) invalidate() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.value = nil
+	c.gen++
+	// A running load now stores nothing; the next request starts its own.
+	c.loading = nil
 }
 
 // Statuses tells what each session is doing, cached for statusesTTL. The map

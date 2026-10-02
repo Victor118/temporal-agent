@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/victor/temporal-agent/store"
@@ -98,6 +100,97 @@ func TestStatuses_SharedForAFewSeconds(t *testing.T) {
 	s.Statuses(context.Background())
 	if len(tc.lists) != 8 {
 		t.Errorf("%d visibility queries after an invalidation, want 8", len(tc.lists))
+	}
+}
+
+// The request that starts a load and goes away does not cancel it: the
+// others share that load, and get what it read.
+func TestStatusCache_LoadOutlivesTheRequest(t *testing.T) {
+	var c statusCache
+	release := make(chan struct{})
+	var loadErr error
+	loads := 0
+	load := func(ctx context.Context) map[string]Status {
+		loads++
+		<-release
+		loadErr = ctx.Err()
+		return map[string]Status{sid: StatusWorking}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	got := make(chan map[string]Status)
+	go func() { got <- c.get(ctx, load) }()
+	cancel()
+	if v := <-got; v != nil {
+		t.Errorf("a cancelled request got %v, want nil", v)
+	}
+
+	close(release)
+	if v := c.get(context.Background(), load); v[sid] != StatusWorking {
+		t.Errorf("after the load: %v", v)
+	}
+	if loadErr != nil {
+		t.Errorf("the load ran under the cancelled request's context: %v", loadErr)
+	}
+	if loads != 1 {
+		t.Errorf("%d loads, want 1 shared", loads)
+	}
+}
+
+// While states expire and reload, requests get the previous ones instead of
+// waiting behind a slow Temporal.
+func TestStatusCache_ServesStaleStatesWhileReloading(t *testing.T) {
+	c := statusCache{value: map[string]Status{sid: StatusActive}, at: time.Now().Add(-time.Minute)}
+	release := make(chan struct{})
+	load := func(context.Context) map[string]Status {
+		<-release
+		return map[string]Status{sid: StatusWaiting}
+	}
+
+	if v := c.get(context.Background(), load); v[sid] != StatusActive {
+		t.Errorf("during the reload: %v, want the previous states", v)
+	}
+	close(release)
+	deadline := time.Now().Add(2 * time.Second)
+	for c.get(context.Background(), load)[sid] != StatusWaiting {
+		if time.Now().After(deadline) {
+			t.Fatal("the reloaded states never replaced the previous ones")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// A load that started before an action must not bring back the states from
+// before it.
+func TestStatusCache_InvalidationDiscardsARunningLoad(t *testing.T) {
+	var c statusCache
+	release := make(chan struct{})
+	var loads atomic.Int32
+	load := func(context.Context) map[string]Status {
+		if loads.Add(1) == 1 {
+			<-release
+			return map[string]Status{sid: StatusActive}
+		}
+		return map[string]Status{sid: StatusIdle}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { c.get(ctx, load) }()
+	for {
+		c.mu.Lock()
+		started := c.loading != nil
+		c.mu.Unlock()
+		if started {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	c.invalidate()
+	close(release)
+	cancel()
+
+	if v := c.get(context.Background(), load); v[sid] != StatusIdle {
+		t.Errorf("got %v, want the states read after the invalidation", v)
 	}
 }
 
