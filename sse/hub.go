@@ -28,7 +28,9 @@ func (h *Hub) Subscribe(sessionID string) chan activity.SSEEvent {
 	return ch
 }
 
-// Unsubscribe removes a channel from the session's subscriber list.
+// Unsubscribe removes a channel from the session's subscriber list and closes
+// it. It takes the write lock, which waits for any Publish still sending: a
+// channel is never closed while a send to it may be in flight.
 func (h *Hub) Unsubscribe(sessionID string, ch chan activity.SSEEvent) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -46,13 +48,16 @@ func (h *Hub) Unsubscribe(sessionID string, ch chan activity.SSEEvent) {
 	}
 }
 
-// Publish sends an event to all subscribers of the given session.
+// Publish sends an event to all subscribers of the given session. The read
+// lock is held for the whole loop: sending after releasing it raced with
+// Unsubscribe, and a send on the channel it had just closed panicked — taking
+// the server down, since the internal router has no recoverer. The sends never
+// block, so holding the lock costs nothing.
 func (h *Hub) Publish(sessionID string, event activity.SSEEvent) {
 	h.mu.RLock()
-	subs := h.subscribers[sessionID]
-	h.mu.RUnlock()
+	defer h.mu.RUnlock()
 
-	for _, ch := range subs {
+	for _, ch := range h.subscribers[sessionID] {
 		select {
 		case ch <- event:
 		default:
