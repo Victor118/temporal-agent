@@ -4,20 +4,13 @@ import (
 	"context"
 	"log"
 	"net/http"
-	"os"
-	"os/signal"
-	"syscall"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/spf13/cobra"
-	"go.temporal.io/sdk/client"
 
-	"github.com/victor/temporal-agent/auth"
 	"github.com/victor/temporal-agent/config"
 	"github.com/victor/temporal-agent/sse"
-	"github.com/victor/temporal-agent/store"
-	"github.com/victor/temporal-agent/web/admin"
 )
 
 var serverCmd = &cobra.Command{
@@ -30,23 +23,13 @@ func runServer(cmd *cobra.Command, args []string) {
 	cfg := config.Load()
 
 	// Temporal client (for starting/signaling/querying workflows)
-	temporalClient, err := client.Dial(client.Options{
-		HostPort:  cfg.TemporalHost,
-		Namespace: cfg.TemporalNamespace,
-	})
-	if err != nil {
-		log.Fatalf("Failed to connect to Temporal: %v", err)
-	}
+	temporalClient := dialTemporal(cfg)
 	defer temporalClient.Close()
 
 	// SSE hub
 	hub := sse.NewHub()
 
-	// Store
-	st, err := store.NewPostgresStore(cfg.DatabaseURL)
-	if err != nil {
-		log.Fatalf("Failed to init store: %v", err)
-	}
+	st := openStore(cfg)
 	defer st.Close()
 
 	// Seed agents missing from the DB (the DB is the source of truth)
@@ -54,19 +37,13 @@ func runServer(cmd *cobra.Command, args []string) {
 		log.Fatalf("Failed to seed agents: %v", err)
 	}
 
-	// Back-office
+	// Back-office skills: the server and the workers reload the repo when
+	// skills_version moves.
 	skills, skillsSource := serverSkills(context.Background(), cfg, st)
-	authSvc := &auth.Service{Store: st, Limits: auth.DefaultLoginLimits()}
-	adminUI := admin.New(admin.Config{
-		Auth:         authSvc,
-		Store:        st,
-		Temporal:     temporalClient,
-		Skills:       skills,
-		SkillsSource: skillsSource,
-		// The server and the workers reload the repo when skills_version moves.
-		SkillsReloadable: cfg.SkillsRepo != "",
-		DefaultAgentID:   cfg.DefaultAgentID,
-		WorkflowQueue:    cfg.WorkflowQueue,
+	handler := newHTTPHandler(cfg, st, temporalClient, hub, httpOptions{
+		skills:           skills,
+		skillsSource:     skillsSource,
+		skillsReloadable: cfg.SkillsRepo != "",
 	})
 
 	// Internal API (receives SSE notifications from workers)
@@ -75,9 +52,8 @@ func runServer(cmd *cobra.Command, args []string) {
 	if cfg.InternalAPIKey == "" {
 		log.Println("Warning: INTERNAL_API_KEY is not set, the internal API refuses every worker notification")
 	}
-	warnClosedWebhooks(cfg)
 
-	publicSrv := &http.Server{Addr: cfg.HTTPAddr, Handler: newServer(cfg, st, temporalClient, hub, authSvc, adminUI.Routes()).routes()}
+	publicSrv := &http.Server{Addr: cfg.HTTPAddr, Handler: handler}
 	internalSrv := &http.Server{Addr: cfg.InternalAddr, Handler: internalRouter}
 
 	// Start both servers
@@ -90,9 +66,7 @@ func runServer(cmd *cobra.Command, args []string) {
 
 	// Graceful shutdown
 	go func() {
-		sigCh := make(chan os.Signal, 1)
-		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-		<-sigCh
+		waitForSignal()
 		log.Println("Shutting down server...")
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()

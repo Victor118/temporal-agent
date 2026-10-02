@@ -11,7 +11,7 @@
 
 ## Architecture
 
-- 3 modes : `agent server`, `agent worker`, `agent dev` (les deux combinés)
+- 3 modes : `agent server`, `agent worker`, `agent dev` (les deux combinés). `worker` et `dev` construisent leurs workers par le même `newWorkerRuntime` (`cmd/agent/runtime.go`) : mêmes workflows, activities et outils ; seuls diffèrent la destination des notifications web et la source des skills. Les outils Claude Code ne sont enregistrés que là où la CLI `claude` est installée. Fournisseur LLM choisi par `provider.New(LLM_PROVIDER)` (registre, `provider.Register`)
 - Server = API HTTP + SSE hub + catalogue agents + skills versioning
 - Back-office `/admin` (htmx + `html/template`, `web/admin`) : agents et utilisateurs, réservé au rôle `admin`. Le JSON du panneau admin du chat est sous `/api/admin` (admin aussi)
 - Règles des sessions dans `session.Service` (`session/`) : ouvrir, livrer un message, forker, inviter, quitter, supprimer, annuler, répondre, états lus dans Temporal. `cmd/agent` n'a que des adaptateurs minces : `api` (JSON), `ui` (htmx), `telegramChannel` ; ils changent une session par le service et ne lisent le store que pour afficher (`readStore`)

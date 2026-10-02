@@ -223,6 +223,13 @@ func (r *Runner) Run(ctx context.Context, p Params) (Result, error) {
 	return res, nil
 }
 
+// Available reports whether the CLI this runner would start is installed. A
+// worker without it has no business offering coding tools.
+func (r *Runner) Available() bool {
+	_, err := exec.LookPath(r.binary())
+	return err == nil
+}
+
 func (r *Runner) binary() string {
 	if r.Binary != "" {
 		return r.Binary
