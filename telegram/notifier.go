@@ -9,7 +9,7 @@ import (
 
 // Sender sends a text to a chat.
 type Sender interface {
-	SendMessage(chatID, text string) error
+	SendMessage(ctx context.Context, chatID, text string) error
 }
 
 // Notifier is the Telegram channel's side of the notifications: the agent's
@@ -19,7 +19,7 @@ type Notifier struct {
 	Client Sender
 }
 
-func (n *Notifier) Notify(_ context.Context, note activity.Notification) error {
+func (n *Notifier) Notify(ctx context.Context, note activity.Notification) error {
 	switch note.Event.Type {
 	case "message":
 		var data struct {
@@ -28,7 +28,7 @@ func (n *Notifier) Notify(_ context.Context, note activity.Notification) error {
 		if err := json.Unmarshal(note.Event.Data, &data); err != nil || data.Content == "" {
 			return nil
 		}
-		return n.Client.SendMessage(note.ChannelID, data.Content)
+		return n.Client.SendMessage(ctx, note.ChannelID, data.Content)
 
 	case "ask_user":
 		var data struct {
@@ -37,7 +37,7 @@ func (n *Notifier) Notify(_ context.Context, note activity.Notification) error {
 		if err := json.Unmarshal(note.Event.Data, &data); err != nil || data.Question == "" {
 			return nil
 		}
-		return n.Client.SendMessage(note.ChannelID, "❓ "+data.Question)
+		return n.Client.SendMessage(ctx, note.ChannelID, "❓ "+data.Question)
 
 	default:
 		return nil

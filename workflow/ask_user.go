@@ -72,7 +72,7 @@ func AskUserWorkflow(ctx workflow.Context, rawInput json.RawMessage) (tool.Resul
 	var notifAct *activity.NotificationActivities
 	if err := workflow.ExecuteActivity(
 		workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-			StartToCloseTimeout: 5 * time.Second,
+			StartToCloseTimeout: channelNotifyTimeout,
 			RetryPolicy:         notifyRetry,
 		}),
 		notifAct.NotifyStep,

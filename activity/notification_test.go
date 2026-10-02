@@ -2,7 +2,10 @@ package activity
 
 import (
 	"context"
+	"errors"
 	"testing"
+
+	"go.temporal.io/sdk/temporal"
 )
 
 type recordingNotifier struct{ got []Notification }
@@ -32,6 +35,28 @@ func TestNotifyStep_PicksTheChannel(t *testing.T) {
 	}
 	if len(tg.got) != 1 || tg.got[0].ChannelID != "42" || tg.got[0].Event.Type != "ask_user" {
 		t.Errorf("telegram got %+v", tg.got)
+	}
+}
+
+type failingNotifier struct{ err error }
+
+func (f failingNotifier) Notify(context.Context, Notification) error { return f.err }
+
+// A channel that delivered part of a notification must not get it again: the
+// error stops the retries. Any other failure stays retryable.
+func TestNotifyStep_NeverRetriesAPartialDelivery(t *testing.T) {
+	partial := &PartialDelivery{Delivered: 1, Total: 3, Err: errors.New("timeout")}
+	a := &NotificationActivities{Notifiers: map[string]Notifier{"telegram": failingNotifier{partial}}}
+	err := a.NotifyStep(context.Background(), NotifyInput{Channel: "telegram"})
+	var appErr *temporal.ApplicationError
+	if !errors.As(err, &appErr) || !appErr.NonRetryable() || appErr.Type() != "PartialDelivery" {
+		t.Errorf("error %v, want a non-retryable PartialDelivery", err)
+	}
+
+	a.Notifiers["telegram"] = failingNotifier{errors.New("connection refused")}
+	err = a.NotifyStep(context.Background(), NotifyInput{Channel: "telegram"})
+	if err == nil || errors.As(err, &appErr) {
+		t.Errorf("error %v, want a plain, retryable one", err)
 	}
 }
 

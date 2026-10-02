@@ -1,13 +1,18 @@
 package telegram
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf16"
 	"unicode/utf8"
+
+	"github.com/victor/temporal-agent/activity"
 )
 
 func TestSplitMessage(t *testing.T) {
@@ -59,7 +64,7 @@ func TestSendMessage_PlainTextAndErrors(t *testing.T) {
 	c := NewClient("tok")
 	c.baseURL = srv.URL
 
-	if err := c.SendMessage("42", "run `go test` on my_var_name *now"); err != nil {
+	if err := c.SendMessage(context.Background(), "42", "run `go test` on my_var_name *now"); err != nil {
 		t.Fatal(err)
 	}
 	if len(sent) != 1 || sent[0].ParseMode != "" || sent[0].Text != "run `go test` on my_var_name *now" {
@@ -67,8 +72,57 @@ func TestSendMessage_PlainTextAndErrors(t *testing.T) {
 	}
 
 	fail = true
-	err := c.SendMessage("42", "hi")
+	err := c.SendMessage(context.Background(), "42", "hi")
 	if err == nil || !strings.Contains(err.Error(), "chat not found") {
 		t.Errorf("error %v, want Telegram's reason", err)
+	}
+}
+
+// A long answer goes out in several messages. Once one is out, a failure is
+// a partial delivery, which nothing retries: the user would read the first
+// part twice. A failure that may pass is retried message by message.
+func TestSendMessage_RetriesEachPartAndNeverResendsOne(t *testing.T) {
+	defer func(d time.Duration) { retryDelay = d }(retryDelay)
+	retryDelay = time.Millisecond
+
+	var texts []string
+	failures := map[int]int{} // request number -> status to answer
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req SendMessageRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		texts = append(texts, req.Text)
+		if status, ok := failures[len(texts)]; ok {
+			w.WriteHeader(status)
+		}
+	}))
+	defer srv.Close()
+	c := NewClient("tok")
+	c.baseURL = srv.URL
+	long := strings.Repeat("a", maxMessageUnits) + strings.Repeat("b", maxMessageUnits) + "c"
+
+	// The second part fails once on a server error: it alone is sent again.
+	failures = map[int]int{2: http.StatusBadGateway}
+	if err := c.SendMessage(context.Background(), "42", long); err != nil {
+		t.Fatal(err)
+	}
+	if len(texts) != 4 || texts[1] != texts[2] || texts[0] == texts[1] || texts[3] != "c" {
+		t.Errorf("sent %d messages, want parts 1, 2, 2 again, 3", len(texts))
+	}
+
+	// The second part is refused for good: one part went out.
+	texts, failures = nil, map[int]int{2: http.StatusBadRequest}
+	err := c.SendMessage(context.Background(), "42", long)
+	var partial *activity.PartialDelivery
+	if !errors.As(err, &partial) || partial.Delivered != 1 || partial.Total != 3 {
+		t.Errorf("error %v, want a partial delivery of 1 part out of 3", err)
+	}
+	if len(texts) != 2 {
+		t.Errorf("sent %d messages, want 2: a refusal is not retried", len(texts))
+	}
+
+	// Nothing went out: a plain error, which the activity may retry.
+	texts, failures = nil, map[int]int{1: http.StatusBadRequest}
+	if err := c.SendMessage(context.Background(), "42", long); err == nil || errors.As(err, &partial) {
+		t.Errorf("error %v, want a plain failure", err)
 	}
 }

@@ -602,6 +602,13 @@ func withAuthor(content json.RawMessage, author string) json.RawMessage {
 // hold the turn that sends it.
 var notifyRetry = &temporal.RetryPolicy{MaximumAttempts: 3}
 
+// channelNotifyTimeout bounds a notification that reaches the user's channel.
+// There an answer can be several messages (Telegram cuts at 4096 characters),
+// each with its own timeout and retries: the bound covers them all, so that an
+// attempt does not expire with part of the answer sent, to be sent again by
+// the next.
+const channelNotifyTimeout = time.Minute
+
 // notifyResponse sends the agent's answer to the session's channel. A failure
 // is logged, not returned: the answer is in the transcript already, and the
 // turn must end.
@@ -613,7 +620,7 @@ func notifyResponse(ctx workflow.Context, sessionID, channel, channelID, content
 	var notifAct *activity.NotificationActivities
 	err := workflow.ExecuteActivity(
 		workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-			StartToCloseTimeout: 10 * time.Second,
+			StartToCloseTimeout: channelNotifyTimeout,
 			RetryPolicy:         notifyRetry,
 		}),
 		notifAct.NotifyStep,

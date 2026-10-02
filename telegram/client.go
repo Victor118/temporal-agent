@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf16"
+
+	"github.com/victor/temporal-agent/activity"
 )
 
 // Channel names Telegram among the channels a session reaches its user on.
@@ -20,17 +23,28 @@ const Channel = "telegram"
 // counts in UTF-16 code units.
 const maxMessageUnits = 4096
 
+// sendAttempts is how many times one message is tried before the send gives
+// up, and retryDelay the wait before the second try (doubled for the next).
+// They are retried here rather than by the activity: a retried activity
+// would send again the parts of a long answer that went through already.
+const sendAttempts = 3
+
+var retryDelay = time.Second
+
 type Client struct {
 	token   string
 	baseURL string
 	client  *http.Client
 }
 
+// NewClient returns a client whose requests each time out after 5 seconds: a
+// long answer is several requests, and they all fit in the notification's
+// activity together with their retries.
 func NewClient(token string) *Client {
 	return &Client{
 		token:   token,
 		baseURL: "https://api.telegram.org",
-		client:  &http.Client{Timeout: 10 * time.Second},
+		client:  &http.Client{Timeout: 5 * time.Second},
 	}
 }
 
@@ -45,22 +59,58 @@ type SendMessageRequest struct {
 // No parse_mode: in Telegram's Markdown, an unpaired _, * or ` — common in
 // code and identifiers — gets the whole message refused, and the agent's
 // answer never arrives. Plain text always goes through.
-func (c *Client) SendMessage(chatID, text string) error {
-	for _, chunk := range splitMessage(text, maxMessageUnits) {
-		if err := c.send(chatID, chunk); err != nil {
-			return err
+//
+// Each message is retried on its own. Once one has gone out, a failure is an
+// *activity.PartialDelivery, which nothing retries: Telegram cannot tell a
+// message it already has, and the user would read the beginning again.
+func (c *Client) SendMessage(ctx context.Context, chatID, text string) error {
+	chunks := splitMessage(text, maxMessageUnits)
+	for i, chunk := range chunks {
+		if err := c.sendRetrying(ctx, chatID, chunk); err != nil {
+			if i == 0 {
+				return err
+			}
+			return &activity.PartialDelivery{Delivered: i, Total: len(chunks), Err: err}
 		}
 	}
 	return nil
 }
 
-func (c *Client) send(chatID, text string) error {
+// sendRetrying sends one message, trying again after a failure that may pass:
+// the network, a rate limit, Telegram's own errors. A refusal (a chat that
+// does not exist) is final.
+func (c *Client) sendRetrying(ctx context.Context, chatID, text string) error {
+	delay := retryDelay
+	for attempt := 1; ; attempt++ {
+		err := c.send(ctx, chatID, text)
+		var refused *refusedError
+		if err == nil || errors.As(err, &refused) || attempt == sendAttempts {
+			return err
+		}
+		select {
+		case <-time.After(delay):
+			delay *= 2
+		case <-ctx.Done():
+			return err
+		}
+	}
+}
+
+// refusedError is Telegram declining a message for a reason a retry does not
+// change.
+type refusedError struct{ status int }
+
+func (e *refusedError) Error() string { return fmt.Sprintf("status %d", e.status) }
+
+func (c *Client) send(ctx context.Context, chatID, text string) error {
 	payload, _ := json.Marshal(SendMessageRequest{ChatID: chatID, Text: text})
-	resp, err := c.client.Post(
-		fmt.Sprintf("%s/bot%s/sendMessage", c.baseURL, c.token),
-		"application/json",
-		bytes.NewReader(payload),
-	)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		fmt.Sprintf("%s/bot%s/sendMessage", c.baseURL, c.token), bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("telegram send: %w", unwrapURLError(err))
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.client.Do(req)
 	if err != nil {
 		// The URL holds the token: report the error without it.
 		return fmt.Errorf("telegram send: %w", unwrapURLError(err))
@@ -71,7 +121,11 @@ func (c *Client) send(chatID, text string) error {
 		// Telegram says why in the body ("message is too long", "chat not
 		// found"): the status alone does not tell.
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("telegram send: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		reason := strings.TrimSpace(string(body))
+		if resp.StatusCode/100 == 4 && resp.StatusCode != http.StatusTooManyRequests {
+			return fmt.Errorf("telegram send: %w: %s", &refusedError{resp.StatusCode}, reason)
+		}
+		return fmt.Errorf("telegram send: status %d: %s", resp.StatusCode, reason)
 	}
 	return nil
 }

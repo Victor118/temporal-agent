@@ -11,7 +11,7 @@ type sent struct{ chat, text string }
 
 type fakeSender struct{ sent []sent }
 
-func (f *fakeSender) SendMessage(chatID, text string) error {
+func (f *fakeSender) SendMessage(_ context.Context, chatID, text string) error {
 	f.sent = append(f.sent, sent{chatID, text})
 	return nil
 }

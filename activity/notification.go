@@ -3,7 +3,11 @@ package activity
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log"
+
+	"go.temporal.io/sdk/temporal"
 )
 
 // SSEHub is an interface for in-process SSE notifications.
@@ -36,6 +40,21 @@ type Notification struct {
 type Notifier interface {
 	Notify(ctx context.Context, n Notification) error
 }
+
+// PartialDelivery is the error of a notification a channel delivered in part:
+// the first Delivered of Total messages went out, the rest did not. It is
+// never retried: the channel has no way to tell a message it already
+// received, so a retry would deliver those parts a second time.
+type PartialDelivery struct {
+	Delivered, Total int
+	Err              error
+}
+
+func (e *PartialDelivery) Error() string {
+	return fmt.Sprintf("delivered %d of %d parts: %v", e.Delivered, e.Total, e.Err)
+}
+
+func (e *PartialDelivery) Unwrap() error { return e.Err }
 
 // HubNotifier is the web channel: it publishes on the SSE hub — the
 // server's own in dev mode, or the server's through an HTTPNotifier.
@@ -73,5 +92,10 @@ func (a *NotificationActivities) NotifyStep(ctx context.Context, input NotifyInp
 		log.Printf("Warning: %s notification skipped (no notifier for this channel)", channel)
 		return nil
 	}
-	return n.Notify(ctx, Notification{SessionID: input.SessionID, ChannelID: input.ChannelID, Event: input.Event})
+	err := n.Notify(ctx, Notification{SessionID: input.SessionID, ChannelID: input.ChannelID, Event: input.Event})
+	var partial *PartialDelivery
+	if errors.As(err, &partial) {
+		return temporal.NewNonRetryableApplicationError(partial.Error(), "PartialDelivery", err)
+	}
+	return err
 }
