@@ -50,6 +50,7 @@ func callsAgent(mode string, members int, text, agentID string) bool {
 // message calls the agent. The turn then loads the whole conversation, the
 // messages the agent was not called on included. Reports whether it called.
 func (h *handler) deliverMessage(ctx context.Context, sess *store.Session, author *store.User, text string) (bool, error) {
+	defer h.statuses.invalidate() // the states shown next must not predate this
 	content, _ := json.Marshal(text)
 	stored := store.Message{Role: store.RoleUser, Content: string(content), UserID: author.ID, Author: author.Name()}
 	if err := h.store.AppendMessage(ctx, sess.SessionID, "msg:"+newUUID(), stored); err != nil {

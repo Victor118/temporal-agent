@@ -35,6 +35,7 @@ type handler struct {
 	cfg            *config.Config
 	registry       *tool.Registry
 	store          store.Store
+	statuses       statusCache
 }
 
 // --- Auth ---
@@ -294,6 +295,7 @@ func (h *handler) setAgentMode(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) cancelAgent(w http.ResponseWriter, r *http.Request) {
+	defer h.statuses.invalidate() // the states shown next must not predate this
 	sessionID := chi.URLParam(r, "id")
 
 	workflowID := h.findActiveWorkflowID(r.Context(), sessionID)
@@ -425,6 +427,7 @@ type answerRequest struct {
 // answerQuestion answers an ask_user of the session in the URL, by any of its
 // members.
 func (h *handler) answerQuestion(w http.ResponseWriter, r *http.Request) {
+	defer h.statuses.invalidate() // the states shown next must not predate this
 	var req answerRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)

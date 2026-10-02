@@ -227,3 +227,32 @@ func TestVisibilityQueriesTakeOnlyUUIDs(t *testing.T) {
 		t.Errorf("a forged session ID reached Temporal: %v", tc.queries)
 	}
 }
+
+// countingTemporal counts the visibility queries the session states cost.
+type countingTemporal struct {
+	fakeTemporal
+	lists int
+}
+
+func (f *countingTemporal) ListWorkflow(context.Context, *workflowservice.ListWorkflowExecutionsRequest) (*workflowservice.ListWorkflowExecutionsResponse, error) {
+	f.lists++
+	return &workflowservice.ListWorkflowExecutionsResponse{}, nil
+}
+
+// Every tab refreshes the tree: the states are read from Temporal once for
+// all of them, and again after an action changes them.
+func TestSessionStatuses_SharedForAFewSeconds(t *testing.T) {
+	tc := &countingTemporal{}
+	h := &handler{temporalClient: tc, cfg: &config.Config{}}
+	for i := 0; i < 10; i++ {
+		h.sessionStatuses(context.Background())
+	}
+	if tc.lists != 4 {
+		t.Errorf("%d visibility queries for 10 reads, want 4", tc.lists)
+	}
+	h.statuses.invalidate()
+	h.sessionStatuses(context.Background())
+	if tc.lists != 8 {
+		t.Errorf("%d visibility queries after an invalidation, want 8", tc.lists)
+	}
+}

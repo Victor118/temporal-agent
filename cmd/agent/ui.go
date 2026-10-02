@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"go.temporal.io/api/workflowservice/v1"
@@ -105,11 +107,55 @@ func goTo(w http.ResponseWriter, r *http.Request, path string) {
 
 // --- Session states, from Temporal ---
 
-// sessionStatuses tells what each session is doing, from the workflows
-// running for it: a question waiting, an agent turn, or the session's own
-// workflow waiting for messages. Three visibility queries, whatever the number
-// of sessions. A failed query degrades the states shown, nothing else.
+// statusesTTL is how long the session states are reused. Every page and every
+// tree refresh (each open tab, every 8 s) needs them, and they cost four
+// visibility queries over every running workflow: shared for a few seconds,
+// that load no longer grows with the number of tabs.
+const statusesTTL = 3 * time.Second
+
+// statusCache holds the last session states read from Temporal. The zero
+// value is ready to use. The map it hands out is shared: read it, never
+// write to it.
+type statusCache struct {
+	mu    sync.Mutex
+	at    time.Time
+	value map[string]chat.Status
+}
+
+// get returns the cached states, or loads them when they are older than
+// statusesTTL. Loading holds the lock: requests arriving meanwhile wait for
+// that one load rather than starting their own.
+func (c *statusCache) get(ctx context.Context, load func(context.Context) map[string]chat.Status) map[string]chat.Status {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.value != nil && time.Since(c.at) < statusesTTL {
+		return c.value
+	}
+	v := load(ctx)
+	if ctx.Err() == nil { // a cancelled request read nothing worth sharing
+		c.value, c.at = v, time.Now()
+	}
+	return v
+}
+
+// invalidate drops the cached states: after an action that changes them, the
+// page it renders must not show the state from before.
+func (c *statusCache) invalidate() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.value = nil
+}
+
+// sessionStatuses tells what each session is doing, cached for statusesTTL.
 func (h *handler) sessionStatuses(ctx context.Context) map[string]chat.Status {
+	return h.statuses.get(ctx, h.loadSessionStatuses)
+}
+
+// loadSessionStatuses tells what each session is doing, from the workflows
+// running for it: a question waiting, an agent turn, or the session's own
+// workflow waiting for messages. Four visibility queries, whatever the number
+// of sessions. A failed query degrades the states shown, nothing else.
+func (h *handler) loadSessionStatuses(ctx context.Context) map[string]chat.Status {
 	statuses := map[string]chat.Status{}
 	mark := func(workflowType string, status chat.Status, sessionOf func(id string) string) {
 		resp, err := h.temporalClient.ListWorkflow(ctx, &workflowservice.ListWorkflowExecutionsRequest{
@@ -459,6 +505,7 @@ func (h *handler) deleteForm(w http.ResponseWriter, r *http.Request) {
 
 // answerForm answers a question of the session in the URL, by any member.
 func (h *handler) answerForm(w http.ResponseWriter, r *http.Request) {
+	defer h.statuses.invalidate() // the states shown next must not predate this
 	sessionID := chi.URLParam(r, "id")
 	workflowID, answer := r.FormValue("workflow_id"), strings.TrimSpace(r.FormValue("answer"))
 	if answer == "" || !strings.HasPrefix(workflowID, sessionID+"-") {
@@ -474,6 +521,7 @@ func (h *handler) answerForm(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) cancelForm(w http.ResponseWriter, r *http.Request) {
+	defer h.statuses.invalidate() // the states shown next must not predate this
 	sessionID := chi.URLParam(r, "id")
 	if wf := h.findActiveWorkflowID(r.Context(), sessionID); wf != "" {
 		if err := h.temporalClient.SignalWorkflow(r.Context(), wf, "", workflow.SignalCancelAgent, nil); err != nil {

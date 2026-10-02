@@ -172,6 +172,7 @@ func (h *handler) handleTelegramWebhook(w http.ResponseWriter, r *http.Request) 
 // "<session>-tool-agent_x-<call>-tool-ask_user-…": the workflow type finds
 // them all, where an ID prefix only found the session agent's own.
 func (h *handler) tryAnswerAskUser(ctx context.Context, sessionID, answer string) bool {
+	defer h.statuses.invalidate() // the states shown next must not predate this
 	query, err := pendingQuestionsQuery(sessionID)
 	if err != nil {
 		return false

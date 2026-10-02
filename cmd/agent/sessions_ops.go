@@ -25,6 +25,7 @@ var (
 // openSession creates a session for me, with its workflow, and returns its
 // ID. agentID empty means the default agent.
 func (h *handler) openSession(ctx context.Context, me *store.User, agentID, systemPrompt, model string) (string, error) {
+	defer h.statuses.invalidate() // the states shown next must not predate this
 	agentID, err := h.resolveAgentID(ctx, agentID)
 	if err != nil {
 		return "", err
@@ -50,6 +51,7 @@ func (h *handler) openSession(ctx context.Context, me *store.User, agentID, syst
 
 // removeSession deletes a session for every member. Only its creator may.
 func (h *handler) removeSession(ctx context.Context, sessionID, by string) error {
+	defer h.statuses.invalidate() // the states shown next must not predate this
 	sess, err := h.store.GetSession(ctx, sessionID)
 	if err != nil {
 		return err
@@ -85,6 +87,7 @@ func (h *handler) inviteByEmail(ctx context.Context, sessionID, email, by string
 // leave takes a member out of a session. When the last member leaves, the
 // session goes: nobody could open it any more.
 func (h *handler) leave(ctx context.Context, sessionID, userID string) error {
+	defer h.statuses.invalidate() // the states shown next must not predate this
 	if err := h.store.RemoveSessionMember(ctx, sessionID, userID); err != nil {
 		return err
 	}
@@ -105,6 +108,7 @@ func (h *handler) leave(ctx context.Context, sessionID, userID string) error {
 // the parent up to that message, written by a workflow: the fork exists at
 // once, and takes messages once the summary is in.
 func (h *handler) fork(ctx context.Context, parentID string, messageID int64, me *store.User) (*store.Session, error) {
+	defer h.statuses.invalidate() // the states shown next must not predate this
 	parent, err := h.store.GetSession(ctx, parentID)
 	if err != nil {
 		return nil, err
