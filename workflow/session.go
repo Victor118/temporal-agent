@@ -135,6 +135,13 @@ func processTurn(actCtx, ctx workflow.Context, input SessionWorkflowInput, userM
 	state.Status = "processing"
 	state.TurnCount++
 
+	// A cancel sent while no turn ran — the stop button clicked just as the
+	// last turn ended — is about that turn, not this one: left in the channel,
+	// it would interrupt this turn before it starts and lose its message.
+	cancelCh := workflow.GetSignalChannel(ctx, SignalCancelAgent)
+	for cancelCh.ReceiveAsync(nil) {
+	}
+
 	var memAct *activity.MemoryActivities
 
 	// turnKey names this turn globally: the run ID keeps it distinct from the
@@ -168,7 +175,6 @@ func processTurn(actCtx, ctx workflow.Context, input SessionWorkflowInput, userM
 	})
 
 	// Listen for cancel signal in parallel
-	cancelCh := workflow.GetSignalChannel(ctx, SignalCancelAgent)
 	cancelSel := workflow.NewSelector(ctx)
 
 	var result AgentWorkflowOutput

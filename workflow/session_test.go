@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -83,5 +84,51 @@ func TestSessionWorkflow_EachTurnAnswersItsAuthor(t *testing.T) {
 			t.Errorf("turn %d: user %q (%q), message %q; want %q (%q), %q",
 				i, got.UserID, got.UserName, got.UserMessage, want.id, want.name, want.text)
 		}
+	}
+}
+
+// A stop sent while no turn runs must not interrupt the next one before it
+// starts; a stop during a turn still interrupts it.
+func TestSessionWorkflow_CancelOnlyStopsTheRunningTurn(t *testing.T) {
+	for _, c := range []struct {
+		name            string
+		cancelAt        time.Duration
+		wantInterrupted bool
+	}{
+		{"stop while idle", 1 * time.Second, false},
+		{"stop during the turn", 5 * time.Second, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var suite testsuite.WorkflowTestSuite
+			env := suite.NewTestWorkflowEnvironment()
+
+			env.RegisterWorkflowWithOptions(func(ctx sdkworkflow.Context, in AgentWorkflowInput) (AgentWorkflowOutput, error) {
+				if err := sdkworkflow.Sleep(ctx, 10*time.Second); err != nil {
+					return AgentWorkflowOutput{Response: "Agent cancelled."}, nil
+				}
+				return AgentWorkflowOutput{Response: "done"}, nil
+			}, sdkworkflow.RegisterOptions{Name: "AgentWorkflow"})
+			var notified []string
+			env.RegisterActivityWithOptions(func(ctx context.Context, in activity.NotifyInput) error {
+				notified = append(notified, string(in.Event.Data))
+				return nil
+			}, sdkactivity.RegisterOptions{Name: "NotifyStep"})
+
+			env.RegisterDelayedCallback(func() { env.SignalWorkflow(SignalCancelAgent, nil) }, c.cancelAt)
+			env.RegisterDelayedCallback(func() {
+				env.SignalWorkflow(SignalUserMessage, UserMessage{Text: "go", UserID: "u-alice"})
+			}, 2*time.Second)
+			env.ExecuteWorkflow(SessionWorkflow, SessionWorkflowInput{SessionID: "s1", AgentID: "default"})
+
+			interrupted := false
+			for _, n := range notified {
+				if strings.Contains(n, "interrupted") {
+					interrupted = true
+				}
+			}
+			if interrupted != c.wantInterrupted {
+				t.Errorf("interrupted = %v, want %v (notifications %v)", interrupted, c.wantInterrupted, notified)
+			}
+		})
 	}
 }
