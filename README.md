@@ -174,8 +174,9 @@ agent/
   can.
 
 - **Coding runs** edit their clone, `.git/config` included. The worker's own
-  git commands after the run (inspection, push) put back the configuration the
-  clone had before the run, never run hooks or a filesystem monitor, and read no
+  git commands after the run (inspection, push) first take all of `.git` back
+  from the run's user, write the configuration the clone had before the run
+  back as a new file, never run hooks or a filesystem monitor, and read no
   system or global configuration; a run that changed `.git/config` gets nothing
   pushed.
 

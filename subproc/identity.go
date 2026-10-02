@@ -228,3 +228,47 @@ func Reclaim(dir string) error {
 	}
 	return os.Chmod(dir, 0o755)
 }
+
+// ReclaimTree takes the whole tree at root back, every entry Reclaim's way:
+// owned by the worker, writable by it alone. Contents a process left behind
+// could still rewrite once Reclaim has fixed the names — a configuration, a
+// ref — are its no longer.
+//
+// Each directory is taken back before it is listed, so that its entries can
+// no longer change under the walk; links are taken back, never followed. A
+// file with other links is left alone: its inode is another path's too,
+// maybe outside the tree, and nothing of it is the worker's to change. An
+// open descriptor survives a change of owner: what must not change once
+// reclaimed is rewritten as a new file (restoreGitConfig).
+func ReclaimTree(root string) error {
+	uid, gid := geteuid(), os.Getegid()
+	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		fi, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		switch {
+		case fi.IsDir():
+			if err := os.Lchown(path, uid, gid); err != nil {
+				return err
+			}
+			return os.Chmod(path, fi.Mode().Perm()&^0o022|0o700)
+		case fi.Mode()&fs.ModeSymlink != 0:
+			return os.Lchown(path, uid, gid)
+		case fi.Mode().IsRegular():
+			if st, ok := fi.Sys().(*syscall.Stat_t); ok && st.Nlink > 1 {
+				return nil
+			}
+			if err := os.Lchown(path, uid, gid); err != nil {
+				return err
+			}
+			return os.Chmod(path, fi.Mode().Perm()&^0o022)
+		default:
+			// A FIFO, a socket: nothing git keeps; taken back, not opened.
+			return os.Lchown(path, uid, gid)
+		}
+	})
+}

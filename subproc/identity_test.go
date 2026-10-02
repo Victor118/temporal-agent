@@ -278,3 +278,49 @@ func TestKillStrays_NeverTheWorker(t *testing.T) {
 	}
 	geteuid = os.Geteuid
 }
+
+// ReclaimTree takes every entry of the tree back and closes it to others,
+// without following a link out of it nor changing a file another path shares.
+func TestReclaimTree(t *testing.T) {
+	requireRoot(t)
+	id := nobody(t)
+	tree := filepath.Join(id.Home, "tree")
+	outside := filepath.Join(id.Home, "outside")
+	shared := filepath.Join(id.Home, "shared")
+	os.MkdirAll(filepath.Join(tree, "sub"), 0o777)
+	os.WriteFile(filepath.Join(tree, "sub", "f"), []byte("f"), 0o666)
+	os.WriteFile(outside, []byte("o"), 0o666)
+	os.WriteFile(shared, []byte("s"), 0o666)
+	os.Symlink(outside, filepath.Join(tree, "link"))
+	os.Link(shared, filepath.Join(tree, "hard"))
+	for _, p := range []string{tree, outside, shared} {
+		if err := id.Give(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, p := range []string{tree, filepath.Join(tree, "sub"), filepath.Join(tree, "sub", "f"), outside, shared} {
+		os.Chmod(p, 0o777)
+	}
+
+	if err := ReclaimTree(tree); err != nil {
+		t.Fatal(err)
+	}
+	stat := func(p string) (uint32, os.FileMode) {
+		fi, err := os.Lstat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return fi.Sys().(*syscall.Stat_t).Uid, fi.Mode()
+	}
+	for _, p := range []string{tree, filepath.Join(tree, "sub"), filepath.Join(tree, "sub", "f"), filepath.Join(tree, "link")} {
+		uid, mode := stat(p)
+		if uid != 0 || (mode&os.ModeSymlink == 0 && mode.Perm()&0o022 != 0) {
+			t.Errorf("%s: uid %d, mode %v after ReclaimTree", p, uid, mode)
+		}
+	}
+	for _, p := range []string{outside, shared} {
+		if uid, mode := stat(p); uid != id.UID || mode.Perm() != 0o777 {
+			t.Errorf("%s, outside the tree, changed: uid %d, mode %v", p, uid, mode)
+		}
+	}
+}

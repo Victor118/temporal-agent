@@ -3,6 +3,7 @@ package activity
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -681,7 +682,17 @@ func TestWorkspaceChangesHandsWithTheRun(t *testing.T) {
 		t.Error("the configuration's copy, or Root, was handed to the run")
 	}
 
-	// The run commits, as its own user.
+	inode := func(path string) uint64 {
+		fi, err := os.Lstat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return fi.Sys().(*syscall.Stat_t).Ino
+	}
+	configInode := inode(filepath.Join(prepared.Dir, ".git", "config"))
+
+	// The run commits, as its own user, and leaves a file in .git that
+	// anyone may write.
 	os.WriteFile(filepath.Join(prepared.Dir, "a.txt"), []byte("a"), 0o644)
 	os.Lchown(filepath.Join(prepared.Dir, "a.txt"), int(id.UID), int(id.GID))
 	cmd := exec.Command("sh", "-c", "git add . && git -c user.email=run@test -c user.name=run commit --quiet -m 'feat: add a'")
@@ -690,6 +701,12 @@ func TestWorkspaceChangesHandsWithTheRun(t *testing.T) {
 	id.Apply(cmd)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("the run could not commit in its clone: %v: %s", err, out)
+	}
+	cmd = exec.Command("sh", "-c", "mkdir -m 777 .git/info/x && echo x > .git/info/x/open && chmod 666 .git/info/x/open")
+	cmd.Dir = prepared.Dir
+	id.Apply(cmd)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("the run could not write in its .git: %v: %s", err, out)
 	}
 
 	inspected, err := a.InspectWorkspace(context.Background(), InspectWorkspaceInput{Dir: prepared.Dir, Base: prepared.Commit})
@@ -704,6 +721,26 @@ func TestWorkspaceChangesHandsWithTheRun(t *testing.T) {
 			t.Errorf("%s is still the run's after the inspection", dir)
 		}
 	}
+	// Nothing in .git is the run's any more, nor writable by it: not the
+	// configuration, which was left as it was and is a new file all the
+	// same, not a ref, not an object.
+	// Rewritten: a descriptor the run kept open is on the old file.
+	if inode(filepath.Join(prepared.Dir, ".git", "config")) == configInode {
+		t.Error("the unchanged configuration is still the file the run had")
+	}
+	filepath.WalkDir(filepath.Join(prepared.Dir, ".git"), func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			t.Fatal(err)
+		}
+		fi, _ := os.Lstat(path)
+		if owner(path) == id.UID {
+			t.Errorf("%s is still the run's after the inspection", path)
+		}
+		if fi.Mode()&fs.ModeSymlink == 0 && fi.Mode().Perm()&0o022 != 0 {
+			t.Errorf("%s is still writable by others: %v", path, fi.Mode())
+		}
+		return nil
+	})
 	if err := a.PushBranch(context.Background(), PushBranchInput{Dir: prepared.Dir, Remote: remote, Branch: "agent/thing"}); err != nil {
 		t.Fatalf("PushBranch: %v", err)
 	}

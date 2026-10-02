@@ -178,10 +178,10 @@ func (a *ClaudeCodeActivities) restoreGitConfig(dir string) (changed bool, err e
 	return restoreGitConfig(dir)
 }
 
-// reclaim takes the workspace and its .git back from RunAs before the worker
-// runs git there. A process the run left behind still runs as RunAs: once
-// they are the worker's, it can no longer swap .git, nor the configuration
-// restoreGitConfig is about to put back.
+// reclaim takes the workspace and all of its .git back from RunAs before the
+// worker runs git there. A process the run left behind still runs as RunAs:
+// once they are the worker's, it can no longer swap .git, nor change what is
+// in it.
 //
 // Such a process is ended first, unless another command of this worker runs
 // as RunAs (KillStrays): a concurrent run's processes are not this one's to
@@ -194,11 +194,16 @@ func (a *ClaudeCodeActivities) reclaim(dir string) error {
 	if err := subproc.Reclaim(dir); err != nil {
 		return err
 	}
-	if err := subproc.Reclaim(filepath.Join(dir, ".git")); err != nil {
+	gitDir := filepath.Join(dir, ".git")
+	if err := subproc.Reclaim(gitDir); err != nil {
 		return temporal.NewNonRetryableApplicationError(
-			fmt.Sprintf("%s/.git is no longer the clone's git directory", dir), "WorkspaceTampered", err)
+			fmt.Sprintf("%s is no longer the clone's git directory", gitDir), "WorkspaceTampered", err)
 	}
-	return nil
+	// All of .git, not only its names: the run's user could otherwise still
+	// rewrite a file in it — refs, objects, info/ — between the moment the
+	// worker checks it and the moment its git reads it. The working tree
+	// stays the run's: git only reads it.
+	return subproc.ReclaimTree(gitDir)
 }
 
 func restoreGitConfig(dir string) (changed bool, err error) {
@@ -235,9 +240,8 @@ func restoreGitConfig(dir string) (changed bool, err error) {
 			changed = true
 		}
 	}
-	if !changed {
-		return false, nil
-	}
+	// Rewritten even when unchanged: the file the run's user had, and may
+	// still hold open for writing, is replaced by a new one of the worker's.
 	// A new file, never written through whatever the run left at that path:
 	// O_EXCL does not follow a symbolic link.
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
