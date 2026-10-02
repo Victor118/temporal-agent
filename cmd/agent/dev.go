@@ -183,17 +183,8 @@ func runDev(cmd *cobra.Command, args []string) {
 	})
 
 	// HTTP server
-	h := &handler{
-		auth:           authSvc,
-		temporalClient: temporalClient,
-		hub:            hub,
-		cfg:            cfg,
-		registry:       registry,
-		store:          st,
-	}
-
 	warnClosedWebhooks(cfg)
-	srv := &http.Server{Addr: cfg.HTTPAddr, Handler: publicRouter(h, adminUI)}
+	srv := &http.Server{Addr: cfg.HTTPAddr, Handler: newServer(cfg, st, temporalClient, hub, authSvc, adminUI.Routes()).routes()}
 
 	go func() {
 		sigCh := make(chan os.Signal, 1)

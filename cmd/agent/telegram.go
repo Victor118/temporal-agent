@@ -8,12 +8,9 @@ import (
 	"strconv"
 	"strings"
 
-	"go.temporal.io/api/workflowservice/v1"
-	"go.temporal.io/sdk/client"
-
+	"github.com/victor/temporal-agent/session"
 	"github.com/victor/temporal-agent/store"
 	"github.com/victor/temporal-agent/telegram"
-	"github.com/victor/temporal-agent/workflow"
 )
 
 // telegramSecretHeader carries the secret_token given to setWebhook. It is the
@@ -21,8 +18,22 @@ import (
 // guessable, and it decides whose agent runs and whose questions get answered.
 const telegramSecretHeader = "X-Telegram-Bot-Api-Secret-Token"
 
-func (h *handler) handleTelegramWebhook(w http.ResponseWriter, r *http.Request) {
-	if !secretEqual(r.Header.Get(telegramSecretHeader), h.cfg.TelegramWebhookSecret) {
+// telegramUsers finds the account a Telegram chat belongs to.
+type telegramUsers interface {
+	GetUserByTelegramID(ctx context.Context, telegramID int64) (*store.User, error)
+}
+
+// telegramChannel takes Telegram updates into sessions: a user's chat is
+// their session on this channel, a message is delivered like one typed on
+// the web, and a message while a question waits is its answer.
+type telegramChannel struct {
+	sessions *session.Service
+	users    telegramUsers
+	secret   string // TELEGRAM_WEBHOOK_SECRET; never empty once the route is mounted
+}
+
+func (t *telegramChannel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if !secretEqual(r.Header.Get(telegramSecretHeader), t.secret) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -32,23 +43,16 @@ func (h *handler) handleTelegramWebhook(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if update.Message == nil || update.Message.Text == "" {
+	// A photo, sticker or voice note has no text. Acknowledge it so Telegram
+	// stops retrying, but never turn it into an empty user message.
+	if update.Message == nil || strings.TrimSpace(update.Message.Text) == "" {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-
 	chatID := update.Message.Chat.ID
 	text := update.Message.Text
 
-	// A photo, sticker or voice note has no text. Acknowledge it so Telegram
-	// stops retrying, but never turn it into an empty user message.
-	if strings.TrimSpace(text) == "" {
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-
-	// Lookup user by telegram_id
-	user, err := h.store.GetUserByTelegramID(r.Context(), chatID)
+	user, err := t.users.GetUserByTelegramID(r.Context(), chatID)
 	if err != nil {
 		log.Printf("Telegram webhook: error looking up user: %v", err)
 		http.Error(w, "Internal error", http.StatusInternalServerError)
@@ -59,139 +63,37 @@ func (h *handler) handleTelegramWebhook(w http.ResponseWriter, r *http.Request) 
 		w.WriteHeader(http.StatusOK) // Return 200 to Telegram so it doesn't retry
 		return
 	}
-
 	channelID := strconv.FormatInt(chatID, 10)
 
-	// Telegram sessions use the default agent
-	agentID, err := h.resolveAgentID(r.Context(), "")
-	if err != nil {
-		log.Printf("Telegram webhook: %v", err)
-		http.Error(w, "Internal error", http.StatusInternalServerError)
-		return
-	}
-
-	// Handle /new command: create a fresh session
+	// /new opens a fresh session, which the chat's next messages go to.
 	if text == "/new" {
-		sessionID := newUUID()
-
-		_, err := h.temporalClient.ExecuteWorkflow(r.Context(), client.StartWorkflowOptions{
-			ID:        "session-" + sessionID,
-			TaskQueue: h.cfg.WorkflowQueue,
-		}, workflow.SessionWorkflow, workflow.SessionWorkflowInput{
-			SessionID: sessionID,
-			AgentID:   agentID,
-			Channel:   "telegram",
-			ChannelID: channelID,
-		})
+		id, err := t.sessions.Open(r.Context(), user, session.OpenOptions{Channel: telegram.Channel, ChannelID: channelID})
 		if err != nil {
 			log.Printf("Telegram webhook: failed to create session: %v", err)
 			http.Error(w, "Internal error", http.StatusInternalServerError)
 			return
 		}
-
-		if err := h.store.CreateSession(r.Context(), store.Session{
-			SessionID: sessionID,
-			CreatedBy: user.ID,
-			AgentID:   agentID,
-			Channel:   "telegram",
-			ChannelID: channelID,
-		}); err != nil {
-			log.Printf("Telegram webhook: failed to persist session: %v", err)
-		}
-
-		log.Printf("Telegram: new session %s for user %s", sessionID, user.ID)
+		log.Printf("Telegram: new session %s for user %s", id, user.ID)
 		w.WriteHeader(http.StatusOK)
 		return
 	}
 
-	// Find or create session for this user+channel
-	session, err := h.store.GetActiveSessionByChannel(r.Context(), user.ID, "telegram", channelID)
+	sess, err := t.sessions.OpenOnChannel(r.Context(), user, telegram.Channel, channelID)
 	if err != nil {
-		log.Printf("Telegram webhook: error finding session: %v", err)
+		log.Printf("Telegram webhook: find or open session: %v", err)
 		http.Error(w, "Internal error", http.StatusInternalServerError)
 		return
 	}
-
-	if session == nil {
-		// Create a new session
-		sessionID := newUUID()
-
-		_, err := h.temporalClient.ExecuteWorkflow(r.Context(), client.StartWorkflowOptions{
-			ID:        "session-" + sessionID,
-			TaskQueue: h.cfg.WorkflowQueue,
-		}, workflow.SessionWorkflow, workflow.SessionWorkflowInput{
-			SessionID: sessionID,
-			AgentID:   agentID,
-			Channel:   "telegram",
-			ChannelID: channelID,
-		})
-		if err != nil {
-			log.Printf("Telegram webhook: failed to create session: %v", err)
-			http.Error(w, "Internal error", http.StatusInternalServerError)
-			return
-		}
-
-		if err := h.store.CreateSession(r.Context(), store.Session{
-			SessionID: sessionID,
-			CreatedBy: user.ID,
-			AgentID:   agentID,
-			Channel:   "telegram",
-			ChannelID: channelID,
-		}); err != nil {
-			log.Printf("Telegram webhook: failed to persist session: %v", err)
-		}
-
-		session = &store.Session{SessionID: sessionID, AgentID: agentID}
-		log.Printf("Telegram: auto-created session %s for user %s", sessionID, user.ID)
-	}
-
-	// Check if there's a pending ask_user workflow waiting for an answer
-	if answered := h.tryAnswerAskUser(r.Context(), session.SessionID, text); answered {
+	// Telegram has no answer button: while a question waits, the next
+	// message answers it.
+	if t.sessions.AnswerPending(r.Context(), sess.SessionID, text) {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-
-	// The full record: an auto-created session above is only partly filled.
-	full, err := h.store.GetSession(r.Context(), session.SessionID)
-	if err != nil || full == nil {
-		log.Printf("Telegram webhook: load session %s: %v", session.SessionID, err)
-		http.Error(w, "Internal error", http.StatusInternalServerError)
-		return
-	}
-	if _, err := h.deliverMessage(r.Context(), full, user, text); err != nil {
+	if _, err := t.sessions.Deliver(r.Context(), sess, user, text); err != nil {
 		log.Printf("Telegram webhook: %v", err)
 		http.Error(w, "Internal error", http.StatusInternalServerError)
 		return
 	}
 	w.WriteHeader(http.StatusOK)
-}
-
-// tryAnswerAskUser checks for a running ask_user child workflow for this session
-// and signals it with the user's answer. Returns true if an ask_user was answered.
-// The question may come from a sub-agent, whose ask_user is
-// "<session>-tool-agent_x-<call>-tool-ask_user-…": the workflow type finds
-// them all, where an ID prefix only found the session agent's own.
-func (h *handler) tryAnswerAskUser(ctx context.Context, sessionID, answer string) bool {
-	defer h.statuses.invalidate() // the states shown next must not predate this
-	query, err := pendingQuestionsQuery(sessionID)
-	if err != nil {
-		return false
-	}
-	resp, err := h.temporalClient.ListWorkflow(ctx, &workflowservice.ListWorkflowExecutionsRequest{
-		Namespace: h.cfg.TemporalNamespace,
-		Query:     query,
-		PageSize:  1,
-	})
-	if err != nil || len(resp.Executions) == 0 {
-		return false
-	}
-
-	askWfID := resp.Executions[0].Execution.WorkflowId
-	if err := h.temporalClient.SignalWorkflow(ctx, askWfID, "", workflow.SignalUserAnswer, answer); err != nil {
-		log.Printf("Telegram: failed to signal ask_user workflow %s: %v", askWfID, err)
-		return false
-	}
-
-	log.Printf("Telegram: routed answer to ask_user workflow %s", askWfID)
-	return true
 }

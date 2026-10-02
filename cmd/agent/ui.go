@@ -2,41 +2,43 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/go-chi/chi/v5"
-	"go.temporal.io/api/workflowservice/v1"
 
 	"github.com/victor/temporal-agent/auth"
+	"github.com/victor/temporal-agent/session"
 	"github.com/victor/temporal-agent/store"
 	"github.com/victor/temporal-agent/web/chat"
-	"github.com/victor/temporal-agent/workflow"
 )
 
-// The HTML interface: server-rendered pages and the fragments htmx swaps in.
-// The session's SSE stream only rings the bell; the fragments carry the state.
+// ui is the HTML interface: server-rendered pages and the fragments htmx
+// swaps in. The session's SSE stream only rings the bell; the fragments carry
+// the state. Like the JSON API, it changes sessions through the session
+// service and reads the store only to show it.
+type ui struct {
+	auth     *auth.Service
+	sessions *session.Service
+	store    readStore
+}
 
 // --- Access ---
 
 // requireUserPage sends a visitor without a login session to the login page.
-func (h *handler) requireUserPage(next http.Handler) http.Handler {
+func (u *ui) requireUserPage(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		u, err := h.auth.UserFromRequest(r)
+		user, err := u.auth.UserFromRequest(r)
 		if err != nil {
 			log.Printf("ui: %v", err)
 			http.Error(w, "Internal error", http.StatusInternalServerError)
 			return
 		}
-		if u == nil {
+		if user == nil {
 			login := "/login?next=" + url.QueryEscape(r.URL.RequestURI())
 			if r.Header.Get("HX-Request") != "" {
 				w.Header().Set("HX-Redirect", login)
@@ -46,21 +48,21 @@ func (h *handler) requireUserPage(next http.Handler) http.Handler {
 			http.Redirect(w, r, login, http.StatusSeeOther)
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(auth.WithUser(r.Context(), u)))
+		next.ServeHTTP(w, r.WithContext(auth.WithUser(r.Context(), user)))
 	})
 }
 
-func (h *handler) loginPage(w http.ResponseWriter, r *http.Request) {
-	if u, _ := h.auth.UserFromRequest(r); u != nil {
+func (u *ui) loginPage(w http.ResponseWriter, r *http.Request) {
+	if user, _ := u.auth.UserFromRequest(r); user != nil {
 		http.Redirect(w, r, safeLocal(r.URL.Query().Get("next")), http.StatusSeeOther)
 		return
 	}
 	chat.Render(w, "login", chat.LoginPage{Next: r.URL.Query().Get("next")})
 }
 
-func (h *handler) loginForm(w http.ResponseWriter, r *http.Request) {
+func (u *ui) loginForm(w http.ResponseWriter, r *http.Request) {
 	page := chat.LoginPage{Email: r.FormValue("email"), Next: r.FormValue("next")}
-	token, _, err := h.auth.Login(r.Context(), auth.ClientAddr(r), page.Email, r.FormValue("password"))
+	token, _, err := u.auth.Login(r.Context(), auth.ClientAddr(r), page.Email, r.FormValue("password"))
 	status := http.StatusUnauthorized
 	switch {
 	case errors.Is(err, auth.ErrInvalidCredentials):
@@ -80,8 +82,8 @@ func (h *handler) loginForm(w http.ResponseWriter, r *http.Request) {
 	chat.Render(w, "login", page)
 }
 
-func (h *handler) logoutForm(w http.ResponseWriter, r *http.Request) {
-	h.auth.Logout(r.Context(), r)
+func (u *ui) logoutForm(w http.ResponseWriter, r *http.Request) {
+	u.auth.Logout(r.Context(), r)
 	auth.ClearCookie(w)
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
@@ -105,143 +107,23 @@ func goTo(w http.ResponseWriter, r *http.Request, path string) {
 	http.Redirect(w, r, path, http.StatusSeeOther)
 }
 
-// --- Session states, from Temporal ---
-
-// statusesTTL is how long the session states are reused. Every page and every
-// tree refresh (each open tab, every 8 s) needs them, and they cost four
-// visibility queries over every running workflow: shared for a few seconds,
-// that load no longer grows with the number of tabs.
-const statusesTTL = 3 * time.Second
-
-// statusCache holds the last session states read from Temporal. The zero
-// value is ready to use. The map it hands out is shared: read it, never
-// write to it.
-type statusCache struct {
-	mu    sync.Mutex
-	at    time.Time
-	value map[string]chat.Status
-}
-
-// get returns the cached states, or loads them when they are older than
-// statusesTTL. Loading holds the lock: requests arriving meanwhile wait for
-// that one load rather than starting their own.
-func (c *statusCache) get(ctx context.Context, load func(context.Context) map[string]chat.Status) map[string]chat.Status {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.value != nil && time.Since(c.at) < statusesTTL {
-		return c.value
-	}
-	v := load(ctx)
-	if ctx.Err() == nil { // a cancelled request read nothing worth sharing
-		c.value, c.at = v, time.Now()
-	}
-	return v
-}
-
-// invalidate drops the cached states: after an action that changes them, the
-// page it renders must not show the state from before.
-func (c *statusCache) invalidate() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.value = nil
-}
-
-// sessionStatuses tells what each session is doing, cached for statusesTTL.
-func (h *handler) sessionStatuses(ctx context.Context) map[string]chat.Status {
-	return h.statuses.get(ctx, h.loadSessionStatuses)
-}
-
-// loadSessionStatuses tells what each session is doing, from the workflows
-// running for it: a question waiting, an agent turn, or the session's own
-// workflow waiting for messages. Four visibility queries, whatever the number
-// of sessions. A failed query degrades the states shown, nothing else.
-func (h *handler) loadSessionStatuses(ctx context.Context) map[string]chat.Status {
-	statuses := map[string]chat.Status{}
-	mark := func(workflowType string, status chat.Status, sessionOf func(id string) string) {
-		resp, err := h.temporalClient.ListWorkflow(ctx, &workflowservice.ListWorkflowExecutionsRequest{
-			Namespace: h.cfg.TemporalNamespace,
-			Query:     fmt.Sprintf("WorkflowType = '%s' AND ExecutionStatus = 'Running'", workflowType),
-			PageSize:  1000,
-		})
-		if err != nil {
-			log.Printf("ui: list running %s: %v", workflowType, err)
-			return
-		}
-		for _, e := range resp.Executions {
-			if sid := sessionOf(e.Execution.WorkflowId); sid != "" {
-				statuses[sid] = statuses[sid].Stronger(status)
-			}
-		}
-	}
-	// "session-<id>" or "session-<id>-<unix time>" for a resumed run.
-	mark("SessionWorkflow", chat.StatusActive, func(id string) string { return uuidPrefix(strings.TrimPrefix(id, "session-")) })
-	// "<id>-turn-<n>", and sub-agents "<id>-tool-…".
-	mark("AgentWorkflow", chat.StatusWorking, uuidPrefix)
-	// A fork's summary being written.
-	mark("ForkSessionWorkflow", chat.StatusWorking, func(id string) string { return uuidPrefix(strings.TrimPrefix(id, "fork-")) })
-	// "<id>-tool-ask_user-…", from the session's agent or a sub-agent of it.
-	mark("AskUserWorkflow", chat.StatusWaiting, uuidPrefix)
-	return statuses
-}
-
-// uuidPrefix returns the session ID (a UUID, 36 characters) a workflow ID
-// starts with, or "".
-func uuidPrefix(id string) string {
-	if len(id) < 36 || (len(id) > 36 && id[36] != '-') {
-		return ""
-	}
-	return id[:36]
-}
-
-// pendingQuestions returns the questions the session's agents wait on.
-func (h *handler) pendingQuestions(ctx context.Context, sessionID string) []chat.Question {
-	query, err := pendingQuestionsQuery(sessionID)
-	if err != nil {
-		return nil
-	}
-	resp, err := h.temporalClient.ListWorkflow(ctx, &workflowservice.ListWorkflowExecutionsRequest{
-		Namespace: h.cfg.TemporalNamespace,
-		Query:     query,
-		PageSize:  50,
-	})
-	if err != nil {
-		log.Printf("ui: list questions of %s: %v", sessionID, err)
-		return nil
-	}
-	var out []chat.Question
-	for _, e := range resp.Executions {
-		id := e.Execution.WorkflowId
-		v, err := h.temporalClient.QueryWorkflow(ctx, id, "", workflow.QueryQuestion)
-		if err != nil {
-			log.Printf("ui: question %s: %v", id, err)
-			continue
-		}
-		var q workflow.PendingQuestion
-		if err := v.Get(&q); err != nil {
-			continue
-		}
-		out = append(out, chat.Question{WorkflowID: id, Text: q.Question, AgentChain: q.AgentChain})
-	}
-	return out
-}
-
 // --- Pages ---
 
 // buildPage gathers what the interface shows for a session (or for none: the
 // welcome page), as the user may see it.
-func (h *handler) buildPage(ctx context.Context, me *store.User, sessionID, view string) (*chat.Page, error) {
-	sessions, err := h.store.ListSessionsByUser(ctx, me.ID)
+func (u *ui) buildPage(ctx context.Context, me *store.User, sessionID, view string) (*chat.Page, error) {
+	sessions, err := u.store.ListSessionsByUser(ctx, me.ID)
 	if err != nil {
 		return nil, err
 	}
-	stats, err := h.store.ListSessionStats(ctx, me.ID)
+	stats, err := u.store.ListSessionStats(ctx, me.ID)
 	if err != nil {
 		return nil, err
 	}
-	statuses := h.sessionStatuses(ctx)
+	statuses := u.sessions.Statuses(ctx)
 	p := &chat.Page{Me: chat.UserPerson(me), IsAdmin: me.IsAdmin(), View: view}
 	p.Roots = chat.BuildTree(sessions, stats, statuses, sessionID)
-	if notes, err := h.store.LoadMessagesWithID(ctx, "notifications:"+me.ID); err == nil {
+	if notes, err := u.store.LoadMessagesWithID(ctx, notificationsOf(me.ID)); err == nil {
 		p.Notifications = len(notes)
 	}
 	if sessionID == "" {
@@ -250,7 +132,7 @@ func (h *handler) buildPage(ctx context.Context, me *store.User, sessionID, view
 
 	p.Node = chat.Find(p.Roots, sessionID)
 	if p.Node == nil {
-		return nil, errSessionGone
+		return nil, session.ErrNotFound
 	}
 	p.Crumbs = chat.Path(p.Node)
 	sess := p.Node.Session
@@ -260,7 +142,7 @@ func (h *handler) buildPage(ctx context.Context, me *store.User, sessionID, view
 		p.AgentMode = store.AgentModeAuto
 	}
 
-	members, err := h.store.ListSessionMembers(ctx, sessionID)
+	members, err := u.store.ListSessionMembers(ctx, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -274,24 +156,24 @@ func (h *handler) buildPage(ctx context.Context, me *store.User, sessionID, view
 	p.AgentOnMention = p.AgentMode == store.AgentModeMention || (p.AgentMode == store.AgentModeAuto && len(members) > 1)
 
 	p.Agent = chat.AgentInfo{ID: sess.AgentID, Name: sess.AgentID}
-	if a, err := h.store.GetAgent(ctx, sess.AgentID); err == nil && a != nil {
+	if a, err := u.store.GetAgent(ctx, sess.AgentID); err == nil && a != nil {
 		p.Agent.Name, p.Agent.Description = a.Name, a.Description
 	}
 
 	if sess.ParentSessionID != "" {
 		p.Parent = &chat.ParentInfo{MessageID: sess.ForkedAtMessageID}
-		if ok, _ := h.store.IsSessionMember(ctx, sess.ParentSessionID, me.ID); ok {
-			if parent, _ := h.store.GetSession(ctx, sess.ParentSessionID); parent != nil {
+		if ok, _ := u.store.IsSessionMember(ctx, sess.ParentSessionID, me.ID); ok {
+			if parent, _ := u.store.GetSession(ctx, sess.ParentSessionID); parent != nil {
 				p.Parent.Accessible, p.Parent.SessionID, p.Parent.Title = true, parent.SessionID, parent.Title
 			}
 		}
 	}
 	if sess.ForkedAtMessageID != 0 {
-		state, err := h.forkSummaryState(ctx, &sess)
+		state, err := u.sessions.ForkSummaryState(ctx, &sess)
 		if err != nil {
 			return nil, err
 		}
-		p.SummaryPending, p.SummaryFailed = state == summaryPending, state == summaryFailed
+		p.SummaryPending, p.SummaryFailed = state == session.SummaryPending, state == session.SummaryFailed
 	}
 
 	if view == "map" {
@@ -300,11 +182,11 @@ func (h *handler) buildPage(ctx context.Context, me *store.User, sessionID, view
 		return p, nil
 	}
 
-	msgs, err := h.store.LoadMessagesWithID(ctx, sessionID)
+	msgs, err := u.store.LoadMessagesWithID(ctx, sessionID)
 	if err != nil {
 		return nil, err
 	}
-	forks, err := h.store.ListForks(ctx, sessionID, me.ID)
+	forks, err := u.store.ListForks(ctx, sessionID, me.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -316,7 +198,7 @@ func (h *handler) buildPage(ctx context.Context, me *store.User, sessionID, view
 		}
 		byMessage[f.ForkedAtMessageID] = append(byMessage[f.ForkedAtMessageID], chat.ForkLink{SessionID: f.SessionID, Title: title})
 	}
-	p.Thread = chat.BuildThread(msgs, me.ID, byMessage, h.pendingQuestions(ctx, sessionID))
+	p.Thread = chat.BuildThread(msgs, me.ID, byMessage, u.sessions.PendingQuestions(ctx, sessionID))
 	for _, it := range p.Thread {
 		if it.Kind == chat.ItemHuman || it.Kind == chat.ItemAgent {
 			p.LastMessageID = it.ID
@@ -324,15 +206,15 @@ func (h *handler) buildPage(ctx context.Context, me *store.User, sessionID, view
 	}
 	// Working is an agent turn: a fork's summary workflow finishing up is not.
 	p.Working = statuses[sessionID] == chat.StatusWorking && !p.SummaryPending &&
-		!(sess.ForkedAtMessageID != 0 && h.isWorkflowRunning(ctx, workflow.ForkWorkflowID(sessionID)))
+		!(sess.ForkedAtMessageID != 0 && u.sessions.ForkRunning(ctx, sessionID))
 	return p, nil
 }
 
 // renderPage renders a page or one of its fragments, or the error that kept
 // it from being built.
-func (h *handler) renderPage(w http.ResponseWriter, r *http.Request, sessionID, view, block string, adjust func(*chat.Page)) {
-	p, err := h.buildPage(r.Context(), auth.UserFrom(r.Context()), sessionID, view)
-	if errors.Is(err, errSessionGone) {
+func (u *ui) renderPage(w http.ResponseWriter, r *http.Request, sessionID, view, block string, adjust func(*chat.Page)) {
+	p, err := u.buildPage(r.Context(), auth.UserFrom(r.Context()), sessionID, view)
+	if errors.Is(err, session.ErrNotFound) {
 		http.NotFound(w, r)
 		return
 	}
@@ -349,9 +231,9 @@ func (h *handler) renderPage(w http.ResponseWriter, r *http.Request, sessionID, 
 }
 
 // home opens the session most recently active, or the welcome page.
-func (h *handler) home(w http.ResponseWriter, r *http.Request) {
+func (u *ui) home(w http.ResponseWriter, r *http.Request) {
 	me := auth.UserFrom(r.Context())
-	stats, err := h.store.ListSessionStats(r.Context(), me.ID)
+	stats, err := u.store.ListSessionStats(r.Context(), me.ID)
 	if err != nil {
 		http.Error(w, "Internal error", http.StatusInternalServerError)
 		return
@@ -366,42 +248,42 @@ func (h *handler) home(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/s/"+latest, http.StatusSeeOther)
 		return
 	}
-	h.renderPage(w, r, "", "thread", "page", nil)
+	u.renderPage(w, r, "", "thread", "page", nil)
 }
 
-func (h *handler) sessionPage(w http.ResponseWriter, r *http.Request) {
-	h.renderPage(w, r, chi.URLParam(r, "id"), "thread", "page", nil)
+func (u *ui) sessionPage(w http.ResponseWriter, r *http.Request) {
+	u.renderPage(w, r, chi.URLParam(r, "id"), "thread", "page", nil)
 }
 
-func (h *handler) mapPage(w http.ResponseWriter, r *http.Request) {
-	h.renderPage(w, r, chi.URLParam(r, "id"), "map", "page", nil)
+func (u *ui) mapPage(w http.ResponseWriter, r *http.Request) {
+	u.renderPage(w, r, chi.URLParam(r, "id"), "map", "page", nil)
 }
 
-func (h *handler) threadFragment(w http.ResponseWriter, r *http.Request) {
-	h.renderPage(w, r, chi.URLParam(r, "id"), "thread", "thread", nil)
+func (u *ui) threadFragment(w http.ResponseWriter, r *http.Request) {
+	u.renderPage(w, r, chi.URLParam(r, "id"), "thread", "thread", nil)
 }
 
 // treeFragment refreshes the tree, which the user sees from any page.
-func (h *handler) treeFragment(w http.ResponseWriter, r *http.Request) {
+func (u *ui) treeFragment(w http.ResponseWriter, r *http.Request) {
 	current := r.URL.Query().Get("current")
 	me := auth.UserFrom(r.Context())
-	sessions, err := h.store.ListSessionsByUser(r.Context(), me.ID)
+	sessions, err := u.store.ListSessionsByUser(r.Context(), me.ID)
 	if err != nil {
 		http.Error(w, "Internal error", http.StatusInternalServerError)
 		return
 	}
-	stats, err := h.store.ListSessionStats(r.Context(), me.ID)
+	stats, err := u.store.ListSessionStats(r.Context(), me.ID)
 	if err != nil {
 		http.Error(w, "Internal error", http.StatusInternalServerError)
 		return
 	}
-	chat.Render(w, "tree-items", &chat.Page{Roots: chat.BuildTree(sessions, stats, h.sessionStatuses(r.Context()), current)})
+	chat.Render(w, "tree-items", &chat.Page{Roots: chat.BuildTree(sessions, stats, u.sessions.Statuses(r.Context()), current)})
 }
 
 // --- Actions ---
 
-func (h *handler) newSessionForm(w http.ResponseWriter, r *http.Request) {
-	id, err := h.openSession(r.Context(), auth.UserFrom(r.Context()), "", "", "")
+func (u *ui) newSessionForm(w http.ResponseWriter, r *http.Request) {
+	id, err := u.sessions.Open(r.Context(), auth.UserFrom(r.Context()), session.OpenOptions{})
 	if err != nil {
 		log.Printf("ui: new session: %v", err)
 		http.Error(w, "Impossible de créer la session", http.StatusInternalServerError)
@@ -411,56 +293,55 @@ func (h *handler) newSessionForm(w http.ResponseWriter, r *http.Request) {
 }
 
 // sendForm posts a member's message and answers with the refreshed thread.
-func (h *handler) sendForm(w http.ResponseWriter, r *http.Request) {
+func (u *ui) sendForm(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "id")
 	text := r.FormValue("content")
 	fail := func(msg string) {
-		h.renderPage(w, r, sessionID, "thread", "thread", func(p *chat.Page) { p.Error = msg })
+		u.renderPage(w, r, sessionID, "thread", "thread", func(p *chat.Page) { p.Error = msg })
 	}
 	if strings.TrimSpace(text) == "" {
 		fail("Le message est vide.")
 		return
 	}
-	sess, err := h.store.GetSession(r.Context(), sessionID)
-	if err != nil || sess == nil {
+	sess, err := u.sessions.Get(r.Context(), sessionID)
+	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
-	if sess.ForkedAtMessageID != 0 {
-		if state, err := h.forkSummaryState(r.Context(), sess); err == nil && state == summaryPending {
-			fail("Le résumé de la session parente est en cours : patiente un instant.")
-			return
-		}
-	}
-	if _, err := h.deliverMessage(r.Context(), sess, auth.UserFrom(r.Context()), text); err != nil {
+	_, err = u.sessions.Deliver(r.Context(), sess, auth.UserFrom(r.Context()), text)
+	switch {
+	case errors.Is(err, session.ErrSummaryPending):
+		fail("Le résumé de la session parente est en cours : patiente un instant.")
+		return
+	case err != nil:
 		log.Printf("ui: send to %s: %v", sessionID, err)
 		fail("Message non envoyé : " + err.Error())
 		return
 	}
-	h.renderPage(w, r, sessionID, "thread", "thread", nil)
+	u.renderPage(w, r, sessionID, "thread", "thread", nil)
 }
 
-func (h *handler) forkForm(w http.ResponseWriter, r *http.Request) {
+func (u *ui) forkForm(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "id")
 	messageID, _ := strconv.ParseInt(r.FormValue("message_id"), 10, 64)
-	f, err := h.fork(r.Context(), sessionID, messageID, auth.UserFrom(r.Context()))
+	f, err := u.sessions.Fork(r.Context(), sessionID, messageID, auth.UserFrom(r.Context()))
 	if err != nil {
 		log.Printf("ui: fork %s at %d: %v", sessionID, messageID, err)
-		h.renderPage(w, r, sessionID, "thread", "thread", func(p *chat.Page) { p.Error = "Fork impossible : " + err.Error() })
+		u.renderPage(w, r, sessionID, "thread", "thread", func(p *chat.Page) { p.Error = "Fork impossible : " + err.Error() })
 		return
 	}
 	goTo(w, r, "/s/"+f.SessionID)
 }
 
-func (h *handler) inviteForm(w http.ResponseWriter, r *http.Request) {
+func (u *ui) inviteForm(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "id")
-	err := h.inviteByEmail(r.Context(), sessionID, strings.TrimSpace(r.FormValue("email")), auth.UserFrom(r.Context()).ID)
+	err := u.sessions.Invite(r.Context(), sessionID, strings.TrimSpace(r.FormValue("email")), auth.UserFrom(r.Context()).ID)
 	if err != nil {
 		msg := "Invitation impossible."
-		if errors.Is(err, errNoSuchUser) {
+		if errors.Is(err, session.ErrNoSuchUser) {
 			msg = "Aucun compte actif avec cet email."
 		}
-		h.renderPage(w, r, sessionID, "thread", "rail", func(p *chat.Page) { p.Error = msg })
+		u.renderPage(w, r, sessionID, "thread", "rail", func(p *chat.Page) { p.Error = msg })
 		return
 	}
 	// The members show in the top bar and change the agent's default mode:
@@ -468,33 +349,30 @@ func (h *handler) inviteForm(w http.ResponseWriter, r *http.Request) {
 	goTo(w, r, "/s/"+sessionID)
 }
 
-func (h *handler) agentModeForm(w http.ResponseWriter, r *http.Request) {
+func (u *ui) agentModeForm(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "id")
-	mode := r.FormValue("mode")
-	switch mode {
-	case store.AgentModeAuto, store.AgentModeAlways, store.AgentModeMention:
-	default:
+	switch err := u.sessions.SetAgentMode(r.Context(), sessionID, r.FormValue("mode")); {
+	case errors.Is(err, session.ErrBadMode):
 		http.Error(w, "Mode inconnu", http.StatusBadRequest)
 		return
-	}
-	if err := h.store.SetSessionAgentMode(r.Context(), sessionID, mode); err != nil {
+	case err != nil:
 		http.Error(w, "Internal error", http.StatusInternalServerError)
 		return
 	}
 	goTo(w, r, "/s/"+sessionID) // the composer's hint changes with the mode
 }
 
-func (h *handler) leaveForm(w http.ResponseWriter, r *http.Request) {
-	if err := h.leave(r.Context(), chi.URLParam(r, "id"), auth.UserFrom(r.Context()).ID); err != nil {
+func (u *ui) leaveForm(w http.ResponseWriter, r *http.Request) {
+	if err := u.sessions.Leave(r.Context(), chi.URLParam(r, "id"), auth.UserFrom(r.Context()).ID); err != nil {
 		http.Error(w, "Internal error", http.StatusInternalServerError)
 		return
 	}
 	goTo(w, r, "/")
 }
 
-func (h *handler) deleteForm(w http.ResponseWriter, r *http.Request) {
-	switch err := h.removeSession(r.Context(), chi.URLParam(r, "id"), auth.UserFrom(r.Context()).ID); {
-	case errors.Is(err, errNotCreator):
+func (u *ui) deleteForm(w http.ResponseWriter, r *http.Request) {
+	switch err := u.sessions.Delete(r.Context(), chi.URLParam(r, "id"), auth.UserFrom(r.Context()).ID); {
+	case errors.Is(err, session.ErrNotCreator):
 		http.Error(w, "Seul le créateur de la session peut la supprimer.", http.StatusForbidden)
 	case err != nil:
 		http.Error(w, "Internal error", http.StatusInternalServerError)
@@ -504,38 +382,34 @@ func (h *handler) deleteForm(w http.ResponseWriter, r *http.Request) {
 }
 
 // answerForm answers a question of the session in the URL, by any member.
-func (h *handler) answerForm(w http.ResponseWriter, r *http.Request) {
-	defer h.statuses.invalidate() // the states shown next must not predate this
+func (u *ui) answerForm(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "id")
-	workflowID, answer := r.FormValue("workflow_id"), strings.TrimSpace(r.FormValue("answer"))
-	if answer == "" || !strings.HasPrefix(workflowID, sessionID+"-") {
+	workflowID := r.FormValue("workflow_id")
+	switch err := u.sessions.Answer(r.Context(), sessionID, workflowID, strings.TrimSpace(r.FormValue("answer"))); {
+	case errors.Is(err, session.ErrEmptyAnswer), errors.Is(err, session.ErrForeignQuestion):
 		http.Error(w, "Réponse invalide", http.StatusBadRequest)
 		return
-	}
-	if err := h.temporalClient.SignalWorkflow(r.Context(), workflowID, "", workflow.SignalUserAnswer, answer); err != nil {
+	case err != nil:
 		log.Printf("ui: answer %s: %v", workflowID, err)
-		h.renderPage(w, r, sessionID, "thread", "thread", func(p *chat.Page) { p.Error = "Réponse non transmise." })
+		u.renderPage(w, r, sessionID, "thread", "thread", func(p *chat.Page) { p.Error = "Réponse non transmise." })
 		return
 	}
-	h.renderPage(w, r, sessionID, "thread", "thread", nil)
+	u.renderPage(w, r, sessionID, "thread", "thread", nil)
 }
 
-func (h *handler) cancelForm(w http.ResponseWriter, r *http.Request) {
-	defer h.statuses.invalidate() // the states shown next must not predate this
+func (u *ui) cancelForm(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "id")
-	if wf := h.findActiveWorkflowID(r.Context(), sessionID); wf != "" {
-		if err := h.temporalClient.SignalWorkflow(r.Context(), wf, "", workflow.SignalCancelAgent, nil); err != nil {
-			log.Printf("ui: cancel %s: %v", sessionID, err)
-		}
+	if err := u.sessions.Cancel(r.Context(), sessionID); err != nil && !errors.Is(err, session.ErrNoActiveSession) {
+		log.Printf("ui: cancel %s: %v", sessionID, err)
 	}
-	h.renderPage(w, r, sessionID, "thread", "thread", nil)
+	u.renderPage(w, r, sessionID, "thread", "thread", nil)
 }
 
 // --- Notifications ---
 
-func (h *handler) notificationsPage(w http.ResponseWriter, r *http.Request) {
+func (u *ui) notificationsPage(w http.ResponseWriter, r *http.Request) {
 	me := auth.UserFrom(r.Context())
-	msgs, err := h.store.LoadMessagesWithID(r.Context(), "notifications:"+me.ID)
+	msgs, err := u.store.LoadMessagesWithID(r.Context(), notificationsOf(me.ID))
 	if err != nil {
 		http.Error(w, "Internal error", http.StatusInternalServerError)
 		return
@@ -547,23 +421,14 @@ func (h *handler) notificationsPage(w http.ResponseWriter, r *http.Request) {
 	chat.Render(w, "notifications", page)
 }
 
-func (h *handler) deleteNotificationForm(w http.ResponseWriter, r *http.Request) {
+func (u *ui) deleteNotificationForm(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(chi.URLParam(r, "notifID"), 10, 64)
 	if err == nil {
-		err = h.store.DeleteMessage(r.Context(), "notifications:"+auth.UserFrom(r.Context()).ID, id)
+		err = u.store.DeleteMessage(r.Context(), notificationsOf(auth.UserFrom(r.Context()).ID), id)
 	}
 	if err != nil {
 		http.Error(w, "Internal error", http.StatusInternalServerError)
 		return
 	}
 	goTo(w, r, "/notifications")
-}
-
-// decodeContent returns a stored message's text: it is kept as a JSON string.
-func decodeContent(content string) string {
-	var s string
-	if json.Unmarshal([]byte(content), &s) == nil {
-		return s
-	}
-	return content
 }

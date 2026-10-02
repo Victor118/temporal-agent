@@ -144,6 +144,7 @@ agent/
 ├── cmd/agent/      # CLI entrypoints (server, worker, dev)
 ├── config/         # Configuration loading
 ├── provider/       # LLM provider abstraction (Anthropic)
+├── session/        # Session rules: open, deliver, fork, members, Temporal lookups
 ├── skill/          # Skill loading (Git, filesystem)
 ├── sse/            # Server-Sent Events hub
 ├── store/          # PostgreSQL persistence (messages, memory, task logs)

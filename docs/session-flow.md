@@ -9,7 +9,7 @@ streamée vers l'UI.
 sequenceDiagram
     autonumber
     actor U as User (web/telegram)
-    participant H as HTTP handler<br/>(cmd/agent)
+    participant H as HTTP adapter + session.Service<br/>(cmd/agent, session)
     participant T as Temporal
     participant SW as SessionWorkflow<br/>(long-lived)
     participant Mem as MemoryActivity<br/>(Postgres)

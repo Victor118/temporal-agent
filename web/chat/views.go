@@ -13,39 +13,20 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/victor/temporal-agent/session"
 	"github.com/victor/temporal-agent/store"
 )
 
-// Status is what a session is doing, from the workflows Temporal runs for it.
-type Status string
+// Status is what a session is doing, as the session service reads it from
+// Temporal.
+type Status = session.Status
 
 const (
-	StatusIdle    Status = "idle"    // no workflow: the session sleeps until a message
-	StatusActive  Status = "active"  // its workflow runs, waiting for messages
-	StatusWorking Status = "working" // the agent is on a turn
-	StatusWaiting Status = "waiting" // a question waits for a member's answer
+	StatusIdle    = session.StatusIdle
+	StatusActive  = session.StatusActive
+	StatusWorking = session.StatusWorking
+	StatusWaiting = session.StatusWaiting
 )
-
-// rank orders statuses by how much they call for attention.
-func (s Status) rank() int {
-	switch s {
-	case StatusWaiting:
-		return 3
-	case StatusWorking:
-		return 2
-	case StatusActive:
-		return 1
-	}
-	return 0
-}
-
-// Stronger returns the status of the two that calls for more attention.
-func (s Status) Stronger(o Status) Status {
-	if o.rank() > s.rank() {
-		return o
-	}
-	return s
-}
 
 // TreeNode is a session in the tree of forks the user can see.
 type TreeNode struct {
@@ -204,11 +185,7 @@ type ForkLink struct {
 }
 
 // Question is a question an agent waits on, for the session's members.
-type Question struct {
-	WorkflowID string
-	Text       string
-	AgentChain []string
-}
+type Question = session.Question
 
 // Item kinds of a thread.
 const (

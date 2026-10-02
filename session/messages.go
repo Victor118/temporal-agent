@@ -1,4 +1,4 @@
-package main
+package session
 
 import (
 	"context"
@@ -7,8 +7,8 @@ import (
 	"log"
 	"regexp"
 	"strings"
-	"time"
 
+	"github.com/google/uuid"
 	"go.temporal.io/sdk/client"
 
 	"github.com/victor/temporal-agent/activity"
@@ -45,58 +45,69 @@ func callsAgent(mode string, members int, text, agentID string) bool {
 	}
 }
 
-// deliverMessage takes a human message into a session, from any channel: it
-// stores it at once, shows it to the members, and starts an agent turn if the
+// Deliver takes a human message into a session, from any channel: it stores
+// it at once, shows it to the members, and starts an agent turn if the
 // message calls the agent. The turn then loads the whole conversation, the
 // messages the agent was not called on included. Reports whether it called.
-func (h *handler) deliverMessage(ctx context.Context, sess *store.Session, author *store.User, text string) (bool, error) {
-	defer h.statuses.invalidate() // the states shown next must not predate this
+//
+// An empty message is refused: stored as an empty user turn, every later turn
+// would replay it to the LLM, which rejects a user message with no content —
+// the session would be poisoned for good. A fork takes messages once its
+// summary is in: the summary must be its first message.
+func (s *Service) Deliver(ctx context.Context, sess *store.Session, author *store.User, text string) (bool, error) {
+	if strings.TrimSpace(text) == "" {
+		return false, ErrEmptyMessage
+	}
+	if sess.ForkedAtMessageID != 0 {
+		if state, err := s.ForkSummaryState(ctx, sess); err == nil && state == SummaryPending {
+			return false, ErrSummaryPending
+		}
+	}
+
 	content, _ := json.Marshal(text)
 	stored := store.Message{Role: store.RoleUser, Content: string(content), UserID: author.ID, Author: author.Name()}
-	if err := h.store.AppendMessage(ctx, sess.SessionID, "msg:"+newUUID(), stored); err != nil {
+	if err := s.store.AppendMessage(ctx, sess.SessionID, "msg:"+uuid.New().String(), stored); err != nil {
 		return false, fmt.Errorf("store message: %w", err)
 	}
-	go h.setTitleFrom(sess.SessionID, text)
+	go s.setTitleFrom(sess.SessionID, text)
 
-	members, err := h.store.ListSessionMembers(ctx, sess.SessionID)
+	members, err := s.store.ListSessionMembers(ctx, sess.SessionID)
 	if err != nil {
 		return false, fmt.Errorf("list members: %w", err)
 	}
 	called := callsAgent(sess.AgentMode, len(members), text, sess.AgentID)
 	msg := workflow.UserMessage{Text: text, UserID: author.ID, UserName: author.Name(), Stored: true}
-	h.publishUserMessage(sess.SessionID, msg, called)
+	s.publishUserMessage(sess.SessionID, msg, called)
 	if !called {
 		return false, nil
 	}
 
-	workflowID, err := h.ensureSessionWorkflow(ctx, sess)
+	defer s.statuses.invalidate()
+	workflowID, err := s.ensureWorkflow(ctx, sess)
 	if err != nil {
 		return false, err
 	}
-	if err := h.temporalClient.SignalWorkflow(ctx, workflowID, "", workflow.SignalUserMessage, msg); err != nil {
+	if err := s.temporal.SignalWorkflow(ctx, workflowID, "", workflow.SignalUserMessage, msg); err != nil {
 		return false, fmt.Errorf("signal session: %w", err)
 	}
 	return true, nil
 }
 
-// ensureSessionWorkflow returns the running workflow of a session, starting a
-// new run when the last one is over (an idle session times out).
-func (h *handler) ensureSessionWorkflow(ctx context.Context, sess *store.Session) (string, error) {
-	if id := h.findActiveWorkflowID(ctx, sess.SessionID); id != "" {
+// ensureWorkflow returns the running workflow of a session, starting a new
+// run when the last one is over (an idle session times out).
+func (s *Service) ensureWorkflow(ctx context.Context, sess *store.Session) (string, error) {
+	if id := s.activeWorkflowID(ctx, sess.SessionID); id != "" {
 		return id, nil
 	}
 	// Resume with the session's agent, or the default one if it is gone.
-	agentID, err := h.resolveAgentID(ctx, sess.AgentID)
-	if err != nil {
-		agentID, err = h.resolveAgentID(ctx, "")
-	}
+	agentID, err := s.agentOrDefault(ctx, sess.AgentID)
 	if err != nil {
 		return "", err
 	}
-	id := fmt.Sprintf("session-%s-%d", sess.SessionID, time.Now().Unix())
-	if _, err := h.temporalClient.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
+	id := fmt.Sprintf("session-%s-%d", sess.SessionID, s.now().Unix())
+	if _, err := s.temporal.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
 		ID:        id,
-		TaskQueue: h.cfg.WorkflowQueue,
+		TaskQueue: s.cfg.WorkflowQueue,
 	}, workflow.SessionWorkflow, workflow.SessionWorkflowInput{
 		SessionID: sess.SessionID,
 		AgentID:   agentID,
@@ -112,12 +123,28 @@ func (h *handler) ensureSessionWorkflow(ctx context.Context, sess *store.Session
 // publishUserMessage shows a user's message to the other members of the
 // session, live, and whether it called the agent. The sender displays it
 // already and skips its own.
-func (h *handler) publishUserMessage(sessionID string, msg workflow.UserMessage, called bool) {
+func (s *Service) publishUserMessage(sessionID string, msg workflow.UserMessage, called bool) {
 	data, _ := json.Marshal(map[string]any{
 		"content":      msg.Text,
 		"user_id":      msg.UserID,
 		"author":       msg.UserName,
 		"agent_called": called,
 	})
-	h.hub.Publish(sessionID, activity.SSEEvent{Type: "user_message", Data: data})
+	s.hub.Publish(sessionID, activity.SSEEvent{Type: "user_message", Data: data})
+}
+
+// maxTitleRunes bounds a session title taken from its first message.
+const maxTitleRunes = 80
+
+// setTitleFrom titles a session after a message, if it has no title yet. The
+// cut is in characters: cut in bytes, an accented letter can be split, and
+// Postgres refuses the invalid UTF-8.
+func (s *Service) setTitleFrom(sessionID, text string) {
+	title := strings.TrimSpace(text)
+	if r := []rune(title); len(r) > maxTitleRunes {
+		title = string(r[:maxTitleRunes]) + "..."
+	}
+	if err := s.store.UpdateSessionTitle(context.Background(), sessionID, title); err != nil {
+		log.Printf("Session %s: set title: %v", sessionID, err)
+	}
 }

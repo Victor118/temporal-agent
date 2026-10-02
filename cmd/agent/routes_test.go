@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	"go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/client"
@@ -17,16 +16,16 @@ import (
 
 	"github.com/victor/temporal-agent/auth"
 	"github.com/victor/temporal-agent/config"
+	"github.com/victor/temporal-agent/session"
 	"github.com/victor/temporal-agent/sse"
 	"github.com/victor/temporal-agent/store"
 	"github.com/victor/temporal-agent/web/admin"
 	"github.com/victor/temporal-agent/workflow"
 )
 
-// routeStore holds users, logins and one session in memory. Methods the
-// routes under test do not reach are left to the nil embedded Store.
+// routeStore holds users, logins and one session in memory. What the routes
+// under test never reach answers empty (see fakes_test.go).
 type routeStore struct {
-	store.Store
 	users    []store.User
 	logins   map[string]string
 	session  store.Session
@@ -110,7 +109,7 @@ func newRouteTest(t *testing.T) (http.Handler, *routeStore) {
 
 // newRouteTestWith builds the router over tc, a stand-in for Temporal: the
 // routes that start workflows need one.
-func newRouteTestWith(t *testing.T, tc workflowClient) (http.Handler, *routeStore) {
+func newRouteTestWith(t *testing.T, tc session.Temporal) (http.Handler, *routeStore) {
 	t.Helper()
 	auth.LoginFailDelay = 0
 	hash, _ := auth.HashPassword(pw)
@@ -125,8 +124,8 @@ func newRouteTestWith(t *testing.T, tc workflowClient) (http.Handler, *routeStor
 		members: []string{"u-alice", "u-bob"},
 	}
 	svc := &auth.Service{Store: st}
-	h := &handler{auth: svc, store: st, hub: sse.NewHub(), cfg: &config.Config{WorkflowQueue: "agent"}, temporalClient: tc}
-	return publicRouter(h, admin.New(admin.Config{Store: st, Auth: svc})), st
+	srv := newServer(&config.Config{WorkflowQueue: "agent", DefaultAgentID: "default"}, st, tc, sse.NewHub(), svc, admin.New(admin.Config{Auth: svc}).Routes())
+	return srv.routes(), st
 }
 
 func call(t *testing.T, h http.Handler, method, path, body string, cookie *http.Cookie) *httptest.ResponseRecorder {
@@ -376,27 +375,6 @@ func TestRoutes_ForkInfoHidesAnInaccessibleParent(t *testing.T) {
 
 func (f *routeStore) ListAgents(context.Context) ([]store.Agent, error) {
 	return []store.Agent{{ID: "default", Name: "Default"}}, nil
-}
-
-type titleStore struct {
-	store.Store
-	title string
-}
-
-func (f *titleStore) UpdateSessionTitle(_ context.Context, _, title string) error {
-	f.title = title
-	return nil
-}
-
-// A title is cut in characters: cut in bytes, an accented letter can be split
-// and Postgres refuses the string.
-func TestSetTitleFrom_CutsOnCharacters(t *testing.T) {
-	st := &titleStore{}
-	h := &handler{store: st}
-	h.setTitleFrom("s1", strings.Repeat("é", 100))
-	if !utf8.ValidString(st.title) || st.title != strings.Repeat("é", maxTitleRunes)+"..." {
-		t.Errorf("title %q", st.title)
-	}
 }
 
 // --- Messages and @agent ---

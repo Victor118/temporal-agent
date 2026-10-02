@@ -69,15 +69,6 @@ func runServer(cmd *cobra.Command, args []string) {
 		WorkflowQueue:    cfg.WorkflowQueue,
 	})
 
-	// Handler
-	h := &handler{
-		auth:           authSvc,
-		temporalClient: temporalClient,
-		hub:            hub,
-		cfg:            cfg,
-		store:          st,
-	}
-
 	// Internal API (receives SSE notifications from workers)
 	internalRouter := chi.NewRouter()
 	internalRouter.Post("/internal/notify", handleInternalNotify(hub, cfg.InternalAPIKey))
@@ -86,7 +77,7 @@ func runServer(cmd *cobra.Command, args []string) {
 	}
 	warnClosedWebhooks(cfg)
 
-	publicSrv := &http.Server{Addr: cfg.HTTPAddr, Handler: publicRouter(h, adminUI)}
+	publicSrv := &http.Server{Addr: cfg.HTTPAddr, Handler: newServer(cfg, st, temporalClient, hub, authSvc, adminUI.Routes()).routes()}
 	internalSrv := &http.Server{Addr: cfg.InternalAddr, Handler: internalRouter}
 
 	// Start both servers

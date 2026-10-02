@@ -13,6 +13,9 @@ import (
 	"unicode/utf16"
 )
 
+// Channel names Telegram among the channels a session reaches its user on.
+const Channel = "telegram"
+
 // maxMessageUnits is Telegram's limit on a message: 4096 characters, which it
 // counts in UTF-16 code units.
 const maxMessageUnits = 4096
