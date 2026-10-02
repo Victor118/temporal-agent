@@ -36,6 +36,11 @@ func ScheduledAgentWorkflow(ctx workflow.Context, input tool.ScheduledAgentInput
 		AgentID:     input.AgentID,
 		UserMessage: input.Prompt,
 		Model:       "", // Uses default from LLM provider
+		// The task runs for the user who scheduled it: the scheduling tools
+		// act only for an identified user, and the answer is theirs, so is
+		// the memory it is written with.
+		UserID:         input.UserID,
+		LoadUserMemory: true,
 	}).Get(ctx, &result)
 
 	response := result.Response

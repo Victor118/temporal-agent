@@ -500,6 +500,48 @@ func TestAgentWorkflow_SubAgentLoadsNoHistory(t *testing.T) {
 	}
 }
 
+// TestAgentWorkflow_ScheduledRunLoadsOnlyTheUserMemory checks that a run with
+// no turn key that asks for its user's memory gets it, and nothing of a
+// session history.
+func TestAgentWorkflow_ScheduledRunLoadsOnlyTheUserMemory(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+	registerAgentStubs(env)
+
+	loads := 0
+	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.LoadContextInput) (activity.LoadContextOutput, error) {
+		loads++
+		return activity.LoadContextOutput{}, nil
+	}, sdkactivity.RegisterOptions{Name: "LoadContext"})
+	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.LoadMemoryInput) (string, error) {
+		if in.Scope != store.MemoryScopeUser || in.ScopeID != "victor" {
+			t.Errorf("LoadMemory(%+v), want victor's user memory", in)
+		}
+		return "likes concise answers", nil
+	}, sdkactivity.RegisterOptions{Name: "LoadMemory"})
+
+	var seen provider.ChatRequest
+	env.RegisterActivityWithOptions(func(ctx context.Context, req provider.ChatRequest) (provider.ChatResponse, error) {
+		seen = req
+		return provider.ChatResponse{Content: "done", StopReason: "end_turn"}, nil
+	}, sdkactivity.RegisterOptions{Name: "CallLLM"})
+
+	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{
+		SessionID: "schedule-1", UserID: "victor", AgentID: "default",
+		UserMessage: "check my reminders", LoadUserMemory: true,
+	})
+
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatalf("workflow error: %v", err)
+	}
+	if loads != 0 {
+		t.Errorf("LoadContext called %d times, want 0 without a turn key", loads)
+	}
+	if !strings.Contains(seen.System, "likes concise answers") {
+		t.Errorf("system prompt lacks the user memory: %q", seen.System)
+	}
+}
+
 // TestAgentWorkflow_LoadsItsOwnHistory checks that a session turn reads the
 // transcript itself rather than receiving it in its input, and that what it
 // loaded reaches the model.

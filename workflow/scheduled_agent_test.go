@@ -66,3 +66,34 @@ func TestScheduledAgentWorkflow_Cleanup(t *testing.T) {
 		})
 	}
 }
+
+// A scheduled task runs for the user who scheduled it: without the user, the
+// scheduling tools answer "user not identified" and the memory stays out.
+func TestScheduledAgentWorkflow_RunsForItsUser(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+
+	var got AgentWorkflowInput
+	env.RegisterWorkflowWithOptions(func(ctx sdkworkflow.Context, in AgentWorkflowInput) (AgentWorkflowOutput, error) {
+		got = in
+		return AgentWorkflowOutput{Response: "done"}, nil
+	}, sdkworkflow.RegisterOptions{Name: "AgentWorkflow"})
+	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.DeliverInput) error {
+		return nil
+	}, sdkactivity.RegisterOptions{Name: "DeliverResult"})
+
+	env.ExecuteWorkflow(ScheduledAgentWorkflow, tool.ScheduledAgentInput{
+		AgentID: "default", Prompt: "check my reminders", UserID: "victor",
+		ScheduleID: "schedule-test", Cron: "0 9 * * 1",
+	})
+
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatalf("workflow error: %v", err)
+	}
+	if got.UserID != "victor" || !got.LoadUserMemory {
+		t.Errorf("agent input UserID = %q, LoadUserMemory = %v; want victor, true", got.UserID, got.LoadUserMemory)
+	}
+	if got.TurnKey != "" {
+		t.Errorf("TurnKey = %q: a scheduled run owns no session history", got.TurnKey)
+	}
+}

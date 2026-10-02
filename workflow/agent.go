@@ -47,8 +47,13 @@ type AgentWorkflowInput struct {
 	// agent persists its messages as it produces them under that key, so a
 	// crash, a cancel or a failed LLM call cannot lose the transcript. Sub-agents
 	// and scheduled runs leave it empty: they own no session history.
-	TurnKey    string   `json:"turn_key,omitempty"`
-	AgentChain []string `json:"agent_chain,omitempty"` // Chain of parent agent IDs for context propagation
+	TurnKey string `json:"turn_key,omitempty"`
+	// LoadUserMemory loads UserID's memory into a run that has no turn key,
+	// and so loads no context: a scheduled task answers its user directly,
+	// as a session turn does. A sub-agent leaves it unset: its context stays
+	// isolated, and its parent already had the memory.
+	LoadUserMemory bool     `json:"load_user_memory,omitempty"`
+	AgentChain     []string `json:"agent_chain,omitempty"` // Chain of parent agent IDs for context propagation
 	// Channel and ChannelID are where the session's user is reached ("web",
 	// "telegram" and its chat_id). A sub-agent inherits them so its questions
 	// reach the user; only the session's own turn sends its answer there.
@@ -140,6 +145,18 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 			return AgentWorkflowOutput{}, fmt.Errorf("load context: %w", err)
 		}
 		messages, userMemory = loaded.Messages, loaded.UserMemory
+	} else if input.LoadUserMemory && input.UserID != "" {
+		// A failed load costs the personalisation, not the run.
+		if err := workflow.ExecuteActivity(
+			workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+				StartToCloseTimeout: 30 * time.Second,
+				RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 3},
+			}),
+			memAct.LoadMemory,
+			activity.LoadMemoryInput{Scope: store.MemoryScopeUser, ScopeID: input.UserID},
+		).Get(ctx, &userMemory); err != nil {
+			workflow.GetLogger(ctx).Warn("User memory not loaded", "user_id", input.UserID, "error", err)
+		}
 	}
 
 	// Everything appended from here on is this turn's output: it is flushed to
