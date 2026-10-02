@@ -129,7 +129,8 @@ Admins manage the other accounts in the back-office, under `/admin/users`.
 | `CLAUDE_CODE_REPOS` | Comma-separated globs of the repositories a coding worker (`analyze_repo`, `implement_feature`) may clone and push to, e.g. `git@github.com:acme/*,https://github.com/acme/*` (`*` stops at a `/`). Empty = every repository is refused |
 | `INTERNAL_ADDR` | Address of the internal API that receives worker notifications (default `:9999`). Keep it off the public network |
 | `NOTIFY_URL` | Base URL a worker posts its notifications to (default `http://localhost:9999`) |
-| `INTERNAL_API_KEY` | Secret shared by the server and its workers for `/internal/notify` (`Authorization: Bearer …`). Empty = the server refuses every notification |
+| `INTERNAL_API_KEY` | Secret shared by the server and its workers for `/internal/notify` (`Authorization: Bearer …`). Empty = the server refuses every notification; a worker checks it at startup and logs a refusal as an error |
+| `TRUSTED_PROXIES` | Comma-separated addresses or CIDR ranges of the reverse proxies in front of the server, whose `X-Forwarded-For` gives the client's address; `none` when clients connect directly. Empty (default) = the client's address is unknown, and failed logins are limited per account only |
 | `SKILLS_REPO`, `SKILLS_BRANCH` | Git repository (and branch) the skills are loaded from |
 | `SKILLS_WEBHOOK_SECRET` | GitHub webhook secret for `/webhooks/skills`. Empty = the route is not served |
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token, to send messages |
@@ -168,9 +169,14 @@ agent/
   ranges are refused after name resolution, on every redirect too, and only
   `http`/`https` URLs are followed.
 
-- **Logins**: failures are limited in memory, 20 per client address and 10 per
-  account in 15 minutes (then `429`), and logged with the address. The address
-  is the connection's peer: behind a reverse proxy, every client shares it.
+- **Logins**: failures are limited in memory, 10 per account in 15 minutes
+  (then `429`), and logged with the client's address. The limit of 20 per
+  client address only applies when that address is known, which takes
+  `TRUSTED_PROXIES`: behind a proxy nobody declared, every client has the
+  proxy's address, and a limit per address would let anyone lock every account
+  out with twenty wrong passwords. Set it to the proxies' addresses (the
+  client's is then read from `X-Forwarded-For`, from the right, past the
+  trusted proxies) or to `none` for a server that faces its clients directly.
 
 ## License
 

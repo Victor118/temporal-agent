@@ -235,7 +235,14 @@ type httpOptions struct {
 // newHTTPHandler builds the public HTTP side: the back-office and the
 // adapters over the session service.
 func newHTTPHandler(cfg *config.Config, st store.Store, tc client.Client, hub *sse.Hub, opts httpOptions) http.Handler {
-	authSvc := &auth.Service{Store: st, Limits: auth.DefaultLoginLimits()}
+	clients, err := auth.ParseClientAddrs(cfg.TrustedProxies)
+	if err != nil {
+		log.Fatalf("Invalid configuration: %v", err)
+	}
+	if !clients.Known() {
+		log.Println("TRUSTED_PROXIES is not set: failed logins are limited per account only, not per client address")
+	}
+	authSvc := &auth.Service{Store: st, Limits: auth.DefaultLoginLimits(clients), Clients: clients}
 	adminUI := admin.New(admin.Config{
 		Auth:             authSvc,
 		Store:            st,

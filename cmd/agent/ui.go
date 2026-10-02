@@ -62,7 +62,7 @@ func (u *ui) loginPage(w http.ResponseWriter, r *http.Request) {
 
 func (u *ui) loginForm(w http.ResponseWriter, r *http.Request) {
 	page := chat.LoginPage{Email: r.FormValue("email"), Next: r.FormValue("next")}
-	token, _, err := u.auth.Login(r.Context(), auth.ClientAddr(r), page.Email, r.FormValue("password"))
+	token, _, err := u.auth.Login(r.Context(), u.auth.ClientAddr(r), page.Email, r.FormValue("password"))
 	status := http.StatusUnauthorized
 	switch {
 	case errors.Is(err, auth.ErrInvalidCredentials):

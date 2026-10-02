@@ -57,7 +57,7 @@ func (a *Admin) loginPage(w http.ResponseWriter, r *http.Request) {
 
 func (a *Admin) login(w http.ResponseWriter, r *http.Request) {
 	data := loginData{Next: r.FormValue("next"), Email: r.FormValue("email")}
-	u, err := a.cfg.Auth.Authenticate(r.Context(), auth.ClientAddr(r), data.Email, r.FormValue("password"))
+	u, err := a.cfg.Auth.Authenticate(r.Context(), a.cfg.Auth.ClientAddr(r), data.Email, r.FormValue("password"))
 	switch {
 	case errors.Is(err, auth.ErrInvalidCredentials):
 		data.Error = "Email ou mot de passe incorrect."

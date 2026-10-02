@@ -89,7 +89,7 @@ func (a *api) login(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
-	token, u, err := a.auth.Login(r.Context(), auth.ClientAddr(r), req.Email, req.Password)
+	token, u, err := a.auth.Login(r.Context(), a.auth.ClientAddr(r), req.Email, req.Password)
 	if errors.Is(err, auth.ErrInvalidCredentials) {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return

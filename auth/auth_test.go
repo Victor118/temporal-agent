@@ -218,3 +218,75 @@ func TestThrottle_WindowCloses(t *testing.T) {
 		t.Error("still blocked once the window closed")
 	}
 }
+
+// Behind a proxy nobody declared, every client has the proxy's address: a
+// limit per address would let twenty wrong passwords lock every account out.
+// The account limit alone stays.
+func TestDefaultLoginLimits_PerAddressOnlyWhenAddressesAreKnown(t *testing.T) {
+	s, st := newService(t)
+	hash, _ := HashPassword("bob's password")
+	st.users["bob@example.com"] = &store.User{ID: "u-bob", Email: "bob@example.com", PasswordHash: hash}
+	s.Limits = DefaultLoginLimits(ClientAddrs{})
+	ctx := context.Background()
+
+	proxy := "172.18.0.5"
+	for i := 0; i < 30; i++ {
+		s.Login(ctx, proxy, "mallory-"+string(rune('a'+i))+"@example.com", "guess")
+	}
+	if _, _, err := s.Login(ctx, proxy, "bob@example.com", "bob's password"); err != nil {
+		t.Errorf("an unknown client address locked another account out: %v", err)
+	}
+
+	known := DefaultLoginLimits(ClientAddrs{Direct: true})
+	if known.PerClient == nil || known.PerAccount == nil {
+		t.Errorf("limits with known addresses = %+v, want both", known)
+	}
+}
+
+func TestParseClientAddrs(t *testing.T) {
+	if c, err := ParseClientAddrs(""); err != nil || c.Known() {
+		t.Errorf("empty: %+v, %v", c, err)
+	}
+	if c, err := ParseClientAddrs("none"); err != nil || !c.Direct || !c.Known() {
+		t.Errorf("none: %+v, %v", c, err)
+	}
+	c, err := ParseClientAddrs("10.0.0.0/8, 172.18.0.5 ,fd00::/8")
+	if err != nil || len(c.TrustedProxies) != 3 {
+		t.Fatalf("list: %+v, %v", c, err)
+	}
+	if _, err := ParseClientAddrs("10.0.0.0/8,proxy.local"); err == nil {
+		t.Error("a host name was accepted")
+	}
+}
+
+func TestClientAddrs_Of(t *testing.T) {
+	c, _ := ParseClientAddrs("10.0.0.0/8")
+	req := func(peer string, xff ...string) *http.Request {
+		r := httptest.NewRequest(http.MethodPost, "/login", nil)
+		r.RemoteAddr = peer
+		for _, h := range xff {
+			r.Header.Add("X-Forwarded-For", h)
+		}
+		return r
+	}
+	for name, tc := range map[string]struct {
+		r    *http.Request
+		want string
+	}{
+		"direct client, header ignored":   {req("198.51.100.7:4242", "1.2.3.4"), "198.51.100.7"},
+		"through the proxy":               {req("10.0.0.2:4242", "203.0.113.9"), "203.0.113.9"},
+		"client-written entries are left": {req("10.0.0.2:4242", "1.2.3.4, 203.0.113.9"), "203.0.113.9"},
+		"chained proxies":                 {req("10.0.0.2:4242", "203.0.113.9, 10.0.0.3"), "203.0.113.9"},
+		"several headers":                 {req("10.0.0.2:4242", "1.2.3.4", "203.0.113.9"), "203.0.113.9"},
+		"proxy without a header":          {req("10.0.0.2:4242"), "10.0.0.2"},
+		"IPv4-mapped peer":                {req("[::ffff:10.0.0.2]:4242", "203.0.113.9"), "203.0.113.9"},
+	} {
+		if got := c.Of(tc.r); got != tc.want {
+			t.Errorf("%s: %q, want %q", name, got, tc.want)
+		}
+	}
+	// Without trusted proxies, the header is nobody's word.
+	if got := (ClientAddrs{Direct: true}).Of(req("10.0.0.2:4242", "203.0.113.9")); got != "10.0.0.2" {
+		t.Errorf("direct: %q", got)
+	}
+}

@@ -47,6 +47,11 @@ type Config struct {
 	// endpoint. The server refuses every notification while it is empty: the
 	// endpoint injects events into any session, so it is closed by default.
 	InternalAPIKey string
+	// TrustedProxies are the reverse proxies in front of the server, whose
+	// X-Forwarded-For gives the client's address: CIDR ranges or addresses,
+	// "none" when clients connect directly. Empty = unknown, and logins are
+	// then limited per account only (auth.DefaultLoginLimits).
+	TrustedProxies string
 
 	// Workspace
 	WorkspacePath string
@@ -131,6 +136,7 @@ func Load() *Config {
 		NotifyURL:    envOr("NOTIFY_URL", "http://localhost:9999"),
 
 		InternalAPIKey: os.Getenv("INTERNAL_API_KEY"),
+		TrustedProxies: os.Getenv("TRUSTED_PROXIES"),
 
 		WorkspacePath:       envOr("WORKSPACE_PATH", "./workspace"),
 		ClaudeCodeWorkspace: envOr("CLAUDE_CODE_WORKSPACE", "./claude-code-runs"),

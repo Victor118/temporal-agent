@@ -51,11 +51,16 @@ type Service struct {
 	Store UserStore
 	// Limits bound failed logins; nil = no limit.
 	Limits *LoginLimits
+	// Clients tells the address a login comes from.
+	Clients ClientAddrs
 }
+
+// ClientAddr is the address r comes from, to pass to Login and Authenticate.
+func (s *Service) ClientAddr(r *http.Request) string { return s.Clients.Of(r) }
 
 // Login checks an email and password and opens a login session. It returns
 // the token to hand to the browser, never stored as is. client is the address
-// the attempt comes from (ClientAddr).
+// the attempt comes from (s.ClientAddr).
 func (s *Service) Login(ctx context.Context, client, email, password string) (string, *store.User, error) {
 	u, err := s.Authenticate(ctx, client, email, password)
 	if err != nil {
