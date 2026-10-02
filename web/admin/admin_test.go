@@ -17,9 +17,7 @@ import (
 )
 
 // fakeStore keeps agents in memory with the revision rules of PostgresStore.
-// Methods the back-office does not call are left to the nil embedded Store.
 type fakeStore struct {
-	store.Store
 	agents []store.Agent
 	tools  []store.ToolRecord
 	users  []store.User
@@ -554,3 +552,5 @@ func hashOf(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(sum[:])
 }
+
+func (f *fakeStore) IncrementSkillsVersion(context.Context) (int64, error) { return 1, nil }

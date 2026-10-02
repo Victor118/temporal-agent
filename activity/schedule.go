@@ -5,14 +5,17 @@ import (
 	"log"
 
 	"go.temporal.io/sdk/client"
-
-	"github.com/victor/temporal-agent/store"
 )
+
+// TaskLogUpdater records where a scheduled task stands.
+type TaskLogUpdater interface {
+	UpdateTaskLogStatus(ctx context.Context, scheduleID, status string) error
+}
 
 // ScheduleActivities handles Temporal Schedule lifecycle operations.
 type ScheduleActivities struct {
 	Client client.Client
-	Store  store.Store
+	Store  TaskLogUpdater
 }
 
 type DeleteScheduleInput struct {

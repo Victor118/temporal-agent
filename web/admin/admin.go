@@ -22,9 +22,30 @@ import (
 //go:embed static
 var staticFS embed.FS
 
+// Store is what the back-office reads and edits: the configuration (agents,
+// the tools workers publish, activity routes, skills version) and the users.
+type Store interface {
+	ListAgents(ctx context.Context) ([]store.Agent, error)
+	GetAgent(ctx context.Context, agentID string) (*store.Agent, error)
+	CreateAgent(ctx context.Context, agent store.Agent) error
+	UpdateAgent(ctx context.Context, agent store.Agent, expectedRevision int64) (int64, error)
+	DeleteAgent(ctx context.Context, agentID string) error
+	CountSessionsByAgent(ctx context.Context) (map[string]int, error)
+	ListTools(ctx context.Context) ([]store.ToolRecord, error)
+	ListActivityQueues(ctx context.Context) ([]store.ActivityQueueEntry, error)
+	IncrementSkillsVersion(ctx context.Context) (int64, error)
+
+	ListUsers(ctx context.Context) ([]store.User, error)
+	GetUser(ctx context.Context, id string) (*store.User, error)
+	CreateUser(ctx context.Context, u store.User) error
+	UpdateUser(ctx context.Context, u store.User) error
+	SetUserPassword(ctx context.Context, id, passwordHash string) error
+	SetUserDisabled(ctx context.Context, id string, disabled bool) error
+}
+
 // Config wires the back-office to the server's state.
 type Config struct {
-	Store        store.Store
+	Store        Store
 	Temporal     client.Client
 	Skills       func() []skill.Skill // the skills the server currently holds
 	SkillsSource string               // where they come from, "" = not loaded

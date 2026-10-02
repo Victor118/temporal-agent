@@ -21,8 +21,13 @@ func DisplayInput(toolName string, input json.RawMessage) json.RawMessage {
 	return input
 }
 
+// MemorySaver writes a scope's memory.
+type MemorySaver interface {
+	SaveMemory(ctx context.Context, scope store.MemoryScope, scopeID string, content string) error
+}
+
 // RegisterMemoryTools registers tools that let the LLM persist user memory.
-func RegisterMemoryTools(registry *Registry, st store.Store) {
+func RegisterMemoryTools(registry *Registry, st MemorySaver) {
 	registry.Register(&Tool{
 		Name: "save_user_memory",
 		Description: `Save or update your memory about the user who wrote the message you are answering. Use this to remember important information across sessions: preferences, role, expertise, ongoing projects, communication style, etc.

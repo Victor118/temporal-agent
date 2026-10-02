@@ -49,7 +49,6 @@ func TestPasswordPolicy(t *testing.T) {
 }
 
 type fakeStore struct {
-	store.Store
 	users  map[string]*store.User // by lowercase email
 	logins map[string]string      // token hash → user ID
 }

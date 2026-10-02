@@ -72,7 +72,6 @@ func TestBuildTranscript_KeepsTheEnd(t *testing.T) {
 }
 
 type forkStore struct {
-	store.Store
 	msgs []store.MessageWithID
 }
 

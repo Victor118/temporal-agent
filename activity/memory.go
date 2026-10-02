@@ -6,8 +6,17 @@ import (
 	"github.com/victor/temporal-agent/store"
 )
 
+// ConversationStore is what the memory activities need of the store: a
+// session's messages and a scope's memory.
+type ConversationStore interface {
+	LoadMessages(ctx context.Context, sessionID string) ([]store.Message, error)
+	AppendMessages(ctx context.Context, sessionID, turnKey string, startIndex int, messages []store.Message) error
+	LoadMemory(ctx context.Context, scope store.MemoryScope, scopeID string) (string, error)
+	SaveMemory(ctx context.Context, scope store.MemoryScope, scopeID string, content string) error
+}
+
 type MemoryActivities struct {
-	Store store.Store
+	Store ConversationStore
 }
 
 type LoadContextInput struct {

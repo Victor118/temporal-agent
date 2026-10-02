@@ -13,11 +13,24 @@ import (
 	"github.com/victor/temporal-agent/store"
 )
 
+// agentSeeder is what seeding needs: whether the table is empty, and inserting.
+type agentSeeder interface {
+	ListAgents(ctx context.Context) ([]store.Agent, error)
+	InsertAgentIfAbsent(ctx context.Context, agent store.Agent) (bool, error)
+}
+
+// catalogSource is where a worker's catalog comes from: the agents, and the
+// tools the workers published.
+type catalogSource interface {
+	ListAgents(ctx context.Context) ([]store.Agent, error)
+	ListTools(ctx context.Context) ([]store.ToolRecord, error)
+}
+
 // seedAgents imports the seed file into an empty agents table. Once the table
 // holds anything, the DB is the source of truth and the file is ignored:
 // otherwise an agent deleted from the back-office would come back on the next
 // start. A missing seed file is not an error; an invalid one is.
-func seedAgents(st store.Store, path string) error {
+func seedAgents(st agentSeeder, path string) error {
 	defs, err := config.LoadAgentDefinitions(path)
 	if errors.Is(err, os.ErrNotExist) {
 		log.Printf("No agents seed file at %s, skipping seed", path)
@@ -58,7 +71,7 @@ func seedAgents(st store.Store, path string) error {
 }
 
 // loadAgentsFromDB reads the full agent catalog from PostgreSQL.
-func loadAgentsFromDB(ctx context.Context, st store.Store) ([]activity.AgentCatalogEntry, error) {
+func loadAgentsFromDB(ctx context.Context, st catalogSource) ([]activity.AgentCatalogEntry, error) {
 	agents, err := st.ListAgents(ctx)
 	if err != nil {
 		return nil, err
@@ -78,7 +91,7 @@ func loadAgentsFromDB(ctx context.Context, st store.Store) ([]activity.AgentCata
 }
 
 // initCatalog creates the worker catalog, loads it from DB and logs the agents.
-func initCatalog(st store.Store) *activity.Catalog {
+func initCatalog(st catalogSource) *activity.Catalog {
 	catalog := activity.NewCatalog()
 	refreshCatalog(st, catalog)
 
@@ -94,7 +107,7 @@ func initCatalog(st store.Store) *activity.Catalog {
 
 // refreshCatalog reloads agents and tools from DB into catalog, logging changes.
 // On a DB error the previous content is kept.
-func refreshCatalog(st store.Store, catalog *activity.Catalog) {
+func refreshCatalog(st catalogSource, catalog *activity.Catalog) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -114,7 +127,7 @@ func refreshCatalog(st store.Store, catalog *activity.Catalog) {
 }
 
 // pollCatalog periodically refreshes the worker catalog from DB.
-func pollCatalog(ctx context.Context, st store.Store, catalog *activity.Catalog, interval time.Duration) {
+func pollCatalog(ctx context.Context, st catalogSource, catalog *activity.Catalog, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 

@@ -7,10 +7,15 @@ import (
 	"github.com/victor/temporal-agent/store"
 )
 
+// MessageAppender stores one message under an idempotency key.
+type MessageAppender interface {
+	AppendMessage(ctx context.Context, sessionID, key string, msg store.Message) error
+}
+
 // DeliveryActivities handles delivering scheduled task results to users.
 type DeliveryActivities struct {
 	Hub   SSEHub
-	Store store.Store
+	Store MessageAppender
 }
 
 type DeliverInput struct {

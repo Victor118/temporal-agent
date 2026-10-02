@@ -10,14 +10,13 @@ import (
 
 	"github.com/victor/temporal-agent/config"
 	"github.com/victor/temporal-agent/skill"
-	"github.com/victor/temporal-agent/store"
 )
 
 // serverSkills loads the skills the back-office shows: from the skills repo if
 // one is configured, reloaded when skills_version moves, as the workers do.
 // Loading runs in the background so an unreachable repo never delays the API.
 // Without a repo the server holds no skill, and source is "".
-func serverSkills(ctx context.Context, cfg *config.Config, st store.Store) (get func() []skill.Skill, source string) {
+func serverSkills(ctx context.Context, cfg *config.Config, st skillsVersionSource) (get func() []skill.Skill, source string) {
 	var current atomic.Pointer[[]skill.Skill]
 	get = func() []skill.Skill {
 		if p := current.Load(); p != nil {

@@ -37,9 +37,18 @@ var ErrTooManyAttempts = errors.New("trop de tentatives, réessaie plus tard")
 // the same time whether the account exists or not.
 var dummyHash, _ = HashPassword("not a real password, only spends time")
 
+// UserStore is what authentication needs of the store: accounts by email,
+// and login sessions.
+type UserStore interface {
+	GetUserByEmail(ctx context.Context, email string) (*store.User, error)
+	CreateLoginSession(ctx context.Context, tokenHash, userID string, expiresAt time.Time) error
+	GetLoginSessionUser(ctx context.Context, tokenHash string) (*store.User, error)
+	DeleteLoginSession(ctx context.Context, tokenHash string) error
+}
+
 // Service logs users in and out, and finds the user behind a request.
 type Service struct {
-	Store store.Store
+	Store UserStore
 	// Limits bound failed logins; nil = no limit.
 	Limits *LoginLimits
 }

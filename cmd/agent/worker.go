@@ -228,8 +228,18 @@ func runWorker(cmd *cobra.Command, args []string) {
 	}
 }
 
+// activityQueueSource holds the activity → task queue mapping.
+type activityQueueSource interface {
+	GetActivityQueueMap(ctx context.Context) (map[string]string, error)
+}
+
+// skillsVersionSource holds the version that tells when to reload the skills.
+type skillsVersionSource interface {
+	GetSkillsVersion(ctx context.Context) (int64, error)
+}
+
 // loadActivityQueuesFromDB reads the activity → task queue mapping from PostgreSQL.
-func loadActivityQueuesFromDB(st store.Store) map[string]string {
+func loadActivityQueuesFromDB(st activityQueueSource) map[string]string {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -245,7 +255,7 @@ func loadActivityQueuesFromDB(st store.Store) map[string]string {
 }
 
 // pollActivityQueues periodically refreshes the activity → task queue mapping from DB.
-func pollActivityQueues(ctx context.Context, st store.Store, cfg *activity.WorkerConfig, interval time.Duration) {
+func pollActivityQueues(ctx context.Context, st activityQueueSource, cfg *activity.WorkerConfig, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -260,7 +270,7 @@ func pollActivityQueues(ctx context.Context, st store.Store, cfg *activity.Worke
 }
 
 // watchSkillsVersionDB polls PostgreSQL for skills version changes.
-func watchSkillsVersionDB(ctx context.Context, st store.Store, interval time.Duration, onReload func()) {
+func watchSkillsVersionDB(ctx context.Context, st skillsVersionSource, interval time.Duration, onReload func()) {
 	var currentVersion int64
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()

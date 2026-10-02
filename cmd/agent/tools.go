@@ -84,10 +84,16 @@ func workerQueues(cfg *config.Config, wc *config.WorkerConfig) []string {
 	return queues
 }
 
+// toolPublisher is the tools table, as a worker publishing to it sees it.
+type toolPublisher interface {
+	ListTools(ctx context.Context) ([]store.ToolRecord, error)
+	UpsertTool(ctx context.Context, tool store.ToolRecord) error
+}
+
 // publishTools writes the registry's tools to the DB catalog under queue.
 // A tool already published by another queue that Temporal still sees served
 // is skipped with an error log.
-func publishTools(st store.Store, tc client.Client, registry *tool.Registry, queue string) {
+func publishTools(st toolPublisher, tc client.Client, registry *tool.Registry, queue string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 

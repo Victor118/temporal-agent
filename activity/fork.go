@@ -37,9 +37,14 @@ Write the summary in the language of the conversation. Keep:
 
 Drop greetings, small talk and dead ends that led nowhere. Name who said what when several users take part. Never add anything the conversation does not contain. Write a structured note, not a narrative; no preamble.`
 
+// TranscriptReader reads a conversation up to one of its messages.
+type TranscriptReader interface {
+	LoadMessagesUpTo(ctx context.Context, sessionID string, lastID int64) ([]store.MessageWithID, error)
+}
+
 // ForkActivities produce the summary a forked session starts from.
 type ForkActivities struct {
-	Store store.Store
+	Store TranscriptReader
 	LLM   provider.LLMProvider
 }
 
