@@ -17,9 +17,18 @@ import (
 	"github.com/victor/temporal-agent/workflow"
 )
 
+// telegramSecretHeader carries the secret_token given to setWebhook. It is the
+// only proof that an update comes from Telegram: the chat ID in the body is
+// guessable, and it decides whose agent runs and whose questions get answered.
+const telegramSecretHeader = "X-Telegram-Bot-Api-Secret-Token"
+
 func (h *handler) handleTelegramWebhook(w http.ResponseWriter, r *http.Request) {
+	if !secretEqual(r.Header.Get(telegramSecretHeader), h.cfg.TelegramWebhookSecret) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
 	var update telegram.Update
-	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxWebhookBytes)).Decode(&update); err != nil {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
 	}

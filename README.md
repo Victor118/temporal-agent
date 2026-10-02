@@ -126,6 +126,13 @@ Admins manage the other accounts in the back-office, under `/admin/users`.
 | `AGENT_DEFINITIONS_FILE` | Agents seed file (default `./agents.yaml`) |
 | `WORKER_CONFIG` | Worker config: tool queue, exposed tools, MCP servers (default `./worker.yaml`, see `worker.example.yaml`) |
 | `MCP_SERVERS` | JSON array of MCP servers, used only without a worker config |
+| `INTERNAL_ADDR` | Address of the internal API that receives worker notifications (default `:9999`). Keep it off the public network |
+| `NOTIFY_URL` | Base URL a worker posts its notifications to (default `http://localhost:9999`) |
+| `INTERNAL_API_KEY` | Secret shared by the server and its workers for `/internal/notify` (`Authorization: Bearer …`). Empty = the server refuses every notification |
+| `SKILLS_REPO`, `SKILLS_BRANCH` | Git repository (and branch) the skills are loaded from |
+| `SKILLS_WEBHOOK_SECRET` | GitHub webhook secret for `/webhooks/skills`. Empty = the route is not served |
+| `TELEGRAM_BOT_TOKEN` | Telegram bot token, to send messages |
+| `TELEGRAM_WEBHOOK_SECRET` | The `secret_token` passed to Telegram's `setWebhook`, checked on every update of `/webhooks/telegram`. Empty = the route is not served |
 
 ## Project Structure
 

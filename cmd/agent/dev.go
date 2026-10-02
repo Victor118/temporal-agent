@@ -192,6 +192,7 @@ func runDev(cmd *cobra.Command, args []string) {
 		store:          st,
 	}
 
+	warnClosedWebhooks(cfg)
 	srv := &http.Server{Addr: cfg.HTTPAddr, Handler: publicRouter(h, adminUI)}
 
 	go func() {

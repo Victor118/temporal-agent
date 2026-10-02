@@ -42,6 +42,10 @@ type Config struct {
 	HTTPAddr     string
 	InternalAddr string // Internal endpoint for worker→server notifications
 	NotifyURL    string // Base URL the worker POSTs notifications to
+	// InternalAPIKey is the secret a worker presents to the server's internal
+	// endpoint. The server refuses every notification while it is empty: the
+	// endpoint injects events into any session, so it is closed by default.
+	InternalAPIKey string
 
 	// Workspace
 	WorkspacePath string
@@ -64,6 +68,9 @@ type Config struct {
 
 	// Telegram
 	TelegramBotToken string
+	// TelegramWebhookSecret is the secret_token given to setWebhook: Telegram
+	// sends it back on every update. Empty = the webhook route is not served.
+	TelegramWebhookSecret string
 
 	// Email (SMTP)
 	SMTPHost     string
@@ -118,6 +125,8 @@ func Load() *Config {
 		InternalAddr: envOr("INTERNAL_ADDR", ":9999"),
 		NotifyURL:    envOr("NOTIFY_URL", "http://localhost:9999"),
 
+		InternalAPIKey: os.Getenv("INTERNAL_API_KEY"),
+
 		WorkspacePath:       envOr("WORKSPACE_PATH", "./workspace"),
 		ClaudeCodeWorkspace: envOr("CLAUDE_CODE_WORKSPACE", "./claude-code-runs"),
 		ClaudeCodeSSHKey:    os.Getenv("CLAUDE_CODE_SSH_KEY"),
@@ -128,7 +137,8 @@ func Load() *Config {
 
 		BraveSearchAPIKey: os.Getenv("BRAVE_SEARCH_API_KEY"),
 
-		TelegramBotToken: os.Getenv("TELEGRAM_BOT_TOKEN"),
+		TelegramBotToken:      os.Getenv("TELEGRAM_BOT_TOKEN"),
+		TelegramWebhookSecret: os.Getenv("TELEGRAM_WEBHOOK_SECRET"),
 
 		SMTPHost:     os.Getenv("SMTP_HOST"),
 		SMTPPort:     envOr("SMTP_PORT", "587"),

@@ -80,7 +80,11 @@ func runServer(cmd *cobra.Command, args []string) {
 
 	// Internal API (receives SSE notifications from workers)
 	internalRouter := chi.NewRouter()
-	internalRouter.Post("/internal/notify", handleInternalNotify(hub))
+	internalRouter.Post("/internal/notify", handleInternalNotify(hub, cfg.InternalAPIKey))
+	if cfg.InternalAPIKey == "" {
+		log.Println("Warning: INTERNAL_API_KEY is not set, the internal API refuses every worker notification")
+	}
+	warnClosedWebhooks(cfg)
 
 	publicSrv := &http.Server{Addr: cfg.HTTPAddr, Handler: publicRouter(h, adminUI)}
 	internalSrv := &http.Server{Addr: cfg.InternalAddr, Handler: internalRouter}

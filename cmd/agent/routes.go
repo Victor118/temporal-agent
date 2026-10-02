@@ -1,12 +1,14 @@
 package main
 
 import (
+	"log"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/victor/temporal-agent/auth"
+	"github.com/victor/temporal-agent/config"
 	"github.com/victor/temporal-agent/web"
 	"github.com/victor/temporal-agent/web/admin"
 	"github.com/victor/temporal-agent/web/chat"
@@ -18,10 +20,15 @@ func publicRouter(h *handler, adminUI *admin.Admin) http.Handler {
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 
-	// Unauthenticated routes. Webhooks authenticate themselves.
+	// Unauthenticated routes. Webhooks authenticate themselves, with a secret
+	// of their own: without it configured, the route does not exist.
 	r.Handle("/static/*", http.StripPrefix("/static/", chat.Static()))
-	r.Post("/webhooks/skills", h.handleSkillsWebhook)
-	r.Post("/webhooks/telegram", h.handleTelegramWebhook)
+	if h.cfg.SkillsWebhookSecret != "" {
+		r.Post("/webhooks/skills", h.handleSkillsWebhook)
+	}
+	if h.cfg.TelegramWebhookSecret != "" {
+		r.Post("/webhooks/telegram", h.handleTelegramWebhook)
+	}
 
 	// Back-office: its own login page, open to admins only
 	r.Mount("/admin", adminUI.Routes())
@@ -106,4 +113,16 @@ func publicRouter(h *handler, adminUI *admin.Admin) http.Handler {
 		})
 	})
 	return r
+}
+
+// warnClosedWebhooks says at startup which configured integration has no
+// webhook because its secret is missing: the route is silently absent
+// otherwise, and the integration just never hears anything.
+func warnClosedWebhooks(cfg *config.Config) {
+	if cfg.SkillsRepo != "" && cfg.SkillsWebhookSecret == "" {
+		log.Println("Warning: SKILLS_WEBHOOK_SECRET is not set, /webhooks/skills is disabled (skills reload from the back-office only)")
+	}
+	if cfg.TelegramBotToken != "" && cfg.TelegramWebhookSecret == "" {
+		log.Println("Warning: TELEGRAM_WEBHOOK_SECRET is not set, /webhooks/telegram is disabled")
+	}
 }

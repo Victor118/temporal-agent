@@ -133,7 +133,10 @@ func runWorker(cmd *cobra.Command, args []string) {
 	refreshCatalog(st, catalog) // include the tools just published
 
 	// Notification bridge: POST to server's internal endpoint (SSE requires HTTP)
-	notifier := activity.NewHTTPNotifier(cfg.NotifyURL)
+	notifier := activity.NewHTTPNotifier(cfg.NotifyURL, cfg.InternalAPIKey)
+	if cfg.InternalAPIKey == "" {
+		log.Println("Warning: INTERNAL_API_KEY is not set, the server will refuse this worker's notifications")
+	}
 
 	// Telegram client (optional)
 	var tgClient activity.TelegramSender

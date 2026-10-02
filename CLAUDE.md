@@ -17,7 +17,8 @@
 - Interface de chat (`web/chat` + `cmd/agent/ui.go`) : htmx + `html/template`, trois colonnes (arbre des sessions et forks, fil, rail) et vue carte (`/s/{id}/map`). Rendu côté serveur ; le flux SSE de la session (`/sessions/{id}/stream`) ne sert que de sonnette pour recharger le fil, qui renvoie la zone de saisie en hors-bande. États des sessions lus dans Temporal (3 requêtes de visibilité). Construction des vues pure et testée (`web/chat/views.go`). Les opérations sur les sessions (`sessions_ops.go`) sont partagées avec l'API JSON. Ancien chat sur `/classic`
 - Comptes (`auth/`) : login email + mot de passe argon2id, cookie `session_token` (token aléatoire, seul son hash est en base dans `login_sessions`). Premier admin : `agent user create --email … --admin`. Une route de session vérifie que l'utilisateur en est membre (`requireMember`)
 - Worker = Temporal worker + activities + tools publiés sur sa queue (`worker.yaml`)
-- Communication worker → serveur via `/internal/notify` ; le reste passe par PostgreSQL (agents, tools, skills_version)
+- Communication worker → serveur via `/internal/notify` ; le reste passe par PostgreSQL (agents, tools, skills_version). `/internal/notify` exige `Authorization: Bearer $INTERNAL_API_KEY` (vide = tout refusé) ; le port interne ne doit pas être publié
+- Webhooks : `/webhooks/telegram` vérifie `X-Telegram-Bot-Api-Secret-Token` = `TELEGRAM_WEBHOOK_SECRET`, `/webhooks/skills` la signature GitHub avec `SKILLS_WEBHOOK_SECRET`. Sans secret, la route n'est pas montée (défaut fermé)
 
 ## Workflows
 
