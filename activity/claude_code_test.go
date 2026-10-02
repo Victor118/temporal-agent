@@ -9,6 +9,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"go.temporal.io/sdk/temporal"
 
@@ -705,5 +706,67 @@ func TestWorkspaceChangesHandsWithTheRun(t *testing.T) {
 	}
 	if err := a.PushBranch(context.Background(), PushBranchInput{Dir: prepared.Dir, Remote: remote, Branch: "agent/thing"}); err != nil {
 		t.Fatalf("PushBranch: %v", err)
+	}
+}
+
+// A repository the run nests in the clone, and commits as a submodule, has a
+// configuration nothing restores: git status would run a clean filter set
+// there. The inspection stays out of submodules.
+func TestInspectWorkspaceStaysOutOfSubmodules(t *testing.T) {
+	src := initRepo(t)
+	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: t.TempDir()}
+	prepared, err := a.PrepareWorkspace(context.Background(), PrepareWorkspaceInput{Name: "run-1", Repo: src, Branch: "agent/x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	marker := filepath.Join(t.TempDir(), "filter-ran")
+	filter := filepath.Join(t.TempDir(), "filter.sh")
+	os.WriteFile(filter, []byte("#!/bin/sh\ntouch "+marker+"\ncat\n"), 0o755)
+	sub := filepath.Join(prepared.Dir, "sub")
+	ident := []string{"-c", "user.email=run@test", "-c", "user.name=run"}
+	for _, args := range [][]string{
+		{"init", "--quiet", sub},
+		{"-C", sub, "config", "filter.evil.clean", filter},
+	} {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	os.WriteFile(filepath.Join(sub, ".gitattributes"), []byte("* filter=evil\n"), 0o644)
+	os.WriteFile(filepath.Join(sub, "f"), []byte("hi\n"), 0o644)
+	for _, args := range [][]string{
+		append(append([]string{"-C", sub}, ident...), "add", "."),
+		append(append([]string{"-C", sub}, ident...), "commit", "--quiet", "-m", "sub"),
+		append(append([]string{"-C", prepared.Dir}, ident...), "add", "sub"),
+		append(append([]string{"-C", prepared.Dir}, ident...), "commit", "--quiet", "-m", "add sub"),
+	} {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	// Same size, newer: git must read the content, through the filter.
+	touchLater := func(d time.Duration) {
+		os.WriteFile(filepath.Join(sub, "f"), []byte("ho\n"), 0o644)
+		later := time.Now().Add(d)
+		os.Chtimes(filepath.Join(sub, "f"), later, later)
+	}
+	touchLater(time.Minute)
+	os.Remove(marker)
+
+	// The vector is real: a plain git status in the clone runs the filter.
+	exec.Command("git", "-C", prepared.Dir, "status", "--porcelain").Run()
+	if _, err := os.Stat(marker); err != nil {
+		t.Skip("this git does not run the submodule's filter; the test would prove nothing")
+	}
+	// Stale again: the status above may have refreshed the stat data.
+	touchLater(2 * time.Minute)
+	os.Remove(marker)
+
+	if _, err := a.InspectWorkspace(context.Background(), InspectWorkspaceInput{Dir: prepared.Dir, Base: prepared.Commit}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("InspectWorkspace ran a filter the run configured in a submodule")
 	}
 }

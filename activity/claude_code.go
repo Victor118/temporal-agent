@@ -408,7 +408,7 @@ func (a *ClaudeCodeActivities) sshEnv() []string {
 // not make git run a program. The configuration is restored before
 // (restoreGitConfig); these hold even if something was missed — no hooks, no
 // filesystem monitor.
-var gitSafeArgs = []string{"-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"}
+var gitSafeArgs = []string{"-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "submodule.recurse=false"}
 
 // gitEnv is git with extra environment entries for this command only. Anything
 // secret belongs here and never in the worker's own environment.
@@ -494,7 +494,10 @@ func (a *ClaudeCodeActivities) InspectWorkspace(ctx context.Context, in InspectW
 	}
 	out.Branch = strings.TrimSpace(branch)
 
-	status, err := a.git(ctx, in.Dir, "status", "--porcelain")
+	// Not into submodules: git status runs a git of its own in each, under
+	// that repository's configuration, which the run wrote and nothing
+	// restored — a clean filter there is a command it runs.
+	status, err := a.git(ctx, in.Dir, "status", "--porcelain", "--ignore-submodules=all")
 	if err != nil {
 		return out, fmt.Errorf("read status: %w: %s", err, status)
 	}
