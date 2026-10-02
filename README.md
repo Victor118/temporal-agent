@@ -151,6 +151,16 @@ agent/
 └── workflow/       # Temporal workflows (session, agent, scheduled)
 ```
 
+## Security notes
+
+- **`exec`** runs a shell command chosen by the model. It gets a filtered
+  environment (no `DATABASE_URL`, no API keys: see `subproc.Env`) and its whole
+  process group is killed at the timeout, but it is **not a sandbox**: it runs
+  as the worker's user, can leave the workspace, and can read whatever that user
+  can, the worker's own `/proc/<pid>/environ` included. Only expose `exec` (in
+  `worker.yaml` and in an agent's allowlist) on a worker whose user and
+  filesystem hold nothing an agent must not reach.
+
 ## License
 
 MIT

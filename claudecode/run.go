@@ -21,6 +21,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/victor/temporal-agent/subproc"
 )
 
 const (
@@ -165,9 +167,7 @@ func (r *Runner) Run(ctx context.Context, p Params) (Result, error) {
 	// Cancellation reaches the CLI's children too. Without the process group,
 	// a build or test it launched keeps running in the container after the
 	// activity is gone.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM) }
-	cmd.WaitDelay = killGrace
+	subproc.KillGroupOnCancel(cmd, syscall.SIGTERM, killGrace)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -286,19 +286,12 @@ func buildArgs(p Params) []string {
 }
 
 // cliEnvNames and cliEnvPrefixes are what the CLI keeps from the worker's
-// environment: what a process needs to run, the CLI's own settings, and the
-// toolchain's (GOPATH, GOTOOLCHAIN: without them a run's `go test` fetches
-// modules, or a whole toolchain, all over again). Anything else stays out,
-// whatever an operator adds to the worker later.
+// environment beyond what any subprocess keeps (subproc.Env): the CLI's own
+// settings, and the toolchain's (GOPATH, GOTOOLCHAIN: without them a run's
+// `go test` fetches modules, or a whole toolchain, all over again).
 var (
-	cliEnvNames = map[string]bool{
-		"PATH": true, "HOME": true, "USER": true, "LOGNAME": true, "SHELL": true,
-		"TERM": true, "LANG": true, "TZ": true, "TMPDIR": true,
-		"CLAUDE_CONFIG_DIR": true, "NODE_EXTRA_CA_CERTS": true,
-		"HTTP_PROXY": true, "HTTPS_PROXY": true, "NO_PROXY": true,
-		"http_proxy": true, "https_proxy": true, "no_proxy": true,
-	}
-	cliEnvPrefixes = []string{"LC_", "ANTHROPIC_", "GO"}
+	cliEnvNames    = []string{"CLAUDE_CONFIG_DIR", "NODE_EXTRA_CA_CERTS"}
+	cliEnvPrefixes = []string{"ANTHROPIC_", "GO"}
 )
 
 // cliEnv filters environ down to what the CLI may see. The worker holds
@@ -306,21 +299,5 @@ var (
 // platform's database. And the CLI hands its environment down to every shell
 // it opens, so whatever it receives, the run can read.
 func cliEnv(environ []string) []string {
-	var kept []string
-	for _, kv := range environ {
-		name, _, _ := strings.Cut(kv, "=")
-		if cliEnvNames[name] || hasAnyPrefix(name, cliEnvPrefixes) {
-			kept = append(kept, kv)
-		}
-	}
-	return kept
-}
-
-func hasAnyPrefix(s string, prefixes []string) bool {
-	for _, p := range prefixes {
-		if strings.HasPrefix(s, p) {
-			return true
-		}
-	}
-	return false
+	return subproc.Env(environ, cliEnvNames, cliEnvPrefixes)
 }

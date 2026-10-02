@@ -58,5 +58,6 @@
 
 - `SystemPrompt` dans les workflow inputs = override manuel ; si vide, prompt construit depuis l'agent (`agent_id`)
 - Les tool results remontent comme string au parent
+- Tout sous-processus lancé pour un modèle (`exec`, Claude Code) passe par `subproc` : environnement en liste blanche (`subproc.Env`), groupe de processus tué à l'annulation. `exec` n'est pas un bac à sable (même utilisateur que le worker) : ne l'exposer que sur un worker sans secret
 - Les notifications SSE passent par `/internal/notify` (prod) ou in-memory hub (dev)
 - ask_user fonctionne pour les sous-agents (SSE route vers le bon sessionID via le workflowID)
