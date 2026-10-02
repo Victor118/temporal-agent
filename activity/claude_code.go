@@ -261,8 +261,10 @@ func restoreGitConfig(dir string) (changed bool, err error) {
 	// Rewritten even when unchanged: the file the run's user had, and may
 	// still hold open for writing, is replaced by a new one of the worker's.
 	// A new file, never written through whatever the run left at that path:
-	// O_EXCL does not follow a symbolic link.
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+	// O_EXCL does not follow a symbolic link. Whatever that is goes, a
+	// directory with its contents included: RemoveAll does not follow links
+	// either, and with RunAs, all of .git is the worker's by now (reclaim).
+	if err := os.RemoveAll(path); err != nil {
 		return changed, err
 	}
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)

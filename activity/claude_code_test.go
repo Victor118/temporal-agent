@@ -619,6 +619,34 @@ func TestPushBranchRefusesAConfigChangedAfterTheInspection(t *testing.T) {
 	}
 }
 
+// A configuration the run replaced by a directory, contents and all, is a
+// changed configuration like any other: put back and reported, not an error
+// that a retry would only repeat.
+func TestInspectWorkspaceRestoresAConfigTurnedIntoADirectory(t *testing.T) {
+	src := initRepo(t)
+	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: t.TempDir()}
+	prepared, err := a.PrepareWorkspace(context.Background(), PrepareWorkspaceInput{Name: "run-1", Repo: src, Branch: "agent/x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(prepared.Dir, ".git", "config")
+	os.Remove(config)
+	os.MkdirAll(filepath.Join(config, "sub"), 0o755)
+	os.WriteFile(filepath.Join(config, "sub", "f"), []byte("x"), 0o644)
+
+	out, err := a.InspectWorkspace(context.Background(), InspectWorkspaceInput{Dir: prepared.Dir, Base: prepared.Commit})
+	if err != nil {
+		t.Fatalf("InspectWorkspace: %v", err)
+	}
+	if !out.GitConfigChanged {
+		t.Error("the configuration turned directory was not reported")
+	}
+	saved, _ := os.ReadFile(gitConfigCopy(prepared.Dir))
+	if data, err := os.ReadFile(config); err != nil || string(data) != string(saved) {
+		t.Errorf("the configuration was not put back: %q, %v", data, err)
+	}
+}
+
 // Inspect and push only work on a workspace under Root.
 func TestInspectAndPushRefuseADirOutsideRoot(t *testing.T) {
 	src := initRepo(t)
