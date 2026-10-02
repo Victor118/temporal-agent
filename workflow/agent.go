@@ -33,8 +33,9 @@ const toolScheduleToStartTimeout = 60 * time.Second
 
 type AgentWorkflowInput struct {
 	SessionID    string `json:"session_id"`
-	UserID       string `json:"user_id,omitempty"`
-	AgentID      string `json:"agent_id"` // Required. Logical agent identity: prompt, skills and allowed tools
+	UserID       string `json:"user_id,omitempty"`   // Author of UserMessage: whose memory is loaded, who tools act for
+	UserName     string `json:"user_name,omitempty"` // Author's name, shown to the model
+	AgentID      string `json:"agent_id"`            // Required. Logical agent identity: prompt, skills and allowed tools
 	UserMessage  string `json:"user_message"`
 	SystemPrompt string `json:"system_prompt"`
 	Model        string `json:"model"` // Explicit model; empty = the worker's default (LLM_MODEL)
@@ -145,6 +146,8 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 	messages = append(messages, store.Message{
 		Role:    store.RoleUser,
 		Content: string(contentJSON),
+		UserID:  input.UserID,
+		Author:  input.UserName,
 	})
 
 	persistOpts := workflow.ActivityOptions{
@@ -207,7 +210,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 	}
 	// Append user memory to system prompt if available
 	if userMemory != "" {
-		systemPrompt += "\n## User Memory\n\nThe following is what you remember about this user from previous conversations. Use it to personalize your responses.\n\n" + userMemory + "\n\n"
+		systemPrompt += userMemorySection(input.UserName, userMemory)
 	}
 
 	// Load the tools this agent may use, with the queue serving each one
@@ -359,6 +362,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 					Input:     tc.Input,
 					SessionID: input.SessionID,
 					AgentID:   currentAgentID,
+					UserID:    input.UserID,
 				})
 			}
 			dispatches[j] = d
@@ -457,6 +461,9 @@ func convertMessages(messages []store.Message) []provider.ChatMessage {
 		if len(content) == 0 {
 			content = nil
 		}
+		if msg.Role == store.RoleUser && msg.Author != "" {
+			content = withAuthor(content, msg.Author)
+		}
 		cm := provider.ChatMessage{
 			Role:    string(msg.Role),
 			Content: content,
@@ -480,6 +487,31 @@ func convertMessages(messages []store.Message) []provider.ChatMessage {
 		result = append(result, cm)
 	}
 	return result
+}
+
+// userMemorySection is the prompt section holding the memory of the user the
+// turn answers. It names that user: in a shared session, the model must not
+// take one member's memory for everyone's, nor save the others into it.
+func userMemorySection(userName, memory string) string {
+	who := "this user"
+	if userName != "" {
+		who = userName + ", the author of the latest message"
+	}
+	return "\n## User Memory\n\nThe following is what you remember about " + who +
+		" from previous conversations. Use it to personalize your responses. It is private to them: do not reveal it to other participants.\n\n" +
+		memory + "\n\n"
+}
+
+// withAuthor prefixes a user message with its author's name, so the model
+// knows who speaks when a session has several users. Only the text sent to the
+// model changes: the stored message keeps the author in its own field.
+func withAuthor(content json.RawMessage, author string) json.RawMessage {
+	var text string
+	if json.Unmarshal(content, &text) != nil {
+		return content // not plain text: leave it alone
+	}
+	prefixed, _ := json.Marshal("[" + author + "] " + text)
+	return prefixed
 }
 
 func notifyResponse(ctx workflow.Context, sessionID, channel, channelID, content string) {
@@ -567,13 +599,21 @@ func subAgentInput(rawInput json.RawMessage, parent AgentWorkflowInput, childID 
 		UserMessage: call.Task,
 		Model:       model,
 		AgentChain:  agentChain,
+		// The sub-agent acts for the same user: its tools save that user's
+		// memory, deliver to that user.
+		UserID: parent.UserID,
 	}, nil
 }
 
 func notifyToolCalls(ctx workflow.Context, sessionID, channel, channelID string, toolCalls []provider.ToolCallInfo) {
+	shown := make([]provider.ToolCallInfo, len(toolCalls))
+	for i, tc := range toolCalls {
+		tc.Input = tool.DisplayInput(tc.Name, tc.Input)
+		shown[i] = tc
+	}
 	data, _ := json.Marshal(map[string]interface{}{
 		"type":       "tool_calls",
-		"tool_calls": toolCalls,
+		"tool_calls": shown,
 	})
 	var notifAct *activity.NotificationActivities
 	_ = workflow.ExecuteActivity(

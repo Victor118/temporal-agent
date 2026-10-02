@@ -13,7 +13,8 @@
 
 - 3 modes : `agent server`, `agent worker`, `agent dev` (les deux combinés)
 - Server = API HTTP + SSE hub + catalogue agents + skills versioning
-- Back-office `/admin` (htmx + `html/template`, `web/admin`) : config des agents (lecture + édition). Mot de passe `ADMIN_API_KEY` (vide = fermé), distinct de `API_KEY` du chat. Le JSON du panneau admin du chat est sous `/api/admin`
+- Back-office `/admin` (htmx + `html/template`, `web/admin`) : agents et utilisateurs, réservé au rôle `admin`. Le JSON du panneau admin du chat est sous `/api/admin` (admin aussi)
+- Comptes (`auth/`) : login email + mot de passe argon2id, cookie `session_token` (token aléatoire, seul son hash est en base dans `login_sessions`). Premier admin : `agent user create --email … --admin`. Une route de session vérifie que l'utilisateur en est membre (`requireMember`)
 - Worker = Temporal worker + activities + tools publiés sur sa queue (`worker.yaml`)
 - Communication worker → serveur via `/internal/notify` ; le reste passe par PostgreSQL (agents, tools, skills_version)
 
@@ -37,6 +38,9 @@
 ## Store (PostgreSQL)
 
 - `messages` : historique de conversation par session (JSONB), append-only ; `msg_key` = cle d'idempotence (`{run id}-{tour}:{index}`, ou `sched:{id}:{run}` pour un resultat de tache), lecture `ORDER BY id`
+- `users` (email unique insensible à la casse, rôle `admin`|`user`, `disabled_at`), `login_sessions`
+- `sessions` (`created_by`) + `session_members` : une session est partagée entre ses membres ; tout membre peut en ajouter, chacun peut la quitter, seul le créateur la supprime
+- Chaque message utilisateur porte son auteur (`user_id`, `author`) ; le signal `user-message` transporte `{text, user_id, user_name}`. Le tour répond à son auteur : c'est **sa** mémoire qui est chargée, et ses tools (`save_user_memory`, `schedule_task`) agissent pour lui
 - `memory` : key-value scope (user/project/session)
 - `task_logs` : suivi des taches schedulees
 - AgentWorkflow ecrit ses messages au fil du tour quand `TurnKey` est fourni ; SessionWorkflow reecrit le meme delta en fin de tour (les memes cles, donc sans effet si deja ecrit). Un sous-agent n'a pas de `TurnKey` et ne persiste rien

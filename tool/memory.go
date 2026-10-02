@@ -8,12 +8,26 @@ import (
 	"github.com/victor/temporal-agent/store"
 )
 
+// privateInputTools are the tools whose input is not shown in the session's
+// transcript: everyone in a shared session sees the tool calls, and a user's
+// memory is theirs alone.
+var privateInputTools = map[string]bool{"save_user_memory": true}
+
+// DisplayInput is the input of a tool call as the session's members see it.
+func DisplayInput(toolName string, input json.RawMessage) json.RawMessage {
+	if privateInputTools[toolName] {
+		return json.RawMessage(`{"content":"(private)"}`)
+	}
+	return input
+}
+
 // RegisterMemoryTools registers tools that let the LLM persist user memory.
 func RegisterMemoryTools(registry *Registry, st store.Store) {
 	registry.Register(&Tool{
 		Name: "save_user_memory",
-		Description: `Save or update your memory about the current user. Use this to remember important information across sessions: preferences, role, expertise, ongoing projects, communication style, etc.
+		Description: `Save or update your memory about the user who wrote the message you are answering. Use this to remember important information across sessions: preferences, role, expertise, ongoing projects, communication style, etc.
 The content you save will be loaded automatically at the start of every future session with this user.
+The memory is private to that one user. In a session several people share, record only what concerns the author of the current message, never anything about the other participants: it would follow this user into sessions the others are not part of.
 Write the memory as a concise, structured note. Each call REPLACES the previous memory — include everything you want to remember.`,
 		InputSchema: json.RawMessage(`{
 			"type": "object",
@@ -34,12 +48,9 @@ Write the memory as a concise, structured note. Each call REPLACES the previous 
 				return "", fmt.Errorf("parse input: %w", err)
 			}
 
-			userID := ""
-			if sid := SessionIDFromContext(ctx); sid != "" {
-				if uid, err := st.GetSessionUser(ctx, sid); err == nil {
-					userID = uid
-				}
-			}
+			// The author of the message being answered: in a shared session,
+			// what the agent learns about one member is not saved for another.
+			userID := UserIDFromContext(ctx)
 			if userID == "" {
 				return "Cannot save memory: user not identified", nil
 			}

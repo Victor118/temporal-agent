@@ -91,13 +91,8 @@ func registerScheduleTask(registry *Registry, temporalClient client.Client, st s
 				}
 			}
 
-			// Resolve the user who owns this session
-			var userID string
-			if sid := SessionIDFromContext(ctx); sid != "" {
-				if uid, err := st.GetSessionUser(ctx, sid); err == nil {
-					userID = uid
-				}
-			}
+			// The task's result goes to the user who asked for it
+			userID := UserIDFromContext(ctx)
 
 			workflowInput := ScheduledAgentInput{
 				AgentID:         AgentIDFromContext(ctx),

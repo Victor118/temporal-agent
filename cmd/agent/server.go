@@ -10,14 +10,13 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
 	"github.com/spf13/cobra"
 	"go.temporal.io/sdk/client"
 
+	"github.com/victor/temporal-agent/auth"
 	"github.com/victor/temporal-agent/config"
 	"github.com/victor/temporal-agent/sse"
 	"github.com/victor/temporal-agent/store"
-	"github.com/victor/temporal-agent/web"
 	"github.com/victor/temporal-agent/web/admin"
 )
 
@@ -57,7 +56,9 @@ func runServer(cmd *cobra.Command, args []string) {
 
 	// Back-office
 	skills, skillsSource := serverSkills(context.Background(), cfg, st)
+	authSvc := &auth.Service{Store: st}
 	adminUI := admin.New(admin.Config{
+		Auth:         authSvc,
 		Store:        st,
 		Temporal:     temporalClient,
 		Skills:       skills,
@@ -66,64 +67,22 @@ func runServer(cmd *cobra.Command, args []string) {
 		SkillsReloadable: cfg.SkillsRepo != "",
 		DefaultAgentID:   cfg.DefaultAgentID,
 		WorkflowQueue:    cfg.WorkflowQueue,
-		AdminKey:         cfg.AdminAPIKey,
 	})
 
 	// Handler
 	h := &handler{
+		auth:           authSvc,
 		temporalClient: temporalClient,
 		hub:            hub,
 		cfg:            cfg,
 		store:          st,
 	}
 
-	// Public API
-	publicRouter := chi.NewRouter()
-	publicRouter.Use(middleware.Logger)
-	publicRouter.Use(middleware.Recoverer)
-	publicRouter.Use(corsMiddleware)
-
-	// Unauthenticated routes
-	publicRouter.Get("/", web.HandleIndex)
-	publicRouter.Post("/auth/login", h.login)
-	publicRouter.Post("/auth/logout", h.logout)
-	publicRouter.Post("/webhooks/skills", h.handleSkillsWebhook)
-	publicRouter.Post("/webhooks/telegram", h.handleTelegramWebhook)
-
-	// Back-office: its own admin password, independent of the chat's API_KEY
-	publicRouter.Mount("/admin", adminUI.Routes())
-
-	// Authenticated routes
-	publicRouter.Group(func(r chi.Router) {
-		r.Use(authMiddleware(cfg))
-
-		r.Get("/auth/check", h.checkAuth)
-		r.Post("/sessions", h.createSession)
-		r.Get("/users/{userID}/sessions", h.listSessions)
-		r.Get("/users/{userID}/notifications", h.getNotifications)
-		r.Get("/users/{userID}/notifications/stream", h.streamNotifications)
-		r.Delete("/users/{userID}/notifications/{notifID}", h.deleteNotification)
-		r.Delete("/users/{userID}/notifications", h.deleteAllNotifications)
-		r.Post("/sessions/{id}/messages", h.sendMessage)
-		r.Post("/sessions/{id}/cancel", h.cancelAgent)
-		r.Delete("/sessions/{id}", h.deleteSession)
-		r.Get("/sessions/{id}/state", h.getState)
-		r.Get("/sessions/{id}/history", h.getHistory)
-		r.Get("/sessions/{id}/stream", h.stream)
-		r.Post("/sessions/{id}/answer", h.answerQuestion)
-
-		// Admin JSON API (used by the chat's admin panel)
-		r.Get("/api/admin/queues", h.listKnownQueues)
-		r.Get("/api/admin/activity-queues", h.listActivityQueues)
-		r.Put("/api/admin/activity-queues", h.setActivityQueue)
-		r.Delete("/api/admin/activity-queues/{activityName}", h.deleteActivityQueue)
-	})
-
 	// Internal API (receives SSE notifications from workers)
 	internalRouter := chi.NewRouter()
 	internalRouter.Post("/internal/notify", handleInternalNotify(hub))
 
-	publicSrv := &http.Server{Addr: cfg.HTTPAddr, Handler: publicRouter}
+	publicSrv := &http.Server{Addr: cfg.HTTPAddr, Handler: publicRouter(h, adminUI)}
 	internalSrv := &http.Server{Addr: cfg.InternalAddr, Handler: internalRouter}
 
 	// Start both servers

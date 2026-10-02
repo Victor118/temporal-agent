@@ -55,12 +55,29 @@ func (s *PostgresStore) migrate() error {
 }
 
 const schema = `
+		-- An account. The email is the login, unique whatever its case; the id is
+		-- what everything else refers to, so the email can change.
 		CREATE TABLE IF NOT EXISTS users (
-			id TEXT PRIMARY KEY,
-			name TEXT NOT NULL DEFAULT '',
-			telegram_id BIGINT UNIQUE,
-			created_at TIMESTAMPTZ DEFAULT NOW()
+			id            TEXT PRIMARY KEY,
+			email         TEXT NOT NULL,
+			display_name  TEXT NOT NULL DEFAULT '',
+			password_hash TEXT NOT NULL,
+			role          TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('admin', 'user')),
+			telegram_id   BIGINT UNIQUE,
+			disabled_at   TIMESTAMPTZ,
+			created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		);
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users (lower(email));
+
+		-- A logged-in browser. Only the token's hash is stored: a leaked table
+		-- logs nobody in.
+		CREATE TABLE IF NOT EXISTS login_sessions (
+			token_hash TEXT PRIMARY KEY,
+			user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			expires_at TIMESTAMPTZ NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_login_sessions_user ON login_sessions(user_id);
 
 		-- msg_key is the idempotency key of a message within its session:
 		-- "{run id}-{turn}:{index}" for a conversation turn, "sched:{id}:{run}"
@@ -85,16 +102,27 @@ const schema = `
 			PRIMARY KEY (scope, scope_id)
 		);
 
+		-- A conversation. created_by is who opened it; who may use it is in
+		-- session_members.
 		CREATE TABLE IF NOT EXISTS sessions (
 			session_id TEXT PRIMARY KEY,
-			user_id TEXT NOT NULL,
+			created_by TEXT NOT NULL REFERENCES users(id),
 			title TEXT NOT NULL DEFAULT '',
 			agent_id TEXT NOT NULL DEFAULT '',
 			channel TEXT NOT NULL DEFAULT 'web',
 			channel_id TEXT NOT NULL DEFAULT '',
 			created_at TIMESTAMPTZ DEFAULT NOW()
 		);
-		CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id, created_at DESC);
+
+		-- The users of a session. Any member may add others.
+		CREATE TABLE IF NOT EXISTS session_members (
+			session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+			user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			added_by   TEXT NOT NULL DEFAULT '',
+			added_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			PRIMARY KEY (session_id, user_id)
+		);
+		CREATE INDEX IF NOT EXISTS idx_session_members_user ON session_members(user_id);
 
 		CREATE TABLE IF NOT EXISTS task_logs (
 			schedule_id TEXT PRIMARY KEY,
@@ -169,101 +197,6 @@ const schema = `
 			updated_at TIMESTAMPTZ DEFAULT NOW()
 		);
 `
-
-func (s *PostgresStore) GetUserByTelegramID(ctx context.Context, telegramID int64) (*User, error) {
-	var u User
-	err := s.db.QueryRowContext(ctx,
-		"SELECT id, name, telegram_id, created_at FROM users WHERE telegram_id = $1",
-		telegramID).Scan(&u.ID, &u.Name, &u.TelegramID, &u.CreatedAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &u, nil
-}
-
-func (s *PostgresStore) CreateSession(ctx context.Context, session Session) error {
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO sessions (session_id, user_id, title, agent_id, channel, channel_id)
-		VALUES ($1, $2, $3, $4, $5, $6)`,
-		session.SessionID, session.UserID, session.Title, session.AgentID, session.Channel, session.ChannelID)
-	return err
-}
-
-func (s *PostgresStore) GetSession(ctx context.Context, sessionID string) (*Session, error) {
-	var sess Session
-	err := s.db.QueryRowContext(ctx,
-		"SELECT session_id, user_id, title, agent_id, channel, channel_id, created_at FROM sessions WHERE session_id = $1",
-		sessionID).Scan(&sess.SessionID, &sess.UserID, &sess.Title, &sess.AgentID, &sess.Channel, &sess.ChannelID, &sess.CreatedAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &sess, nil
-}
-
-func (s *PostgresStore) GetActiveSessionByChannel(ctx context.Context, userID, channel, channelID string) (*Session, error) {
-	var sess Session
-	err := s.db.QueryRowContext(ctx,
-		`SELECT session_id, user_id, title, agent_id, channel, channel_id, created_at
-		 FROM sessions WHERE user_id = $1 AND channel = $2 AND channel_id = $3
-		 ORDER BY created_at DESC LIMIT 1`,
-		userID, channel, channelID).Scan(&sess.SessionID, &sess.UserID, &sess.Title, &sess.AgentID, &sess.Channel, &sess.ChannelID, &sess.CreatedAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &sess, nil
-}
-
-func (s *PostgresStore) GetSessionUser(ctx context.Context, sessionID string) (string, error) {
-	var userID string
-	err := s.db.QueryRowContext(ctx, "SELECT user_id FROM sessions WHERE session_id = $1", sessionID).Scan(&userID)
-	if err != nil {
-		return "", err
-	}
-	return userID, nil
-}
-
-func (s *PostgresStore) DeleteSession(ctx context.Context, sessionID string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	tx.ExecContext(ctx, "DELETE FROM messages WHERE session_id = $1", sessionID)
-	tx.ExecContext(ctx, "DELETE FROM memory WHERE scope = 'session' AND scope_id = $1", sessionID)
-	tx.ExecContext(ctx, "DELETE FROM sessions WHERE session_id = $1", sessionID)
-
-	return tx.Commit()
-}
-
-func (s *PostgresStore) ListSessionsByUser(ctx context.Context, userID string) ([]Session, error) {
-	rows, err := s.db.QueryContext(ctx,
-		"SELECT session_id, user_id, title, agent_id, channel, channel_id, created_at FROM sessions WHERE user_id = $1 ORDER BY created_at DESC",
-		userID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var sessions []Session
-	for rows.Next() {
-		var s Session
-		if err := rows.Scan(&s.SessionID, &s.UserID, &s.Title, &s.AgentID, &s.Channel, &s.ChannelID, &s.CreatedAt); err != nil {
-			return nil, err
-		}
-		sessions = append(sessions, s)
-	}
-	return sessions, rows.Err()
-}
 
 func (s *PostgresStore) UpdateSessionTitle(ctx context.Context, sessionID, title string) error {
 	_, err := s.db.ExecContext(ctx,

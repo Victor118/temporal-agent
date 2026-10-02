@@ -17,16 +17,31 @@ const (
 
 type Store interface {
 	// Users
+	CreateUser(ctx context.Context, u User) error
+	GetUser(ctx context.Context, id string) (*User, error)
+	GetUserByEmail(ctx context.Context, email string) (*User, error)
 	GetUserByTelegramID(ctx context.Context, telegramID int64) (*User, error)
+	ListUsers(ctx context.Context) ([]User, error)
+	UpdateUser(ctx context.Context, u User) error
+	SetUserPassword(ctx context.Context, id, passwordHash string) error
+	SetUserDisabled(ctx context.Context, id string, disabled bool) error
 
-	// Sessions
+	// Login sessions
+	CreateLoginSession(ctx context.Context, tokenHash, userID string, expiresAt time.Time) error
+	GetLoginSessionUser(ctx context.Context, tokenHash string) (*User, error)
+	DeleteLoginSession(ctx context.Context, tokenHash string) error
+
+	// Sessions and their members
 	CreateSession(ctx context.Context, session Session) error
 	GetSession(ctx context.Context, sessionID string) (*Session, error)
-	GetSessionUser(ctx context.Context, sessionID string) (string, error)
 	GetActiveSessionByChannel(ctx context.Context, userID, channel, channelID string) (*Session, error)
 	ListSessionsByUser(ctx context.Context, userID string) ([]Session, error)
 	UpdateSessionTitle(ctx context.Context, sessionID, title string) error
 	DeleteSession(ctx context.Context, sessionID string) error
+	IsSessionMember(ctx context.Context, sessionID, userID string) (bool, error)
+	ListSessionMembers(ctx context.Context, sessionID string) ([]SessionMember, error)
+	AddSessionMember(ctx context.Context, sessionID, userID, addedBy string) error
+	RemoveSessionMember(ctx context.Context, sessionID, userID string) error
 
 	// Session messages
 	LoadMessages(ctx context.Context, sessionID string) ([]Message, error)

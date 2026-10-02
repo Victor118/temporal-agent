@@ -39,8 +39,6 @@ type Config struct {
 	HTTPAddr     string
 	InternalAddr string // Internal endpoint for worker→server notifications
 	NotifyURL    string // Base URL the worker POSTs notifications to
-	APIKey       string // Shared secret for auth (required in production)
-	AdminAPIKey  string // Back-office password; empty = back-office closed
 
 	// Workspace
 	WorkspacePath string
@@ -115,8 +113,6 @@ func Load() *Config {
 		HTTPAddr:     envOr("HTTP_ADDR", ":8888"),
 		InternalAddr: envOr("INTERNAL_ADDR", ":9999"),
 		NotifyURL:    envOr("NOTIFY_URL", "http://localhost:9999"),
-		APIKey:       os.Getenv("API_KEY"),
-		AdminAPIKey:  os.Getenv("ADMIN_API_KEY"),
 
 		WorkspacePath:       envOr("WORKSPACE_PATH", "./workspace"),
 		ClaudeCodeWorkspace: envOr("CLAUDE_CODE_WORKSPACE", "./claude-code-runs"),

@@ -3,17 +3,16 @@ package main
 import (
 	"context"
 	"crypto/hmac"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -21,6 +20,7 @@ import (
 	"go.temporal.io/sdk/client"
 
 	"github.com/victor/temporal-agent/activity"
+	"github.com/victor/temporal-agent/auth"
 	"github.com/victor/temporal-agent/config"
 	"github.com/victor/temporal-agent/sse"
 	"github.com/victor/temporal-agent/store"
@@ -29,6 +29,7 @@ import (
 )
 
 type handler struct {
+	auth           *auth.Service
 	temporalClient client.Client
 	hub            *sse.Hub
 	cfg            *config.Config
@@ -38,23 +39,9 @@ type handler struct {
 
 // --- Auth ---
 
-const sessionCookieName = "session_token"
-
-// sessionStore holds active session tokens in memory.
-// Tokens are lost on restart — users simply re-login.
-var (
-	sessions   = make(map[string]bool)
-	sessionsMu sync.RWMutex
-)
-
-func generateToken() string {
-	b := make([]byte, 32)
-	rand.Read(b)
-	return hex.EncodeToString(b)
-}
-
 type loginRequest struct {
-	APIKey string `json:"api_key"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
 }
 
 func (h *handler) login(w http.ResponseWriter, r *http.Request) {
@@ -63,88 +50,57 @@ func (h *handler) login(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
-
-	if req.APIKey != h.cfg.APIKey {
-		http.Error(w, "Invalid API key", http.StatusUnauthorized)
+	token, u, err := h.auth.Login(r.Context(), req.Email, req.Password)
+	if errors.Is(err, auth.ErrInvalidCredentials) {
+		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}
-
-	token := generateToken()
-	sessionsMu.Lock()
-	sessions[token] = true
-	sessionsMu.Unlock()
-
-	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookieName,
-		Value:    token,
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   true,
-		SameSite: http.SameSiteStrictMode,
-		MaxAge:   7 * 24 * 60 * 60, // 7 days
-	})
-
-	w.WriteHeader(http.StatusNoContent)
+	if err != nil {
+		log.Printf("login: %v", err)
+		http.Error(w, "Internal error", http.StatusInternalServerError)
+		return
+	}
+	auth.SetCookie(w, r, token)
+	writeJSON(w, http.StatusOK, u)
 }
 
 func (h *handler) logout(w http.ResponseWriter, r *http.Request) {
-	cookie, err := r.Cookie(sessionCookieName)
-	if err == nil {
-		sessionsMu.Lock()
-		delete(sessions, cookie.Value)
-		sessionsMu.Unlock()
-	}
+	h.auth.Logout(r.Context(), r)
+	auth.ClearCookie(w)
+	w.WriteHeader(http.StatusNoContent)
+}
 
-	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookieName,
-		Value:    "",
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   true,
-		SameSite: http.SameSiteStrictMode,
-		MaxAge:   -1,
+// me returns the logged-in user.
+func (h *handler) me(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, auth.UserFrom(r.Context()))
+}
+
+// requireMember lets through only the members of the session in the URL.
+// A non-member gets 404, not 403: whether a session exists is not theirs to
+// learn.
+func (h *handler) requireMember(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ok, err := h.store.IsSessionMember(r.Context(), chi.URLParam(r, "id"), auth.UserFrom(r.Context()).ID)
+		if err != nil {
+			log.Printf("membership check: %v", err)
+			http.Error(w, "Internal error", http.StatusInternalServerError)
+			return
+		}
+		if !ok {
+			http.Error(w, "Session not found", http.StatusNotFound)
+			return
+		}
+		next.ServeHTTP(w, r)
 	})
-
-	w.WriteHeader(http.StatusNoContent)
 }
 
-func (h *handler) checkAuth(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// authMiddleware checks for a valid session cookie.
-// Skips auth if API_KEY is not configured (dev mode).
-func authMiddleware(cfg *config.Config) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// No API key configured → auth disabled
-			if cfg.APIKey == "" {
-				next.ServeHTTP(w, r)
-				return
-			}
-
-			cookie, err := r.Cookie(sessionCookieName)
-			if err != nil {
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
-				return
-			}
-
-			sessionsMu.RLock()
-			valid := sessions[cookie.Value]
-			sessionsMu.RUnlock()
-
-			if !valid {
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
-				return
-			}
-
-			next.ServeHTTP(w, r)
-		})
-	}
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(v)
 }
 
 type createSessionRequest struct {
-	UserID       string `json:"user_id,omitempty"`
 	AgentID      string `json:"agent_id,omitempty"`
 	SystemPrompt string `json:"system_prompt,omitempty"`
 	Model        string `json:"model,omitempty"`
@@ -160,11 +116,7 @@ func (h *handler) createSession(w http.ResponseWriter, r *http.Request) {
 		json.NewDecoder(r.Body).Decode(&req)
 	}
 
-	userID := req.UserID
-	if userID == "" {
-		userID = "anonymous"
-	}
-
+	me := auth.UserFrom(r.Context())
 	sessionID := newUUID()
 	model := req.Model // Explicit choice only; empty = worker default (LLM_MODEL)
 
@@ -179,7 +131,6 @@ func (h *handler) createSession(w http.ResponseWriter, r *http.Request) {
 		TaskQueue: h.cfg.WorkflowQueue,
 	}, workflow.SessionWorkflow, workflow.SessionWorkflowInput{
 		SessionID:    sessionID,
-		UserID:       userID,
 		AgentID:      agentID,
 		SystemPrompt: req.SystemPrompt, // Optional override; empty = load from agent skills
 		Model:        model,
@@ -189,14 +140,16 @@ func (h *handler) createSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Persist session metadata
+	// Persist session metadata: without it nobody is a member, so nobody
+	// could open the session.
 	if err := h.store.CreateSession(r.Context(), store.Session{
 		SessionID: sessionID,
-		UserID:    userID,
+		CreatedBy: me.ID,
 		AgentID:   agentID,
 		Channel:   "web",
 	}); err != nil {
-		log.Printf("Warning: failed to persist session: %v", err)
+		http.Error(w, fmt.Sprintf("Failed to persist session: %v", err), http.StatusInternalServerError)
+		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -204,10 +157,9 @@ func (h *handler) createSession(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(createSessionResponse{SessionID: sessionID})
 }
 
+// listSessions returns the sessions the logged-in user is a member of.
 func (h *handler) listSessions(w http.ResponseWriter, r *http.Request) {
-	userID := chi.URLParam(r, "userID")
-
-	sessions, err := h.store.ListSessionsByUser(r.Context(), userID)
+	sessions, err := h.store.ListSessionsByUser(r.Context(), auth.UserFrom(r.Context()).ID)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to list sessions: %v", err), http.StatusInternalServerError)
 		return
@@ -216,20 +168,37 @@ func (h *handler) listSessions(w http.ResponseWriter, r *http.Request) {
 	// Check workflow status for each session
 	type sessionEntry struct {
 		store.Session
-		Active bool `json:"active"`
+		Members []store.SessionMember `json:"members"`
+		Active  bool                  `json:"active"`
 	}
 	entries := make([]sessionEntry, 0, len(sessions))
 	for _, s := range sessions {
+		members, err := h.store.ListSessionMembers(r.Context(), s.SessionID)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to list members: %v", err), http.StatusInternalServerError)
+			return
+		}
 		active := h.isSessionActive(r.Context(), s.SessionID)
-		entries = append(entries, sessionEntry{Session: s, Active: active})
+		entries = append(entries, sessionEntry{Session: s, Members: members, Active: active})
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(entries)
 }
 
+// deleteSession deletes a session for every member. Only its creator may: the
+// others leave it instead.
 func (h *handler) deleteSession(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "id")
+	sess, err := h.store.GetSession(r.Context(), sessionID)
+	if err != nil || sess == nil {
+		http.Error(w, "Session not found", http.StatusNotFound)
+		return
+	}
+	if sess.CreatedBy != auth.UserFrom(r.Context()).ID {
+		http.Error(w, "Only the session's creator can delete it; leave it instead", http.StatusForbidden)
+		return
+	}
 
 	// Terminate any running Temporal workflows for this session
 	workflowID := h.findActiveWorkflowID(r.Context(), sessionID)
@@ -335,7 +304,6 @@ func (h *handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 			TaskQueue: h.cfg.WorkflowQueue,
 		}, workflow.SessionWorkflow, workflow.SessionWorkflowInput{
 			SessionID: sessionID,
-			UserID:    func() string { u, _ := h.store.GetSessionUser(r.Context(), sessionID); return u }(),
 			AgentID:   agentID,
 		})
 		if err != nil {
@@ -346,11 +314,14 @@ func (h *handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Session %s resumed with workflow %s", sessionID, workflowID)
 	}
 
-	err := h.temporalClient.SignalWorkflow(r.Context(), workflowID, "", workflow.SignalUserMessage, req.Content)
+	me := auth.UserFrom(r.Context())
+	msg := workflow.UserMessage{Text: req.Content, UserID: me.ID, UserName: me.Name()}
+	err := h.temporalClient.SignalWorkflow(r.Context(), workflowID, "", workflow.SignalUserMessage, msg)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to send message: %v", err), http.StatusInternalServerError)
 		return
 	}
+	h.publishUserMessage(sessionID, msg)
 
 	// Set session title from first message (only if title is still empty)
 	go func() {
@@ -396,6 +367,8 @@ func (h *handler) getHistory(w http.ResponseWriter, r *http.Request) {
 		Type      string      `json:"type"`           // "message", "tool_calls"
 		Role      string      `json:"role,omitempty"` // "user", "assistant"
 		Content   string      `json:"content,omitempty"`
+		UserID    string      `json:"user_id,omitempty"` // author of a user message
+		Author    string      `json:"author,omitempty"`
 		ToolCalls interface{} `json:"tool_calls,omitempty"`
 	}
 
@@ -410,7 +383,7 @@ func (h *handler) getHistory(w http.ResponseWriter, r *http.Request) {
 
 		switch msg.Role {
 		case store.RoleUser:
-			history = append(history, historyEntry{Type: "message", Role: "user", Content: content})
+			history = append(history, historyEntry{Type: "message", Role: "user", Content: content, UserID: msg.UserID, Author: msg.Author})
 		case store.RoleAssistant:
 			if content != "" {
 				history = append(history, historyEntry{Type: "message", Role: "assistant", Content: content})
@@ -422,7 +395,7 @@ func (h *handler) getHistory(w http.ResponseWriter, r *http.Request) {
 				}
 				calls := make([]tc, len(msg.ToolCalls))
 				for i, t := range msg.ToolCalls {
-					calls[i] = tc{Name: t.Name, Input: t.Input}
+					calls[i] = tc{Name: t.Name, Input: tool.DisplayInput(t.Name, t.Input)}
 				}
 				history = append(history, historyEntry{Type: "tool_calls", ToolCalls: calls})
 			}
@@ -488,6 +461,8 @@ type answerRequest struct {
 	Answer     string `json:"answer"`
 }
 
+// answerQuestion answers an ask_user of the session in the URL, by any of its
+// members.
 func (h *handler) answerQuestion(w http.ResponseWriter, r *http.Request) {
 	var req answerRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -496,6 +471,13 @@ func (h *handler) answerQuestion(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.WorkflowID == "" || req.Answer == "" {
 		http.Error(w, "workflow_id and answer are required", http.StatusBadRequest)
+		return
+	}
+	// Every workflow of a session, sub-agents' included, has an ID starting
+	// with the session's: one from another session is refused, membership
+	// was checked for this one only.
+	if !strings.HasPrefix(req.WorkflowID, chi.URLParam(r, "id")+"-") {
+		http.Error(w, "This question does not belong to this session", http.StatusForbidden)
 		return
 	}
 
@@ -510,8 +492,7 @@ func (h *handler) answerQuestion(w http.ResponseWriter, r *http.Request) {
 
 // getNotifications returns the notification history for a user.
 func (h *handler) getNotifications(w http.ResponseWriter, r *http.Request) {
-	userID := chi.URLParam(r, "userID")
-	sessionID := fmt.Sprintf("notifications:%s", userID)
+	sessionID := "notifications:" + auth.UserFrom(r.Context()).ID
 
 	messages, err := h.store.LoadMessagesWithID(r.Context(), sessionID)
 	if err != nil {
@@ -542,8 +523,7 @@ func (h *handler) getNotifications(w http.ResponseWriter, r *http.Request) {
 
 // deleteNotification deletes a single notification by ID.
 func (h *handler) deleteNotification(w http.ResponseWriter, r *http.Request) {
-	userID := chi.URLParam(r, "userID")
-	sessionID := fmt.Sprintf("notifications:%s", userID)
+	sessionID := "notifications:" + auth.UserFrom(r.Context()).ID
 
 	idStr := chi.URLParam(r, "notifID")
 	var id int64
@@ -561,8 +541,7 @@ func (h *handler) deleteNotification(w http.ResponseWriter, r *http.Request) {
 
 // deleteAllNotifications deletes all notifications for a user.
 func (h *handler) deleteAllNotifications(w http.ResponseWriter, r *http.Request) {
-	userID := chi.URLParam(r, "userID")
-	sessionID := fmt.Sprintf("notifications:%s", userID)
+	sessionID := "notifications:" + auth.UserFrom(r.Context()).ID
 
 	if err := h.store.DeleteMessagesBySession(r.Context(), sessionID); err != nil {
 		http.Error(w, "Failed to delete notifications", http.StatusInternalServerError)
@@ -573,8 +552,7 @@ func (h *handler) deleteAllNotifications(w http.ResponseWriter, r *http.Request)
 
 // streamNotifications streams live notifications for a user via SSE.
 func (h *handler) streamNotifications(w http.ResponseWriter, r *http.Request) {
-	userID := chi.URLParam(r, "userID")
-	sessionID := "notifications:" + userID
+	sessionID := "notifications:" + auth.UserFrom(r.Context()).ID
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -752,20 +730,80 @@ func (h *handler) deleteActivityQueue(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func corsMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// The back-office changes what agents may do: no other site may call it.
-		if strings.HasPrefix(r.URL.Path, "/admin") {
-			next.ServeHTTP(w, r)
-			return
+// --- Session members ---
+
+func (h *handler) listMembers(w http.ResponseWriter, r *http.Request) {
+	members, err := h.store.ListSessionMembers(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to list members: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if members == nil {
+		members = []store.SessionMember{}
+	}
+	writeJSON(w, http.StatusOK, members)
+}
+
+type addMemberRequest struct {
+	Email string `json:"email"`
+}
+
+// addMember adds a user to the session, by email. Any member may.
+func (h *handler) addMember(w http.ResponseWriter, r *http.Request) {
+	var req addMemberRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Email) == "" {
+		http.Error(w, "email is required", http.StatusBadRequest)
+		return
+	}
+	u, err := h.store.GetUserByEmail(r.Context(), req.Email)
+	if err != nil {
+		http.Error(w, "Internal error", http.StatusInternalServerError)
+		return
+	}
+	if u == nil || u.DisabledAt != nil {
+		http.Error(w, "No active user with this email", http.StatusNotFound)
+		return
+	}
+	sessionID := chi.URLParam(r, "id")
+	if err := h.store.AddSessionMember(r.Context(), sessionID, u.ID, auth.UserFrom(r.Context()).ID); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to add member: %v", err), http.StatusInternalServerError)
+		return
+	}
+	log.Printf("Session %s: %s added %s", sessionID, auth.UserFrom(r.Context()).ID, u.ID)
+	h.listMembers(w, r)
+}
+
+// removeMember lets a member leave the session. Members cannot remove each
+// other. When the last member leaves, the session goes: nobody could open it.
+func (h *handler) removeMember(w http.ResponseWriter, r *http.Request) {
+	sessionID, userID := chi.URLParam(r, "id"), chi.URLParam(r, "userID")
+	if userID != auth.UserFrom(r.Context()).ID {
+		http.Error(w, "A member can only remove themselves", http.StatusForbidden)
+		return
+	}
+	if err := h.store.RemoveSessionMember(r.Context(), sessionID, userID); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to leave: %v", err), http.StatusInternalServerError)
+		return
+	}
+	members, err := h.store.ListSessionMembers(r.Context(), sessionID)
+	if err == nil && len(members) == 0 {
+		if wf := h.findActiveWorkflowID(r.Context(), sessionID); wf != "" {
+			_ = h.temporalClient.TerminateWorkflow(r.Context(), wf, "", "last member left")
 		}
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-		if r.Method == "OPTIONS" {
-			w.WriteHeader(http.StatusOK)
-			return
+		if err := h.store.DeleteSession(r.Context(), sessionID); err != nil {
+			log.Printf("Session %s: delete after last member left: %v", sessionID, err)
 		}
-		next.ServeHTTP(w, r)
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// publishUserMessage shows a user's message to the other members of the
+// session, live. The sender displays it already and skips its own.
+func (h *handler) publishUserMessage(sessionID string, msg workflow.UserMessage) {
+	data, _ := json.Marshal(map[string]string{
+		"content": msg.Text,
+		"user_id": msg.UserID,
+		"author":  msg.UserName,
 	})
+	h.hub.Publish(sessionID, activity.SSEEvent{Type: "user_message", Data: data})
 }

@@ -13,17 +13,14 @@
 <main class="login">
   <h1>Configuration</h1>
   {{with .Data}}
-  {{if .Enabled}}
-  <p class="lead">Mot de passe du back-office (<code>ADMIN_API_KEY</code>).</p>
+  <p class="lead">Réservé aux comptes administrateurs.</p>
   {{with .Error}}<div class="error">{{.}}</div>{{end}}
   <form method="post" action="/admin/login">
     <input type="hidden" name="next" value="{{.Next}}">
-    <input type="password" name="password" autocomplete="current-password" required autofocus>
+    <input type="email" name="email" value="{{.Email}}" placeholder="Email" autocomplete="username" required {{if not .Email}}autofocus{{end}}>
+    <input type="password" name="password" placeholder="Mot de passe" autocomplete="current-password" required {{if .Email}}autofocus{{end}}>
     <button class="primary" type="submit">Se connecter</button>
   </form>
-  {{else}}
-  <p class="lead">Le back-office est fermé : définis <code>ADMIN_API_KEY</code> dans l'environnement du serveur, puis redémarre-le.</p>
-  {{end}}
   {{end}}
   <p class="note"><a class="link" href="/">← Retour au chat</a></p>
 </main>

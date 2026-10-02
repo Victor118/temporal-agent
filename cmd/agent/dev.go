@@ -9,13 +9,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
 	"github.com/spf13/cobra"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
 
 	"github.com/victor/temporal-agent/activity"
+	"github.com/victor/temporal-agent/auth"
 	"github.com/victor/temporal-agent/config"
 	"github.com/victor/temporal-agent/provider"
 	"github.com/victor/temporal-agent/skill"
@@ -23,7 +22,6 @@ import (
 	"github.com/victor/temporal-agent/store"
 	"github.com/victor/temporal-agent/telegram"
 	"github.com/victor/temporal-agent/tool"
-	"github.com/victor/temporal-agent/web"
 	"github.com/victor/temporal-agent/web/admin"
 	"github.com/victor/temporal-agent/workflow"
 )
@@ -171,18 +169,20 @@ func runDev(cmd *cobra.Command, args []string) {
 	}
 
 	// Back-office — shows the skills dev mode loaded from ./skills
+	authSvc := &auth.Service{Store: st}
 	adminUI := admin.New(admin.Config{
+		Auth:           authSvc,
 		Store:          st,
 		Temporal:       temporalClient,
 		Skills:         func() []skill.Skill { return skills },
 		SkillsSource:   skillStore.Dir,
 		DefaultAgentID: cfg.DefaultAgentID,
 		WorkflowQueue:  cfg.WorkflowQueue,
-		AdminKey:       cfg.AdminAPIKey,
 	})
 
 	// HTTP server
 	h := &handler{
+		auth:           authSvc,
 		temporalClient: temporalClient,
 		hub:            hub,
 		cfg:            cfg,
@@ -190,47 +190,7 @@ func runDev(cmd *cobra.Command, args []string) {
 		store:          st,
 	}
 
-	r := chi.NewRouter()
-	r.Use(middleware.Logger)
-	r.Use(middleware.Recoverer)
-	r.Use(corsMiddleware)
-
-	// Unauthenticated routes
-	r.Get("/", web.HandleIndex)
-	r.Post("/auth/login", h.login)
-	r.Post("/auth/logout", h.logout)
-	r.Post("/webhooks/telegram", h.handleTelegramWebhook)
-
-	// Back-office: its own admin password, independent of the chat's API_KEY
-	r.Mount("/admin", adminUI.Routes())
-
-	// Authenticated routes
-	r.Group(func(g chi.Router) {
-		g.Use(authMiddleware(cfg))
-
-		g.Get("/auth/check", h.checkAuth)
-		g.Post("/sessions", h.createSession)
-		g.Get("/users/{userID}/sessions", h.listSessions)
-		g.Get("/users/{userID}/notifications", h.getNotifications)
-		g.Get("/users/{userID}/notifications/stream", h.streamNotifications)
-		g.Delete("/users/{userID}/notifications/{notifID}", h.deleteNotification)
-		g.Delete("/users/{userID}/notifications", h.deleteAllNotifications)
-		g.Post("/sessions/{id}/messages", h.sendMessage)
-		g.Post("/sessions/{id}/cancel", h.cancelAgent)
-		g.Delete("/sessions/{id}", h.deleteSession)
-		g.Get("/sessions/{id}/state", h.getState)
-		g.Get("/sessions/{id}/history", h.getHistory)
-		g.Get("/sessions/{id}/stream", h.stream)
-		g.Post("/sessions/{id}/answer", h.answerQuestion)
-
-		// Admin JSON API (used by the chat's admin panel)
-		g.Get("/api/admin/queues", h.listKnownQueues)
-		g.Get("/api/admin/activity-queues", h.listActivityQueues)
-		g.Put("/api/admin/activity-queues", h.setActivityQueue)
-		g.Delete("/api/admin/activity-queues/{activityName}", h.deleteActivityQueue)
-	})
-
-	srv := &http.Server{Addr: cfg.HTTPAddr, Handler: r}
+	srv := &http.Server{Addr: cfg.HTTPAddr, Handler: publicRouter(h, adminUI)}
 
 	go func() {
 		sigCh := make(chan os.Signal, 1)

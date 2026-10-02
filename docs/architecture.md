@@ -199,9 +199,12 @@ diagnostic.
 - **Pas de sessions d'outils à état** : `session_tools` est parti avec
   `spawn_session` (il ne fonctionnait pas : pas d'`EnableSessionWorker`). À
   refaire avec un flag « outil à état » sur le tool.
-- **Back-office** (`/admin`) : édite les agents (allowlist comprise), protégé
-  par un mot de passe unique (`ADMIN_API_KEY`). Pas encore de comptes
-  utilisateurs ni d'historique des modifications.
+- **Back-office** (`/admin`) : édite les agents (allowlist comprise) et les
+  utilisateurs, réservé au rôle `admin`. Pas encore d'historique des
+  modifications.
+- **Comptes** : connexion par email et mot de passe (argon2id), sessions de
+  connexion en base. Pas encore d'envoi d'emails (réinitialisation du mot de
+  passe par un admin seulement).
 - **Tous les workflows et activities sont enregistrés sur toutes les queues**
   d'un worker, y compris sa queue d'outils. Les outils de type workflow
   (`ask_user`) tournent donc sur la queue de l'outil.

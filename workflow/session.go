@@ -20,9 +20,17 @@ const (
 	QuerySessionState = "session-state"
 )
 
+// UserMessage is the payload of the user-message signal: the text and who
+// wrote it. A session can have several users, so each message carries its
+// author.
+type UserMessage struct {
+	Text     string `json:"text"`
+	UserID   string `json:"user_id"`
+	UserName string `json:"user_name"`
+}
+
 type SessionWorkflowInput struct {
 	SessionID    string `json:"session_id"`
-	UserID       string `json:"user_id"`
 	AgentID      string `json:"agent_id,omitempty"` // Logical agent identity. Resolved by handlers when starting a session.
 	SystemPrompt string `json:"system_prompt"`
 	Model        string `json:"model"`                // Explicit model; empty = the worker's default (LLM_MODEL)
@@ -65,7 +73,7 @@ func SessionWorkflow(ctx workflow.Context, input SessionWorkflowInput) error {
 		state.Status = "idle"
 
 		// Wait for a message or timeout
-		var userMessage string
+		var userMessage UserMessage
 		ok, _ := msgCh.ReceiveWithTimeout(ctx, idleTimeout, &userMessage)
 		if !ok {
 			logger.Info("Session timed out", "session_id", input.SessionID)
@@ -111,11 +119,11 @@ func sessionHistoryIsLarge(ctx workflow.Context) bool {
 // processTurn handles a single user message: run the agent, then persist what
 // the turn produced. The agent loads the conversation itself. processTurn
 // listens for cancel-agent signals to interrupt the agent mid-execution.
-func processTurn(actCtx, ctx workflow.Context, input SessionWorkflowInput, userMessage string, state *SessionState) error {
+func processTurn(actCtx, ctx workflow.Context, input SessionWorkflowInput, userMessage UserMessage, state *SessionState) error {
 	// Backstop for every channel that can signal a session: an empty user
 	// message is rejected by the LLM API, and once persisted it breaks every
 	// later turn of this session.
-	if strings.TrimSpace(userMessage) == "" {
+	if strings.TrimSpace(userMessage.Text) == "" {
 		workflow.GetLogger(ctx).Warn("Ignoring empty user message", "session_id", input.SessionID)
 		return nil
 	}
@@ -140,11 +148,14 @@ func processTurn(actCtx, ctx workflow.Context, input SessionWorkflowInput, userM
 	})
 
 	agentFuture := workflow.ExecuteChildWorkflow(childCtx, AgentWorkflow, AgentWorkflowInput{
-		SessionID:    input.SessionID,
-		UserID:       input.UserID,
+		SessionID: input.SessionID,
+		// The turn answers its author: their memory is loaded, tools act for
+		// them.
+		UserID:       userMessage.UserID,
+		UserName:     userMessage.UserName,
 		AgentID:      input.AgentID,
 		TurnKey:      turnKey,
-		UserMessage:  userMessage,
+		UserMessage:  userMessage.Text,
 		SystemPrompt: input.SystemPrompt,
 		Model:        input.Model,
 		Channel:      input.Channel,

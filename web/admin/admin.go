@@ -14,6 +14,7 @@ import (
 	"go.temporal.io/sdk/client"
 
 	"github.com/victor/temporal-agent/activity"
+	"github.com/victor/temporal-agent/auth"
 	"github.com/victor/temporal-agent/skill"
 	"github.com/victor/temporal-agent/store"
 )
@@ -32,24 +33,23 @@ type Config struct {
 	SkillsReloadable bool
 	DefaultAgentID   string
 	WorkflowQueue    string
-	AdminKey         string // the back-office password; "" = closed
+	Auth             *auth.Service // logs users in; the back-office admits admins only
 }
 
 type Admin struct {
-	cfg      Config
-	prober   *queueProber
-	pages    *renderer
-	sessions *sessionStore
+	cfg    Config
+	prober *queueProber
+	pages  *renderer
 }
 
 func New(cfg Config) *Admin {
-	return &Admin{cfg: cfg, prober: newQueueProber(cfg.Temporal), pages: newRenderer(), sessions: newSessionStore()}
+	return &Admin{cfg: cfg, prober: newQueueProber(cfg.Temporal), pages: newRenderer()}
 }
 
 // Routes returns the back-office router, to be mounted under /admin.
 func (a *Admin) Routes() http.Handler {
 	r := chi.NewRouter()
-	r.Use(sameOrigin)
+	r.Use(auth.SameOrigin)
 
 	static, _ := fs.Sub(staticFS, "static")
 	r.Handle("/static/*", http.StripPrefix("/admin/static/", shortCache(http.FileServer(http.FS(static)))))
@@ -77,6 +77,14 @@ func (a *Admin) Routes() http.Handler {
 		r.Get("/skills", a.skills)
 		r.Post("/skills/reload", a.reloadSkills)
 		r.Get("/skills/{name}", a.skill)
+		r.Get("/users", a.users)
+		r.Get("/users/new", a.newUserForm)
+		r.Post("/users", a.createUser)
+		r.Get("/users/{id}/edit", a.editUserForm)
+		r.Post("/users/{id}", a.updateUser)
+		r.Post("/users/{id}/password", a.resetPassword)
+		r.Post("/users/{id}/disable", a.disableUser)
+		r.Post("/users/{id}/enable", a.enableUser)
 	})
 	return r
 }
@@ -154,7 +162,7 @@ func (a *Admin) page(w http.ResponseWriter, r *http.Request, name, nav string, d
 		http.NotFound(w, r)
 		return
 	}
-	a.pages.page(w, name, pageData{Nav: nav, Inv: snap.inv, Data: d, Flash: flash(r)})
+	a.pages.page(w, name, pageData{Nav: nav, Inv: snap.inv, Data: d, Flash: flash(r), Me: auth.UserFrom(r.Context())})
 }
 
 func (a *Admin) overview(w http.ResponseWriter, r *http.Request) {

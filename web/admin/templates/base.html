@@ -17,9 +17,10 @@
     <a href="/admin/tools" {{if eq .Nav "tools"}}class="active"{{end}}>Tools <span class="count">{{len .Inv.Tools}}</span></a>
     <a href="/admin/queues" {{if eq .Nav "queues"}}class="active"{{end}}>Queues <span class="count">{{len .Inv.Queues}}</span></a>
     <a href="/admin/skills" {{if eq .Nav "skills"}}class="active"{{end}}>Skills <span class="count">{{len .Inv.Skills}}</span></a>
+    <a href="/admin/users" {{if eq .Nav "users"}}class="active"{{end}}>Utilisateurs</a>
     <div class="sep"></div>
     <a href="/" hx-boost="false">← Chat</a>
-    <form method="post" action="/admin/logout"><button class="linkbtn" type="submit">Déconnexion</button></form>
+    <form method="post" action="/admin/logout"><button class="linkbtn" type="submit">Déconnexion{{with .Me}} · {{.Name}}{{end}}</button></form>
   </nav>
   <main>
 {{with .Flash}}<div class="banner flash">{{.}}</div>{{end}}

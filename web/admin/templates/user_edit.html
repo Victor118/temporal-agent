@@ -1,0 +1,70 @@
+{{define "title"}}{{if .Data.New}}Nouvel utilisateur{{else}}{{.Data.Email}}{{end}}{{end}}
+{{define "content"}}
+{{with .Data}}
+<div class="crumbs"><a href="/admin/users">Utilisateurs</a> /</div>
+<h1>{{if .New}}Nouvel utilisateur{{else}}{{.Email}}{{if .Disabled}} <span class="badge b-bad">désactivé</span>{{end}}{{end}}</h1>
+
+{{with .Error}}<div class="error">{{.}}</div>{{end}}
+
+<div class="grid2">
+  <div class="card">
+    <h2>Compte</h2>
+    <form class="edit" method="post" action="/admin/users{{if not .New}}/{{.ID}}{{end}}">
+      <label for="u-email">Email <span class="hint">sert d'identifiant de connexion</span></label>
+      <input type="email" id="u-email" name="email" value="{{.Email}}" required {{if .New}}autofocus{{end}}>
+
+      <label for="u-name">Nom affiché <span class="hint">montré aux autres membres et à l'agent</span></label>
+      <input type="text" id="u-name" name="display_name" value="{{.DisplayName}}">
+
+      <label for="u-role">Rôle</label>
+      <select id="u-role" name="role" {{if .IsSelf}}disabled{{end}}>
+        <option value="user" {{if eq .Role "user"}}selected{{end}}>Utilisateur</option>
+        <option value="admin" {{if eq .Role "admin"}}selected{{end}}>Admin : accès au back-office</option>
+      </select>
+      {{if .IsSelf}}<input type="hidden" name="role" value="{{.Role}}"><p class="note">Tu ne peux pas changer ton propre rôle.</p>{{end}}
+
+      <label for="u-tg">ID Telegram <span class="hint">facultatif : relie un chat Telegram à ce compte</span></label>
+      <input type="text" id="u-tg" name="telegram_id" value="{{.TelegramID}}" inputmode="numeric">
+
+      {{if .New}}
+      <label for="u-pw">Mot de passe initial <span class="hint">10 caractères minimum, à transmettre à l'utilisateur</span></label>
+      <input type="password" id="u-pw" name="password" autocomplete="new-password" required minlength="10">
+      {{end}}
+
+      <div class="actions">
+        <button class="primary" type="submit">{{if .New}}Créer{{else}}Enregistrer{{end}}</button>
+        <a class="btn" href="/admin/users">Annuler</a>
+      </div>
+    </form>
+  </div>
+
+  {{if not .New}}
+  <div>
+    <div class="card">
+      <h2>Mot de passe</h2>
+      <form class="edit" method="post" action="/admin/users/{{.ID}}/password">
+        <label for="u-newpw">Nouveau mot de passe <span class="hint">10 caractères minimum</span></label>
+        <input type="password" id="u-newpw" name="password" autocomplete="new-password" required minlength="10">
+        <div class="actions"><button type="submit">Changer le mot de passe</button></div>
+      </form>
+      <p class="note">Ferme toutes les sessions de connexion de cet utilisateur{{if .IsSelf}}, la tienne comprise : tu devras te reconnecter{{end}}.</p>
+    </div>
+
+    {{if not .IsSelf}}
+    <div class="card">
+      <h2>Accès</h2>
+      {{if .Disabled}}
+      <form method="post" action="/admin/users/{{.ID}}/enable"><button type="submit">Réactiver le compte</button></form>
+      {{else}}
+      <form method="post" action="/admin/users/{{.ID}}/disable" hx-confirm="Désactiver {{.Email}} ? Il sera déconnecté partout.">
+        <button class="danger" type="submit">Désactiver le compte</button>
+      </form>
+      <p class="note">Un compte désactivé ne peut plus se connecter. Ses sessions et sa mémoire sont conservées.</p>
+      {{end}}
+    </div>
+    {{end}}
+  </div>
+  {{end}}
+</div>
+{{end}}
+{{end}}

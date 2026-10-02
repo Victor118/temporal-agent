@@ -14,6 +14,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/victor/temporal-agent/activity"
+	"github.com/victor/temporal-agent/auth"
 	"github.com/victor/temporal-agent/config"
 	"github.com/victor/temporal-agent/store"
 )
@@ -161,7 +162,7 @@ func (a *Admin) renderForm(w http.ResponseWriter, r *http.Request, f agentForm) 
 	f.IsDefault = !f.New && f.ID == a.cfg.DefaultAgentID
 	f.Picker = buildPicker(snap.inv, f)
 	f.Preview = previewData{Agent: preview(snap.in, f), Picker: f.Picker}
-	a.pages.page(w, "agent_edit", pageData{Nav: "agents", Inv: snap.inv, Data: f})
+	a.pages.page(w, "agent_edit", pageData{Nav: "agents", Inv: snap.inv, Data: f, Me: auth.UserFrom(r.Context())})
 }
 
 // buildPicker lists the published tools by queue, checked as in the form, and
@@ -359,6 +360,9 @@ func flash(r *http.Request) string {
 	}
 	if id := q.Get("deleted"); id != "" {
 		return fmt.Sprintf("Agent %s supprimé. Ses sessions encore ouvertes n'ont plus accès à aucun tool.", id)
+	}
+	if msg, ok := userFlashes[q.Get("user")]; ok {
+		return msg
 	}
 	if v := q.Get("reloaded"); v != "" {
 		return fmt.Sprintf("Version des skills passée à %s : le serveur et les workers rechargent le dépôt d'ici %d s.", v, int(catalogRefresh.Seconds()))

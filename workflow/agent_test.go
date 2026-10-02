@@ -554,3 +554,19 @@ func TestTruncateToolResult(t *testing.T) {
 		t.Error("truncation broke a rune")
 	}
 }
+
+// In a shared session the model must know who speaks: each user message
+// reaches it prefixed with its author, while the stored message keeps the text
+// and the author apart.
+func TestConvertMessages_NamesTheAuthor(t *testing.T) {
+	msgs := convertMessages([]store.Message{
+		{Role: store.RoleUser, Content: `"hello"`, UserID: "u-alice", Author: "Alice"},
+		{Role: store.RoleAssistant, Content: `"hi Alice"`},
+		{Role: store.RoleUser, Content: `"scheduled prompt"`}, // no author: a scheduled run
+	})
+	for i, want := range []string{`"[Alice] hello"`, `"hi Alice"`, `"scheduled prompt"`} {
+		if got := string(msgs[i].Content); got != want {
+			t.Errorf("message %d = %s, want %s", i, got, want)
+		}
+	}
+}

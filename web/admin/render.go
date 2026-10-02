@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/victor/temporal-agent/store"
 )
 
 //go:embed templates
@@ -18,13 +20,14 @@ var templateFS embed.FS
 // pageNames are the templates/<name>.html pages. Each gets its own template
 // set (base + partials + the page), so every page can define "content"
 // without colliding with the others.
-var pageNames = []string{"overview", "agents", "agent", "agent_edit", "tools", "tool", "queues", "skills", "skill", "login"}
+var pageNames = []string{"overview", "agents", "agent", "agent_edit", "tools", "tool", "queues", "skills", "skill", "users", "user_edit", "login"}
 
 type pageData struct {
 	Nav   string
 	Inv   *Inventory
 	Data  any
-	Flash string // one-line confirmation of the last action
+	Flash string      // one-line confirmation of the last action
+	Me    *store.User // the logged-in admin
 }
 
 type renderer struct {

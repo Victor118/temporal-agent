@@ -26,8 +26,12 @@ type ToolResult struct {
 }
 
 type Message struct {
-	Role       Role        `json:"role"`
-	Content    string      `json:"content,omitempty"`
+	Role    Role   `json:"role"`
+	Content string `json:"content,omitempty"`
+	// UserID and Author identify who wrote a user message, in a session
+	// several users share. Author is the name at the time of writing.
+	UserID     string      `json:"user_id,omitempty"`
+	Author     string      `json:"author,omitempty"`
 	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`
 	ToolResult *ToolResult `json:"tool_result,omitempty"`
 }

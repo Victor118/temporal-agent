@@ -18,6 +18,7 @@ type ExecuteToolInput struct {
 	Input     json.RawMessage `json:"input"`
 	SessionID string          `json:"session_id,omitempty"`
 	AgentID   string          `json:"agent_id,omitempty"` // Agent calling the tool
+	UserID    string          `json:"user_id,omitempty"`  // User the turn answers
 }
 
 type ExecuteToolOutput struct {
@@ -55,6 +56,9 @@ func (a *ToolActivities) ExecuteTool(ctx context.Context, input ExecuteToolInput
 	}
 	if input.AgentID != "" {
 		ctx = tool.WithAgentID(ctx, input.AgentID)
+	}
+	if input.UserID != "" {
+		ctx = tool.WithUserID(ctx, input.UserID)
 	}
 	result, err := a.Registry.Execute(ctx, input.Name, input.Input)
 	if err != nil {

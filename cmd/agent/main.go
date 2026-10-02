@@ -17,7 +17,7 @@ func main() {
 		Short: "Temporal Agent — AI assistant orchestrated by Temporal",
 	}
 
-	rootCmd.AddCommand(serverCmd, workerCmd, devCmd, claudeCodeRunCmd)
+	rootCmd.AddCommand(serverCmd, workerCmd, devCmd, claudeCodeRunCmd, userCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		log.Fatal(err)

@@ -47,8 +47,8 @@ func (h *handler) handleTelegramWebhook(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "Internal error", http.StatusInternalServerError)
 		return
 	}
-	if user == nil {
-		log.Printf("Telegram webhook: unknown telegram_id %d", chatID)
+	if user == nil || user.DisabledAt != nil {
+		log.Printf("Telegram webhook: unknown or disabled telegram_id %d", chatID)
 		w.WriteHeader(http.StatusOK) // Return 200 to Telegram so it doesn't retry
 		return
 	}
@@ -72,7 +72,6 @@ func (h *handler) handleTelegramWebhook(w http.ResponseWriter, r *http.Request) 
 			TaskQueue: h.cfg.WorkflowQueue,
 		}, workflow.SessionWorkflow, workflow.SessionWorkflowInput{
 			SessionID: sessionID,
-			UserID:    user.ID,
 			AgentID:   agentID,
 			Channel:   "telegram",
 			ChannelID: channelID,
@@ -85,7 +84,7 @@ func (h *handler) handleTelegramWebhook(w http.ResponseWriter, r *http.Request) 
 
 		if err := h.store.CreateSession(r.Context(), store.Session{
 			SessionID: sessionID,
-			UserID:    user.ID,
+			CreatedBy: user.ID,
 			AgentID:   agentID,
 			Channel:   "telegram",
 			ChannelID: channelID,
@@ -115,7 +114,6 @@ func (h *handler) handleTelegramWebhook(w http.ResponseWriter, r *http.Request) 
 			TaskQueue: h.cfg.WorkflowQueue,
 		}, workflow.SessionWorkflow, workflow.SessionWorkflowInput{
 			SessionID: sessionID,
-			UserID:    user.ID,
 			AgentID:   agentID,
 			Channel:   "telegram",
 			ChannelID: channelID,
@@ -128,7 +126,7 @@ func (h *handler) handleTelegramWebhook(w http.ResponseWriter, r *http.Request) 
 
 		if err := h.store.CreateSession(r.Context(), store.Session{
 			SessionID: sessionID,
-			UserID:    user.ID,
+			CreatedBy: user.ID,
 			AgentID:   agentID,
 			Channel:   "telegram",
 			ChannelID: channelID,
@@ -149,7 +147,6 @@ func (h *handler) handleTelegramWebhook(w http.ResponseWriter, r *http.Request) 
 			TaskQueue: h.cfg.WorkflowQueue,
 		}, workflow.SessionWorkflow, workflow.SessionWorkflowInput{
 			SessionID: session.SessionID,
-			UserID:    user.ID,
 			AgentID:   sessionAgentID(session, agentID),
 			Channel:   "telegram",
 			ChannelID: channelID,
@@ -170,11 +167,13 @@ func (h *handler) handleTelegramWebhook(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Signal the workflow with the message
-	if err := h.temporalClient.SignalWorkflow(r.Context(), workflowID, "", workflow.SignalUserMessage, text); err != nil {
+	msg := workflow.UserMessage{Text: text, UserID: user.ID, UserName: user.Name()}
+	if err := h.temporalClient.SignalWorkflow(r.Context(), workflowID, "", workflow.SignalUserMessage, msg); err != nil {
 		log.Printf("Telegram webhook: failed to signal workflow: %v", err)
 		http.Error(w, "Internal error", http.StatusInternalServerError)
 		return
 	}
+	h.publishUserMessage(session.SessionID, msg)
 
 	// Set title from first message
 	go func() {

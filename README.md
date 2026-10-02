@@ -101,6 +101,14 @@ docker compose exec agent ./agent dev
 
 The API will be available at `http://localhost:8888`.
 
+Create the first account, an admin, before logging in:
+
+```bash
+docker compose exec -it agent ./tmp/main user create --email you@example.com --name You --admin
+```
+
+Admins manage the other accounts in the back-office, under `/admin/users`.
+
 ### Environment Variables
 
 | Variable | Description |

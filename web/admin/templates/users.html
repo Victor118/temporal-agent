@@ -1,0 +1,31 @@
+{{define "title"}}Utilisateurs{{end}}
+{{define "content"}}
+<div class="head">
+<h1>Utilisateurs</h1>
+<div class="toolbar"><a class="btn primary" href="/admin/users/new">Nouvel utilisateur</a></div>
+</div>
+<p class="lead">Les comptes qui se connectent au chat. Un admin a aussi accès à ce back-office.</p>
+
+<div class="card">
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Utilisateur</th><th>Rôle</th><th>Telegram</th><th>État</th><th>Créé</th></tr></thead>
+  <tbody>
+  {{range .Data}}
+  <tr>
+    <td><a class="link" href="/admin/users/{{.ID}}/edit">{{.Email}}</a>
+      {{with .DisplayName}}<div class="sub">{{.}}</div>{{end}}
+      {{if and $.Me (eq .ID $.Me.ID)}}<span class="badge b-info">toi</span>{{end}}</td>
+    <td>{{if eq .Role "admin"}}<span class="badge b-warn">admin</span>{{else}}<span class="badge b-muted">utilisateur</span>{{end}}</td>
+    <td class="mono">{{with .TelegramID}}{{.}}{{else}}<span class="sub">—</span>{{end}}</td>
+    <td>{{if .DisabledAt}}<span class="badge b-bad">désactivé</span>{{else}}<span class="badge b-ok">actif</span>{{end}}</td>
+    <td class="nowrap sub">{{ago .CreatedAt}}</td>
+  </tr>
+  {{else}}
+  <tr><td colspan="5" class="empty">Aucun utilisateur.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+</div>
+</div>
+{{end}}
