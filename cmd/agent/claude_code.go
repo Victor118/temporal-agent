@@ -15,6 +15,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/victor/temporal-agent/claudecode"
+	"github.com/victor/temporal-agent/config"
+	"github.com/victor/temporal-agent/subproc"
 )
 
 // claudeCodeRunCmd exercises the Claude Code runner outside Temporal. It is a
@@ -61,7 +63,7 @@ var claudeCodeFlags struct {
 
 func init() {
 	f := claudeCodeRunCmd.Flags()
-	f.StringVar(&claudeCodeFlags.cwd, "cwd", ".", "Working directory for the run")
+	f.StringVar(&claudeCodeFlags.cwd, "cwd", ".", "Working directory for the run (writable by RUN_AS_UID, which the CLI runs as)")
 	f.StringVar(&claudeCodeFlags.task, "task", "", "Task to give Claude Code")
 	f.StringVar(&claudeCodeFlags.taskFile, "task-file", "", "Read the task from this file")
 	f.StringVar(&claudeCodeFlags.model, "model", "", "Model (alias or full name)")
@@ -84,6 +86,24 @@ func init() {
 	f.BoolVar(&claudeCodeFlags.quiet, "quiet", false, "Don't stream progress to stderr")
 }
 
+// newDebugRunner is the runner of a manual run: the same binary, in the same
+// container, as a worker's, so it runs the CLI as the worker would — as
+// RUN_AS_UID, and never as root (subproc.CheckRunAs). --cwd must then be a
+// directory that user can write.
+func newDebugRunner(cfg *config.Config, binary string) (*claudecode.Runner, error) {
+	runAs, err := subproc.ParseIdentity(cfg.RunAsUID, cfg.RunAsGID)
+	if err != nil {
+		return nil, err
+	}
+	if err := subproc.CheckRunAs(runAs); err != nil {
+		return nil, err
+	}
+	if err := runAs.PrepareHome(); err != nil {
+		return nil, fmt.Errorf("RUN_AS_UID: %w", err)
+	}
+	return &claudecode.Runner{Binary: binary, RunAs: runAs}, nil
+}
+
 func runClaudeCodeRun(cmd *cobra.Command, args []string) error {
 	task, err := resolveTask(cmd.InOrStdin())
 	if err != nil {
@@ -100,7 +120,10 @@ func runClaudeCodeRun(cmd *cobra.Command, args []string) error {
 		defer cancel()
 	}
 
-	runner := &claudecode.Runner{Binary: claudeCodeFlags.binary}
+	runner, err := newDebugRunner(config.Load(), claudeCodeFlags.binary)
+	if err != nil {
+		return err
+	}
 	if !claudeCodeFlags.quiet {
 		start := time.Now()
 		runner.OnEvent = func(ev claudecode.Event) {
