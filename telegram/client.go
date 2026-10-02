@@ -63,9 +63,18 @@ type SendMessageRequest struct {
 // Each message is retried on its own. Once one has gone out, a failure is an
 // *activity.PartialDelivery, which nothing retries: Telegram cannot tell a
 // message it already has, and the user would read the beginning again.
+//
+// For the same reason, a message after the first is only started if ctx
+// leaves it the time to finish, retries included (worstSend): an activity
+// that times out with the beginning sent is retried, beginning included,
+// whatever it returns afterwards. Without that time, the rest is given up as
+// a PartialDelivery.
 func (c *Client) SendMessage(ctx context.Context, chatID, text string) error {
 	chunks := splitMessage(text, maxMessageUnits)
 	for i, chunk := range chunks {
+		if i > 0 && !c.timeFor(ctx) {
+			return &activity.PartialDelivery{Delivered: i, Total: len(chunks), Err: errNoTimeLeft}
+		}
 		if err := c.sendRetrying(ctx, chatID, chunk); err != nil {
 			if i == 0 {
 				return err
@@ -74,6 +83,33 @@ func (c *Client) SendMessage(ctx context.Context, chatID, text string) error {
 		}
 	}
 	return nil
+}
+
+// errNoTimeLeft is the rest of an answer given up for lack of time.
+var errNoTimeLeft = errors.New("telegram send: not enough time left to send the rest before the activity's timeout")
+
+// sendMargin is kept between the end of the last send and ctx's deadline:
+// the activity still has to report its result.
+const sendMargin = 2 * time.Second
+
+// worstSend is the longest one message can take: every attempt up to the
+// request timeout, and the waits between them.
+func (c *Client) worstSend() time.Duration {
+	worst, delay := time.Duration(0), retryDelay
+	for attempt := 1; attempt <= sendAttempts; attempt++ {
+		worst += c.client.Timeout
+		if attempt < sendAttempts {
+			worst += delay
+			delay *= 2
+		}
+	}
+	return worst
+}
+
+// timeFor reports whether ctx leaves one more message the time to finish.
+func (c *Client) timeFor(ctx context.Context) bool {
+	deadline, ok := ctx.Deadline()
+	return !ok || time.Until(deadline) >= c.worstSend()+sendMargin
 }
 
 // sendRetrying sends one message, trying again after a failure that may pass:

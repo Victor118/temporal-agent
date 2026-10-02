@@ -126,3 +126,33 @@ func TestSendMessage_RetriesEachPartAndNeverResendsOne(t *testing.T) {
 		t.Errorf("error %v, want a plain failure", err)
 	}
 }
+
+// A part after the first is only started if the activity has the time to
+// finish it, retries included: one that times out with the beginning sent is
+// retried, and sends the beginning again.
+func TestSendMessage_StartsNoPartItCannotFinish(t *testing.T) {
+	var sent int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { sent++ }))
+	defer srv.Close()
+	c := NewClient("tok")
+	c.baseURL = srv.URL
+	long := strings.Repeat("a", maxMessageUnits) + "b"
+	if worst := c.worstSend(); worst != 18*time.Second {
+		t.Errorf("worst case for one message = %s, want 18s (3 tries of 5s, 1s and 2s between)", worst)
+	}
+
+	short, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	err := c.SendMessage(short, "42", long)
+	var partial *activity.PartialDelivery
+	if !errors.As(err, &partial) || partial.Delivered != 1 || sent != 1 {
+		t.Errorf("with 10s left: %v, %d sent; want the first part alone, as a partial delivery", err, sent)
+	}
+
+	sent = 0
+	enough, cancel2 := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel2()
+	if err := c.SendMessage(enough, "42", long); err != nil || sent != 2 {
+		t.Errorf("with a minute left: %v, %d sent", err, sent)
+	}
+}
