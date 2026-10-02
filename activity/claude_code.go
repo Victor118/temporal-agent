@@ -45,7 +45,8 @@ type ClaudeCodeActivities struct {
 	// ClaudeConfigDir is the operator's CLI configuration (CLAUDE_CONFIG_DIR):
 	// each run starts from a copy of its own, next to its workspace, and only
 	// a renewed login comes back (claudecode.SeedConfigDir, KeepCredentials).
-	// Empty: each run starts from an empty one.
+	// Empty: each run starts from an empty one with RunAs, and without, uses
+	// the CLI's default one (claudecode.OwnConfig).
 	ClaudeConfigDir string
 	// AllowedRepos are the repositories this worker clones and pushes to, as
 	// globs (path.Match: * stops at a slash). Empty refuses them all. The
@@ -390,16 +391,21 @@ func (a *ClaudeCodeActivities) RunClaudeCode(ctx context.Context, in RunClaudeCo
 		return claudecode.Result{}, fmt.Errorf("claude code: %w", err)
 	}
 	// A configuration of the run's own, made afresh on every attempt: what an
-	// earlier run, or attempt, wrote in one is never read by another.
-	configDir := cliConfigDir(dir)
-	if err := claudecode.SeedConfigDir(configDir, a.ClaudeConfigDir, a.RunAs); err != nil {
-		return claudecode.Result{}, fmt.Errorf("claude code: configuration: %w", err)
-	}
-	defer func() {
-		if err := claudecode.KeepCredentials(configDir, a.ClaudeConfigDir); err != nil {
-			log.Printf("Warning: claude code: the login the run renewed was not kept: %v", err)
+	// earlier run, or attempt, wrote in one is never read by another. Without
+	// an operator's configuration nor RunAs (a worker on a development
+	// machine), the CLI keeps the worker's user's own (claudecode.OwnConfig).
+	var configDir string
+	if claudecode.OwnConfig(a.ClaudeConfigDir, a.RunAs) {
+		configDir = cliConfigDir(dir)
+		if err := claudecode.SeedConfigDir(configDir, a.ClaudeConfigDir, a.RunAs); err != nil {
+			return claudecode.Result{}, fmt.Errorf("claude code: configuration: %w", err)
 		}
-	}()
+		defer func() {
+			if err := claudecode.KeepCredentials(configDir, a.ClaudeConfigDir); err != nil {
+				log.Printf("Warning: claude code: the login the run renewed was not kept: %v", err)
+			}
+		}()
+	}
 
 	runner := claudecode.Runner{}
 	if a.Runner != nil {

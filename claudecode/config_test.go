@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/victor/temporal-agent/subproc"
 )
 
 // A run's configuration starts from the operator's login, settings and
@@ -80,5 +82,26 @@ func TestKeepCredentials(t *testing.T) {
 	os.Remove(filepath.Join(dir, ".credentials.json"))
 	if err := KeepCredentials(dir, base); err != nil || creds(base) != `{"token":2}` {
 		t.Errorf("no login in the run: %q, %v", creds(base), err)
+	}
+}
+
+// A run gets a configuration of its own when there is one to copy or a user
+// of its own to give it to; otherwise the CLI keeps its default one, the
+// caller's login in it.
+func TestOwnConfig(t *testing.T) {
+	someone := &subproc.Identity{UID: 10001, GID: 10001}
+	for _, c := range []struct {
+		base  string
+		runAs *subproc.Identity
+		want  bool
+	}{
+		{"", nil, false},
+		{"/config", nil, true},
+		{"", someone, true},
+		{"/config", someone, true},
+	} {
+		if got := OwnConfig(c.base, c.runAs); got != c.want {
+			t.Errorf("OwnConfig(%q, %v) = %v, want %v", c.base, c.runAs, got, c.want)
+		}
 	}
 }

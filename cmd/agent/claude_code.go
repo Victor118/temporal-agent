@@ -29,7 +29,11 @@ var claudeCodeRunCmd = &cobra.Command{
 	Short: "Run the Claude Code CLI once and print the result (debugging)",
 	Long: "Run the Claude Code CLI once in a directory and print what it did.\n\n" +
 		"The task is read from --task, from --task-file, or from stdin.\n" +
-		"Progress goes to stderr, the final report to stdout.",
+		"Progress goes to stderr, the final report to stdout.\n\n" +
+		"The CLI's configuration is a copy of CLAUDE_CONFIG_DIR's (login, settings,\n" +
+		"CLAUDE.md), thrown away after the run except for a renewed login. Without\n" +
+		"CLAUDE_CONFIG_DIR, it is an empty one when the CLI runs as RUN_AS_UID, and\n" +
+		"otherwise the CLI's own default (~/.claude), as when you run it yourself.",
 	// A run that fails is not a usage error: don't bury the CLI's own
 	// diagnosis under a wall of flag help. main already reports the error,
 	// so cobra doesn't print it a second time either.
@@ -108,8 +112,13 @@ func newDebugRunner(cfg *config.Config, binary string) (*claudecode.Runner, erro
 // debugConfigDir is the CLI's configuration for a manual run: a copy of the
 // operator's, as a worker's run gets (claudecode.SeedConfigDir). done keeps a
 // renewed login and removes the copy, unless the session is to be kept: its
-// transcript is in it.
+// transcript is in it. With no operator's configuration and no user to run
+// as, dir is empty: the CLI uses its default one, the login of the user
+// running this command (claudecode.OwnConfig).
 func debugConfigDir(base string, runAs *subproc.Identity, keep bool) (dir string, done func(), err error) {
+	if !claudecode.OwnConfig(base, runAs) {
+		return "", func() {}, nil
+	}
 	parent, err := os.MkdirTemp("", "claude-code-run-")
 	if err != nil {
 		return "", nil, err

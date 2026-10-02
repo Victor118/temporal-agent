@@ -169,7 +169,10 @@ agent/
   CLI's configuration (`CLAUDE_CONFIG_DIR`) stays the worker's: each run
   works on a copy of its own (settings, `CLAUDE.md`, login), thrown away with
   it, so that nothing a run writes there (a hook, an instruction, an MCP
-  server) is read by the next; only a renewed OAuth login is kept. Its Go caches are its own (`$HOME/go`, `$HOME/.cache`): the
+  server) is read by the next; only a renewed OAuth login is kept. Without
+  `CLAUDE_CONFIG_DIR` nor `RUN_AS_UID` (a development machine), the CLI, run by
+  the worker or by `agent claude-code-run`, keeps its own default configuration
+  and login (`~/.claude`). Its Go caches are its own (`$HOME/go`, `$HOME/.cache`): the
   worker's are what the agent itself is built from. Once no command of the
   worker runs as that user, every process of it is killed, one that left the
   process group included: the uid must be dedicated to this. It is still **not

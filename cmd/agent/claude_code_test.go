@@ -32,3 +32,28 @@ func TestNewDebugRunner_RunsAsTheWorkerWould(t *testing.T) {
 		t.Errorf("runner = %+v, want the CLI run as 40001", r)
 	}
 }
+
+// Run by hand on a development machine — no CLAUDE_CONFIG_DIR, no user to
+// switch to — the CLI keeps its default configuration and the login in it;
+// with either, it gets a copy of its own, removed once done.
+func TestDebugConfigDir(t *testing.T) {
+	dir, done, err := debugConfigDir("", nil, false)
+	if err != nil || dir != "" {
+		t.Errorf("no base, no identity: dir %q, %v, want the CLI's default", dir, err)
+	}
+	done()
+
+	base := t.TempDir()
+	os.WriteFile(filepath.Join(base, "settings.json"), []byte(`{}`), 0o600)
+	dir, done, err = debugConfigDir(base, nil, false)
+	if err != nil || dir == "" {
+		t.Fatalf("with a base: dir %q, %v", dir, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "settings.json")); err != nil {
+		t.Errorf("the copy lacks the operator's settings: %v", err)
+	}
+	done()
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("the copy outlived the run: %v", err)
+	}
+}

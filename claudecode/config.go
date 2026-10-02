@@ -35,6 +35,16 @@ const credentialsFile = ".credentials.json"
 // maxCredentialsBytes bounds what KeepCredentials takes back from a run.
 const maxCredentialsBytes = 64 * 1024
 
+// OwnConfig tells whether a run gets a configuration of its own
+// (SeedConfigDir): when there is an operator's configuration to copy (base),
+// or when the CLI runs as a user of its own (runAs). With neither, the CLI
+// runs as the caller's user, with the configuration that user's CLI uses
+// anyway (~/.claude, ~/.claude.json): a copy would keep nothing out of the
+// run's reach, and an empty one would only leave the CLI logged out.
+func OwnConfig(base string, runAs *subproc.Identity) bool {
+	return base != "" || runAs != nil
+}
+
 // SeedConfigDir creates dir afresh as a run's configuration: base's seedFiles
 // copied in, the whole given to owner. An empty base seeds nothing. dir's
 // parent must be the worker's: dir is removed and created again by name.
