@@ -281,6 +281,15 @@ func (h *handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A fork takes messages once its summary is in: a turn started before
+	// would run without the context the fork exists to carry.
+	if sess, _ := h.store.GetSession(r.Context(), sessionID); sess != nil && sess.ForkedAtMessageID != 0 {
+		if state, err := h.forkSummaryState(r.Context(), sess); err == nil && state == summaryPending {
+			http.Error(w, "The summary of the parent session is still being written", http.StatusConflict)
+			return
+		}
+	}
+
 	// Find the active workflow for this session, or restart if none
 	workflowID := h.findActiveWorkflowID(r.Context(), sessionID)
 	if workflowID == "" {
@@ -324,13 +333,7 @@ func (h *handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 	h.publishUserMessage(sessionID, msg)
 
 	// Set session title from first message (only if title is still empty)
-	go func() {
-		title := req.Content
-		if len(title) > 80 {
-			title = title[:80] + "..."
-		}
-		h.store.UpdateSessionTitle(context.Background(), sessionID, title)
-	}()
+	go h.setTitleFrom(sessionID, req.Content)
 
 	w.WriteHeader(http.StatusAccepted)
 }
@@ -356,7 +359,7 @@ func (h *handler) cancelAgent(w http.ResponseWriter, r *http.Request) {
 func (h *handler) getHistory(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "id")
 
-	messages, err := h.store.LoadMessages(r.Context(), sessionID)
+	messages, err := h.store.LoadMessagesWithID(r.Context(), sessionID)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to load messages: %v", err), http.StatusInternalServerError)
 		return
@@ -364,7 +367,8 @@ func (h *handler) getHistory(w http.ResponseWriter, r *http.Request) {
 
 	// Convert store messages to a frontend-friendly format
 	type historyEntry struct {
-		Type      string      `json:"type"`           // "message", "tool_calls"
+		ID        int64       `json:"id"`             // what a fork starts from
+		Type      string      `json:"type"`           // "message", "tool_calls", "fork_summary"
 		Role      string      `json:"role,omitempty"` // "user", "assistant"
 		Content   string      `json:"content,omitempty"`
 		UserID    string      `json:"user_id,omitempty"` // author of a user message
@@ -381,12 +385,14 @@ func (h *handler) getHistory(w http.ResponseWriter, r *http.Request) {
 			content = decoded
 		}
 
-		switch msg.Role {
-		case store.RoleUser:
-			history = append(history, historyEntry{Type: "message", Role: "user", Content: content, UserID: msg.UserID, Author: msg.Author})
-		case store.RoleAssistant:
+		switch {
+		case msg.Kind == store.KindForkSummary:
+			history = append(history, historyEntry{ID: msg.ID, Type: "fork_summary", Content: content})
+		case msg.Role == store.RoleUser:
+			history = append(history, historyEntry{ID: msg.ID, Type: "message", Role: "user", Content: content, UserID: msg.UserID, Author: msg.Author})
+		case msg.Role == store.RoleAssistant:
 			if content != "" {
-				history = append(history, historyEntry{Type: "message", Role: "assistant", Content: content})
+				history = append(history, historyEntry{ID: msg.ID, Type: "message", Role: "assistant", Content: content})
 			}
 			if len(msg.ToolCalls) > 0 {
 				type tc struct {
@@ -397,7 +403,7 @@ func (h *handler) getHistory(w http.ResponseWriter, r *http.Request) {
 				for i, t := range msg.ToolCalls {
 					calls[i] = tc{Name: t.Name, Input: tool.DisplayInput(t.Name, t.Input)}
 				}
-				history = append(history, historyEntry{Type: "tool_calls", ToolCalls: calls})
+				history = append(history, historyEntry{ID: msg.ID, Type: "tool_calls", ToolCalls: calls})
 			}
 		}
 	}
@@ -806,4 +812,20 @@ func (h *handler) publishUserMessage(sessionID string, msg workflow.UserMessage)
 		"author":  msg.UserName,
 	})
 	h.hub.Publish(sessionID, activity.SSEEvent{Type: "user_message", Data: data})
+}
+
+// maxTitleRunes bounds a session title taken from its first message.
+const maxTitleRunes = 80
+
+// setTitleFrom titles a session after a message, if it has no title yet. The
+// cut is in characters: cut in bytes, an accented letter can be split, and
+// Postgres refuses the invalid UTF-8.
+func (h *handler) setTitleFrom(sessionID, text string) {
+	title := strings.TrimSpace(text)
+	if r := []rune(title); len(r) > maxTitleRunes {
+		title = string(r[:maxTitleRunes]) + "..."
+	}
+	if err := h.store.UpdateSessionTitle(context.Background(), sessionID, title); err != nil {
+		log.Printf("Session %s: set title: %v", sessionID, err)
+	}
 }

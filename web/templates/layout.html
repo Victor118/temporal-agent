@@ -331,6 +331,19 @@
         .member-chip { background:#1a1a1a; border:1px solid #2a2a2a; border-radius:10px; padding:2px 8px; color:#e0e0e0; }
         .message .author { display:block; font-size:11px; color:#888; margin-bottom:2px; }
         .message.user.other { background:#1a2a1e; align-self:flex-start; }
+        .message { position:relative; }
+        .fork-btn { position:absolute; top:4px; right:4px; opacity:0; background:#2a2a2a; color:#aaa; border:none; border-radius:6px; padding:2px 8px; font-size:11px; cursor:pointer; }
+        .message:hover .fork-btn { opacity:1; }
+        .fork-btn:hover { color:#fff; }
+        .message.highlight { outline:2px solid #a78bfa; outline-offset:4px; border-radius:8px; }
+        .fork-banner { max-width:720px; width:100%; margin:0 auto; font-size:12px; color:#888; }
+        .fork-banner a, .fork-marker a { color:#a78bfa; }
+        .fork-marker { max-width:720px; width:100%; margin:-8px auto 0; font-size:11px; color:#888; }
+        .fork-summary { max-width:720px; width:100%; margin:0 auto; background:#16161f; border:1px solid #2a2a3a; border-radius:10px; padding:10px 14px; font-size:13px; }
+        .fork-summary summary { cursor:pointer; color:#a78bfa; }
+        .fork-summary-body { margin-top:8px; line-height:1.5; }
+        .fork-summary-body ul, .fork-summary-body ol { padding-left:20px; margin:4px 0; }
+        .fork-summary-body p { margin:6px 0; }
     </style>
 </head>
 <body>
@@ -657,10 +670,25 @@
             openSession(data.session_id);
         }
 
-        function openSession(id) {
+        // openSession shows a session. highlightID scrolls to one of its
+        // messages: the one a fork started from, when coming from the fork.
+        function openSession(id, highlightID) {
             sessionID = id;
             showScreen('chat');
             connectSSE();
+            refreshSession(highlightID);
+        }
+
+        // refreshSession redraws the conversation and its place in the fork
+        // tree. It runs on open, and whenever messages get their IDs.
+        async function refreshSession(highlightID) {
+            const id = sessionID;
+            await loadHistory();
+            if (id !== sessionID) return; // another session was opened meanwhile
+            const resp = await api('/sessions/' + sessionID);
+            if (!resp.ok) return;
+            renderSessionInfo(await resp.json());
+            if (highlightID) highlightMessage(highlightID);
         }
 
         // --- Chat ---
@@ -668,14 +696,16 @@
             const resp = await api('/sessions/' + sessionID + '/history');
             if (!resp.ok) return;
             const history = await resp.json();
-            if (!history || history.length === 0) return;
 
             const chat = document.getElementById('chat');
             chat.innerHTML = '';
+            if (!history) return;
 
             history.forEach(entry => {
-                if (entry.type === 'message') {
-                    appendMessage(entry.role, entry.content, entry.user_id, entry.author);
+                if (entry.type === 'fork_summary') {
+                    appendForkSummary(entry.content);
+                } else if (entry.type === 'message') {
+                    appendMessage(entry.role, entry.content, entry.user_id, entry.author, entry.id);
                 } else if (entry.type === 'tool_calls' && entry.tool_calls) {
                     entry.tool_calls.forEach(tc => {
                         appendToolCall(tc.name, tc.input);
@@ -684,17 +714,100 @@
             });
         }
 
+        // --- Forks ---
+        function renderSessionInfo(info) {
+            const chat = document.getElementById('chat');
+            document.getElementById('fork-banner')?.remove();
+            if (info.parent) {
+                const banner = document.createElement('div');
+                banner.id = 'fork-banner';
+                banner.className = 'fork-banner';
+                if (info.parent.accessible) {
+                    banner.innerHTML = '↳ Forked from <a href="#">' + escapeHtml(info.parent.title || 'Untitled session') + '</a>';
+                    banner.querySelector('a').onclick = (e) => {
+                        e.preventDefault();
+                        openSession(info.parent.session_id, info.parent.message_id);
+                    };
+                } else {
+                    banner.textContent = '↳ Forked from a session you do not have access to';
+                }
+                chat.prepend(banner);
+            }
+
+            // Mark the messages forks started from.
+            const byMessage = {};
+            (info.forks || []).forEach(f => (byMessage[f.forked_at_message_id] ||= []).push(f));
+            Object.entries(byMessage).forEach(([msgID, forks]) => {
+                const msg = chat.querySelector('[data-id="' + msgID + '"]');
+                if (!msg) return;
+                const marker = document.createElement('div');
+                marker.className = 'fork-marker';
+                marker.innerHTML = '⑂ ' + forks.length + ' fork' + (forks.length > 1 ? 's' : '') + ': ' +
+                    forks.map((f, i) => '<a href="#" data-fork="' + i + '">' + escapeHtml(f.title || 'Fork') + '</a>').join(', ');
+                marker.querySelectorAll('a').forEach(a => a.onclick = (e) => {
+                    e.preventDefault();
+                    openSession(forks[a.dataset.fork].session_id);
+                });
+                msg.after(marker);
+            });
+
+            setForkPending(info.summary === 'pending');
+            if (info.summary === 'failed') setStatus('The summary of the parent session could not be written: this fork starts without it.');
+        }
+
+        function setForkPending(pending) {
+            const input = document.getElementById('message-input');
+            const btn = document.querySelector('#input-form button');
+            input.disabled = pending;
+            btn.disabled = pending;
+            if (pending) setStatus('Summarizing the parent session...');
+            else if (document.getElementById('status').textContent.startsWith('Summarizing')) setStatus('');
+        }
+
+        function appendForkSummary(content) {
+            const chat = document.getElementById('chat');
+            const details = document.createElement('details');
+            details.className = 'fork-summary';
+            details.innerHTML = '<summary>Carried over from the parent session (summary)</summary>' +
+                '<div class="fork-summary-body">' + marked.parse(String(content)) + '</div>';
+            chat.appendChild(details);
+        }
+
+        function highlightMessage(id) {
+            const msg = document.querySelector('#chat [data-id="' + id + '"]');
+            if (!msg) return;
+            msg.scrollIntoView({ block: 'center' });
+            msg.classList.add('highlight');
+            setTimeout(() => msg.classList.remove('highlight'), 3000);
+        }
+
+        async function forkAt(messageID) {
+            if (!confirm('Start a new session from this message? It begins with a summary of the conversation up to here.')) return;
+            const resp = await api('/sessions/' + sessionID + '/fork', jsonBody('POST', { message_id: messageID }));
+            if (!resp.ok) {
+                setStatus('Could not fork: ' + (await resp.text()));
+                return;
+            }
+            const data = await resp.json();
+            openSession(data.session_id);
+        }
+
         function connectSSE() {
             if (evtSource) { evtSource.close(); }
             document.getElementById('chat').innerHTML = '';
-            loadHistory();
             evtSource = new EventSource('/sessions/' + sessionID + '/stream');
+
+            evtSource.addEventListener('fork_ready', () => refreshSession());
+            evtSource.addEventListener('fork_failed', () => refreshSession());
 
             evtSource.addEventListener('message', (e) => {
                 const data = JSON.parse(e.data);
                 appendMessage('assistant', data.content);
                 setProcessing(false);
                 setStatus('');
+                // Live messages have no ID yet: reload once stored, so they
+                // can be forked from.
+                setTimeout(() => refreshSession(), 1500);
             });
 
             // Another member's message: the sender has shown its own already.
@@ -725,18 +838,19 @@
             evtSource.onerror = () => {
                 setStatus('Connection lost. Reconnecting...');
                 evtSource.close();
-                setTimeout(() => connectSSE(), 3000);
+                setTimeout(() => { connectSSE(); refreshSession(); }, 3000);
             };
         }
 
         // appendMessage shows a message. A user message written by another
         // member is labelled with its author.
-        function appendMessage(role, content, authorID, authorName) {
+        function appendMessage(role, content, authorID, authorName, messageID) {
             if (!content) return;
             const chat = document.getElementById('chat');
             const div = document.createElement('div');
             const other = role === 'user' && authorID && currentUser && authorID !== currentUser.id;
             div.className = 'message ' + role + (other ? ' other' : '');
+            if (messageID) div.dataset.id = messageID;
             if (role === 'assistant') {
                 div.innerHTML = marked.parse(String(content));
             } else {
@@ -747,6 +861,14 @@
                     div.appendChild(label);
                 }
                 div.appendChild(document.createTextNode(content));
+            }
+            if (messageID) {
+                const btn = document.createElement('button');
+                btn.className = 'fork-btn';
+                btn.title = 'Start a new session from this message';
+                btn.textContent = '⑂ Fork';
+                btn.onclick = () => forkAt(messageID);
+                div.appendChild(btn);
             }
             chat.appendChild(div);
             chat.scrollTop = chat.scrollHeight;

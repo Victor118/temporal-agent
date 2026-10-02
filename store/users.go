@@ -141,27 +141,50 @@ func (s *PostgresStore) DeleteLoginSession(ctx context.Context, tokenHash string
 
 // --- Sessions and their members ---
 
-const sessionColumns = "s.session_id, s.created_by, s.title, s.agent_id, s.channel, s.channel_id, s.created_at"
+const sessionColumns = "s.session_id, s.created_by, s.title, s.agent_id, s.channel, s.channel_id, s.created_at, " +
+	"s.parent_session_id, s.forked_at_message_id, s.forked_by"
 
 func scanSession(row interface{ Scan(...any) error }) (*Session, error) {
 	var sess Session
-	err := row.Scan(&sess.SessionID, &sess.CreatedBy, &sess.Title, &sess.AgentID, &sess.Channel, &sess.ChannelID, &sess.CreatedAt)
+	var parent, forkedBy sql.NullString
+	var forkedAt sql.NullInt64
+	err := row.Scan(&sess.SessionID, &sess.CreatedBy, &sess.Title, &sess.AgentID, &sess.Channel, &sess.ChannelID, &sess.CreatedAt,
+		&parent, &forkedAt, &forkedBy)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+	sess.ParentSessionID, sess.ForkedAtMessageID, sess.ForkedBy = parent.String, forkedAt.Int64, forkedBy.String
 	return &sess, nil
+}
+
+// nullIfEmpty stores "" and 0 as SQL NULL: a session that is not a fork has
+// no parent, rather than a parent named "".
+func nullIfEmpty(v any) any {
+	switch x := v.(type) {
+	case string:
+		if x == "" {
+			return nil
+		}
+	case int64:
+		if x == 0 {
+			return nil
+		}
+	}
+	return v
 }
 
 // CreateSession records a session with its creator as first member.
 func (s *PostgresStore) CreateSession(ctx context.Context, session Session) error {
 	return s.inTx(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO sessions (session_id, created_by, title, agent_id, channel, channel_id)
-			VALUES ($1, $2, $3, $4, $5, $6)`,
-			session.SessionID, session.CreatedBy, session.Title, session.AgentID, session.Channel, session.ChannelID); err != nil {
+			INSERT INTO sessions (session_id, created_by, title, agent_id, channel, channel_id,
+				parent_session_id, forked_at_message_id, forked_by)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+			session.SessionID, session.CreatedBy, session.Title, session.AgentID, session.Channel, session.ChannelID,
+			nullIfEmpty(session.ParentSessionID), nullIfEmpty(session.ForkedAtMessageID), nullIfEmpty(session.ForkedBy)); err != nil {
 			return err
 		}
 		_, err := tx.ExecContext(ctx,
@@ -221,6 +244,29 @@ func (s *PostgresStore) DeleteSession(ctx context.Context, sessionID string) err
 		}
 		return nil
 	})
+}
+
+// ListForks returns the forks of a session that userID is a member of: the
+// others are not theirs to know about.
+func (s *PostgresStore) ListForks(ctx context.Context, sessionID, userID string) ([]Session, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT `+sessionColumns+`
+		FROM sessions s JOIN session_members m ON m.session_id = s.session_id
+		WHERE s.parent_session_id = $1 AND m.user_id = $2
+		ORDER BY s.forked_at_message_id, s.created_at`, sessionID, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var forks []Session
+	for rows.Next() {
+		sess, err := scanSession(rows)
+		if err != nil {
+			return nil, err
+		}
+		forks = append(forks, *sess)
+	}
+	return forks, rows.Err()
 }
 
 func (s *PostgresStore) IsSessionMember(ctx context.Context, sessionID, userID string) (bool, error) {

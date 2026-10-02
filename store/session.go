@@ -46,6 +46,12 @@ type Session struct {
 	Channel   string    `json:"channel"`    // "web", "telegram", "whatsapp"
 	ChannelID string    `json:"channel_id"` // chat_id telegram, phone whatsapp, "" pour web
 	CreatedAt time.Time `json:"created_at"`
+
+	// A fork: the session and the message it started from, and who forked it.
+	// Empty for a session that is not a fork, or whose parent was deleted.
+	ParentSessionID   string `json:"parent_session_id,omitempty"`
+	ForkedAtMessageID int64  `json:"forked_at_message_id,omitempty"`
+	ForkedBy          string `json:"forked_by,omitempty"`
 }
 
 // SessionMember is a user of a session.

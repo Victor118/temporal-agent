@@ -45,6 +45,8 @@ func publicRouter(h *handler, adminUI *admin.Admin) http.Handler {
 			// Members of the session only
 			r.Route("/sessions/{id}", func(r chi.Router) {
 				r.Use(h.requireMember)
+				r.Get("/", h.getSessionInfo)
+				r.Post("/fork", h.forkSession)
 				r.Post("/messages", h.sendMessage)
 				r.Post("/cancel", h.cancelAgent)
 				r.Delete("/", h.deleteSession)

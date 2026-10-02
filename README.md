@@ -119,6 +119,7 @@ Admins manage the other accounts in the back-office, under `/admin/users`.
 | `LLM_PROVIDER` | LLM provider (`anthropic`) |
 | `LLM_API_KEY` | LLM API key |
 | `LLM_MODEL` | Model to use |
+| `SUMMARY_MODEL` | Model that summarizes a session for a fork (default: `LLM_MODEL`) |
 | `HTTP_ADDR` | Public HTTP server address |
 | `WORKFLOW_QUEUE` | Task queue for sessions, agents and LLM calls (default `agent`) |
 | `DEFAULT_AGENT_ID` | Agent used when a session doesn't name one (default `default`) |

@@ -34,6 +34,9 @@ type Config struct {
 	LLMProvider string
 	LLMAPIKey   string
 	LLMModel    string // Default model, applied by workers to requests without an explicit model
+	// SummaryModel writes the summary a forked session starts from; empty =
+	// the workers' LLM_MODEL. A summary needs less than a conversation does.
+	SummaryModel string
 
 	// Server
 	HTTPAddr     string
@@ -106,9 +109,10 @@ func Load() *Config {
 
 		DatabaseURL: envOr("DATABASE_URL", "postgres://agent:agent@localhost:5432/agent?sslmode=disable"),
 
-		LLMProvider: envOr("LLM_PROVIDER", "anthropic"),
-		LLMAPIKey:   os.Getenv("LLM_API_KEY"),
-		LLMModel:    envOr("LLM_MODEL", "claude-sonnet-5"),
+		LLMProvider:  envOr("LLM_PROVIDER", "anthropic"),
+		LLMAPIKey:    os.Getenv("LLM_API_KEY"),
+		LLMModel:     envOr("LLM_MODEL", "claude-sonnet-5"),
+		SummaryModel: os.Getenv("SUMMARY_MODEL"),
 
 		HTTPAddr:     envOr("HTTP_ADDR", ":8888"),
 		InternalAddr: envOr("INTERNAL_ADDR", ":9999"),

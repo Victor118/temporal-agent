@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"reflect"
 	"testing"
@@ -212,5 +213,63 @@ func TestSessionMembers(t *testing.T) {
 	s.db.QueryRow("SELECT count(*) FROM session_members WHERE session_id = 'zz-s1'").Scan(&n)
 	if n != 0 {
 		t.Errorf("%d members left after delete", n)
+	}
+}
+
+func TestForks(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	cleanup := func() {
+		s.db.Exec("DELETE FROM messages WHERE session_id LIKE 'zz-%'")
+		s.db.Exec("DELETE FROM sessions WHERE session_id LIKE 'zz-f%'")
+		s.db.Exec("DELETE FROM sessions WHERE session_id LIKE 'zz-%'")
+		s.db.Exec("DELETE FROM users WHERE id LIKE 'zz-%'")
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+	for _, id := range []string{"zz-alice", "zz-bob"} {
+		if err := s.CreateUser(ctx, User{ID: id, Email: id + "@example.com", Role: UserRoleStandard, PasswordHash: "h"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.CreateSession(ctx, Session{SessionID: "zz-parent", CreatedBy: "zz-alice", Channel: "web"}); err != nil {
+		t.Fatal(err)
+	}
+	for i, m := range []string{"one", "two", "three"} {
+		s.AppendMessage(ctx, "zz-parent", fmt.Sprintf("k%d", i), Message{Role: RoleUser, Content: `"` + m + `"`})
+	}
+	all, _ := s.LoadMessagesWithID(ctx, "zz-parent")
+	if len(all) != 3 {
+		t.Fatalf("%d messages", len(all))
+	}
+	upTo, _ := s.LoadMessagesUpTo(ctx, "zz-parent", all[1].ID)
+	if len(upTo) != 2 || upTo[1].ID != all[1].ID {
+		t.Errorf("up to the second message: %+v", upTo)
+	}
+
+	// A plain session has no parent; a fork records where it started.
+	if p, _ := s.GetSession(ctx, "zz-parent"); p.ParentSessionID != "" || p.ForkedAtMessageID != 0 || p.ForkedBy != "" {
+		t.Errorf("plain session %+v", p)
+	}
+	for _, f := range []struct{ id, by string }{{"zz-f-alice", "zz-alice"}, {"zz-f-bob", "zz-bob"}} {
+		if err := s.CreateSession(ctx, Session{SessionID: f.id, CreatedBy: f.by, Channel: "web",
+			ParentSessionID: "zz-parent", ForkedAtMessageID: all[1].ID, ForkedBy: f.by}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if f, _ := s.GetSession(ctx, "zz-f-alice"); f.ParentSessionID != "zz-parent" || f.ForkedAtMessageID != all[1].ID || f.ForkedBy != "zz-alice" {
+		t.Errorf("fork %+v", f)
+	}
+	// Each user sees only the forks they are a member of.
+	if forks, _ := s.ListForks(ctx, "zz-parent", "zz-alice"); len(forks) != 1 || forks[0].SessionID != "zz-f-alice" {
+		t.Errorf("alice's forks %+v", forks)
+	}
+
+	// Deleting the parent keeps the fork, without its link.
+	if err := s.DeleteSession(ctx, "zz-parent"); err != nil {
+		t.Fatal(err)
+	}
+	if f, _ := s.GetSession(ctx, "zz-f-alice"); f == nil || f.ParentSessionID != "" || f.ForkedAtMessageID == 0 {
+		t.Errorf("fork after the parent's deletion: %+v", f)
 	}
 }

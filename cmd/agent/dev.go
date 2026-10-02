@@ -142,8 +142,10 @@ func runDev(cmd *cobra.Command, args []string) {
 		w.RegisterWorkflow(workflow.AgentWorkflow)
 		w.RegisterWorkflow(workflow.AskUserWorkflow)
 		w.RegisterWorkflow(workflow.ScheduledAgentWorkflow)
+		w.RegisterWorkflow(workflow.ForkSessionWorkflow)
 
 		w.RegisterActivity(&activity.LLMActivities{Provider: llmProvider})
+		w.RegisterActivity(&activity.ForkActivities{Store: st, LLM: llmProvider})
 		w.RegisterActivity(&activity.MemoryActivities{Store: st})
 		w.RegisterActivity(&activity.ToolActivities{Registry: registry, Catalog: catalog})
 		w.RegisterActivity(&activity.NotificationActivities{Hub: hub, Telegram: tgClient})

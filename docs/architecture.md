@@ -202,6 +202,11 @@ diagnostic.
 - **Back-office** (`/admin`) : édite les agents (allowlist comprise) et les
   utilisateurs, réservé au rôle `admin`. Pas encore d'historique des
   modifications.
+- **Fork de session** : depuis un message, la nouvelle session part d'un résumé
+  de la conversation jusqu'à ce message. Le résumé est la première brique de la
+  compaction du contexte, pas encore faite. Suppression d'une session qui a des
+  forks : autorisée pour l'instant (le fork perd son lien), à revoir pour la
+  traçabilité.
 - **Comptes** : connexion par email et mot de passe (argon2id), sessions de
   connexion en base. Pas encore d'envoi d'emails (réinitialisation du mot de
   passe par un admin seulement).

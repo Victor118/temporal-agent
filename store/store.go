@@ -39,6 +39,7 @@ type Store interface {
 	UpdateSessionTitle(ctx context.Context, sessionID, title string) error
 	DeleteSession(ctx context.Context, sessionID string) error
 	IsSessionMember(ctx context.Context, sessionID, userID string) (bool, error)
+	ListForks(ctx context.Context, sessionID, userID string) ([]Session, error)
 	ListSessionMembers(ctx context.Context, sessionID string) ([]SessionMember, error)
 	AddSessionMember(ctx context.Context, sessionID, userID, addedBy string) error
 	RemoveSessionMember(ctx context.Context, sessionID, userID string) error
@@ -46,6 +47,7 @@ type Store interface {
 	// Session messages
 	LoadMessages(ctx context.Context, sessionID string) ([]Message, error)
 	LoadMessagesWithID(ctx context.Context, sessionID string) ([]MessageWithID, error)
+	LoadMessagesUpTo(ctx context.Context, sessionID string, lastID int64) ([]MessageWithID, error)
 	// AppendMessages appends the messages a turn produced, keyed by
 	// TurnMessageKey(turnKey, startIndex+i). Re-writing a message already stored
 	// is a no-op, so a replayed activity never duplicates or renumbers.

@@ -461,7 +461,10 @@ func convertMessages(messages []store.Message) []provider.ChatMessage {
 		if len(content) == 0 {
 			content = nil
 		}
-		if msg.Role == store.RoleUser && msg.Author != "" {
+		switch {
+		case msg.Kind == store.KindForkSummary:
+			content = asForkContext(content)
+		case msg.Role == store.RoleUser && msg.Author != "":
 			content = withAuthor(content, msg.Author)
 		}
 		cm := provider.ChatMessage{
@@ -500,6 +503,17 @@ func userMemorySection(userName, memory string) string {
 	return "\n## User Memory\n\nThe following is what you remember about " + who +
 		" from previous conversations. Use it to personalize your responses. It is private to them: do not reveal it to other participants.\n\n" +
 		memory + "\n\n"
+}
+
+// asForkContext presents a fork's starting summary to the model for what it
+// is: context carried over, not something a user just said.
+func asForkContext(content json.RawMessage) json.RawMessage {
+	var text string
+	if json.Unmarshal(content, &text) != nil {
+		return content
+	}
+	framed, _ := json.Marshal("[Context carried over from an earlier conversation this one was forked from. A summary, not a message from the user.]\n\n" + text)
+	return framed
 }
 
 // withAuthor prefixes a user message with its author's name, so the model

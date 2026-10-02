@@ -41,6 +41,7 @@
 - `users` (email unique insensible à la casse, rôle `admin`|`user`, `disabled_at`), `login_sessions`
 - `sessions` (`created_by`) + `session_members` : une session est partagée entre ses membres ; tout membre peut en ajouter, chacun peut la quitter, seul le créateur la supprime
 - Chaque message utilisateur porte son auteur (`user_id`, `author`) ; le signal `user-message` transporte `{text, user_id, user_name}`. Le tour répond à son auteur : c'est **sa** mémoire qui est chargée, et ses tools (`save_user_memory`, `schedule_task`) agissent pour lui
+- Fork : `sessions.parent_session_id` + `forked_at_message_id` + `forked_by`. `POST /sessions/{id}/fork {message_id}` crée la session (même agent, seul membre = celui qui forke) puis `ForkSessionWorkflow` résume le parent jusqu'à ce message (`SummarizeConversation`, modèle `SUMMARY_MODEL` ou `LLM_MODEL`) et l'écrit comme premier message (`kind = fork_summary`). Tant que le résumé n'est pas là, le fork refuse les messages (409). Supprimer le parent laisse le fork entier, sans lien
 - `memory` : key-value scope (user/project/session)
 - `task_logs` : suivi des taches schedulees
 - AgentWorkflow ecrit ses messages au fil du tour quand `TurnKey` est fourni ; SessionWorkflow reecrit le meme delta en fin de tour (les memes cles, donc sans effet si deja ecrit). Un sous-agent n'a pas de `TurnKey` et ne persiste rien

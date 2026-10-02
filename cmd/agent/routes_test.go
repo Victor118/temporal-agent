@@ -3,11 +3,16 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
+
+	"go.temporal.io/api/workflowservice/v1"
+	"go.temporal.io/sdk/client"
 
 	"github.com/victor/temporal-agent/auth"
 	"github.com/victor/temporal-agent/config"
@@ -20,10 +25,12 @@ import (
 // routes under test do not reach are left to the nil embedded Store.
 type routeStore struct {
 	store.Store
-	users   []store.User
-	logins  map[string]string
-	session store.Session
-	members []string
+	users    []store.User
+	logins   map[string]string
+	session  store.Session
+	members  []string
+	messages map[string][]store.MessageWithID
+	created  []store.Session
 }
 
 func (f *routeStore) user(match func(store.User) bool) *store.User {
@@ -95,6 +102,13 @@ const pw = "correct horse battery"
 
 func newRouteTest(t *testing.T) (http.Handler, *routeStore) {
 	t.Helper()
+	return newRouteTestWith(t, nil)
+}
+
+// newRouteTestWith builds the router over tc, a stand-in for Temporal: the
+// routes that start workflows need one.
+func newRouteTestWith(t *testing.T, tc client.Client) (http.Handler, *routeStore) {
+	t.Helper()
 	auth.LoginFailDelay = 0
 	hash, _ := auth.HashPassword(pw)
 	st := &routeStore{
@@ -108,7 +122,7 @@ func newRouteTest(t *testing.T) (http.Handler, *routeStore) {
 		members: []string{"u-alice", "u-bob"},
 	}
 	svc := &auth.Service{Store: st}
-	h := &handler{auth: svc, store: st, hub: sse.NewHub(), cfg: &config.Config{}}
+	h := &handler{auth: svc, store: st, hub: sse.NewHub(), cfg: &config.Config{WorkflowQueue: "agent"}, temporalClient: tc}
 	return publicRouter(h, admin.New(admin.Config{Store: st, Auth: svc})), st
 }
 
@@ -228,5 +242,146 @@ func TestRoutes_RefuseCrossSiteWrites(t *testing.T) {
 	h.ServeHTTP(w, req)
 	if w.Code != http.StatusForbidden || len(st.members) != 2 {
 		t.Errorf("cross-site add: %d, members %v", w.Code, st.members)
+	}
+}
+
+// --- Forks ---
+
+type fakeTemporal struct {
+	client.Client
+	started []string // workflow IDs
+}
+
+func (f *fakeTemporal) ExecuteWorkflow(_ context.Context, opts client.StartWorkflowOptions, _ interface{}, _ ...interface{}) (client.WorkflowRun, error) {
+	f.started = append(f.started, opts.ID)
+	return nil, nil
+}
+
+func (f *fakeTemporal) DescribeWorkflowExecution(context.Context, string, string) (*workflowservice.DescribeWorkflowExecutionResponse, error) {
+	return nil, errors.New("not running")
+}
+
+func (f *routeStore) LoadMessagesUpTo(_ context.Context, sessionID string, lastID int64) ([]store.MessageWithID, error) {
+	var out []store.MessageWithID
+	for _, m := range f.messages[sessionID] {
+		if lastID == 0 || m.ID <= lastID {
+			out = append(out, m)
+		}
+	}
+	return out, nil
+}
+
+func (f *routeStore) LoadMessages(_ context.Context, sessionID string) ([]store.Message, error) {
+	var out []store.Message
+	for _, m := range f.messages[sessionID] {
+		out = append(out, m.Message)
+	}
+	return out, nil
+}
+
+func (f *routeStore) CreateSession(_ context.Context, s store.Session) error {
+	f.created = append(f.created, s)
+	return nil
+}
+
+func (f *routeStore) ListForks(context.Context, string, string) ([]store.Session, error) {
+	return nil, nil
+}
+
+func newForkTest(t *testing.T) (http.Handler, *routeStore, *fakeTemporal) {
+	t.Helper()
+	tc := &fakeTemporal{}
+	h, st := newRouteTestWith(t, tc)
+	st.session.Title = "Plan"
+	st.messages = map[string][]store.MessageWithID{"s1": {
+		{ID: 1, Message: store.Message{Role: store.RoleUser, Content: `"question"`}},
+		{ID: 2, Message: store.Message{Role: store.RoleAssistant, Content: `"answer"`}},
+		{ID: 3, Message: store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{Content: "raw"}}},
+	}}
+	return h, st, tc
+}
+
+func TestRoutes_Fork(t *testing.T) {
+	h, st, tc := newForkTest(t)
+	bob := logIn(t, h, "bob@example.com")
+
+	w := call(t, h, http.MethodPost, "/sessions/s1/fork", `{"message_id":2}`, bob)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("fork: %d %s", w.Code, w.Body)
+	}
+	var resp createSessionResponse
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	if len(st.created) != 1 {
+		t.Fatalf("created %v", st.created)
+	}
+	f := st.created[0]
+	// The forking user alone, the parent's agent, and where it started from.
+	if f.SessionID != resp.SessionID || f.CreatedBy != "u-bob" || f.ForkedBy != "u-bob" ||
+		f.ParentSessionID != "s1" || f.ForkedAtMessageID != 2 || f.Title != "Fork : Plan" {
+		t.Errorf("fork %+v", f)
+	}
+	if len(tc.started) != 1 || tc.started[0] != "fork-"+f.SessionID {
+		t.Errorf("workflows started %v", tc.started)
+	}
+
+	for body, why := range map[string]string{
+		`{"message_id":3}`:  "a tool result",
+		`{"message_id":99}`: "a message of no session",
+		`{}`:                "no message",
+	} {
+		if w := call(t, h, http.MethodPost, "/sessions/s1/fork", body, bob); w.Code != http.StatusBadRequest {
+			t.Errorf("forking from %s: %d", why, w.Code)
+		}
+	}
+
+	carol := logIn(t, h, "carol@example.com")
+	if w := call(t, h, http.MethodPost, "/sessions/s1/fork", `{"message_id":2}`, carol); w.Code != http.StatusNotFound {
+		t.Errorf("a non-member forking: %d", w.Code)
+	}
+}
+
+func TestRoutes_ForkInfoHidesAnInaccessibleParent(t *testing.T) {
+	h, st, _ := newForkTest(t)
+	// s1 is now a fork of "secret", which bob is no member of.
+	st.session.ParentSessionID, st.session.ForkedAtMessageID = "secret", 1
+	st.messages["s1"][0].Kind = store.KindForkSummary
+	bob := logIn(t, h, "bob@example.com")
+
+	w := call(t, h, http.MethodGet, "/sessions/s1", "", bob)
+	if w.Code != 200 {
+		t.Fatalf("info: %d %s", w.Code, w.Body)
+	}
+	var info struct {
+		Summary string `json:"summary"`
+		Parent  map[string]any
+	}
+	json.Unmarshal(w.Body.Bytes(), &info)
+	if info.Summary != "ready" || info.Parent["accessible"] != false || info.Parent["session_id"] != nil || info.Parent["title"] != nil {
+		t.Errorf("info %s", w.Body)
+	}
+}
+
+func (f *routeStore) ListAgents(context.Context) ([]store.Agent, error) {
+	return []store.Agent{{ID: "default", Name: "Default"}}, nil
+}
+
+type titleStore struct {
+	store.Store
+	title string
+}
+
+func (f *titleStore) UpdateSessionTitle(_ context.Context, _, title string) error {
+	f.title = title
+	return nil
+}
+
+// A title is cut in characters: cut in bytes, an accented letter can be split
+// and Postgres refuses the string.
+func TestSetTitleFrom_CutsOnCharacters(t *testing.T) {
+	st := &titleStore{}
+	h := &handler{store: st}
+	h.setTitleFrom("s1", strings.Repeat("é", 100))
+	if !utf8.ValidString(st.title) || st.title != strings.Repeat("é", maxTitleRunes)+"..." {
+		t.Errorf("title %q", st.title)
 	}
 }

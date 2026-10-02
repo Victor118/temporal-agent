@@ -156,8 +156,10 @@ func runWorker(cmd *cobra.Command, args []string) {
 		w.RegisterWorkflow(workflow.AnalyzeRepoWorkflow)
 		w.RegisterWorkflow(workflow.ImplementFeatureWorkflow)
 		w.RegisterWorkflow(workflow.ScheduledAgentWorkflow)
+		w.RegisterWorkflow(workflow.ForkSessionWorkflow)
 
 		w.RegisterActivity(&activity.LLMActivities{Provider: llmProvider})
+		w.RegisterActivity(&activity.ForkActivities{Store: st, LLM: llmProvider})
 		w.RegisterActivity(&activity.MemoryActivities{Store: st})
 		w.RegisterActivity(&activity.ClaudeCodeActivities{Root: cfg.ClaudeCodeWorkspace, SSHKeyPath: cfg.ClaudeCodeSSHKey})
 		w.RegisterActivity(&activity.ToolActivities{Registry: registry, Catalog: catalog})

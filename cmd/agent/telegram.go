@@ -176,13 +176,7 @@ func (h *handler) handleTelegramWebhook(w http.ResponseWriter, r *http.Request) 
 	h.publishUserMessage(session.SessionID, msg)
 
 	// Set title from first message
-	go func() {
-		title := text
-		if len(title) > 80 {
-			title = title[:80] + "..."
-		}
-		h.store.UpdateSessionTitle(r.Context(), session.SessionID, title)
-	}()
+	go h.setTitleFrom(session.SessionID, text)
 
 	w.WriteHeader(http.StatusOK)
 }

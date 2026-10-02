@@ -30,11 +30,18 @@ type Message struct {
 	Content string `json:"content,omitempty"`
 	// UserID and Author identify who wrote a user message, in a session
 	// several users share. Author is the name at the time of writing.
-	UserID     string      `json:"user_id,omitempty"`
-	Author     string      `json:"author,omitempty"`
+	UserID string `json:"user_id,omitempty"`
+	Author string `json:"author,omitempty"`
+	// Kind marks a message the system wrote: KindForkSummary is the summary
+	// a fork starts from. Empty for an ordinary message.
+	Kind       string      `json:"kind,omitempty"`
 	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`
 	ToolResult *ToolResult `json:"tool_result,omitempty"`
 }
+
+// KindForkSummary marks the first message of a fork: the summary of the
+// parent session up to the message the fork started from.
+const KindForkSummary = "fork_summary"
 
 type MessageWithID struct {
 	ID int64 `json:"id"`

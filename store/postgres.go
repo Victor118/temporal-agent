@@ -114,6 +114,14 @@ const schema = `
 			created_at TIMESTAMPTZ DEFAULT NOW()
 		);
 
+		-- A fork starts from a message of another session, seeded with a summary
+		-- of the conversation up to it. Deleting the parent leaves the fork
+		-- whole: it keeps its summary, and loses only the link.
+		ALTER TABLE sessions ADD COLUMN IF NOT EXISTS parent_session_id TEXT REFERENCES sessions(session_id) ON DELETE SET NULL;
+		ALTER TABLE sessions ADD COLUMN IF NOT EXISTS forked_at_message_id BIGINT;
+		ALTER TABLE sessions ADD COLUMN IF NOT EXISTS forked_by TEXT;
+		CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
+
 		-- The users of a session. Any member may add others.
 		CREATE TABLE IF NOT EXISTS session_members (
 			session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
@@ -228,8 +236,14 @@ func (s *PostgresStore) LoadMessages(ctx context.Context, sessionID string) ([]M
 }
 
 func (s *PostgresStore) LoadMessagesWithID(ctx context.Context, sessionID string) ([]MessageWithID, error) {
+	return s.LoadMessagesUpTo(ctx, sessionID, 0)
+}
+
+// LoadMessagesUpTo returns a session's messages up to and including lastID;
+// all of them when lastID is 0.
+func (s *PostgresStore) LoadMessagesUpTo(ctx context.Context, sessionID string, lastID int64) ([]MessageWithID, error) {
 	rows, err := s.db.QueryContext(ctx,
-		"SELECT id, data FROM messages WHERE session_id = $1 ORDER BY id", sessionID)
+		"SELECT id, data FROM messages WHERE session_id = $1 AND ($2 = 0 OR id <= $2) ORDER BY id", sessionID, lastID)
 	if err != nil {
 		return nil, err
 	}
