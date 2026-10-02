@@ -401,7 +401,9 @@ func (a *ClaudeCodeActivities) RunClaudeCode(ctx context.Context, in RunClaudeCo
 			return claudecode.Result{}, fmt.Errorf("claude code: configuration: %w", err)
 		}
 		defer func() {
-			if err := claudecode.KeepCredentials(configDir, a.ClaudeConfigDir); err != nil {
+			// The CLI's environment is the worker's, filtered: whether it has
+			// an API key is the worker's.
+			if err := claudecode.KeepCredentials(configDir, a.ClaudeConfigDir, os.Environ()); err != nil {
 				log.Printf("Warning: claude code: the login the run renewed was not kept: %v", err)
 			}
 		}()

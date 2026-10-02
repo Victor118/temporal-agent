@@ -31,7 +31,8 @@ var claudeCodeRunCmd = &cobra.Command{
 		"The task is read from --task, from --task-file, or from stdin.\n" +
 		"Progress goes to stderr, the final report to stdout.\n\n" +
 		"The CLI's configuration is a copy of CLAUDE_CONFIG_DIR's (login, settings,\n" +
-		"CLAUDE.md), thrown away after the run except for a renewed login. Without\n" +
+		"CLAUDE.md), thrown away after the run except for a renewed OAuth login (not\n" +
+		"with ANTHROPIC_API_KEY, which the CLI uses instead). Without\n" +
 		"CLAUDE_CONFIG_DIR, it is an empty one when the CLI runs as RUN_AS_UID, and\n" +
 		"otherwise the CLI's own default (~/.claude), as when you run it yourself.",
 	// A run that fails is not a usage error: don't bury the CLI's own
@@ -114,8 +115,9 @@ func newDebugRunner(cfg *config.Config, binary string) (*claudecode.Runner, erro
 // renewed login and removes the copy, unless the session is to be kept: its
 // transcript is in it. With no operator's configuration and no user to run
 // as, dir is empty: the CLI uses its default one, the login of the user
-// running this command (claudecode.OwnConfig).
-func debugConfigDir(base string, runAs *subproc.Identity, keep bool) (dir string, done func(), err error) {
+// running this command (claudecode.OwnConfig). environ is the CLI's
+// environment, which tells whether it has a login to renew at all.
+func debugConfigDir(base string, runAs *subproc.Identity, environ []string, keep bool) (dir string, done func(), err error) {
 	if !claudecode.OwnConfig(base, runAs) {
 		return "", func() {}, nil
 	}
@@ -133,7 +135,7 @@ func debugConfigDir(base string, runAs *subproc.Identity, keep bool) (dir string
 		return "", nil, fmt.Errorf("CLI configuration: %w", err)
 	}
 	return dir, func() {
-		if err := claudecode.KeepCredentials(dir, base); err != nil {
+		if err := claudecode.KeepCredentials(dir, base, environ); err != nil {
 			fmt.Fprintf(os.Stderr, "the login the run renewed was not kept: %v\n", err)
 		}
 		if keep {
@@ -165,7 +167,8 @@ func runClaudeCodeRun(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	configDir, done, err := debugConfigDir(cfg.ClaudeConfigDir, runner.RunAs, claudeCodeFlags.persistSession)
+	configDir, done, err := debugConfigDir(cfg.ClaudeConfigDir, runner.RunAs,
+		append(os.Environ(), claudeCodeFlags.env...), claudeCodeFlags.persistSession)
 	if err != nil {
 		return err
 	}

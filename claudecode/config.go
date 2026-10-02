@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
+	"time"
 
 	"github.com/victor/temporal-agent/subproc"
 )
@@ -22,7 +25,7 @@ import (
 //
 // So each run gets a configuration of its own (Params.ConfigDir), seeded from
 // the operator's and thrown away with the run. Only renewed login tokens are
-// kept (KeepCredentials).
+// kept, and only without an API key (KeepCredentials).
 
 // seedFiles are what a run's configuration starts with, from the operator's:
 // the login, the settings, the instructions, the CLI's own state. Anything
@@ -77,11 +80,23 @@ func SeedConfigDir(dir, base string, owner *subproc.Identity) error {
 // refresh can retire the refresh token base holds, and the next run would
 // find itself logged out. Nothing else of the run's configuration is kept.
 //
-// Only when base has a login of its own (a run cannot add one), and only a
-// regular file of valid JSON, opened without following a link: the run's user
-// wrote dir. base gets a new file, never written through a path.
-func KeepCredentials(dir, base string) error {
-	if base == "" {
+// It is the one thing a run hands back to the operator's configuration, so
+// only what a renewal could have produced comes back, and each time it does,
+// the log says so:
+//   - not when the CLI had an API key (ANTHROPIC_API_KEY in environ, the
+//     CLI's environment): it authenticates with the key, and has no login to
+//     renew;
+//   - only when base has a login of its own (a run cannot add one);
+//   - only a regular file, opened without following a link (the run's user
+//     wrote dir), of JSON holding everything the current login holds
+//     (sameShape): a renewal changes tokens and dates, never which there
+//     are, and a run that emptied the login would log every next one out.
+//
+// Whose login it is cannot be checked here: a run could put another
+// account's in its place. An API key leaves no such channel (README).
+// base gets a new file, never written through a path.
+func KeepCredentials(dir, base string, environ []string) error {
+	if base == "" || hasAPIKey(environ) {
 		return nil
 	}
 	target := filepath.Join(base, credentialsFile)
@@ -92,7 +107,7 @@ func KeepCredentials(dir, base string) error {
 	if err != nil {
 		return err
 	}
-	renewed, err := readRunFile(filepath.Join(dir, credentialsFile))
+	renewed, written, err := readRunFile(filepath.Join(dir, credentialsFile))
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
@@ -104,6 +119,9 @@ func KeepCredentials(dir, base string) error {
 	}
 	if !json.Valid(renewed) {
 		return fmt.Errorf("the run's %s is not JSON: not kept", credentialsFile)
+	}
+	if !sameShape(current, renewed) {
+		return fmt.Errorf("the run's %s lacks what the current login holds: not kept", credentialsFile)
 	}
 	tmp, err := os.CreateTemp(base, credentialsFile+".*")
 	if err != nil {
@@ -117,28 +135,83 @@ func KeepCredentials(dir, base string) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), target)
+	if err := os.Rename(tmp.Name(), target); err != nil {
+		return err
+	}
+	log.Printf("claude code: kept the login a run renewed in %s (%d bytes, written %s)",
+		target, len(renewed), written.UTC().Format(time.RFC3339))
+	return nil
+}
+
+// hasAPIKey tells whether environ gives the CLI an API key: a non-empty
+// ANTHROPIC_API_KEY, the last one winning as os/exec has it.
+func hasAPIKey(environ []string) bool {
+	key := ""
+	for _, kv := range environ {
+		if name, value, _ := strings.Cut(kv, "="); name == "ANTHROPIC_API_KEY" {
+			key = value
+		}
+	}
+	return key != ""
+}
+
+// sameShape tells whether renewed, a JSON document, holds everything current
+// does: each key of current's objects, at every depth, with a value that is
+// not null, and not empty where current's is a non-empty string. Current not
+// being a JSON object, there is nothing to compare: any JSON will do.
+func sameShape(current, renewed []byte) bool {
+	var was, is any
+	if json.Unmarshal(current, &was) != nil {
+		return true
+	}
+	if _, ok := was.(map[string]any); !ok {
+		return true
+	}
+	if json.Unmarshal(renewed, &is) != nil {
+		return false
+	}
+	return holds(was, is)
+}
+
+func holds(was, is any) bool {
+	switch w := was.(type) {
+	case map[string]any:
+		i, ok := is.(map[string]any)
+		if !ok {
+			return false
+		}
+		for k, v := range w {
+			if iv, ok := i[k]; !ok || iv == nil || !holds(v, iv) {
+				return false
+			}
+		}
+	case string:
+		if s, ok := is.(string); w != "" && (!ok || s == "") {
+			return false
+		}
+	}
+	return true
 }
 
 // readRunFile reads a regular file the run's user may have replaced: never
 // through a link, never blocking on a FIFO, and no more than
 // maxCredentialsBytes.
-func readRunFile(path string) ([]byte, error) {
+func readRunFile(path string) (data []byte, written time.Time, err error) {
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
-		return nil, err
+		return nil, time.Time{}, err
 	}
 	defer f.Close()
 	fi, err := f.Stat()
 	if err != nil {
-		return nil, err
+		return nil, time.Time{}, err
 	}
 	if !fi.Mode().IsRegular() {
-		return nil, fmt.Errorf("%s is not a regular file", path)
+		return nil, time.Time{}, fmt.Errorf("%s is not a regular file", path)
 	}
-	data, err := io.ReadAll(io.LimitReader(f, maxCredentialsBytes+1))
+	data, err = io.ReadAll(io.LimitReader(f, maxCredentialsBytes+1))
 	if err == nil && len(data) > maxCredentialsBytes {
 		err = fmt.Errorf("%s is larger than %d bytes", path, maxCredentialsBytes)
 	}
-	return data, err
+	return data, fi.ModTime(), err
 }

@@ -37,7 +37,7 @@ func TestNewDebugRunner_RunsAsTheWorkerWould(t *testing.T) {
 // switch to — the CLI keeps its default configuration and the login in it;
 // with either, it gets a copy of its own, removed once done.
 func TestDebugConfigDir(t *testing.T) {
-	dir, done, err := debugConfigDir("", nil, false)
+	dir, done, err := debugConfigDir("", nil, nil, false)
 	if err != nil || dir != "" {
 		t.Errorf("no base, no identity: dir %q, %v, want the CLI's default", dir, err)
 	}
@@ -45,7 +45,7 @@ func TestDebugConfigDir(t *testing.T) {
 
 	base := t.TempDir()
 	os.WriteFile(filepath.Join(base, "settings.json"), []byte(`{}`), 0o600)
-	dir, done, err = debugConfigDir(base, nil, false)
+	dir, done, err = debugConfigDir(base, nil, nil, false)
 	if err != nil || dir == "" {
 		t.Fatalf("with a base: dir %q, %v", dir, err)
 	}

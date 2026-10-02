@@ -853,6 +853,8 @@ func TestInspectWorkspaceStaysOutOfSubmodules(t *testing.T) {
 // a hook one run plants in its settings is never read by the next, and the
 // operator's stay as they were. A renewed login alone comes back.
 func TestRunClaudeCode_AConfigurationOfItsOwn(t *testing.T) {
+	// With an API key, the CLI has no login to renew, and none comes back.
+	t.Setenv("ANTHROPIC_API_KEY", "")
 	id := subproctest.Identity(t)
 	base := subproctest.Dir(t, nil)
 	os.WriteFile(filepath.Join(base, "settings.json"), []byte(`{"model":"operator"}`), 0o600)
