@@ -18,14 +18,15 @@ import (
 const execKillGrace = 2 * time.Second
 
 // RegisterExecTool registers exec, which runs a shell command chosen by the
-// model in the workspace.
+// model in the workspace, as runAs.
 //
 // The command sees a filtered environment and its whole process group dies at
-// the timeout. That is not a sandbox: the command runs as the worker's user,
-// can leave the workspace and can read what that user can — the worker's own
-// /proc/<pid>/environ included. Serve exec from a worker whose user and
-// filesystem hold nothing the agent must not reach.
-func RegisterExecTool(r *Registry, workspacePath string) {
+// the timeout. Run as runAs, a user of its own, it cannot read the worker's
+// /proc/<pid>/environ nor its 0600 files, which hold what the filtered
+// environment leaves out. It is still not a sandbox: it can leave the
+// workspace, and read whatever that user can. A worker running as root with
+// no runAs refuses every command (subproc.CheckRunAs): they would run as root.
+func RegisterExecTool(r *Registry, workspacePath string, runAs *subproc.Identity) {
 	r.Register(&Tool{
 		Name:        "exec",
 		Description: "Execute a shell command in the workspace. The command runs with the workspace as the working directory.",
@@ -48,6 +49,10 @@ func RegisterExecTool(r *Registry, workspacePath string) {
 				return "", err
 			}
 
+			if err := subproc.CheckRunAs(runAs); err != nil {
+				return "", fmt.Errorf("exec: %w", err)
+			}
+
 			timeout := time.Duration(params.TimeoutSeconds) * time.Second
 			if timeout <= 0 || timeout > 300*time.Second {
 				timeout = 30 * time.Second
@@ -58,7 +63,8 @@ func RegisterExecTool(r *Registry, workspacePath string) {
 
 			cmd := exec.CommandContext(ctx, "sh", "-c", params.Command)
 			cmd.Dir = workspacePath
-			cmd.Env = subproc.Env(os.Environ(), subproc.GoToolchainNames, nil)
+			cmd.Env = runAs.Env(subproc.Env(os.Environ(), subproc.GoToolchainNames, nil))
+			runAs.Apply(cmd)
 			subproc.KillGroupOnCancel(cmd, syscall.SIGKILL, execKillGrace)
 
 			output, err := cmd.CombinedOutput()

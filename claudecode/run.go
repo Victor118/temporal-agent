@@ -133,6 +133,9 @@ type Runner struct {
 	// HeartbeatEvery throttles heartbeats when running inside an activity.
 	// Zero means every event.
 	HeartbeatEvery time.Duration
+	// RunAs is the user the CLI runs as; nil = this process's. Whether that
+	// is acceptable is the caller's decision (subproc.CheckRunAs).
+	RunAs *subproc.Identity
 }
 
 // Run executes one Claude Code run and blocks until the CLI exits.
@@ -159,7 +162,8 @@ func (r *Runner) Run(ctx context.Context, p Params) (Result, error) {
 	// command that carries a context.
 	cmd := exec.CommandContext(ctx, r.binary(), buildArgs(p)...)
 	cmd.Dir = p.Cwd
-	cmd.Env = append(cliEnv(os.Environ()), p.Env...)
+	cmd.Env = r.RunAs.Env(append(cliEnv(os.Environ()), p.Env...))
+	r.RunAs.Apply(cmd)
 	// The task goes in on stdin rather than argv: it is arbitrary user text of
 	// arbitrary length, and argv has a limit.
 	cmd.Stdin = strings.NewReader(p.Task)

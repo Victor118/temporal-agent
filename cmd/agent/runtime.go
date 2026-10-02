@@ -21,6 +21,7 @@ import (
 	"github.com/victor/temporal-agent/skill"
 	"github.com/victor/temporal-agent/sse"
 	"github.com/victor/temporal-agent/store"
+	"github.com/victor/temporal-agent/subproc"
 	"github.com/victor/temporal-agent/telegram"
 	"github.com/victor/temporal-agent/tool"
 	"github.com/victor/temporal-agent/web/admin"
@@ -64,8 +65,16 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 		return nil, fmt.Errorf("git identity: %w", err)
 	}
 
+	runAs, err := subproc.ParseIdentity(cfg.RunAsUID, cfg.RunAsGID)
+	if err != nil {
+		return nil, err
+	}
+	if err := prepareRunAs(cfg, runAs); err != nil {
+		return nil, fmt.Errorf("RUN_AS_UID: %w", err)
+	}
+
 	workerConf := loadWorkerConfig(cfg)
-	registry := buildRegistry(cfg, st, tc, workerConf)
+	registry := buildRegistry(cfg, st, tc, workerConf, runAs)
 
 	skills := loadSkills(opts.skills)
 	catalog := initCatalog(st)
@@ -110,7 +119,7 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 		w.RegisterActivity(&activity.LLMActivities{Provider: llmProvider})
 		w.RegisterActivity(&activity.ForkActivities{Store: st, LLM: llmProvider, Private: catalog})
 		w.RegisterActivity(&activity.MemoryActivities{Store: st})
-		w.RegisterActivity(&activity.ClaudeCodeActivities{Root: cfg.ClaudeCodeWorkspace, SSHKeyPath: cfg.ClaudeCodeSSHKey, AllowedRepos: cfg.ClaudeCodeRepos})
+		w.RegisterActivity(&activity.ClaudeCodeActivities{Root: cfg.ClaudeCodeWorkspace, SSHKeyPath: cfg.ClaudeCodeSSHKey, AllowedRepos: cfg.ClaudeCodeRepos, RunAs: runAs})
 		w.RegisterActivity(&activity.ToolActivities{Registry: registry, Catalog: catalog})
 		w.RegisterActivity(&activity.NotificationActivities{Notifiers: notifiers})
 		w.RegisterActivity(&activity.DeliveryActivities{Web: opts.web, Store: st})
@@ -139,12 +148,12 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 
 // buildRegistry registers the tools this process can run. Which of them it
 // exposes is the worker config's decision (exposeTools).
-func buildRegistry(cfg *config.Config, st store.Store, tc client.Client, wc *config.WorkerConfig) *tool.Registry {
+func buildRegistry(cfg *config.Config, st store.Store, tc client.Client, wc *config.WorkerConfig, runAs *subproc.Identity) *tool.Registry {
 	registry := tool.NewRegistry()
-	tool.RegisterFilesystemTools(registry, cfg.WorkspacePath)
+	tool.RegisterFilesystemTools(registry, cfg.WorkspacePath, runAs)
 	tool.RegisterGrepTool(registry, cfg.WorkspacePath)
 	tool.RegisterGlobTool(registry, cfg.WorkspacePath)
-	tool.RegisterExecTool(registry, cfg.WorkspacePath)
+	tool.RegisterExecTool(registry, cfg.WorkspacePath, runAs)
 	tool.RegisterWebTools(registry)
 	tool.RegisterWebSearchTool(registry, cfg.BraveSearchAPIKey)
 	tool.RegisterEmailTool(registry, tool.SMTPConfig{
@@ -175,6 +184,36 @@ func buildRegistry(cfg *config.Config, st store.Store, tc client.Client, wc *con
 
 	registerMCPServers(registry, wc.MCP)
 	return registry
+}
+
+// prepareRunAs gets ready what the user that commands chosen by a model run
+// as must reach — its home, the workspace exec and the file tools share, the
+// coding CLI's state — or says in the log why those commands will be refused.
+func prepareRunAs(cfg *config.Config, runAs *subproc.Identity) error {
+	if err := subproc.CheckRunAs(runAs); err != nil {
+		log.Printf("ERROR: exec and coding runs are refused on this worker: %v", err)
+		return nil
+	}
+	if runAs == nil {
+		return nil
+	}
+	if err := runAs.PrepareHome(); err != nil {
+		return err
+	}
+	dirs := []string{cfg.WorkspacePath}
+	if cfg.ClaudeConfigDir != "" && (&claudecode.Runner{}).Available() {
+		dirs = append(dirs, cfg.ClaudeConfigDir)
+	}
+	for _, dir := range dirs {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+		if err := runAs.Give(dir); err != nil {
+			return err
+		}
+	}
+	log.Printf("exec and coding runs run as uid %d, gid %d", runAs.UID, runAs.GID)
+	return nil
 }
 
 // loadSkills loads the skills once at startup. A failure leaves the worker

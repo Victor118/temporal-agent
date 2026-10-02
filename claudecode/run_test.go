@@ -9,6 +9,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/victor/temporal-agent/subproc/subproctest"
 )
 
 // fakeCLI writes an executable stand-in for the claude binary and returns its
@@ -386,5 +388,28 @@ func TestCLIEnv(t *testing.T) {
 	want := []string{"PATH=/bin", "HOME=/root", "LC_ALL=C", "ANTHROPIC_BASE_URL=http://proxy", "GOPATH=/go"}
 	if strings.Join(got, " ") != strings.Join(want, " ") {
 		t.Errorf("cliEnv = %v, want %v", got, want)
+	}
+}
+
+// With RunAs, the CLI and the shells it opens run as that user, at home in
+// its own HOME rather than the worker's.
+func TestRunAsAnotherUser(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("switching users takes root")
+	}
+	id := subproctest.Identity(t)
+	bin := filepath.Join(subproctest.Dir(t, nil), "fake-claude")
+	script := `printf '{"type":"result","subtype":"success","is_error":false,"result":"uid=%s home=%s","session_id":"s"}\n' "$(id -u)" "$HOME"`
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"+script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	r := &Runner{Binary: bin, RunAs: id}
+	res, err := r.Run(context.Background(), Params{Cwd: subproctest.Dir(t, id), Task: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := fmt.Sprintf("uid=%d home=%s", subproctest.Nobody, id.Home); res.Report != want {
+		t.Errorf("CLI reported %q, want %q", res.Report, want)
 	}
 }

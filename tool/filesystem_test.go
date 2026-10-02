@@ -5,14 +5,17 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
+
+	"github.com/victor/temporal-agent/subproc"
 )
 
 func setupWorkspace(t *testing.T) (string, *Registry) {
 	t.Helper()
 	dir := t.TempDir()
 	r := NewRegistry()
-	RegisterFilesystemTools(r, dir)
+	RegisterFilesystemTools(r, dir, nil)
 	return dir, r
 }
 
@@ -240,5 +243,40 @@ func TestSafePath_Symlinks(t *testing.T) {
 	}
 	if out, err := execTool(t, r, "read_file", map[string]string{"path": "inner-link"}); err != nil || out != "ok" {
 		t.Errorf("a link inside the workspace: %q, %v", out, err)
+	}
+}
+
+// What write_file creates belongs to the user exec runs as, so that its
+// commands can change it; what was there keeps its owner.
+func TestWriteFile_GivesWhatItCreatesToTheOwner(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("giving files away takes root")
+	}
+	dir := t.TempDir()
+	owner := &subproc.Identity{UID: 65534, GID: 65534}
+	r := NewRegistry()
+	RegisterFilesystemTools(r, dir, owner)
+	os.WriteFile(filepath.Join(dir, "kept.txt"), []byte("x"), 0o644)
+
+	for _, path := range []string{"a/b/new.txt", "kept.txt"} {
+		input, _ := json.Marshal(map[string]string{"path": path, "content": "y"})
+		if _, err := r.Execute(context.Background(), "write_file", input); err != nil {
+			t.Fatal(err)
+		}
+	}
+	uid := func(rel string) uint32 {
+		fi, err := os.Lstat(filepath.Join(dir, rel))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return fi.Sys().(*syscall.Stat_t).Uid
+	}
+	for _, rel := range []string{"a", "a/b", "a/b/new.txt"} {
+		if uid(rel) != 65534 {
+			t.Errorf("%s belongs to %d, want the owner", rel, uid(rel))
+		}
+	}
+	if uid(".") != 0 || uid("kept.txt") != 0 {
+		t.Error("write_file gave away what it did not create")
 	}
 }

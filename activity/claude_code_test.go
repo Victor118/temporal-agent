@@ -2,12 +2,18 @@ package activity
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
+
+	"go.temporal.io/sdk/temporal"
+
+	"github.com/victor/temporal-agent/subproc"
+	"github.com/victor/temporal-agent/subproc/subproctest"
 )
 
 // testRepos lets the tests clone and push to the repositories they make under
@@ -151,7 +157,7 @@ func TestCleanupWorkspaceDeletesTheRunDirectory(t *testing.T) {
 func TestRunClaudeCodeNeverPersistsTheSession(t *testing.T) {
 	// The workspace is deleted at the end of the run, so a transcript on disk
 	// would only outlive the tree it talks about.
-	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: t.TempDir()}
+	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: t.TempDir(), RunAs: subproctest.Identity(t)}
 	_, err := a.RunClaudeCode(context.Background(), RunClaudeCodeInput{Dir: filepath.Join(a.Root, "nope"), Task: "x"})
 	if err == nil || !strings.Contains(err.Error(), "cwd") {
 		t.Fatalf("expected the missing workspace to be reported, got %v", err)
@@ -626,5 +632,78 @@ func TestCleanupWorkspaceRemovesTheConfigCopy(t *testing.T) {
 	}
 	if _, err := os.Stat(gitConfigCopy(prepared.Dir)); !os.IsNotExist(err) {
 		t.Errorf("the copy outlived the workspace: %v", err)
+	}
+}
+
+// A worker running as root without an identity does not start the CLI: its
+// shell would run as root, the worker's credentials in reach.
+func TestRunClaudeCodeRefusesToRunAsRoot(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("only a worker running as root refuses")
+	}
+	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: t.TempDir()}
+	_, err := a.RunClaudeCode(context.Background(), RunClaudeCodeInput{Dir: a.Root, Task: "x"})
+	var appErr *temporal.ApplicationError
+	if !errors.As(err, &appErr) || !appErr.NonRetryable() || !strings.Contains(err.Error(), "RUN_AS_UID") {
+		t.Errorf("err = %v, want a non-retryable refusal naming RUN_AS_UID", err)
+	}
+}
+
+// With an identity, the clone is the run's while it works — it commits as
+// that user — and the worker's again before its own git runs there.
+func TestWorkspaceChangesHandsWithTheRun(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("switching users takes root")
+	}
+	id := subproctest.Identity(t)
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	exec.Command("git", "init", "--quiet", "--bare", "--initial-branch", "main", remote).Run()
+	src := initRepo(t)
+	exec.Command("git", "-C", src, "push", "--quiet", remote, "main").Run()
+
+	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: subproctest.Dir(t, nil), RunAs: id}
+	prepared, err := a.PrepareWorkspace(context.Background(), PrepareWorkspaceInput{Name: "run-1", Repo: remote, Branch: "agent/thing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := func(path string) uint32 {
+		fi, err := os.Lstat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return fi.Sys().(*syscall.Stat_t).Uid
+	}
+	if owner(prepared.Dir) != id.UID || owner(filepath.Join(prepared.Dir, ".git", "config")) != id.UID {
+		t.Error("the clone was not handed to the run")
+	}
+	if owner(gitConfigCopy(prepared.Dir)) != 0 || owner(a.Root) != 0 {
+		t.Error("the configuration's copy, or Root, was handed to the run")
+	}
+
+	// The run commits, as its own user.
+	os.WriteFile(filepath.Join(prepared.Dir, "a.txt"), []byte("a"), 0o644)
+	exec.Command("chown", "65534:65534", filepath.Join(prepared.Dir, "a.txt")).Run()
+	cmd := exec.Command("sh", "-c", "git add . && git -c user.email=run@test -c user.name=run commit --quiet -m 'feat: add a'")
+	cmd.Dir = prepared.Dir
+	cmd.Env = id.Env(subproc.Env(os.Environ(), nil, nil))
+	id.Apply(cmd)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("the run could not commit in its clone: %v: %s", err, out)
+	}
+
+	inspected, err := a.InspectWorkspace(context.Background(), InspectWorkspaceInput{Dir: prepared.Dir, Base: prepared.Commit})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inspected.Commits) != 1 || inspected.GitConfigChanged {
+		t.Errorf("inspected %+v", inspected)
+	}
+	for _, dir := range []string{prepared.Dir, filepath.Join(prepared.Dir, ".git")} {
+		if owner(dir) != 0 {
+			t.Errorf("%s is still the run's after the inspection", dir)
+		}
+	}
+	if err := a.PushBranch(context.Background(), PushBranchInput{Dir: prepared.Dir, Remote: remote, Branch: "agent/thing"}); err != nil {
+		t.Fatalf("PushBranch: %v", err)
 	}
 }

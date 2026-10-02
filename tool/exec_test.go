@@ -3,18 +3,26 @@ package tool
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/victor/temporal-agent/subproc"
+	"github.com/victor/temporal-agent/subproc/subproctest"
 )
 
+// setupExecWorkspace registers exec the way a worker does: as root (the
+// agent's container), commands run as nobody, in a workspace given to it.
 func setupExecWorkspace(t *testing.T) (string, *Registry) {
 	t.Helper()
-	dir := t.TempDir()
+	id := subproctest.Identity(t)
+	dir := subproctest.Dir(t, id)
 	r := NewRegistry()
-	RegisterExecTool(r, dir)
+	RegisterExecTool(r, dir, id)
 	return dir, r
 }
 
@@ -127,6 +135,46 @@ func TestExec_DoesNotInheritSecrets(t *testing.T) {
 	}
 	if result != "db= key= path=set" {
 		t.Errorf("got %q", result)
+	}
+
+	// Nor can the command read them back from the worker's own environment.
+	result, err = execExec(t, r, map[string]interface{}{
+		"command": "cat /proc/" + strconv.Itoa(os.Getpid()) + "/environ",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(result, "sk-secret") {
+		t.Error("the command read the worker's environment from /proc")
+	}
+}
+
+// A worker running as root without an identity to run commands as refuses
+// them all: they would run as root.
+func TestExec_RefusesToRunAsRoot(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("only a worker running as root refuses")
+	}
+	r := NewRegistry()
+	RegisterExecTool(r, t.TempDir(), nil)
+	_, err := execExec(t, r, map[string]interface{}{"command": "touch /tmp/ran-as-root"})
+	if !errors.Is(err, subproc.ErrRootWithoutIdentity) {
+		t.Errorf("err = %v, want a refusal", err)
+	}
+}
+
+// The command runs as the identity, its Go caches its own.
+func TestExec_RunsAsTheIdentity(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("switching users takes root")
+	}
+	_, r := setupExecWorkspace(t)
+	result, err := execExec(t, r, map[string]interface{}{"command": `echo "$(id -u) $GOPATH"`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(result, strconv.Itoa(subproctest.Nobody)+" ") || strings.HasSuffix(result, " /go") {
+		t.Errorf("got %q, want nobody with a GOPATH of its own", result)
 	}
 }
 

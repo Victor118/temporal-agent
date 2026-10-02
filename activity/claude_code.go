@@ -36,6 +36,10 @@ type ClaudeCodeActivities struct {
 	// is a property of the machine that holds it, and a path in a workflow
 	// input would be recorded in the execution history for good.
 	SSHKeyPath string
+	// RunAs is the user the CLI runs as, and who owns a workspace while it
+	// does: not the worker's, whose credentials the run's shell would reach.
+	// nil runs it as the worker's user, refused when that is root.
+	RunAs *subproc.Identity
 	// AllowedRepos are the repositories this worker clones and pushes to, as
 	// globs (path.Match: * stops at a slash). Empty refuses them all. The
 	// repository is the model's choice, and a push goes out with this
@@ -127,6 +131,11 @@ func (a *ClaudeCodeActivities) PrepareWorkspace(ctx context.Context, in PrepareW
 	if err := keepGitConfig(dir); err != nil {
 		return PrepareWorkspaceOutput{}, fmt.Errorf("prepare workspace: %w", err)
 	}
+	// The run works, and commits, as RunAs: the clone is its own. Root and the
+	// configuration's copy stay the worker's.
+	if err := a.RunAs.Give(dir); err != nil {
+		return PrepareWorkspaceOutput{}, fmt.Errorf("prepare workspace: %w", err)
+	}
 	return PrepareWorkspaceOutput{Dir: dir, Commit: strings.TrimSpace(commit), Branch: in.Branch}, nil
 }
 
@@ -162,6 +171,31 @@ func keepGitConfig(dir string) error {
 // (commondir, config.worktree) would make git read its configuration from
 // elsewhere: it is removed as well. A .git that is no longer a directory is
 // refused outright.
+func (a *ClaudeCodeActivities) restoreGitConfig(dir string) (changed bool, err error) {
+	if err := a.reclaim(dir); err != nil {
+		return false, err
+	}
+	return restoreGitConfig(dir)
+}
+
+// reclaim takes the workspace and its .git back from RunAs before the worker
+// runs git there. A process the run left behind still runs as RunAs: once
+// they are the worker's, it can no longer swap .git, nor the configuration
+// restoreGitConfig is about to put back.
+func (a *ClaudeCodeActivities) reclaim(dir string) error {
+	if a.RunAs == nil {
+		return nil
+	}
+	if err := subproc.Reclaim(dir); err != nil {
+		return err
+	}
+	if err := subproc.Reclaim(filepath.Join(dir, ".git")); err != nil {
+		return temporal.NewNonRetryableApplicationError(
+			fmt.Sprintf("%s/.git is no longer the clone's git directory", dir), "WorkspaceTampered", err)
+	}
+	return nil
+}
+
 func restoreGitConfig(dir string) (changed bool, err error) {
 	gitDir := filepath.Join(dir, ".git")
 	if fi, err := os.Lstat(gitDir); err != nil || !fi.IsDir() {
@@ -312,10 +346,15 @@ type RunClaudeCodeInput struct {
 // decides what a failed run means, and the report explains it better than an
 // activity failure would.
 func (a *ClaudeCodeActivities) RunClaudeCode(ctx context.Context, in RunClaudeCodeInput) (claudecode.Result, error) {
-	runner := a.Runner
-	if runner == nil {
-		runner = &claudecode.Runner{}
+	if err := subproc.CheckRunAs(a.RunAs); err != nil {
+		return claudecode.Result{}, temporal.NewNonRetryableApplicationError(
+			fmt.Sprintf("claude code: %v", err), "RunAsRoot", nil)
 	}
+	runner := claudecode.Runner{}
+	if a.Runner != nil {
+		runner = *a.Runner
+	}
+	runner.RunAs = a.RunAs
 	return runner.Run(ctx, claudecode.Params{
 		Cwd:                in.Dir,
 		Task:               in.Task,
@@ -443,7 +482,7 @@ func (a *ClaudeCodeActivities) InspectWorkspace(ctx context.Context, in InspectW
 		return InspectWorkspaceOutput{}, fmt.Errorf("inspect workspace: %w", err)
 	}
 	var out InspectWorkspaceOutput
-	changed, err := restoreGitConfig(in.Dir)
+	changed, err := a.restoreGitConfig(in.Dir)
 	if err != nil {
 		return out, fmt.Errorf("inspect workspace: %w", err)
 	}
@@ -504,7 +543,7 @@ func (a *ClaudeCodeActivities) PushBranch(ctx context.Context, in PushBranchInpu
 	}
 	// InspectWorkspace restored the configuration already: a change now was
 	// made after it, by something the run left running.
-	if changed, err := restoreGitConfig(in.Dir); err != nil {
+	if changed, err := a.restoreGitConfig(in.Dir); err != nil {
 		return fmt.Errorf("push: %w", err)
 	} else if changed {
 		return temporal.NewNonRetryableApplicationError(

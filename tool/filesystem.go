@@ -9,9 +9,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/victor/temporal-agent/subproc"
 )
 
-func RegisterFilesystemTools(r *Registry, workspacePath string) {
+// RegisterFilesystemTools registers the tools that read and write the
+// workspace. What they create belongs to owner, the user exec runs as, so
+// that its commands can change it too; nil leaves it to the worker's user.
+func RegisterFilesystemTools(r *Registry, workspacePath string, owner *subproc.Identity) {
 	absWorkspace, _ := filepath.Abs(workspacePath)
 
 	r.Register(&Tool{
@@ -69,11 +74,17 @@ func RegisterFilesystemTools(r *Registry, workspacePath string) {
 			if err != nil {
 				return "", err
 			}
-			if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+			if err := mkdirAllFor(filepath.Dir(fullPath), owner); err != nil {
 				return "", fmt.Errorf("write_file: mkdir: %w", err)
 			}
+			_, statErr := os.Lstat(fullPath)
 			if err := os.WriteFile(fullPath, []byte(params.Content), 0644); err != nil {
 				return "", fmt.Errorf("write_file: %w", err)
+			}
+			if os.IsNotExist(statErr) {
+				if err := owner.Give(fullPath); err != nil {
+					return "", fmt.Errorf("write_file: %w", err)
+				}
 			}
 			return "File written successfully.", nil
 		},
@@ -223,4 +234,26 @@ func resolveExisting(p string) (string, error) {
 		missing = filepath.Join(filepath.Base(cur), missing)
 		cur = parent
 	}
+}
+
+// mkdirAllFor creates dir and its missing parents, and gives the ones it
+// created to owner.
+func mkdirAllFor(dir string, owner *subproc.Identity) error {
+	top := ""
+	for d := dir; ; d = filepath.Dir(d) {
+		if _, err := os.Lstat(d); err == nil {
+			break
+		}
+		top = d
+		if filepath.Dir(d) == d {
+			break
+		}
+	}
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	if top == "" {
+		return nil
+	}
+	return owner.Give(top)
 }

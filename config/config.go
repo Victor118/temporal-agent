@@ -62,6 +62,14 @@ type Config struct {
 	// to, as globs (path.Match syntax: * stops at a slash). Empty = none: the
 	// model picks the repository, and a push uses the worker's identity.
 	ClaudeCodeRepos []string
+	// RunAsUID and RunAsGID are the user commands chosen by a model (exec,
+	// a coding run) run as, in place of the worker's: subproc.Identity. A
+	// worker running as root refuses them without one. Empty GID = the UID.
+	RunAsUID string
+	RunAsGID string
+	// ClaudeConfigDir is the coding CLI's state (CLAUDE_CONFIG_DIR), which
+	// the user it runs as must be able to write.
+	ClaudeConfigDir string
 	// SSH identity a coding worker uses for git: cloning a private repository,
 	// and pushing when the identity allows it. What the worker can do is a
 	// property of the identity it is given, not of the code — the read-only
@@ -141,6 +149,9 @@ func Load() *Config {
 		WorkspacePath:       envOr("WORKSPACE_PATH", "./workspace"),
 		ClaudeCodeWorkspace: envOr("CLAUDE_CODE_WORKSPACE", "./claude-code-runs"),
 		ClaudeCodeSSHKey:    os.Getenv("CLAUDE_CODE_SSH_KEY"),
+		ClaudeConfigDir:     os.Getenv("CLAUDE_CONFIG_DIR"),
+		RunAsUID:            os.Getenv("RUN_AS_UID"),
+		RunAsGID:            os.Getenv("RUN_AS_GID"),
 		ClaudeCodeRepos:     splitList(os.Getenv("CLAUDE_CODE_REPOS")),
 
 		SkillsRepo:          os.Getenv("SKILLS_REPO"),
