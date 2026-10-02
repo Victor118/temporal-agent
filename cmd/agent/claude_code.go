@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"slices"
 	"strings"
 	"syscall"
@@ -104,6 +105,36 @@ func newDebugRunner(cfg *config.Config, binary string) (*claudecode.Runner, erro
 	return &claudecode.Runner{Binary: binary, RunAs: runAs}, nil
 }
 
+// debugConfigDir is the CLI's configuration for a manual run: a copy of the
+// operator's, as a worker's run gets (claudecode.SeedConfigDir). done keeps a
+// renewed login and removes the copy, unless the session is to be kept: its
+// transcript is in it.
+func debugConfigDir(base string, runAs *subproc.Identity, keep bool) (dir string, done func(), err error) {
+	parent, err := os.MkdirTemp("", "claude-code-run-")
+	if err != nil {
+		return "", nil, err
+	}
+	if err := os.Chmod(parent, 0o755); err != nil {
+		os.RemoveAll(parent)
+		return "", nil, err
+	}
+	dir = filepath.Join(parent, "config")
+	if err := claudecode.SeedConfigDir(dir, base, runAs); err != nil {
+		os.RemoveAll(parent)
+		return "", nil, fmt.Errorf("CLI configuration: %w", err)
+	}
+	return dir, func() {
+		if err := claudecode.KeepCredentials(dir, base); err != nil {
+			fmt.Fprintf(os.Stderr, "the login the run renewed was not kept: %v\n", err)
+		}
+		if keep {
+			fmt.Fprintf(os.Stderr, "the run's CLI configuration, its session included, is in %s\n", dir)
+			return
+		}
+		os.RemoveAll(parent)
+	}, nil
+}
+
 func runClaudeCodeRun(cmd *cobra.Command, args []string) error {
 	task, err := resolveTask(cmd.InOrStdin())
 	if err != nil {
@@ -120,10 +151,16 @@ func runClaudeCodeRun(cmd *cobra.Command, args []string) error {
 		defer cancel()
 	}
 
-	runner, err := newDebugRunner(config.Load(), claudeCodeFlags.binary)
+	cfg := config.Load()
+	runner, err := newDebugRunner(cfg, claudeCodeFlags.binary)
 	if err != nil {
 		return err
 	}
+	configDir, done, err := debugConfigDir(cfg.ClaudeConfigDir, runner.RunAs, claudeCodeFlags.persistSession)
+	if err != nil {
+		return err
+	}
+	defer done()
 	if !claudeCodeFlags.quiet {
 		start := time.Now()
 		runner.OnEvent = func(ev claudecode.Event) {
@@ -150,6 +187,7 @@ func runClaudeCodeRun(cmd *cobra.Command, args []string) error {
 		SessionID:            claudeCodeFlags.sessionID,
 		NoSessionPersistence: !claudeCodeFlags.persistSession,
 		Env:                  claudeCodeFlags.env,
+		ConfigDir:            configDir,
 	})
 	if err != nil {
 		return err

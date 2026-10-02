@@ -14,6 +14,7 @@ import (
 
 	"go.temporal.io/sdk/temporal"
 
+	"github.com/victor/temporal-agent/claudecode"
 	"github.com/victor/temporal-agent/subproc"
 	"github.com/victor/temporal-agent/subproc/subproctest"
 )
@@ -805,5 +806,58 @@ func TestInspectWorkspaceStaysOutOfSubmodules(t *testing.T) {
 	}
 	if _, err := os.Stat(marker); err == nil {
 		t.Error("InspectWorkspace ran a filter the run configured in a submodule")
+	}
+}
+
+// Each run gets a CLI configuration of its own, seeded from the operator's:
+// a hook one run plants in its settings is never read by the next, and the
+// operator's stay as they were. A renewed login alone comes back.
+func TestRunClaudeCode_AConfigurationOfItsOwn(t *testing.T) {
+	id := subproctest.Identity(t)
+	base := subproctest.Dir(t, nil)
+	os.WriteFile(filepath.Join(base, "settings.json"), []byte(`{"model":"operator"}`), 0o600)
+	os.WriteFile(filepath.Join(base, ".credentials.json"), []byte(`{"token":1}`), 0o600)
+	bin := filepath.Join(subproctest.Dir(t, nil), "fake-claude")
+	script := `#!/bin/sh
+seen=no
+grep -q planted "$CLAUDE_CONFIG_DIR/settings.json" && seen=yes
+echo '{"hooks":"planted"}' > "$CLAUDE_CONFIG_DIR/settings.json"
+echo '{"token":2}' > "$CLAUDE_CONFIG_DIR/.credentials.json"
+printf '{"type":"result","subtype":"success","is_error":false,"result":"seen=%s updater=%s","session_id":"s"}\n' "$seen" "$DISABLE_AUTOUPDATER"
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a := &ClaudeCodeActivities{
+		AllowedRepos: testRepos, Root: subproctest.Dir(t, nil), RunAs: id,
+		ClaudeConfigDir: base, Runner: &claudecode.Runner{Binary: bin},
+	}
+
+	for i := 0; i < 2; i++ {
+		dir := filepath.Join(a.Root, "run-1")
+		os.RemoveAll(dir)
+		os.Mkdir(dir, 0o755)
+		if err := id.Give(dir); err != nil {
+			t.Fatal(err)
+		}
+		res, err := a.RunClaudeCode(context.Background(), RunClaudeCodeInput{Dir: dir, Task: "x"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Report != "seen=no updater=1" {
+			t.Errorf("run %d: %q, want a configuration of its own, the updater off", i+1, res.Report)
+		}
+	}
+	if data, _ := os.ReadFile(filepath.Join(base, "settings.json")); string(data) != `{"model":"operator"}` {
+		t.Errorf("the operator's settings became %q", data)
+	}
+	if data, _ := os.ReadFile(filepath.Join(base, ".credentials.json")); strings.TrimSpace(string(data)) != `{"token":2}` {
+		t.Errorf("the renewed login was not kept: %q", data)
+	}
+	if err := a.CleanupWorkspace(context.Background(), CleanupWorkspaceInput{Dir: filepath.Join(a.Root, "run-1")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(cliConfigDir(filepath.Join(a.Root, "run-1"))); err == nil {
+		t.Error("the run's configuration outlived its workspace")
 	}
 }

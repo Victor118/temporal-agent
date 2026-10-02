@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -40,6 +41,11 @@ type ClaudeCodeActivities struct {
 	// does: not the worker's, whose credentials the run's shell would reach.
 	// nil runs it as the worker's user, refused when that is root.
 	RunAs *subproc.Identity
+	// ClaudeConfigDir is the operator's CLI configuration (CLAUDE_CONFIG_DIR):
+	// each run starts from a copy of its own, next to its workspace, and only
+	// a renewed login comes back (claudecode.SeedConfigDir, KeepCredentials).
+	// Empty: each run starts from an empty one.
+	ClaudeConfigDir string
 	// AllowedRepos are the repositories this worker clones and pushes to, as
 	// globs (path.Match: * stops at a slash). Empty refuses them all. The
 	// repository is the model's choice, and a push goes out with this
@@ -258,11 +264,17 @@ func restoreGitConfig(dir string) (changed bool, err error) {
 	return changed, f.Close()
 }
 
-// removeWorkspace deletes a run's directory and the copy of its git
-// configuration.
+// cliConfigDir is the CLI's configuration for the run in dir: next to the
+// workspace, in Root, and thrown away with it.
+func cliConfigDir(dir string) string { return dir + ".claude" }
+
+// removeWorkspace deletes a run's directory, the copy of its git
+// configuration and its CLI configuration.
 func removeWorkspace(dir string) error {
-	if err := os.RemoveAll(dir); err != nil {
-		return err
+	for _, path := range []string{dir, cliConfigDir(dir)} {
+		if err := os.RemoveAll(path); err != nil {
+			return err
+		}
 	}
 	if err := os.Remove(gitConfigCopy(dir)); err != nil && !os.IsNotExist(err) {
 		return err
@@ -359,12 +371,29 @@ func (a *ClaudeCodeActivities) RunClaudeCode(ctx context.Context, in RunClaudeCo
 		return claudecode.Result{}, temporal.NewNonRetryableApplicationError(
 			fmt.Sprintf("claude code: %v", err), "RunAsRoot", nil)
 	}
+	dir, err := a.workspaceDir(in.Dir)
+	if err != nil {
+		return claudecode.Result{}, fmt.Errorf("claude code: %w", err)
+	}
+	// A configuration of the run's own, made afresh on every attempt: what an
+	// earlier run, or attempt, wrote in one is never read by another.
+	configDir := cliConfigDir(dir)
+	if err := claudecode.SeedConfigDir(configDir, a.ClaudeConfigDir, a.RunAs); err != nil {
+		return claudecode.Result{}, fmt.Errorf("claude code: configuration: %w", err)
+	}
+	defer func() {
+		if err := claudecode.KeepCredentials(configDir, a.ClaudeConfigDir); err != nil {
+			log.Printf("Warning: claude code: the login the run renewed was not kept: %v", err)
+		}
+	}()
+
 	runner := claudecode.Runner{}
 	if a.Runner != nil {
 		runner = *a.Runner
 	}
 	runner.RunAs = a.RunAs
 	return runner.Run(ctx, claudecode.Params{
+		ConfigDir:          configDir,
 		Cwd:                in.Dir,
 		Task:               in.Task,
 		Model:              in.Model,

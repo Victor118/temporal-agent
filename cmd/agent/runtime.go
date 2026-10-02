@@ -119,7 +119,7 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 		w.RegisterActivity(&activity.LLMActivities{Provider: llmProvider})
 		w.RegisterActivity(&activity.ForkActivities{Store: st, LLM: llmProvider, Private: catalog})
 		w.RegisterActivity(&activity.MemoryActivities{Store: st})
-		w.RegisterActivity(&activity.ClaudeCodeActivities{Root: cfg.ClaudeCodeWorkspace, SSHKeyPath: cfg.ClaudeCodeSSHKey, AllowedRepos: cfg.ClaudeCodeRepos, RunAs: runAs})
+		w.RegisterActivity(&activity.ClaudeCodeActivities{Root: cfg.ClaudeCodeWorkspace, SSHKeyPath: cfg.ClaudeCodeSSHKey, AllowedRepos: cfg.ClaudeCodeRepos, RunAs: runAs, ClaudeConfigDir: cfg.ClaudeConfigDir})
 		w.RegisterActivity(&activity.ToolActivities{Registry: registry, Catalog: catalog})
 		w.RegisterActivity(&activity.NotificationActivities{Notifiers: notifiers})
 		w.RegisterActivity(&activity.DeliveryActivities{Web: opts.web, Store: st})
@@ -187,8 +187,8 @@ func buildRegistry(cfg *config.Config, st store.Store, tc client.Client, wc *con
 }
 
 // prepareRunAs gets ready what the user that commands chosen by a model run
-// as must reach — its home, the workspace exec and the file tools share, the
-// coding CLI's state — or says in the log why those commands will be refused.
+// as must reach — its home, the workspace exec and the file tools share — or
+// says in the log why those commands will be refused.
 func prepareRunAs(cfg *config.Config, runAs *subproc.Identity) error {
 	if err := subproc.CheckRunAs(runAs); err != nil {
 		log.Printf("ERROR: exec and coding runs are refused on this worker: %v", err)
@@ -200,16 +200,20 @@ func prepareRunAs(cfg *config.Config, runAs *subproc.Identity) error {
 	if err := runAs.PrepareHome(); err != nil {
 		return err
 	}
-	dirs := []string{cfg.WorkspacePath}
-	if cfg.ClaudeConfigDir != "" && (&claudecode.Runner{}).Available() {
-		dirs = append(dirs, cfg.ClaudeConfigDir)
+	if err := os.MkdirAll(cfg.WorkspacePath, 0o755); err != nil {
+		return err
 	}
-	for _, dir := range dirs {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return err
-		}
-		if err := runAs.Give(dir); err != nil {
-			return err
+	if err := runAs.Give(cfg.WorkspacePath); err != nil {
+		return err
+	}
+	// The CLI's configuration is the worker's: each run works on a copy of
+	// its own (claudecode.SeedConfigDir). One an earlier version of the
+	// worker gave away is taken back.
+	if cfg.ClaudeConfigDir != "" {
+		if _, err := os.Lstat(cfg.ClaudeConfigDir); err == nil {
+			if err := subproc.ReclaimTree(cfg.ClaudeConfigDir); err != nil {
+				return err
+			}
 		}
 	}
 	log.Printf("exec and coding runs run as uid %d, gid %d", runAs.UID, runAs.GID)

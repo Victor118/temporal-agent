@@ -45,3 +45,32 @@ func TestPrepareRunAs_GivesTheWorkspace(t *testing.T) {
 		t.Error("prepared a workspace with no identity to give it to")
 	}
 }
+
+// The CLI's configuration stays the worker's: each run works on a copy of
+// its own. One an earlier version gave away is taken back.
+func TestPrepareRunAs_KeepsTheCLIConfiguration(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("giving files away takes root")
+	}
+	root := t.TempDir()
+	cfg := &config.Config{WorkspacePath: filepath.Join(root, "workspace"), ClaudeConfigDir: filepath.Join(root, "config")}
+	os.MkdirAll(cfg.ClaudeConfigDir, 0o777)
+	os.WriteFile(filepath.Join(cfg.ClaudeConfigDir, "settings.json"), []byte("{}"), 0o666)
+	id := &subproc.Identity{UID: 65534, GID: 65534, Home: filepath.Join(root, "home")}
+	if err := id.Give(cfg.ClaudeConfigDir); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := prepareRunAs(cfg, id); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{cfg.ClaudeConfigDir, filepath.Join(cfg.ClaudeConfigDir, "settings.json")} {
+		fi, err := os.Lstat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if uid := fi.Sys().(*syscall.Stat_t).Uid; uid != 0 || fi.Mode().Perm()&0o022 != 0 {
+			t.Errorf("%s: uid %d, mode %v; want the worker's alone", path, uid, fi.Mode())
+		}
+	}
+}

@@ -67,8 +67,9 @@ type Config struct {
 	// worker running as root refuses them without one. Empty GID = the UID.
 	RunAsUID string
 	RunAsGID string
-	// ClaudeConfigDir is the coding CLI's state (CLAUDE_CONFIG_DIR), which
-	// the user it runs as must be able to write.
+	// ClaudeConfigDir is the operator's configuration of the coding CLI
+	// (CLAUDE_CONFIG_DIR), the worker's alone: each run works on a copy of
+	// its own (claudecode.SeedConfigDir).
 	ClaudeConfigDir string
 	// SSH identity a coding worker uses for git: cloning a private repository,
 	// and pushing when the identity allows it. What the worker can do is a

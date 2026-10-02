@@ -64,6 +64,10 @@ type Params struct {
 	// holds only what cliEnv keeps from the worker's. This is how context
 	// reaches an MCP server the CLI spawns.
 	Env []string `json:"env,omitempty"`
+
+	// ConfigDir is the CLI's configuration for this run (CLAUDE_CONFIG_DIR),
+	// one of its own (SeedConfigDir); empty keeps the worker's.
+	ConfigDir string `json:"config_dir,omitempty"`
 }
 
 // Result is what one run produced. A run that the CLI itself reports as failed
@@ -165,6 +169,12 @@ func (r *Runner) Run(ctx context.Context, p Params) (Result, error) {
 	cmd := exec.CommandContext(ctx, r.binary(), buildArgs(p)...)
 	cmd.Dir = p.Cwd
 	cmd.Env = r.RunAs.Env(append(cliEnv(os.Environ()), p.Env...))
+	// The CLI's version is the image's: it does not update itself, wherever
+	// the user it runs as could write.
+	cmd.Env = append(cmd.Env, "DISABLE_AUTOUPDATER=1")
+	if p.ConfigDir != "" {
+		cmd.Env = append(cmd.Env, "CLAUDE_CONFIG_DIR="+p.ConfigDir)
+	}
 	r.RunAs.Apply(cmd)
 	// The task goes in on stdin rather than argv: it is arbitrary user text of
 	// arbitrary length, and argv has a limit.

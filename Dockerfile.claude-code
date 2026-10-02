@@ -23,6 +23,10 @@ RUN groupadd --gid 10001 agent-run \
       --shell /usr/sbin/nologin agent-run
 ENV RUN_AS_UID=10001
 
+# The CLI's version is the one pinned above: it never updates itself, not in a
+# run (the worker sets this for each) nor when an operator runs it by hand.
+ENV DISABLE_AUTOUPDATER=1
+
 # Claude Code writes the commits, as agent-run; pushing stays the workflow's
 # job. Without an identity, the commit fails halfway through a long run with a
 # message nobody is watching for. In the system configuration, which every
