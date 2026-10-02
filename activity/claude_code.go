@@ -1,6 +1,7 @@
 package activity
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"go.temporal.io/sdk/temporal"
 
 	"github.com/victor/temporal-agent/claudecode"
+	"github.com/victor/temporal-agent/subproc"
 	"github.com/victor/temporal-agent/tool"
 )
 
@@ -79,7 +81,7 @@ func (a *ClaudeCodeActivities) PrepareWorkspace(ctx context.Context, in PrepareW
 
 	// A retried attempt finds the previous one's half-written clone. Start over
 	// rather than trying to repair it.
-	if err := os.RemoveAll(dir); err != nil {
+	if err := removeWorkspace(dir); err != nil {
 		return PrepareWorkspaceOutput{}, fmt.Errorf("prepare workspace: %w", err)
 	}
 	if err := os.MkdirAll(a.Root, 0o755); err != nil {
@@ -122,7 +124,107 @@ func (a *ClaudeCodeActivities) PrepareWorkspace(ctx context.Context, in PrepareW
 			return PrepareWorkspaceOutput{}, fmt.Errorf("create branch %s: %w: %s", in.Branch, err, out)
 		}
 	}
+	if err := keepGitConfig(dir); err != nil {
+		return PrepareWorkspaceOutput{}, fmt.Errorf("prepare workspace: %w", err)
+	}
 	return PrepareWorkspaceOutput{Dir: dir, Commit: strings.TrimSpace(commit), Branch: in.Branch}, nil
+}
+
+// gitConfigCopy is where the clone's .git/config is kept while the run works:
+// next to the workspace, not in it. The run's edits are only accepted in its
+// own directory, and nothing it runs may write in Root.
+func gitConfigCopy(dir string) string { return dir + ".gitconfig" }
+
+// keepGitConfig keeps a copy of the clone's git configuration, which the
+// worker's own git commands use after the run, in place of whatever the run
+// left in .git/config. It also drops the sample hooks: nothing in the
+// workspace's .git is the worker's business once the run has had it.
+func keepGitConfig(dir string) error {
+	config, err := os.ReadFile(filepath.Join(dir, ".git", "config"))
+	if err != nil {
+		return err
+	}
+	if err := os.RemoveAll(filepath.Join(dir, ".git", "hooks")); err != nil {
+		return err
+	}
+	return os.WriteFile(gitConfigCopy(dir), config, 0o644)
+}
+
+// restoreGitConfig puts the clone's configuration back in .git/config before
+// the worker runs git in a tree the run had write access to, and reports
+// whether the run had changed it.
+//
+// The run edits files, and .git/config is one: git reads it on every
+// command, and core.fsmonitor, diff.external, credential.helper or
+// gpg.program in it are commands the worker would run with its own
+// credentials, while url.<x>.pushInsteadOf would send the push to another
+// repository than the one checkRepo allowed. A linked-worktree layout
+// (commondir, config.worktree) would make git read its configuration from
+// elsewhere: it is removed as well. A .git that is no longer a directory is
+// refused outright.
+func restoreGitConfig(dir string) (changed bool, err error) {
+	gitDir := filepath.Join(dir, ".git")
+	if fi, err := os.Lstat(gitDir); err != nil || !fi.IsDir() {
+		return false, temporal.NewNonRetryableApplicationError(
+			fmt.Sprintf("%s is no longer the clone's git directory", gitDir), "WorkspaceTampered", err)
+	}
+	saved, err := os.ReadFile(gitConfigCopy(dir))
+	if err != nil {
+		return false, fmt.Errorf("the clone's git configuration was not kept: %w", err)
+	}
+
+	for _, name := range []string{"commondir", "config.worktree"} {
+		path := filepath.Join(gitDir, name)
+		if _, err := os.Lstat(path); err == nil {
+			changed = true
+			if err := os.RemoveAll(path); err != nil {
+				return changed, err
+			}
+		}
+	}
+
+	path := filepath.Join(gitDir, "config")
+	fi, err := os.Lstat(path)
+	switch {
+	case err != nil:
+		changed = true
+	case !fi.Mode().IsRegular():
+		changed = true
+	default:
+		current, err := os.ReadFile(path)
+		if err != nil || !bytes.Equal(current, saved) {
+			changed = true
+		}
+	}
+	if !changed {
+		return false, nil
+	}
+	// A new file, never written through whatever the run left at that path:
+	// O_EXCL does not follow a symbolic link.
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return changed, err
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return changed, err
+	}
+	if _, err := f.Write(saved); err != nil {
+		f.Close()
+		return changed, err
+	}
+	return changed, f.Close()
+}
+
+// removeWorkspace deletes a run's directory and the copy of its git
+// configuration.
+func removeWorkspace(dir string) error {
+	if err := os.RemoveAll(dir); err != nil {
+		return err
+	}
+	if err := os.Remove(gitConfigCopy(dir)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 // checkRepo refuses a repository this worker must not clone or push to: one
@@ -173,7 +275,21 @@ func (a *ClaudeCodeActivities) CleanupWorkspace(ctx context.Context, in CleanupW
 	if filepath.Clean(in.Dir) != want {
 		return fmt.Errorf("cleanup: refusing to delete %q, which is not a workspace under %q", in.Dir, a.Root)
 	}
-	return os.RemoveAll(want)
+	return removeWorkspace(want)
+}
+
+// workspaceDir checks that dir is a run's directory under Root, as the
+// workflow got it from PrepareWorkspace.
+func (a *ClaudeCodeActivities) workspaceDir(dir string) (string, error) {
+	want, err := a.workspacePath(filepath.Base(dir))
+	if err != nil {
+		return "", err
+	}
+	if filepath.Clean(dir) != want {
+		return "", temporal.NewNonRetryableApplicationError(
+			fmt.Sprintf("%q is not a workspace under %q", dir, a.Root), "InvalidInput", nil)
+	}
+	return want, nil
 }
 
 type RunClaudeCodeInput struct {
@@ -248,16 +364,24 @@ func (a *ClaudeCodeActivities) sshEnv() []string {
 		a.SSHKeyPath)}
 }
 
+// gitSafeArgs come before every git command of the worker. Its git commands
+// run in a tree the run had write access to: whatever the run left there must
+// not make git run a program. The configuration is restored before
+// (restoreGitConfig); these hold even if something was missed — no hooks, no
+// filesystem monitor.
+var gitSafeArgs = []string{"-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"}
+
 // gitEnv is git with extra environment entries for this command only. Anything
-// secret belongs here and never in the worker's own environment: the Claude
-// Code subprocess inherits os.Environ(), so a credential left there would be
-// handed to the run itself.
+// secret belongs here and never in the worker's own environment.
+//
+// The worker's environment is not passed on (subproc.Env): git and the ssh it
+// starts need none of the platform's credentials. Nor is the system's or the
+// user's git configuration read: what git does here is the code's decision.
 func (a *ClaudeCodeActivities) gitEnv(ctx context.Context, dir string, env []string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := exec.CommandContext(ctx, "git", append(append([]string(nil), gitSafeArgs...), args...)...)
 	cmd.Dir = dir
-	if len(env) > 0 {
-		cmd.Env = append(os.Environ(), env...)
-	}
+	cmd.Env = append(subproc.Env(os.Environ(), nil, nil), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
+	cmd.Env = append(cmd.Env, env...)
 
 	if activity.IsActivity(ctx) {
 		stop := make(chan struct{})
@@ -294,7 +418,11 @@ type CommitInfo struct {
 }
 
 type InspectWorkspaceOutput struct {
-	Commits []CommitInfo `json:"commits,omitempty"`
+	// GitConfigChanged reports a run that changed the clone's git
+	// configuration, put back before inspecting. A run has no reason to; one
+	// that does may be steering the push, which must not happen.
+	GitConfigChanged bool         `json:"git_config_changed,omitempty"`
+	Commits          []CommitInfo `json:"commits,omitempty"`
 	// Branch is where HEAD actually is, which is not necessarily where the
 	// preparation left it.
 	Branch string `json:"branch"`
@@ -311,7 +439,15 @@ func (a *ClaudeCodeActivities) InspectWorkspace(ctx context.Context, in InspectW
 	if in.Dir == "" || in.Base == "" {
 		return InspectWorkspaceOutput{}, fmt.Errorf("inspect workspace: dir and base are required")
 	}
+	if _, err := a.workspaceDir(in.Dir); err != nil {
+		return InspectWorkspaceOutput{}, fmt.Errorf("inspect workspace: %w", err)
+	}
 	var out InspectWorkspaceOutput
+	changed, err := restoreGitConfig(in.Dir)
+	if err != nil {
+		return out, fmt.Errorf("inspect workspace: %w", err)
+	}
+	out.GitConfigChanged = changed
 
 	branch, err := a.git(ctx, in.Dir, "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil {
@@ -351,8 +487,8 @@ type PushBranchInput struct {
 
 // PushBranch publishes the run's branch. This is the one step where a secret
 // meets a working tree that the run had write access to, so it takes nothing
-// from that tree: not the remote URL, and not the hooks git would otherwise
-// run on the way out.
+// from that tree: not the remote URL, not the git configuration (which could
+// rewrite that URL), and not the hooks git would otherwise run on the way out.
 func (a *ClaudeCodeActivities) PushBranch(ctx context.Context, in PushBranchInput) error {
 	if in.Dir == "" || in.Remote == "" || in.Branch == "" {
 		return fmt.Errorf("push: dir, remote and branch are required")
@@ -363,12 +499,22 @@ func (a *ClaudeCodeActivities) PushBranch(ctx context.Context, in PushBranchInpu
 	if strings.HasPrefix(in.Branch, "-") {
 		return temporal.NewNonRetryableApplicationError(fmt.Sprintf("push: invalid branch %q", in.Branch), "InvalidInput", nil)
 	}
+	if _, err := a.workspaceDir(in.Dir); err != nil {
+		return fmt.Errorf("push: %w", err)
+	}
+	// InspectWorkspace restored the configuration already: a change now was
+	// made after it, by something the run left running.
+	if changed, err := restoreGitConfig(in.Dir); err != nil {
+		return fmt.Errorf("push: %w", err)
+	} else if changed {
+		return temporal.NewNonRetryableApplicationError(
+			"push: the clone's git configuration changed since the inspection", "WorkspaceTampered", nil)
+	}
 
 	// An explicit refspec: a tag the run happened to name like the branch
 	// must not be what gets published.
 	ref := "refs/heads/" + in.Branch
 	out, err := a.gitEnv(ctx, in.Dir, a.sshEnv(),
-		"-c", "core.hooksPath=/dev/null",
 		"push", "--", in.Remote, ref+":"+ref)
 	if err != nil {
 		return fmt.Errorf("push %s: %w: %s", in.Branch, err, out)

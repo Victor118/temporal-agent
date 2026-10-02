@@ -297,6 +297,7 @@ func TestPushBranchIgnoresHooksLeftInTheWorkspace(t *testing.T) {
 
 	marker := filepath.Join(t.TempDir(), "hook-ran")
 	hook := filepath.Join(prepared.Dir, ".git", "hooks", "pre-push")
+	os.MkdirAll(filepath.Dir(hook), 0o755)
 	if err := os.WriteFile(hook, []byte("#!/bin/sh\ntouch "+marker+"\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -467,5 +468,163 @@ func TestPushBranchRefusesAnUnlistedRemote(t *testing.T) {
 		if err := a.PushBranch(context.Background(), PushBranchInput{Dir: prepared.Dir, Remote: remote, Branch: "agent/x"}); err == nil {
 			t.Errorf("pushed to %q", remote)
 		}
+	}
+}
+
+// appendGitConfig adds lines to the workspace's .git/config, as a run that
+// edits files can.
+func appendGitConfig(t *testing.T, dir, lines string) {
+	t.Helper()
+	f, err := os.OpenFile(filepath.Join(dir, ".git", "config"), os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(lines); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// git reads .git/config on every command, and the run can edit it: a
+// filesystem monitor set there is a command git status would run, with the
+// worker's credentials. The worker's git uses the configuration of the clone.
+func TestInspectWorkspaceDoesNotRunTheRunsGitConfig(t *testing.T) {
+	src := initRepo(t)
+	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: t.TempDir()}
+	prepared, err := a.PrepareWorkspace(context.Background(), PrepareWorkspaceInput{Name: "run-1", Repo: src, Branch: "agent/x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	marker := filepath.Join(t.TempDir(), "fsmonitor-ran")
+	monitor := filepath.Join(t.TempDir(), "monitor.sh")
+	os.WriteFile(monitor, []byte("#!/bin/sh\ntouch "+marker+"\n"), 0o755)
+	appendGitConfig(t, prepared.Dir, "[core]\n\tfsmonitor = "+monitor+"\n")
+
+	// The vector is real: a plain git status in the tree runs the monitor.
+	exec.Command("git", "-C", prepared.Dir, "status", "--porcelain").Run()
+	if _, err := os.Stat(marker); err != nil {
+		t.Skip("this git does not run core.fsmonitor; the test would prove nothing")
+	}
+	os.Remove(marker)
+
+	out, err := a.InspectWorkspace(context.Background(), InspectWorkspaceInput{Dir: prepared.Dir, Base: prepared.Commit})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("InspectWorkspace ran the filesystem monitor the run configured")
+	}
+	if !out.GitConfigChanged {
+		t.Error("the changed configuration was not reported")
+	}
+	raw, _ := os.ReadFile(filepath.Join(prepared.Dir, ".git", "config"))
+	if strings.Contains(string(raw), "fsmonitor") {
+		t.Error("the clone's configuration was not restored")
+	}
+}
+
+// A pushInsteadOf in .git/config would rewrite the remote checkRepo allowed
+// into one it never saw: the push must still land where it was told.
+func TestPushBranchIgnoresAPushInsteadOfLeftByTheRun(t *testing.T) {
+	bare := func() string {
+		dir := filepath.Join(t.TempDir(), "remote.git")
+		if out, err := exec.Command("git", "init", "--quiet", "--bare", "--initial-branch", "main", dir).CombinedOutput(); err != nil {
+			t.Fatalf("init bare: %v: %s", err, out)
+		}
+		return dir
+	}
+	remote, elsewhere := bare(), bare()
+	src := initRepo(t)
+	exec.Command("git", "-C", src, "push", "--quiet", remote, "main").Run()
+
+	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: t.TempDir()}
+	prepared, err := a.PrepareWorkspace(context.Background(), PrepareWorkspaceInput{Name: "run-1", Repo: remote, Branch: "agent/thing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitFile(t, prepared.Dir, "a.txt", "a", "feat: add a")
+	appendGitConfig(t, prepared.Dir, "[url \""+elsewhere+"\"]\n\tpushInsteadOf = "+remote+"\n")
+
+	ref := "refs/heads/agent/thing"
+	has := func(repo string) bool {
+		return exec.Command("git", "-C", repo, "rev-parse", "--verify", "--quiet", ref).Run() == nil
+	}
+	// The vector is real: a plain push follows the rewrite.
+	exec.Command("git", "-C", prepared.Dir, "push", "--quiet", remote, ref+":"+ref).Run()
+	if !has(elsewhere) {
+		t.Fatal("a plain push did not follow pushInsteadOf; the test would prove nothing")
+	}
+	exec.Command("git", "-C", elsewhere, "update-ref", "-d", ref).Run()
+
+	// The workflow inspects before it pushes.
+	inspected, err := a.InspectWorkspace(context.Background(), InspectWorkspaceInput{Dir: prepared.Dir, Base: prepared.Commit})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !inspected.GitConfigChanged {
+		t.Error("the changed configuration was not reported")
+	}
+	if err := a.PushBranch(context.Background(), PushBranchInput{Dir: prepared.Dir, Remote: remote, Branch: "agent/thing"}); err != nil {
+		t.Fatalf("PushBranch: %v", err)
+	}
+	if has(elsewhere) {
+		t.Error("the branch landed in the repository the run's configuration named")
+	}
+	if !has(remote) {
+		t.Error("the branch is not on the remote the workflow named")
+	}
+}
+
+// A configuration changed after the inspection is something the run left
+// running: the push refuses rather than restore and go on.
+func TestPushBranchRefusesAConfigChangedAfterTheInspection(t *testing.T) {
+	src := initRepo(t)
+	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: t.TempDir()}
+	prepared, err := a.PrepareWorkspace(context.Background(), PrepareWorkspaceInput{Name: "run-1", Repo: src, Branch: "agent/x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendGitConfig(t, prepared.Dir, "[credential]\n\thelper = !touch /tmp/pwned\n")
+	if err := a.PushBranch(context.Background(), PushBranchInput{Dir: prepared.Dir, Remote: src, Branch: "agent/x"}); err == nil {
+		t.Error("pushed from a tree whose configuration changed")
+	}
+
+	// And a .git replaced by something else is not git's to read at all.
+	os.RemoveAll(filepath.Join(prepared.Dir, ".git"))
+	os.WriteFile(filepath.Join(prepared.Dir, ".git"), []byte("gitdir: /elsewhere\n"), 0o644)
+	if _, err := a.InspectWorkspace(context.Background(), InspectWorkspaceInput{Dir: prepared.Dir, Base: prepared.Commit}); err == nil {
+		t.Error("inspected a workspace whose .git is a file")
+	}
+}
+
+// Inspect and push only work on a workspace under Root.
+func TestInspectAndPushRefuseADirOutsideRoot(t *testing.T) {
+	src := initRepo(t)
+	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: t.TempDir()}
+	if _, err := a.InspectWorkspace(context.Background(), InspectWorkspaceInput{Dir: src, Base: "HEAD"}); err == nil {
+		t.Error("inspected a directory outside Root")
+	}
+	if err := a.PushBranch(context.Background(), PushBranchInput{Dir: src, Remote: src, Branch: "main"}); err == nil {
+		t.Error("pushed from a directory outside Root")
+	}
+}
+
+// Cleanup takes the copy of the configuration with the workspace.
+func TestCleanupWorkspaceRemovesTheConfigCopy(t *testing.T) {
+	src := initRepo(t)
+	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: t.TempDir()}
+	prepared, err := a.PrepareWorkspace(context.Background(), PrepareWorkspaceInput{Name: "run-1", Repo: src})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(gitConfigCopy(prepared.Dir)); err != nil {
+		t.Fatalf("no copy of the configuration: %v", err)
+	}
+	if err := a.CleanupWorkspace(context.Background(), CleanupWorkspaceInput{Dir: prepared.Dir}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(gitConfigCopy(prepared.Dir)); !os.IsNotExist(err) {
+		t.Errorf("the copy outlived the workspace: %v", err)
 	}
 }

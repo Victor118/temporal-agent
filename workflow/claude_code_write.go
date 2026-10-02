@@ -172,6 +172,14 @@ func implementFeature(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCod
 	out.Commits = inspected.Commits
 	out.Dirty = inspected.Dirty
 
+	// The run has no reason to touch the repository's git configuration, and
+	// what it could put there redirects or rides on the push.
+	if inspected.GitConfigChanged {
+		out.Error = joinErrors(out.Error,
+			"the run changed the repository's git configuration (.git/config), so nothing was pushed")
+		return out, nil
+	}
+
 	// A run that changed nothing is a failure, not a quiet success. Silently
 	// doing nothing is the most expensive outcome to diagnose, and we know it
 	// happens: a denied git command leaves exactly this state.

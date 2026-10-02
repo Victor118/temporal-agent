@@ -240,3 +240,23 @@ func TestBranchName(t *testing.T) {
 		t.Errorf("two runs produced the same branch %q", a)
 	}
 }
+
+// A run that changed .git/config may be steering the push: nothing is pushed,
+// and the caller is told why.
+func TestImplementFeatureWorkflow_ChangedGitConfigIsNotPushed(t *testing.T) {
+	inspected := oneCommit()
+	inspected.GitConfigChanged = true
+	e := newImplementEnv(t, claudeCodeResult{Report: "Done.", Subtype: "success"}, nil, inspected, nil)
+
+	out := e.run_(t, ImplementFeatureInput{Repo: "/src/repo", Task: "do it"})
+
+	if e.pushed != nil || out.Pushed {
+		t.Error("pushed a tree whose git configuration the run changed")
+	}
+	if !strings.Contains(out.Error, ".git/config") {
+		t.Errorf("Error = %q", out.Error)
+	}
+	if len(e.cleaned) != 1 {
+		t.Errorf("cleaned = %v, want the workspace deleted", e.cleaned)
+	}
+}
