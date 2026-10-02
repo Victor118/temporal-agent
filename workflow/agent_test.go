@@ -146,6 +146,16 @@ func TestBuildChildInput_AgentTool(t *testing.T) {
 		}
 	})
 
+	t.Run("a sub-agent reaches the user on the parent's channel", func(t *testing.T) {
+		res := analyst()
+		tg := AgentWorkflowInput{Model: "m", UserID: "u-alice", Channel: "telegram", ChannelID: "42"}
+		_, in, _ := buildChildInput("agent_market-analyst", json.RawMessage(`{"task":"t"}`),
+			tg, "child", &res, nil, "default", "agent")
+		if child := in.(AgentWorkflowInput); child.Channel != "telegram" || child.ChannelID != "42" || child.UserID != "u-alice" {
+			t.Errorf("child = %+v", child)
+		}
+	})
+
 	t.Run("the call may pick its own model", func(t *testing.T) {
 		res := analyst()
 		_, in, _ := buildChildInput("agent_market-analyst", json.RawMessage(`{"task":"t","model":"other"}`),
@@ -632,5 +642,58 @@ func TestAgentWorkflow_StoredMessageIsNotAddedAgain(t *testing.T) {
 				t.Errorf("the turn stored a user message again: %+v", p)
 			}
 		}
+	}
+}
+
+// A sub-agent of a Telegram session asks its questions on Telegram, but its
+// answer goes to its parent only: on Telegram it would read as the reply.
+func TestAgentWorkflow_SubAgentRepliesToItsParentOnly(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.ListToolsInput) (activity.ListToolsOutput, error) {
+		return activity.ListToolsOutput{}, nil
+	}, sdkactivity.RegisterOptions{Name: "ListTools"})
+	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.LoadSkillsForAgentInput) (activity.LoadSkillsForAgentOutput, error) {
+		return activity.LoadSkillsForAgentOutput{}, nil
+	}, sdkactivity.RegisterOptions{Name: "LoadSkillsForAgent"})
+	env.RegisterActivityWithOptions(func(ctx context.Context, req provider.ChatRequest) (provider.ChatResponse, error) {
+		return provider.ChatResponse{Content: "the analysis", StopReason: "end_turn"}, nil
+	}, sdkactivity.RegisterOptions{Name: "CallLLM"})
+	var channels []string
+	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.NotifyInput) error {
+		channels = append(channels, in.Channel)
+		return nil
+	}, sdkactivity.RegisterOptions{Name: "NotifyStep"})
+
+	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{
+		SessionID: "s1-tool-agent_analyst-1", AgentID: "analyst", UserMessage: "go",
+		Channel: "telegram", ChannelID: "42", // inherited, no TurnKey: a sub-agent
+	})
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range channels {
+		if c == "telegram" {
+			t.Errorf("the sub-agent's answer went to Telegram: %v", channels)
+		}
+	}
+}
+
+// ask_user gets the channel of the agent that asks, a sub-agent's included.
+func TestBuildChildInput_AskUserGetsTheChannel(t *testing.T) {
+	sub := AgentWorkflowInput{SessionID: "s1-tool-agent_analyst-1", Channel: "telegram", ChannelID: "42"}
+	res := activity.ToolResolution{Kind: "workflow", WorkflowName: "AskUserWorkflow"}
+	_, in, err := buildChildInput("ask_user", json.RawMessage(`{"question":"ok?"}`), sub, "child", &res, []string{"default", "analyst"}, "analyst", "agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Channel    string   `json:"channel"`
+		ChannelID  string   `json:"channel_id"`
+		AgentChain []string `json:"agent_chain"`
+	}
+	json.Unmarshal(in.(json.RawMessage), &got)
+	if got.Channel != "telegram" || got.ChannelID != "42" || len(got.AgentChain) != 2 {
+		t.Errorf("ask_user input %s", in)
 	}
 }

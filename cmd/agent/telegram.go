@@ -169,10 +169,13 @@ func (h *handler) handleTelegramWebhook(w http.ResponseWriter, r *http.Request) 
 
 // tryAnswerAskUser checks for a running ask_user child workflow for this session
 // and signals it with the user's answer. Returns true if an ask_user was answered.
+// The question may come from a sub-agent, whose ask_user is
+// "<session>-tool-agent_x-<call>-tool-ask_user-…": the workflow type finds
+// them all, where an ID prefix only found the session agent's own.
 func (h *handler) tryAnswerAskUser(ctx context.Context, sessionID, answer string) bool {
 	resp, err := h.temporalClient.ListWorkflow(ctx, &workflowservice.ListWorkflowExecutionsRequest{
 		Namespace: h.cfg.TemporalNamespace,
-		Query:     fmt.Sprintf("WorkflowId STARTS_WITH '%s-tool-ask_user' AND ExecutionStatus = 'Running'", sessionID),
+		Query:     fmt.Sprintf("WorkflowType = 'AskUserWorkflow' AND ExecutionStatus = 'Running' AND WorkflowId STARTS_WITH '%s-'", sessionID),
 		PageSize:  1,
 	})
 	if err != nil || len(resp.Executions) == 0 {

@@ -11,6 +11,10 @@ import (
 	"testing"
 	"time"
 
+	commonpb "go.temporal.io/api/common/v1"
+	workflowpb "go.temporal.io/api/workflow/v1"
+	"go.temporal.io/api/workflowservice/v1"
+
 	"github.com/victor/temporal-agent/auth"
 	"github.com/victor/temporal-agent/config"
 	"github.com/victor/temporal-agent/sse"
@@ -164,5 +168,39 @@ func TestInternalNotify_RequiresTheKey(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// askTemporal has one question waiting, asked by a sub-agent of s1.
+type askTemporal struct {
+	fakeTemporal
+	queries []string
+}
+
+func (f *askTemporal) ListWorkflow(_ context.Context, req *workflowservice.ListWorkflowExecutionsRequest) (*workflowservice.ListWorkflowExecutionsResponse, error) {
+	f.queries = append(f.queries, req.Query)
+	return &workflowservice.ListWorkflowExecutionsResponse{Executions: []*workflowpb.WorkflowExecutionInfo{
+		{Execution: &commonpb.WorkflowExecution{WorkflowId: "s1-tool-agent_analyst-c1-tool-ask_user-c2"}},
+	}}, nil
+}
+
+func (f *askTemporal) SignalWorkflow(_ context.Context, workflowID, _, signal string, arg interface{}) error {
+	f.signals = append(f.signals, workflowID)
+	return nil
+}
+
+// A Telegram answer reaches a question a sub-agent asked: they are found by
+// type, not by the session agent's own ID prefix.
+func TestTryAnswerAskUser_FindsSubAgentQuestions(t *testing.T) {
+	tc := &askTemporal{}
+	h := &handler{temporalClient: tc, cfg: &config.Config{}}
+	if !h.tryAnswerAskUser(context.Background(), "s1", "yes") {
+		t.Fatal("the answer was not delivered")
+	}
+	if len(tc.queries) != 1 || !strings.Contains(tc.queries[0], "WorkflowType = 'AskUserWorkflow'") || !strings.Contains(tc.queries[0], "STARTS_WITH 's1-'") {
+		t.Errorf("query %v", tc.queries)
+	}
+	if len(tc.signals) != 1 || tc.signals[0] != "s1-tool-agent_analyst-c1-tool-ask_user-c2" {
+		t.Errorf("signalled %v", tc.signals)
 	}
 }

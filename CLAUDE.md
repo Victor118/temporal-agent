@@ -62,4 +62,4 @@
 - Claude Code : `repo` (et `ref`/`base`) viennent du modèle. Le worker n'accepte que les dépôts de `CLAUDE_CODE_REPOS` (globs, vide = tout refusé), vérifiés dans `PrepareWorkspace` et `PushBranch` (là où vit la clé), refuse ce qui commence par `-`, et passe `--` / `--end-of-options` à git
 - `web_fetch` ne se connecte qu'à des adresses publiques (vérifiées dans le dialer, après résolution DNS et à chaque redirection), en http(s) uniquement
 - Les notifications SSE passent par `/internal/notify` (prod) ou in-memory hub (dev)
-- ask_user fonctionne pour les sous-agents (SSE route vers le bon sessionID via le workflowID)
+- ask_user fonctionne pour les sous-agents, web comme Telegram : un sous-agent hérite `Channel`/`ChannelID` de son parent (ses questions vont à l'utilisateur ; sa réponse finale ne part que vers le parent, seul le tour de session — `TurnKey` non vide — répond sur le canal), et une réponse Telegram cherche les `AskUserWorkflow` en cours dont l'ID commence par `<session>-`

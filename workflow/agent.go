@@ -49,8 +49,11 @@ type AgentWorkflowInput struct {
 	// and scheduled runs leave it empty: they own no session history.
 	TurnKey    string   `json:"turn_key,omitempty"`
 	AgentChain []string `json:"agent_chain,omitempty"` // Chain of parent agent IDs for context propagation
-	Channel    string   `json:"channel,omitempty"`     // "web", "telegram"
-	ChannelID  string   `json:"channel_id,omitempty"`  // chat_id for telegram
+	// Channel and ChannelID are where the session's user is reached ("web",
+	// "telegram" and its chat_id). A sub-agent inherits them so its questions
+	// reach the user; only the session's own turn sends its answer there.
+	Channel   string `json:"channel,omitempty"`
+	ChannelID string `json:"channel_id,omitempty"`
 }
 
 type AgentWorkflowOutput struct {
@@ -232,6 +235,15 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 		return AgentWorkflowOutput{}, fmt.Errorf("list tools: %w", err)
 	}
 
+	// The answer and the tool calls go to the user's channel from the
+	// session's own turn only. A sub-agent's answer is for its parent: sent to
+	// a Telegram chat, it would read as the agent's reply. Its events stay on
+	// the web hub, under its own ID, as before.
+	replyChannel, replyChannelID := input.Channel, input.ChannelID
+	if input.TurnKey == "" {
+		replyChannel, replyChannelID = "", ""
+	}
+
 	// ReAct loop
 	for i := 0; i < maxReActIterations; i++ {
 		// Check for cancellation before each iteration
@@ -295,7 +307,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 			}
 
 			cancelSafeFlush()
-			notifyResponse(ctx, input.SessionID, input.Channel, input.ChannelID, response.Content)
+			notifyResponse(ctx, input.SessionID, replyChannel, replyChannelID, response.Content)
 
 			return AgentWorkflowOutput{
 				Response:     response.Content,
@@ -323,7 +335,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 		}
 		messages = append(messages, assistantMsg)
 
-		notifyToolCalls(ctx, input.SessionID, input.Channel, input.ChannelID, response.ToolCalls)
+		notifyToolCalls(ctx, input.SessionID, replyChannel, replyChannelID, response.ToolCalls)
 
 		// Execute all tools in parallel, each on its tool's task queue
 		type toolDispatch struct {
@@ -653,6 +665,10 @@ func subAgentInput(rawInput json.RawMessage, parent AgentWorkflowInput, childID 
 		// The sub-agent acts for the same user: its tools save that user's
 		// memory, deliver to that user.
 		UserID: parent.UserID,
+		// And asks that user, where they are: an ask_user from a sub-agent of
+		// a Telegram session goes to Telegram.
+		Channel:   parent.Channel,
+		ChannelID: parent.ChannelID,
 	}, nil
 }
 
