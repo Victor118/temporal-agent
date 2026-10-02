@@ -294,11 +294,10 @@ func buildArgs(p Params) []string {
 
 // cliEnvNames and cliEnvPrefixes are what the CLI keeps from the worker's
 // environment beyond what any subprocess keeps (subproc.Env): the CLI's own
-// settings, and the toolchain's (GOPATH, GOTOOLCHAIN: without them a run's
-// `go test` fetches modules, or a whole toolchain, all over again).
+// settings, and the Go toolchain's, named as exec names them.
 var (
-	cliEnvNames    = []string{"CLAUDE_CONFIG_DIR", "NODE_EXTRA_CA_CERTS"}
-	cliEnvPrefixes = []string{"ANTHROPIC_", "GO"}
+	cliEnvNames    = append([]string{"CLAUDE_CONFIG_DIR", "NODE_EXTRA_CA_CERTS"}, subproc.GoToolchainNames...)
+	cliEnvPrefixes = []string{"ANTHROPIC_"}
 )
 
 // cliEnv filters environ down to what the CLI may see. The worker holds

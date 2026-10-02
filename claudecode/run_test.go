@@ -381,6 +381,7 @@ func TestCLIEnv(t *testing.T) {
 	got := cliEnv([]string{
 		"PATH=/bin", "HOME=/root", "LC_ALL=C", "ANTHROPIC_BASE_URL=http://proxy", "GOPATH=/go",
 		"DATABASE_URL=postgres://x", "LLM_API_KEY=k", "TEMPORAL_HOST=t", "PATHX=no", "=weird",
+		"GOOGLE_APPLICATION_CREDENTIALS=/keys/gcp.json", "GOOGLE_API_KEY=g",
 	})
 	want := []string{"PATH=/bin", "HOME=/root", "LC_ALL=C", "ANTHROPIC_BASE_URL=http://proxy", "GOPATH=/go"}
 	if strings.Join(got, " ") != strings.Join(want, " ") {

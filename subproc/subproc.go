@@ -24,6 +24,15 @@ var baseNames = []string{
 
 var basePrefixes = []string{"LC_"}
 
+// GoToolchainNames are the Go toolchain's variables, for a command that builds
+// Go code: without them `go build` fetches modules, or a whole toolchain, all
+// over again. Named one by one rather than by a "GO" prefix, which would also
+// let GOOGLE_* credentials through.
+var GoToolchainNames = []string{
+	"GOPATH", "GOROOT", "GOCACHE", "GOMODCACHE", "GOTOOLCHAIN", "GOFLAGS", "GOENV",
+	"GOPROXY", "GOPRIVATE", "GONOPROXY", "GONOSUMDB", "GOSUMDB", "GOINSECURE",
+}
+
 // Env filters environ down to the base variables, plus the names and name
 // prefixes a caller adds. Anything else stays out, whatever an operator adds
 // to the worker later: the list says what is kept, not what is removed.

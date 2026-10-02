@@ -15,8 +15,9 @@ func TestEnv(t *testing.T) {
 	got := Env([]string{
 		"PATH=/bin", "HOME=/root", "LC_ALL=C", "DATABASE_URL=postgres://x", "LLM_API_KEY=k",
 		"SMTP_PASSWORD=p", "GOPATH=/go", "ANTHROPIC_API_KEY=a", "PATHX=no", "=weird",
-	}, []string{"GOPATH"}, nil)
-	want := []string{"PATH=/bin", "HOME=/root", "LC_ALL=C", "GOPATH=/go"}
+		"GOOGLE_APPLICATION_CREDENTIALS=/keys/gcp.json", "GOCACHE=/cache",
+	}, GoToolchainNames, nil)
+	want := []string{"PATH=/bin", "HOME=/root", "LC_ALL=C", "GOPATH=/go", "GOCACHE=/cache"}
 	if strings.Join(got, " ") != strings.Join(want, " ") {
 		t.Errorf("Env = %v, want %v", got, want)
 	}

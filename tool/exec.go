@@ -13,12 +13,6 @@ import (
 	"github.com/victor/temporal-agent/subproc"
 )
 
-// execEnvNames are the variables a command keeps beyond subproc's base: the Go
-// toolchain's, so `go build` in the workspace finds its caches. Named one by
-// one rather than by a "GO" prefix, which would also let GOOGLE_* credentials
-// through.
-var execEnvNames = []string{"GOPATH", "GOROOT", "GOCACHE", "GOMODCACHE", "GOTOOLCHAIN", "GOFLAGS", "GOPROXY"}
-
 // execKillGrace is how long a cancelled command's pipes are waited on once its
 // process group is killed.
 const execKillGrace = 2 * time.Second
@@ -64,7 +58,7 @@ func RegisterExecTool(r *Registry, workspacePath string) {
 
 			cmd := exec.CommandContext(ctx, "sh", "-c", params.Command)
 			cmd.Dir = workspacePath
-			cmd.Env = subproc.Env(os.Environ(), execEnvNames, nil)
+			cmd.Env = subproc.Env(os.Environ(), subproc.GoToolchainNames, nil)
 			subproc.KillGroupOnCancel(cmd, syscall.SIGKILL, execKillGrace)
 
 			output, err := cmd.CombinedOutput()
