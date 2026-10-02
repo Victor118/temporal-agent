@@ -167,6 +167,10 @@ agent/
   ranges are refused after name resolution, on every redirect too, and only
   `http`/`https` URLs are followed.
 
+- **Logins**: failures are limited in memory, 20 per client address and 10 per
+  account in 15 minutes (then `429`), and logged with the address. The address
+  is the connection's peer: behind a reverse proxy, every client shares it.
+
 ## License
 
 MIT

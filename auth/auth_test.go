@@ -94,7 +94,7 @@ func TestLogin(t *testing.T) {
 	s, st := newService(t)
 	ctx := context.Background()
 
-	token, u, err := s.Login(ctx, "ALICE@example.com", "correct horse battery")
+	token, u, err := s.Login(ctx, "192.0.2.1", "ALICE@example.com", "correct horse battery")
 	if err != nil || u.ID != "u-alice" {
 		t.Fatalf("login: %v %v", u, err)
 	}
@@ -104,21 +104,21 @@ func TestLogin(t *testing.T) {
 	}
 
 	for _, creds := range [][2]string{{"alice@example.com", "wrong"}, {"nobody@example.com", "correct horse battery"}} {
-		if _, _, err := s.Login(ctx, creds[0], creds[1]); !errors.Is(err, ErrInvalidCredentials) {
+		if _, _, err := s.Login(ctx, "192.0.2.1", creds[0], creds[1]); !errors.Is(err, ErrInvalidCredentials) {
 			t.Errorf("%v: %v", creds, err)
 		}
 	}
 
 	now := time.Now()
 	st.users["alice@example.com"].DisabledAt = &now
-	if _, _, err := s.Login(ctx, "alice@example.com", "correct horse battery"); !errors.Is(err, ErrInvalidCredentials) {
+	if _, _, err := s.Login(ctx, "192.0.2.1", "alice@example.com", "correct horse battery"); !errors.Is(err, ErrInvalidCredentials) {
 		t.Errorf("disabled user logged in: %v", err)
 	}
 }
 
 func TestRequireUser(t *testing.T) {
 	s, _ := newService(t)
-	token, _, _ := s.Login(context.Background(), "alice@example.com", "correct horse battery")
+	token, _, _ := s.Login(context.Background(), "192.0.2.1", "alice@example.com", "correct horse battery")
 
 	var seen *store.User
 	h := s.RequireUser(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { seen = UserFrom(r.Context()) }))
@@ -172,5 +172,50 @@ func TestSameOrigin(t *testing.T) {
 		if w.Code != c.want {
 			t.Errorf("%s from %q: %d, want %d", c.method, c.origin, w.Code, c.want)
 		}
+	}
+}
+
+// Parallel guesses get past a delay: the limits stop them, per client and
+// per account, and say so without checking the password.
+func TestLogin_Limits(t *testing.T) {
+	s, _ := newService(t)
+	s.Limits = &LoginLimits{PerClient: NewThrottle(3, time.Hour), PerAccount: NewThrottle(5, time.Hour)}
+	ctx := context.Background()
+
+	for i := 0; i < 3; i++ {
+		if _, _, err := s.Login(ctx, "198.51.100.7", "alice@example.com", "guess"); !errors.Is(err, ErrInvalidCredentials) {
+			t.Fatalf("guess %d: %v", i, err)
+		}
+	}
+	// The client is out of tries, even with the right password.
+	if _, _, err := s.Login(ctx, "198.51.100.7", "alice@example.com", "correct horse battery"); !errors.Is(err, ErrTooManyAttempts) {
+		t.Errorf("a blocked client: %v", err)
+	}
+	// Another client still logs in, which clears the account's count.
+	if _, _, err := s.Login(ctx, "203.0.113.9", "alice@example.com", "correct horse battery"); err != nil {
+		t.Errorf("another client: %v", err)
+	}
+
+	// Guesses on one account from many clients lock the account.
+	for i := 0; i < 5; i++ {
+		s.Login(ctx, "10.0.0."+string(rune('1'+i)), "ALICE@example.com ", "guess")
+	}
+	if _, _, err := s.Login(ctx, "203.0.113.9", "alice@example.com", "correct horse battery"); !errors.Is(err, ErrTooManyAttempts) {
+		t.Errorf("a locked account: %v", err)
+	}
+}
+
+func TestThrottle_WindowCloses(t *testing.T) {
+	now := time.Now()
+	th := NewThrottle(2, time.Minute)
+	th.now = func() time.Time { return now }
+	th.Fail("k")
+	th.Fail("k")
+	if !th.Blocked("k") || th.Blocked("other") {
+		t.Fatal("blocked the wrong keys")
+	}
+	now = now.Add(time.Minute)
+	if th.Blocked("k") {
+		t.Error("still blocked once the window closed")
 	}
 }

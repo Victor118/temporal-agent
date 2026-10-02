@@ -57,10 +57,13 @@ func (a *Admin) loginPage(w http.ResponseWriter, r *http.Request) {
 
 func (a *Admin) login(w http.ResponseWriter, r *http.Request) {
 	data := loginData{Next: r.FormValue("next"), Email: r.FormValue("email")}
-	u, err := a.cfg.Auth.Authenticate(r.Context(), data.Email, r.FormValue("password"))
+	u, err := a.cfg.Auth.Authenticate(r.Context(), auth.ClientAddr(r), data.Email, r.FormValue("password"))
 	switch {
 	case errors.Is(err, auth.ErrInvalidCredentials):
 		data.Error = "Email ou mot de passe incorrect."
+	case errors.Is(err, auth.ErrTooManyAttempts):
+		data.Error = "Trop de tentatives : réessaie dans quelques minutes."
+		w.WriteHeader(http.StatusTooManyRequests)
 	case err != nil:
 		log.Printf("admin: login: %v", err)
 		data.Error = "Erreur interne."

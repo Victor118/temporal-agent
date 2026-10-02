@@ -50,9 +50,13 @@ func (h *handler) login(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
-	token, u, err := h.auth.Login(r.Context(), req.Email, req.Password)
+	token, u, err := h.auth.Login(r.Context(), auth.ClientAddr(r), req.Email, req.Password)
 	if errors.Is(err, auth.ErrInvalidCredentials) {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
+	}
+	if errors.Is(err, auth.ErrTooManyAttempts) {
+		http.Error(w, err.Error(), http.StatusTooManyRequests)
 		return
 	}
 	if err != nil {

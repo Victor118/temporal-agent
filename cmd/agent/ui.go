@@ -58,10 +58,14 @@ func (h *handler) loginPage(w http.ResponseWriter, r *http.Request) {
 
 func (h *handler) loginForm(w http.ResponseWriter, r *http.Request) {
 	page := chat.LoginPage{Email: r.FormValue("email"), Next: r.FormValue("next")}
-	token, _, err := h.auth.Login(r.Context(), page.Email, r.FormValue("password"))
+	token, _, err := h.auth.Login(r.Context(), auth.ClientAddr(r), page.Email, r.FormValue("password"))
+	status := http.StatusUnauthorized
 	switch {
 	case errors.Is(err, auth.ErrInvalidCredentials):
 		page.Error = "Email ou mot de passe incorrect."
+	case errors.Is(err, auth.ErrTooManyAttempts):
+		page.Error = "Trop de tentatives : réessaie dans quelques minutes."
+		status = http.StatusTooManyRequests
 	case err != nil:
 		log.Printf("ui: login: %v", err)
 		page.Error = "Erreur interne."
@@ -70,7 +74,7 @@ func (h *handler) loginForm(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, safeLocal(page.Next), http.StatusSeeOther)
 		return
 	}
-	w.WriteHeader(http.StatusUnauthorized)
+	w.WriteHeader(status)
 	chat.Render(w, "login", page)
 }
 

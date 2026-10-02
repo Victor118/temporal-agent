@@ -261,7 +261,7 @@ func TestAuth_NonAdminRefused(t *testing.T) {
 	}
 
 	// Logged in through the chat, a non-admin is still sent to the login page.
-	token, _, err := a.cfg.Auth.Login(context.Background(), "bob@example.com", testPassword)
+	token, _, err := a.cfg.Auth.Login(context.Background(), "192.0.2.1", "bob@example.com", testPassword)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -526,17 +526,17 @@ func TestUsers_DisableAndPasswordEndSessions(t *testing.T) {
 	c := login(t, h)
 	ctx := context.Background()
 
-	bobToken, _, _ := a.cfg.Auth.Login(ctx, "bob@example.com", testPassword)
+	bobToken, _, _ := a.cfg.Auth.Login(ctx, "192.0.2.1", "bob@example.com", testPassword)
 	do(h, http.MethodPost, "/admin/users/u-bob/disable", url.Values{}, c)
 	if u, _ := st.GetLoginSessionUser(ctx, hashOf(bobToken)); u != nil {
 		t.Error("a disabled user is still logged in")
 	}
-	if _, _, err := a.cfg.Auth.Login(ctx, "bob@example.com", testPassword); err == nil {
+	if _, _, err := a.cfg.Auth.Login(ctx, "192.0.2.1", "bob@example.com", testPassword); err == nil {
 		t.Error("a disabled user can log in")
 	}
 	do(h, http.MethodPost, "/admin/users/u-bob/enable", url.Values{}, c)
 
-	bobToken, _, _ = a.cfg.Auth.Login(ctx, "bob@example.com", testPassword)
+	bobToken, _, _ = a.cfg.Auth.Login(ctx, "192.0.2.1", "bob@example.com", testPassword)
 	w := do(h, http.MethodPost, "/admin/users/u-bob/password", url.Values{"password": {"another long secret"}}, c)
 	if w.Code != http.StatusSeeOther {
 		t.Fatalf("reset: %d %s", w.Code, w.Body)
@@ -544,7 +544,7 @@ func TestUsers_DisableAndPasswordEndSessions(t *testing.T) {
 	if u, _ := st.GetLoginSessionUser(ctx, hashOf(bobToken)); u != nil {
 		t.Error("the old session survived a password reset")
 	}
-	if _, _, err := a.cfg.Auth.Login(ctx, "bob@example.com", "another long secret"); err != nil {
+	if _, _, err := a.cfg.Auth.Login(ctx, "192.0.2.1", "bob@example.com", "another long secret"); err != nil {
 		t.Errorf("new password refused: %v", err)
 	}
 }

@@ -28,6 +28,11 @@ var LoginFailDelay = time.Second
 // whether the email exists.
 var ErrInvalidCredentials = errors.New("email ou mot de passe incorrect")
 
+// ErrTooManyAttempts refuses a login after too many failures, from the same
+// address or on the same account. It is answered before the password is
+// checked, so it says nothing about the password either.
+var ErrTooManyAttempts = errors.New("trop de tentatives, réessaie plus tard")
+
 // dummyHash is checked against when the email is unknown, so a login takes
 // the same time whether the account exists or not.
 var dummyHash, _ = HashPassword("not a real password, only spends time")
@@ -35,12 +40,15 @@ var dummyHash, _ = HashPassword("not a real password, only spends time")
 // Service logs users in and out, and finds the user behind a request.
 type Service struct {
 	Store store.Store
+	// Limits bound failed logins; nil = no limit.
+	Limits *LoginLimits
 }
 
 // Login checks an email and password and opens a login session. It returns
-// the token to hand to the browser, never stored as is.
-func (s *Service) Login(ctx context.Context, email, password string) (string, *store.User, error) {
-	u, err := s.Authenticate(ctx, email, password)
+// the token to hand to the browser, never stored as is. client is the address
+// the attempt comes from (ClientAddr).
+func (s *Service) Login(ctx context.Context, client, email, password string) (string, *store.User, error) {
+	u, err := s.Authenticate(ctx, client, email, password)
 	if err != nil {
 		return "", nil, err
 	}
@@ -50,7 +58,15 @@ func (s *Service) Login(ctx context.Context, email, password string) (string, *s
 
 // Authenticate checks an email and password without opening a session, for a
 // caller that has more to check first (the back-office: is it an admin?).
-func (s *Service) Authenticate(ctx context.Context, email, password string) (*store.User, error) {
+//
+// Failures are counted per client and per account, and logged with the
+// client's address. The delay on a failure only slows a sequential guesser;
+// the limits stop parallel ones.
+func (s *Service) Authenticate(ctx context.Context, client, email, password string) (*store.User, error) {
+	if s.Limits != nil && (s.Limits.PerClient.Blocked(client) || s.Limits.PerAccount.Blocked(accountKey(email))) {
+		log.Printf("auth: login refused for %q from %s: too many failures", email, client)
+		return nil, ErrTooManyAttempts
+	}
 	u, err := s.Store.GetUserByEmail(ctx, email)
 	if err != nil {
 		return nil, err
@@ -64,8 +80,16 @@ func (s *Service) Authenticate(ctx context.Context, email, password string) (*st
 		log.Printf("auth: user %s has an unreadable password hash: %v", u.ID, err)
 	}
 	if u == nil || !ok || u.DisabledAt != nil {
+		log.Printf("auth: failed login for %q from %s", email, client)
+		if s.Limits != nil {
+			s.Limits.PerClient.Fail(client)
+			s.Limits.PerAccount.Fail(accountKey(email))
+		}
 		time.Sleep(LoginFailDelay)
 		return nil, ErrInvalidCredentials
+	}
+	if s.Limits != nil {
+		s.Limits.PerAccount.Reset(accountKey(email))
 	}
 	return u, nil
 }

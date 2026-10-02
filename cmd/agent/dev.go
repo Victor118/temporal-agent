@@ -171,7 +171,7 @@ func runDev(cmd *cobra.Command, args []string) {
 	}
 
 	// Back-office — shows the skills dev mode loaded from ./skills
-	authSvc := &auth.Service{Store: st}
+	authSvc := &auth.Service{Store: st, Limits: auth.DefaultLoginLimits()}
 	adminUI := admin.New(admin.Config{
 		Auth:           authSvc,
 		Store:          st,
