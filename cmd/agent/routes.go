@@ -9,7 +9,6 @@ import (
 
 	"github.com/victor/temporal-agent/auth"
 	"github.com/victor/temporal-agent/config"
-	"github.com/victor/temporal-agent/web"
 	"github.com/victor/temporal-agent/web/admin"
 	"github.com/victor/temporal-agent/web/chat"
 )
@@ -47,8 +46,6 @@ func publicRouter(h *handler, adminUI *admin.Admin) http.Handler {
 			r.Post("/s/new", h.newSessionForm)
 			r.Get("/notifications", h.notificationsPage)
 			r.Post("/notifications/{notifID}/delete", h.deleteNotificationForm)
-			// The former single-page chat, kept while the interface settles.
-			r.Get("/classic", web.HandleIndex)
 
 			r.Route("/s/{id}", func(r chi.Router) {
 				r.Use(h.requireMember)

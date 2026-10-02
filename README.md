@@ -148,7 +148,7 @@ agent/
 ├── sse/            # Server-Sent Events hub
 ├── store/          # PostgreSQL persistence (messages, memory, task logs)
 ├── tool/           # Tool implementations (fs, web, exec, spawn, schedule)
-├── web/            # Web UI templates
+├── web/            # Web UI: chat (web/chat) and back-office (web/admin)
 └── workflow/       # Temporal workflows (session, agent, scheduled)
 ```
 
