@@ -90,7 +90,7 @@ func notifySession(ctx workflow.Context, sessionID, eventType string, payload ma
 	data, _ := json.Marshal(payload)
 	var notifAct *activity.NotificationActivities
 	_ = workflow.ExecuteActivity(
-		workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: 10 * time.Second}),
+		workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: 10 * time.Second, RetryPolicy: notifyRetry}),
 		notifAct.NotifyStep,
 		activity.NotifyInput{SessionID: sessionID, Event: activity.SSEEvent{Type: eventType, Data: data}},
 	).Get(ctx, nil)

@@ -577,15 +577,24 @@ func withAuthor(content json.RawMessage, author string) json.RawMessage {
 	return prefixed
 }
 
+// notifyRetry bounds the attempts at a notification. Without it the default
+// policy retries for ever, and a channel that refuses a message for good would
+// hold the turn that sends it.
+var notifyRetry = &temporal.RetryPolicy{MaximumAttempts: 3}
+
+// notifyResponse sends the agent's answer to the session's channel. A failure
+// is logged, not returned: the answer is in the transcript already, and the
+// turn must end.
 func notifyResponse(ctx workflow.Context, sessionID, channel, channelID, content string) {
 	data, _ := json.Marshal(map[string]string{
 		"type":    "message",
 		"content": content,
 	})
 	var notifAct *activity.NotificationActivities
-	_ = workflow.ExecuteActivity(
+	err := workflow.ExecuteActivity(
 		workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 			StartToCloseTimeout: 10 * time.Second,
+			RetryPolicy:         notifyRetry,
 		}),
 		notifAct.NotifyStep,
 		activity.NotifyInput{
@@ -598,6 +607,9 @@ func notifyResponse(ctx workflow.Context, sessionID, channel, channelID, content
 			},
 		},
 	).Get(ctx, nil)
+	if err != nil {
+		workflow.GetLogger(ctx).Error("Answer not delivered", "session_id", sessionID, "channel", channel, "error", err)
+	}
 }
 
 // buildChildInput constructs the proper input for child workflow tools, and
@@ -686,6 +698,7 @@ func notifyToolCalls(ctx workflow.Context, sessionID, channel, channelID string,
 	_ = workflow.ExecuteActivity(
 		workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 			StartToCloseTimeout: 5 * time.Second,
+			RetryPolicy:         notifyRetry,
 		}),
 		notifAct.NotifyStep,
 		activity.NotifyInput{

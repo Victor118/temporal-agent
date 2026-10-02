@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -695,5 +696,38 @@ func TestBuildChildInput_AskUserGetsTheChannel(t *testing.T) {
 	json.Unmarshal(in.(json.RawMessage), &got)
 	if got.Channel != "telegram" || got.ChannelID != "42" || len(got.AgentChain) != 2 {
 		t.Errorf("ask_user input %s", in)
+	}
+}
+
+// A channel refusing the answer for good must not hold the turn: the answer
+// is in the transcript, and the turn ends.
+func TestAgentWorkflow_UndeliveredAnswerEndsTheTurn(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.ListToolsInput) (activity.ListToolsOutput, error) {
+		return activity.ListToolsOutput{}, nil
+	}, sdkactivity.RegisterOptions{Name: "ListTools"})
+	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.LoadSkillsForAgentInput) (activity.LoadSkillsForAgentOutput, error) {
+		return activity.LoadSkillsForAgentOutput{}, nil
+	}, sdkactivity.RegisterOptions{Name: "LoadSkillsForAgent"})
+	env.RegisterActivityWithOptions(func(ctx context.Context, req provider.ChatRequest) (provider.ChatResponse, error) {
+		return provider.ChatResponse{Content: "the answer", StopReason: "end_turn"}, nil
+	}, sdkactivity.RegisterOptions{Name: "CallLLM"})
+	attempts := 0
+	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.NotifyInput) error {
+		attempts++
+		return errors.New("telegram send: status 400")
+	}, sdkactivity.RegisterOptions{Name: "NotifyStep"})
+
+	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{SessionID: "s1", AgentID: "default", UserMessage: "go", Channel: "telegram", ChannelID: "42", TurnKey: ""})
+	if !env.IsWorkflowCompleted() {
+		t.Fatal("the turn did not end")
+	}
+	var out AgentWorkflowOutput
+	if err := env.GetWorkflowResult(&out); err != nil || out.Response != "the answer" {
+		t.Errorf("result %+v, %v", out, err)
+	}
+	if attempts != 3 {
+		t.Errorf("%d attempts, want 3", attempts)
 	}
 }
