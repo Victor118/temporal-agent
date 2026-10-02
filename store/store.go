@@ -65,7 +65,8 @@ type Store interface {
 
 	// Task logs (scheduled tasks)
 	SaveTaskLog(ctx context.Context, log TaskLog) error
-	ListTaskLogs(ctx context.Context) ([]TaskLog, error)
+	ListTaskLogsByUser(ctx context.Context, userID string) ([]TaskLog, error)
+	GetTaskLog(ctx context.Context, scheduleID string) (*TaskLog, error)
 	UpdateTaskLogStatus(ctx context.Context, scheduleID, status string) error
 
 	// Agent catalog

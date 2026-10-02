@@ -273,3 +273,37 @@ func TestForks(t *testing.T) {
 		t.Errorf("fork after the parent's deletion: %+v", f)
 	}
 }
+
+func TestTaskLogsBelongToTheirUser(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	ids := []string{"zz-task-alice", "zz-task-bob"}
+	cleanup := func() {
+		for _, id := range ids {
+			s.db.ExecContext(ctx, "DELETE FROM task_logs WHERE schedule_id = $1", id)
+		}
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+
+	for i, user := range []string{"zz-alice", "zz-bob"} {
+		if err := s.SaveTaskLog(ctx, TaskLog{ScheduleID: ids[i], Type: "schedule", Description: user, Prompt: "p", UserID: user, Status: "scheduled"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	logs, err := s.ListTaskLogsByUser(ctx, "zz-alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) != 1 || logs[0].ScheduleID != "zz-task-alice" {
+		t.Errorf("alice's tasks: %+v", logs)
+	}
+
+	got, err := s.GetTaskLog(ctx, "zz-task-bob")
+	if err != nil || got == nil || got.UserID != "zz-bob" {
+		t.Errorf("get bob's task: %+v, %v", got, err)
+	}
+	if got, err := s.GetTaskLog(ctx, "zz-task-nobody"); err != nil || got != nil {
+		t.Errorf("get a missing task: %+v, %v", got, err)
+	}
+}

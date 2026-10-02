@@ -47,7 +47,7 @@
 - Un message humain peut être stocké entre un tool call et son résultat (un membre écrit pendant le tour) : `convertMessages` le replace après les résultats (`deferInterleaved`), l'API LLM l'exige
 - Fork : `sessions.parent_session_id` + `forked_at_message_id` + `forked_by`. `POST /sessions/{id}/fork {message_id}` crée la session (même agent, seul membre = celui qui forke) puis `ForkSessionWorkflow` résume le parent jusqu'à ce message (`SummarizeConversation`, modèle `SUMMARY_MODEL` ou `LLM_MODEL`) et l'écrit comme premier message (`kind = fork_summary`). Tant que le résumé n'est pas là, le fork refuse les messages (409). Supprimer le parent laisse le fork entier, sans lien
 - `memory` : key-value scope (user/project/session)
-- `task_logs` : suivi des taches schedulees
+- `task_logs` : suivi des taches schedulees, chacune a son `user_id` : `list_schedules` et `cancel_schedule` ne voient que celles de l'utilisateur du tour (aucun outil sans utilisateur identifie). `query_workflow` n'interroge que les workflows de la session appelante
 - AgentWorkflow ecrit ses messages au fil du tour quand `TurnKey` est fourni ; SessionWorkflow reecrit le meme delta en fin de tour (les memes cles, donc sans effet si deja ecrit). Un sous-agent n'a pas de `TurnKey` et ne persiste rien
 - Un tour qui echoue ne doit pas perdre son transcript : `AgentWorkflow` renvoie `Error` dans sa sortie plutot qu'une erreur de workflow (un workflow en echec ne rend aucun resultat)
 - Ne jamais persister un message assistant portant des tool calls sans ses tool results : le tour suivant serait rejete par l'API LLM

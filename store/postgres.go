@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -149,6 +150,8 @@ const schema = `
 			created_at TIMESTAMPTZ DEFAULT NOW(),
 			status TEXT NOT NULL DEFAULT 'scheduled'
 		);
+		-- A user lists and cancels their own tasks only.
+		CREATE INDEX IF NOT EXISTS idx_task_logs_user ON task_logs(user_id);
 
 		CREATE TABLE IF NOT EXISTS agents (
 			agent_id      TEXT PRIMARY KEY,
@@ -353,9 +356,15 @@ func (s *PostgresStore) SaveTaskLog(ctx context.Context, log TaskLog) error {
 	return err
 }
 
-func (s *PostgresStore) ListTaskLogs(ctx context.Context) ([]TaskLog, error) {
+// taskLogColumns is the column list of task log queries, in scanTaskLog order.
+const taskLogColumns = `schedule_id, type, description, COALESCE(cron, ''), COALESCE(delay, ''), prompt,
+	COALESCE(user_id, ''), COALESCE(channel, ''), created_at, status`
+
+// ListTaskLogsByUser returns the scheduled tasks of one user, newest first.
+// There is no listing of everyone's: a task's prompt is often personal.
+func (s *PostgresStore) ListTaskLogsByUser(ctx context.Context, userID string) ([]TaskLog, error) {
 	rows, err := s.db.QueryContext(ctx,
-		"SELECT schedule_id, type, description, cron, delay, prompt, user_id, channel, created_at, status FROM task_logs ORDER BY created_at DESC")
+		"SELECT "+taskLogColumns+" FROM task_logs WHERE user_id = $1 ORDER BY created_at DESC", userID)
 	if err != nil {
 		return nil, err
 	}
@@ -363,13 +372,32 @@ func (s *PostgresStore) ListTaskLogs(ctx context.Context) ([]TaskLog, error) {
 
 	var logs []TaskLog
 	for rows.Next() {
-		var l TaskLog
-		if err := rows.Scan(&l.ScheduleID, &l.Type, &l.Description, &l.Cron, &l.Delay, &l.Prompt, &l.UserID, &l.Channel, &l.CreatedAt, &l.Status); err != nil {
+		l, err := scanTaskLog(rows)
+		if err != nil {
 			return nil, err
 		}
 		logs = append(logs, l)
 	}
 	return logs, rows.Err()
+}
+
+// GetTaskLog returns one scheduled task, or nil if there is none.
+func (s *PostgresStore) GetTaskLog(ctx context.Context, scheduleID string) (*TaskLog, error) {
+	l, err := scanTaskLog(s.db.QueryRowContext(ctx,
+		"SELECT "+taskLogColumns+" FROM task_logs WHERE schedule_id = $1", scheduleID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &l, nil
+}
+
+func scanTaskLog(row interface{ Scan(...any) error }) (TaskLog, error) {
+	var l TaskLog
+	err := row.Scan(&l.ScheduleID, &l.Type, &l.Description, &l.Cron, &l.Delay, &l.Prompt, &l.UserID, &l.Channel, &l.CreatedAt, &l.Status)
+	return l, err
 }
 
 func (s *PostgresStore) UpdateTaskLogStatus(ctx context.Context, scheduleID, status string) error {

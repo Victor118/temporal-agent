@@ -13,16 +13,35 @@ import (
 	"github.com/victor/temporal-agent/store"
 )
 
+// Scheduler is what the schedule tools need of Temporal's schedule client.
+type Scheduler interface {
+	Create(ctx context.Context, options client.ScheduleOptions) (client.ScheduleHandle, error)
+	GetHandle(ctx context.Context, scheduleID string) client.ScheduleHandle
+}
+
+// ScheduleStore records who scheduled what. A task belongs to the user it
+// was scheduled for: they alone list it and cancel it.
+type ScheduleStore interface {
+	SaveTaskLog(ctx context.Context, log store.TaskLog) error
+	ListTaskLogsByUser(ctx context.Context, userID string) ([]store.TaskLog, error)
+	GetTaskLog(ctx context.Context, scheduleID string) (*store.TaskLog, error)
+	UpdateTaskLogStatus(ctx context.Context, scheduleID, status string) error
+}
+
+// noUser answers a schedule tool called outside any user's turn: a task
+// belongs to someone, or it could not be listed or cancelled by anyone.
+const noUser = "Cannot manage scheduled tasks: user not identified"
+
 // RegisterScheduleTools registers schedule_task, list_schedules, and cancel_schedule tools.
 // These tools allow the LLM to create, list, and cancel Temporal Schedules.
 // taskQueue is the workflow queue the scheduled agent runs on.
-func RegisterScheduleTools(registry *Registry, temporalClient client.Client, st store.Store, scheduledWorkflowFunc interface{}, taskQueue string) {
-	registerScheduleTask(registry, temporalClient, st, scheduledWorkflowFunc, taskQueue)
-	registerListSchedules(registry, temporalClient, st)
-	registerCancelSchedule(registry, temporalClient, st)
+func RegisterScheduleTools(registry *Registry, scheduler Scheduler, st ScheduleStore, scheduledWorkflowFunc interface{}, taskQueue string) {
+	registerScheduleTask(registry, scheduler, st, scheduledWorkflowFunc, taskQueue)
+	registerListSchedules(registry, st)
+	registerCancelSchedule(registry, scheduler, st)
 }
 
-func registerScheduleTask(registry *Registry, temporalClient client.Client, st store.Store, scheduledWorkflowFunc interface{}, taskQueue string) {
+func registerScheduleTask(registry *Registry, scheduler Scheduler, st ScheduleStore, scheduledWorkflowFunc interface{}, taskQueue string) {
 	registry.Register(&Tool{
 		Name:        "schedule_task",
 		Description: "Schedule a recurring or one-time task. The agent will execute the prompt at the specified time and deliver the result via the chosen channel.",
@@ -70,6 +89,12 @@ func registerScheduleTask(registry *Registry, temporalClient client.Client, st s
 				params.DeliveryChannel = "app_notification"
 			}
 
+			// The task's result goes to the user who asked for it
+			userID := UserIDFromContext(ctx)
+			if userID == "" {
+				return noUser, nil
+			}
+
 			scheduleID := fmt.Sprintf("schedule-%s-%d", slugify(params.Description), time.Now().UnixMilli())
 
 			spec := client.ScheduleSpec{}
@@ -91,9 +116,6 @@ func registerScheduleTask(registry *Registry, temporalClient client.Client, st s
 				}
 			}
 
-			// The task's result goes to the user who asked for it
-			userID := UserIDFromContext(ctx)
-
 			workflowInput := ScheduledAgentInput{
 				AgentID:         AgentIDFromContext(ctx),
 				Prompt:          params.Prompt,
@@ -109,7 +131,7 @@ func registerScheduleTask(registry *Registry, temporalClient client.Client, st s
 				remainingActions = 1
 			}
 
-			_, err := temporalClient.ScheduleClient().Create(ctx, client.ScheduleOptions{
+			handle, err := scheduler.Create(ctx, client.ScheduleOptions{
 				ID:               scheduleID,
 				Spec:             spec,
 				RemainingActions: remainingActions,
@@ -124,16 +146,22 @@ func registerScheduleTask(registry *Registry, temporalClient client.Client, st s
 				return fmt.Sprintf("Failed to create schedule: %s", err.Error()), nil
 			}
 
-			st.SaveTaskLog(ctx, store.TaskLog{
+			// The log is what makes the task its owner's: one that could not
+			// be recorded could be neither listed nor cancelled.
+			if err := st.SaveTaskLog(ctx, store.TaskLog{
 				ScheduleID:  scheduleID,
 				Type:        "schedule",
 				Description: params.Description,
 				Cron:        params.Cron,
 				Delay:       params.Delay,
 				Prompt:      params.Prompt,
+				UserID:      userID,
 				Channel:     params.DeliveryChannel,
 				Status:      "scheduled",
-			})
+			}); err != nil {
+				_ = handle.Delete(ctx)
+				return fmt.Sprintf("Failed to record the schedule: %s", err.Error()), nil
+			}
 
 			if params.Cron != "" {
 				return fmt.Sprintf("Scheduled recurring task: %s (cron: %s, schedule_id: %s)", params.Description, params.Cron, scheduleID), nil
@@ -146,17 +174,21 @@ func registerScheduleTask(registry *Registry, temporalClient client.Client, st s
 	})
 }
 
-func registerListSchedules(registry *Registry, temporalClient client.Client, st store.Store) {
+func registerListSchedules(registry *Registry, st ScheduleStore) {
 	registry.Register(&Tool{
 		Name:        "list_schedules",
-		Description: "List all scheduled tasks (recurring and one-shot).",
+		Description: "List the scheduled tasks (recurring and one-shot) of the user you are answering.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {}
 		}`),
 		Kind: ToolKindActivity,
 		Execute: func(ctx context.Context, input json.RawMessage) (string, error) {
-			logs, err := st.ListTaskLogs(ctx)
+			userID := UserIDFromContext(ctx)
+			if userID == "" {
+				return noUser, nil
+			}
+			logs, err := st.ListTaskLogsByUser(ctx, userID)
 			if err != nil {
 				return fmt.Sprintf("Failed to list schedules: %s", err.Error()), nil
 			}
@@ -184,10 +216,10 @@ func registerListSchedules(registry *Registry, temporalClient client.Client, st 
 	})
 }
 
-func registerCancelSchedule(registry *Registry, temporalClient client.Client, st store.Store) {
+func registerCancelSchedule(registry *Registry, scheduler Scheduler, st ScheduleStore) {
 	registry.Register(&Tool{
 		Name:        "cancel_schedule",
-		Description: "Cancel a scheduled task by its schedule ID.",
+		Description: "Cancel a scheduled task of the user you are answering, by its schedule ID.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -207,7 +239,21 @@ func registerCancelSchedule(registry *Registry, temporalClient client.Client, st
 				return "", fmt.Errorf("parse input: %w", err)
 			}
 
-			handle := temporalClient.ScheduleClient().GetHandle(ctx, params.ScheduleID)
+			userID := UserIDFromContext(ctx)
+			if userID == "" {
+				return noUser, nil
+			}
+			// Someone else's task is answered like one that does not exist:
+			// which IDs others use is not this user's to learn.
+			task, err := st.GetTaskLog(ctx, params.ScheduleID)
+			if err != nil {
+				return fmt.Sprintf("Failed to cancel schedule: %s", err.Error()), nil
+			}
+			if task == nil || task.UserID != userID {
+				return fmt.Sprintf("No scheduled task %s among yours.", params.ScheduleID), nil
+			}
+
+			handle := scheduler.GetHandle(ctx, params.ScheduleID)
 			if err := handle.Delete(ctx); err != nil {
 				return fmt.Sprintf("Failed to cancel schedule: %s", err.Error()), nil
 			}

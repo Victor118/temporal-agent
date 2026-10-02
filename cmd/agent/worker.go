@@ -124,7 +124,7 @@ func runWorker(cmd *cobra.Command, args []string) {
 	tool.RegisterQueryWorkflowTool(registry, temporalClient)
 
 	// Register schedule tools (needs temporal client + store)
-	tool.RegisterScheduleTools(registry, temporalClient, st, workflow.ScheduledAgentWorkflow, cfg.WorkflowQueue)
+	tool.RegisterScheduleTools(registry, temporalClient.ScheduleClient(), st, workflow.ScheduledAgentWorkflow, cfg.WorkflowQueue)
 
 	// Expose only the configured tools and publish them to the DB catalog
 	exposeTools(registry, workerConf)

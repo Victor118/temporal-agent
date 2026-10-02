@@ -4,13 +4,19 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
-	"go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/converter"
 )
+
+// WorkflowQuerier is what query_workflow needs of the Temporal client.
+type WorkflowQuerier interface {
+	QueryWorkflow(ctx context.Context, workflowID, runID, queryType string, args ...interface{}) (converter.EncodedValue, error)
+}
 
 // RegisterQueryWorkflowTool registers a tool that queries the state of a running
 // workflow by its ID. Useful to check on fire-and-forget workflows.
-func RegisterQueryWorkflowTool(registry *Registry, temporalClient client.Client) {
+func RegisterQueryWorkflowTool(registry *Registry, temporalClient WorkflowQuerier) {
 	registry.Register(&Tool{
 		Name:        "query_workflow",
 		Description: "Query the current state of a running workflow by its ID. Use this to check the status or progress of a previously launched fire-and-forget workflow.",
@@ -37,6 +43,9 @@ func RegisterQueryWorkflowTool(registry *Registry, temporalClient client.Client)
 			if err := json.Unmarshal(input, &params); err != nil {
 				return "", fmt.Errorf("parse input: %w", err)
 			}
+			if !ownWorkflow(SessionIDFromContext(ctx), params.WorkflowID) {
+				return fmt.Sprintf("Workflow %s is not one of this session's.", params.WorkflowID), nil
+			}
 			if params.QueryName == "" {
 				params.QueryName = "session-state"
 			}
@@ -54,4 +63,17 @@ func RegisterQueryWorkflowTool(registry *Registry, temporalClient client.Client)
 			return string(result), nil
 		},
 	})
+}
+
+// ownWorkflow reports whether workflowID belongs to sessionID: the session's
+// own workflow ("session-<id>", "session-<id>-<run>") or one started from it,
+// whose ID starts with "<id>-". Workflows of other sessions, other users' among
+// them, are out of reach.
+func ownWorkflow(sessionID, workflowID string) bool {
+	if sessionID == "" {
+		return false
+	}
+	own := "session-" + sessionID
+	return strings.HasPrefix(workflowID, sessionID+"-") ||
+		workflowID == own || strings.HasPrefix(workflowID, own+"-")
 }
