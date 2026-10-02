@@ -194,3 +194,51 @@ func containsStr(s, sub string) bool {
 	}
 	return false
 }
+
+// A sibling directory sharing the workspace's prefix is outside it.
+func TestSafePath_SiblingPrefix(t *testing.T) {
+	parent := t.TempDir()
+	workspace := filepath.Join(parent, "workspace")
+	sibling := filepath.Join(parent, "workspace2")
+	os.MkdirAll(workspace, 0o755)
+	os.MkdirAll(sibling, 0o755)
+	os.WriteFile(filepath.Join(sibling, "secret"), []byte("s"), 0o644)
+
+	if _, err := safePath(workspace, "../workspace2/secret"); err == nil {
+		t.Error("reached a sibling directory sharing the workspace's prefix")
+	}
+	if p, err := safePath(workspace, "a/../b.txt"); err != nil || p != filepath.Join(workspace, "b.txt") {
+		t.Errorf("a path inside: %q, %v", p, err)
+	}
+	if p, err := safePath(workspace, "/etc/passwd"); err != nil || p != filepath.Join(workspace, "etc/passwd") {
+		t.Errorf("an absolute path stays under the workspace: %q, %v", p, err)
+	}
+}
+
+// A symbolic link leading out of the workspace is refused, through a file, a
+// directory, or a link whose target does not exist yet.
+func TestSafePath_Symlinks(t *testing.T) {
+	workspace, r := setupWorkspace(t)
+	outside := t.TempDir()
+	os.WriteFile(filepath.Join(outside, "secret"), []byte("secret"), 0o644)
+	os.Symlink(filepath.Join(outside, "secret"), filepath.Join(workspace, "file-link"))
+	os.Symlink(outside, filepath.Join(workspace, "dir-link"))
+	os.Symlink(filepath.Join(outside, "new"), filepath.Join(workspace, "dangling"))
+	os.WriteFile(filepath.Join(workspace, "inside.txt"), []byte("ok"), 0o644)
+	os.Symlink(filepath.Join(workspace, "inside.txt"), filepath.Join(workspace, "inner-link"))
+
+	for _, p := range []string{"file-link", "dir-link/secret", "dir-link/new.txt"} {
+		if out, err := execTool(t, r, "read_file", map[string]string{"path": p}); err == nil {
+			t.Errorf("read %s through a link: %q", p, out)
+		}
+	}
+	if _, err := execTool(t, r, "write_file", map[string]string{"path": "dangling", "content": "x"}); err == nil {
+		t.Error("wrote through a dangling link")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "new")); err == nil {
+		t.Error("a file was created outside the workspace")
+	}
+	if out, err := execTool(t, r, "read_file", map[string]string{"path": "inner-link"}); err != nil || out != "ok" {
+		t.Errorf("a link inside the workspace: %q, %v", out, err)
+	}
+}

@@ -91,6 +91,11 @@ Context lines: use "before", "after", or "context" to show surrounding lines.`,
 				if err != nil || info.IsDir() {
 					return err
 				}
+				// Walk does not follow links, but opening one would: a link to
+				// a file outside the workspace is skipped, like any non-file.
+				if !info.Mode().IsRegular() {
+					return nil
+				}
 				if totalMatches >= params.MaxResults {
 					return filepath.SkipAll
 				}

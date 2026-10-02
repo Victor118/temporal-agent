@@ -3,7 +3,9 @@ package tool
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -164,15 +166,59 @@ func RegisterFilesystemTools(r *Registry, workspacePath string) {
 
 }
 
-// safePath resolves a relative path within the workspace and ensures it doesn't escape.
-func safePath(workspace, rel string) (string, error) {
-	full := filepath.Join(workspace, filepath.Clean(rel))
-	abs, err := filepath.Abs(full)
+// safePath resolves rel within root and refuses anything that would land
+// outside it: through "..", through a sibling sharing root's prefix
+// (/app/workspace2 is not in /app/workspace), or through a symbolic link —
+// which exec can create, and a cloned repository can contain. An absolute rel
+// is taken relative to root.
+func safePath(root, rel string) (string, error) {
+	abs := filepath.Join(root, rel)
+	if !within(root, abs) {
+		return "", fmt.Errorf("path escapes workspace: %s", rel)
+	}
+	realRoot, err := resolveExisting(root)
 	if err != nil {
 		return "", err
 	}
-	if !strings.HasPrefix(abs, workspace) {
+	realPath, err := resolveExisting(abs)
+	if err != nil {
+		return "", fmt.Errorf("path %s: %w", rel, err)
+	}
+	if !within(realRoot, realPath) {
 		return "", fmt.Errorf("path escapes workspace: %s", rel)
 	}
 	return abs, nil
+}
+
+// within reports whether p is root or lies under it. Both are clean absolute
+// paths.
+func within(root, p string) bool {
+	rel, err := filepath.Rel(root, p)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// resolveExisting resolves the symbolic links of p's longest existing prefix
+// and appends the rest, which does not exist yet (a file about to be
+// written). A dangling link is refused: writing through it would create its
+// target, wherever that is.
+func resolveExisting(p string) (string, error) {
+	missing := ""
+	for cur := p; ; {
+		resolved, err := filepath.EvalSymlinks(cur)
+		if err == nil {
+			return filepath.Join(resolved, missing), nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return "", err
+		}
+		if _, lerr := os.Lstat(cur); lerr == nil {
+			return "", fmt.Errorf("%s is a dangling symbolic link", cur)
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return p, nil
+		}
+		missing = filepath.Join(filepath.Base(cur), missing)
+		cur = parent
+	}
 }

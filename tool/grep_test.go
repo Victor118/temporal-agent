@@ -278,3 +278,19 @@ func TestGrep_MaxResults(t *testing.T) {
 		t.Errorf("expected truncation message: %s", result)
 	}
 }
+
+// grep walks the workspace: a link in it must not lead it to a file outside.
+func TestGrep_SkipsLinksOutOfTheWorkspace(t *testing.T) {
+	outside := t.TempDir()
+	os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("password=hunter2"), 0o644)
+	dir := t.TempDir()
+	os.Symlink(filepath.Join(outside, "secret.txt"), filepath.Join(dir, "link.txt"))
+	r := NewRegistry()
+	RegisterGrepTool(r, dir)
+
+	input, _ := json.Marshal(map[string]string{"pattern": "hunter2"})
+	out, _ := r.Execute(context.Background(), "grep", input)
+	if strings.Contains(out, "hunter2") {
+		t.Errorf("grep read through a link: %q", out)
+	}
+}
