@@ -11,12 +11,12 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
-	"go.temporal.io/sdk/client"
 
 	"github.com/victor/temporal-agent/activity"
 	"github.com/victor/temporal-agent/auth"
 	"github.com/victor/temporal-agent/skill"
 	"github.com/victor/temporal-agent/store"
+	"github.com/victor/temporal-agent/taskqueue"
 )
 
 //go:embed static
@@ -46,7 +46,7 @@ type Store interface {
 // Config wires the back-office to the server's state.
 type Config struct {
 	Store        Store
-	Temporal     client.Client
+	Temporal     taskqueue.Describer  // asked who polls each queue
 	Skills       func() []skill.Skill // the skills the server currently holds
 	SkillsSource string               // where they come from, "" = not loaded
 	// SkillsReloadable: the skills come from a repo that the server and the

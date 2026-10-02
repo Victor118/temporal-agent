@@ -8,8 +8,6 @@ import (
 	"slices"
 	"time"
 
-	"go.temporal.io/sdk/client"
-
 	"github.com/victor/temporal-agent/config"
 	"github.com/victor/temporal-agent/store"
 	"github.com/victor/temporal-agent/taskqueue"
@@ -93,7 +91,7 @@ type toolPublisher interface {
 // publishTools writes the registry's tools to the DB catalog under queue.
 // A tool already published by another queue that Temporal still sees served
 // is skipped with an error log.
-func publishTools(st toolPublisher, tc client.Client, registry *tool.Registry, queue string) {
+func publishTools(st toolPublisher, tc taskqueue.Describer, registry *tool.Registry, queue string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -151,7 +149,7 @@ func publishTools(st toolPublisher, tc client.Client, registry *tool.Registry, q
 
 // queueServed reports whether Temporal has seen a recent poller on the queue.
 // If Temporal can't be queried, the queue is assumed served (don't take over).
-func queueServed(ctx context.Context, tc client.Client, queue string) bool {
+func queueServed(ctx context.Context, tc taskqueue.Describer, queue string) bool {
 	status := taskqueue.Describe(ctx, tc, queue)
 	if status.Err != nil {
 		log.Printf("Warning: failed to describe task queue %q: %v", queue, status.Err)

@@ -13,6 +13,7 @@ import (
 
 	"go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/converter"
 
 	"github.com/victor/temporal-agent/auth"
 	"github.com/victor/temporal-agent/config"
@@ -109,7 +110,7 @@ func newRouteTest(t *testing.T) (http.Handler, *routeStore) {
 
 // newRouteTestWith builds the router over tc, a stand-in for Temporal: the
 // routes that start workflows need one.
-func newRouteTestWith(t *testing.T, tc client.Client) (http.Handler, *routeStore) {
+func newRouteTestWith(t *testing.T, tc workflowClient) (http.Handler, *routeStore) {
 	t.Helper()
 	auth.LoginFailDelay = 0
 	hash, _ := auth.HashPassword(pw)
@@ -249,10 +250,19 @@ func TestRoutes_RefuseCrossSiteWrites(t *testing.T) {
 
 // --- Forks ---
 
+// fakeTemporal records the workflows started and the signals sent. Nothing
+// runs: a description says not running, a query and a termination fail.
 type fakeTemporal struct {
-	client.Client
 	started []string // workflow IDs
 	signals []interface{}
+}
+
+func (f *fakeTemporal) QueryWorkflow(context.Context, string, string, string, ...interface{}) (converter.EncodedValue, error) {
+	return nil, errors.New("not running")
+}
+
+func (f *fakeTemporal) TerminateWorkflow(context.Context, string, string, string, ...interface{}) error {
+	return errors.New("not running")
 }
 
 func (f *fakeTemporal) ExecuteWorkflow(_ context.Context, opts client.StartWorkflowOptions, _ interface{}, _ ...interface{}) (client.WorkflowRun, error) {

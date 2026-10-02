@@ -5,8 +5,6 @@ import (
 	"sync"
 	"time"
 
-	"go.temporal.io/sdk/client"
-
 	"github.com/victor/temporal-agent/taskqueue"
 )
 
@@ -19,7 +17,7 @@ const (
 // caches the answers briefly: every page lists every queue, and the queues page
 // refreshes itself.
 type queueProber struct {
-	tc client.Client
+	tc taskqueue.Describer
 
 	mu    sync.Mutex
 	cache map[string]probed
@@ -30,7 +28,7 @@ type probed struct {
 	at     time.Time
 }
 
-func newQueueProber(tc client.Client) *queueProber {
+func newQueueProber(tc taskqueue.Describer) *queueProber {
 	return &queueProber{tc: tc, cache: make(map[string]probed)}
 }
 

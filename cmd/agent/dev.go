@@ -150,7 +150,7 @@ func runDev(cmd *cobra.Command, args []string) {
 		w.RegisterActivity(&activity.ToolActivities{Registry: registry, Catalog: catalog})
 		w.RegisterActivity(&activity.NotificationActivities{Hub: hub, Telegram: tgClient})
 		w.RegisterActivity(&activity.DeliveryActivities{Hub: hub, Store: st})
-		w.RegisterActivity(&activity.ScheduleActivities{Client: temporalClient, Store: st})
+		w.RegisterActivity(&activity.ScheduleActivities{Client: temporalClient.ScheduleClient(), Store: st})
 		w.RegisterActivity(skillAct)
 
 		workers = append(workers, w)

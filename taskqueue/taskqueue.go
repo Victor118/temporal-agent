@@ -8,7 +8,7 @@ import (
 	"time"
 
 	enumspb "go.temporal.io/api/enums/v1"
-	"go.temporal.io/sdk/client"
+	"go.temporal.io/api/workflowservice/v1"
 )
 
 // Freshness is how recent a poller must be to count. Temporal itself drops
@@ -30,8 +30,13 @@ type Status struct {
 	Err      error
 }
 
+// Describer is the one call this package makes to Temporal.
+type Describer interface {
+	DescribeTaskQueue(ctx context.Context, taskQueue string, taskQueueType enumspb.TaskQueueType) (*workflowservice.DescribeTaskQueueResponse, error)
+}
+
 // Describe asks Temporal for the activity and workflow pollers of queue.
-func Describe(ctx context.Context, tc client.Client, queue string) Status {
+func Describe(ctx context.Context, tc Describer, queue string) Status {
 	s := Status{Queue: queue}
 	for _, typ := range []enumspb.TaskQueueType{enumspb.TASK_QUEUE_TYPE_ACTIVITY, enumspb.TASK_QUEUE_TYPE_WORKFLOW} {
 		resp, err := tc.DescribeTaskQueue(ctx, queue, typ)

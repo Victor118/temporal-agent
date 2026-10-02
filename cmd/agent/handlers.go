@@ -18,6 +18,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/converter"
 
 	"github.com/victor/temporal-agent/activity"
 	"github.com/victor/temporal-agent/auth"
@@ -28,9 +29,20 @@ import (
 	"github.com/victor/temporal-agent/workflow"
 )
 
+// workflowClient is what the server's handlers need of Temporal: start,
+// signal, query, find and stop the workflows of a session.
+type workflowClient interface {
+	ExecuteWorkflow(ctx context.Context, options client.StartWorkflowOptions, workflow interface{}, args ...interface{}) (client.WorkflowRun, error)
+	SignalWorkflow(ctx context.Context, workflowID, runID, signalName string, arg interface{}) error
+	QueryWorkflow(ctx context.Context, workflowID, runID, queryType string, args ...interface{}) (converter.EncodedValue, error)
+	DescribeWorkflowExecution(ctx context.Context, workflowID, runID string) (*workflowservice.DescribeWorkflowExecutionResponse, error)
+	ListWorkflow(ctx context.Context, request *workflowservice.ListWorkflowExecutionsRequest) (*workflowservice.ListWorkflowExecutionsResponse, error)
+	TerminateWorkflow(ctx context.Context, workflowID, runID, reason string, details ...interface{}) error
+}
+
 type handler struct {
 	auth           *auth.Service
-	temporalClient client.Client
+	temporalClient workflowClient
 	hub            *sse.Hub
 	cfg            *config.Config
 	registry       *tool.Registry
