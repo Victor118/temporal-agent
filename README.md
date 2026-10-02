@@ -161,6 +161,11 @@ agent/
   `worker.yaml` and in an agent's allowlist) on a worker whose user and
   filesystem hold nothing an agent must not reach.
 
+- **`web_fetch`** fetches a URL the model chose, so it only connects to public
+  addresses: loopback, private, link-local (cloud metadata), CGNAT and reserved
+  ranges are refused after name resolution, on every redirect too, and only
+  `http`/`https` URLs are followed.
+
 ## License
 
 MIT
