@@ -138,6 +138,16 @@ func (id *Identity) Give(root string) error {
 	})
 }
 
+// GiveFile hands the open file f over to id. It acts on what f is, not on a
+// name a process of id's could have pointed elsewhere in the meantime. A nil
+// id gives nothing.
+func (id *Identity) GiveFile(f *os.File) error {
+	if id == nil {
+		return nil
+	}
+	return f.Chown(int(id.UID), int(id.GID))
+}
+
 // Reclaim takes dir back from whoever the commands ran as: owned by the
 // worker, writable by it alone. After it, a process left behind by a command
 // can no longer add, remove or rename an entry of dir — what the worker is

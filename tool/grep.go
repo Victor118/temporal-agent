@@ -5,14 +5,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
 )
 
 func RegisterGrepTool(r *Registry, workspacePath string) {
-	absWorkspace, _ := filepath.Abs(workspacePath)
+	ws := newWorkspace(workspacePath, nil)
 
 	r.Register(&Tool{
 		Name: "grep",
@@ -76,34 +78,36 @@ Context lines: use "before", "after", or "context" to show surrounding lines.`,
 				return "", fmt.Errorf("grep: invalid regex: %w", err)
 			}
 
-			searchRoot := absWorkspace
+			start := "."
 			if params.Path != "" {
-				searchRoot, err = safePath(absWorkspace, params.Path)
-				if err != nil {
+				if start, err = relPath(params.Path); err != nil {
 					return "", err
 				}
 			}
+			root, err := ws.open()
+			if err != nil {
+				return "", fmt.Errorf("grep: %w", err)
+			}
+			defer root.Close()
 
 			var out strings.Builder
 			totalMatches := 0
 
-			walkErr := filepath.Walk(searchRoot, func(path string, info os.FileInfo, err error) error {
-				if err != nil || info.IsDir() {
+			walkErr := fs.WalkDir(walkFS{root}, start, func(rel string, d fs.DirEntry, err error) error {
+				if err != nil || d.IsDir() {
 					return err
 				}
-				// Walk does not follow links, but opening one would: a link to
-				// a file outside the workspace is skipped, like any non-file.
-				if !info.Mode().IsRegular() {
+				// A link is skipped, like any non-file: grep reads what the
+				// workspace holds, not what its links point at.
+				if !d.Type().IsRegular() {
 					return nil
 				}
 				if totalMatches >= params.MaxResults {
-					return filepath.SkipAll
+					return fs.SkipAll
 				}
 
-				relPath, _ := filepath.Rel(absWorkspace, path)
-
 				// Skip hidden dirs and common non-text dirs
-				for _, part := range strings.Split(relPath, string(os.PathSeparator)) {
+				for _, part := range strings.Split(rel, "/") {
 					if strings.HasPrefix(part, ".") || part == "node_modules" || part == "vendor" {
 						return nil
 					}
@@ -111,14 +115,16 @@ Context lines: use "before", "after", or "context" to show surrounding lines.`,
 
 				// Apply include glob filter
 				if params.Include != "" {
-					matched, _ := filepath.Match(params.Include, filepath.Base(path))
+					matched, _ := filepath.Match(params.Include, path.Base(rel))
 					if !matched {
 						return nil
 					}
 				}
 
 				// Skip binary files (check first 512 bytes)
-				f, err := os.Open(path)
+				// Opened through the root: a file swapped for a link since
+				// it was listed is followed only inside the workspace.
+				f, err := openRegular(root, rel, os.O_RDONLY)
 				if err != nil {
 					return nil
 				}
@@ -156,11 +162,11 @@ Context lines: use "before", "after", or "context" to show surrounding lines.`,
 
 				switch params.OutputMode {
 				case "files":
-					fmt.Fprintln(&out, relPath)
+					fmt.Fprintln(&out, rel)
 					totalMatches++
 
 				case "count":
-					fmt.Fprintf(&out, "%s:%d\n", relPath, len(matchLineNums))
+					fmt.Fprintf(&out, "%s:%d\n", rel, len(matchLineNums))
 					totalMatches++
 
 				default: // "content"
@@ -192,12 +198,12 @@ Context lines: use "before", "after", or "context" to show surrounding lines.`,
 						}
 						if totalMatches >= params.MaxResults {
 							fmt.Fprintf(&out, "\n... (truncated at %d matches)\n", params.MaxResults)
-							return filepath.SkipAll
+							return fs.SkipAll
 						}
 						if prevShown >= 0 && i > prevShown+1 {
 							fmt.Fprintln(&out, "--")
 						}
-						fmt.Fprintf(&out, "%s:%d:%s\n", relPath, i+1, lines[i])
+						fmt.Fprintf(&out, "%s:%d:%s\n", rel, i+1, lines[i])
 						if matchSet[i] {
 							totalMatches++
 						}
@@ -207,7 +213,7 @@ Context lines: use "before", "after", or "context" to show surrounding lines.`,
 
 				return nil
 			})
-			if walkErr != nil && walkErr != filepath.SkipAll {
+			if walkErr != nil && walkErr != fs.SkipAll {
 				return "", fmt.Errorf("grep: %w", walkErr)
 			}
 

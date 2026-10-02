@@ -3,11 +3,9 @@ package tool
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io/fs"
+	"io"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/victor/temporal-agent/subproc"
@@ -17,7 +15,7 @@ import (
 // workspace. What they create belongs to owner, the user exec runs as, so
 // that its commands can change it too; nil leaves it to the worker's user.
 func RegisterFilesystemTools(r *Registry, workspacePath string, owner *subproc.Identity) {
-	absWorkspace, _ := filepath.Abs(workspacePath)
+	ws := newWorkspace(workspacePath, owner)
 
 	r.Register(&Tool{
 		Name:        "read_file",
@@ -37,11 +35,16 @@ func RegisterFilesystemTools(r *Registry, workspacePath string, owner *subproc.I
 			if err := json.Unmarshal(input, &params); err != nil {
 				return "", err
 			}
-			fullPath, err := safePath(absWorkspace, params.Path)
+			name, err := relPath(params.Path)
 			if err != nil {
 				return "", err
 			}
-			data, err := os.ReadFile(fullPath)
+			root, err := ws.open()
+			if err != nil {
+				return "", fmt.Errorf("read_file: %w", err)
+			}
+			defer root.Close()
+			data, err := readFile(root, name)
 			if err != nil {
 				return "", fmt.Errorf("read_file: %w", err)
 			}
@@ -70,21 +73,17 @@ func RegisterFilesystemTools(r *Registry, workspacePath string, owner *subproc.I
 			if err := json.Unmarshal(input, &params); err != nil {
 				return "", err
 			}
-			fullPath, err := safePath(absWorkspace, params.Path)
+			name, err := relPath(params.Path)
 			if err != nil {
 				return "", err
 			}
-			if err := mkdirAllFor(filepath.Dir(fullPath), owner); err != nil {
-				return "", fmt.Errorf("write_file: mkdir: %w", err)
-			}
-			_, statErr := os.Lstat(fullPath)
-			if err := os.WriteFile(fullPath, []byte(params.Content), 0644); err != nil {
+			root, err := ws.open()
+			if err != nil {
 				return "", fmt.Errorf("write_file: %w", err)
 			}
-			if os.IsNotExist(statErr) {
-				if err := owner.Give(fullPath); err != nil {
-					return "", fmt.Errorf("write_file: %w", err)
-				}
+			defer root.Close()
+			if err := ws.writeFile(root, name, []byte(params.Content)); err != nil {
+				return "", fmt.Errorf("write_file: %w", err)
 			}
 			return "File written successfully.", nil
 		},
@@ -113,11 +112,23 @@ func RegisterFilesystemTools(r *Registry, workspacePath string, owner *subproc.I
 			if err := json.Unmarshal(input, &params); err != nil {
 				return "", err
 			}
-			fullPath, err := safePath(absWorkspace, params.Path)
+			name, err := relPath(params.Path)
 			if err != nil {
 				return "", err
 			}
-			data, err := os.ReadFile(fullPath)
+			root, err := ws.open()
+			if err != nil {
+				return "", fmt.Errorf("edit_file: %w", err)
+			}
+			defer root.Close()
+			// One descriptor to read and write back: the file edited is the
+			// file read, whatever happens to its name in between.
+			f, err := openRegular(root, name, os.O_RDWR)
+			if err != nil {
+				return "", fmt.Errorf("edit_file: %w", err)
+			}
+			defer f.Close()
+			data, err := io.ReadAll(f)
 			if err != nil {
 				return "", fmt.Errorf("edit_file: %w", err)
 			}
@@ -130,7 +141,13 @@ func RegisterFilesystemTools(r *Registry, workspacePath string, owner *subproc.I
 				return "", fmt.Errorf("edit_file: old_string appears %d times, must be unique", count)
 			}
 			newContent := strings.Replace(content, params.OldString, params.NewString, 1)
-			if err := os.WriteFile(fullPath, []byte(newContent), 0644); err != nil {
+			if err := f.Truncate(0); err != nil {
+				return "", fmt.Errorf("edit_file: write: %w", err)
+			}
+			if _, err := f.WriteAt([]byte(newContent), 0); err != nil {
+				return "", fmt.Errorf("edit_file: write: %w", err)
+			}
+			if err := f.Close(); err != nil {
 				return "", fmt.Errorf("edit_file: write: %w", err)
 			}
 			return "File edited successfully.", nil
@@ -157,11 +174,16 @@ func RegisterFilesystemTools(r *Registry, workspacePath string, owner *subproc.I
 			if params.Path == "" {
 				params.Path = "."
 			}
-			fullPath, err := safePath(absWorkspace, params.Path)
+			name, err := relPath(params.Path)
 			if err != nil {
 				return "", err
 			}
-			entries, err := os.ReadDir(fullPath)
+			root, err := ws.open()
+			if err != nil {
+				return "", fmt.Errorf("list_directory: %w", err)
+			}
+			defer root.Close()
+			entries, err := readDir(root, name)
 			if err != nil {
 				return "", fmt.Errorf("list_directory: %w", err)
 			}
@@ -177,83 +199,4 @@ func RegisterFilesystemTools(r *Registry, workspacePath string, owner *subproc.I
 		},
 	})
 
-}
-
-// safePath resolves rel within root and refuses anything that would land
-// outside it: through "..", through a sibling sharing root's prefix
-// (/app/workspace2 is not in /app/workspace), or through a symbolic link —
-// which exec can create, and a cloned repository can contain. An absolute rel
-// is taken relative to root.
-func safePath(root, rel string) (string, error) {
-	abs := filepath.Join(root, rel)
-	if !within(root, abs) {
-		return "", fmt.Errorf("path escapes workspace: %s", rel)
-	}
-	realRoot, err := resolveExisting(root)
-	if err != nil {
-		return "", err
-	}
-	realPath, err := resolveExisting(abs)
-	if err != nil {
-		return "", fmt.Errorf("path %s: %w", rel, err)
-	}
-	if !within(realRoot, realPath) {
-		return "", fmt.Errorf("path escapes workspace: %s", rel)
-	}
-	return abs, nil
-}
-
-// within reports whether p is root or lies under it. Both are clean absolute
-// paths.
-func within(root, p string) bool {
-	rel, err := filepath.Rel(root, p)
-	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
-}
-
-// resolveExisting resolves the symbolic links of p's longest existing prefix
-// and appends the rest, which does not exist yet (a file about to be
-// written). A dangling link is refused: writing through it would create its
-// target, wherever that is.
-func resolveExisting(p string) (string, error) {
-	missing := ""
-	for cur := p; ; {
-		resolved, err := filepath.EvalSymlinks(cur)
-		if err == nil {
-			return filepath.Join(resolved, missing), nil
-		}
-		if !errors.Is(err, fs.ErrNotExist) {
-			return "", err
-		}
-		if _, lerr := os.Lstat(cur); lerr == nil {
-			return "", fmt.Errorf("%s is a dangling symbolic link", cur)
-		}
-		parent := filepath.Dir(cur)
-		if parent == cur {
-			return p, nil
-		}
-		missing = filepath.Join(filepath.Base(cur), missing)
-		cur = parent
-	}
-}
-
-// mkdirAllFor creates dir and its missing parents, and gives the ones it
-// created to owner.
-func mkdirAllFor(dir string, owner *subproc.Identity) error {
-	top := ""
-	for d := dir; ; d = filepath.Dir(d) {
-		if _, err := os.Lstat(d); err == nil {
-			break
-		}
-		top = d
-		if filepath.Dir(d) == d {
-			break
-		}
-	}
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
-	}
-	if top == "" {
-		return nil
-	}
-	return owner.Give(top)
 }

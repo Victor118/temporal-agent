@@ -4,13 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
+	"io/fs"
 	"path/filepath"
 	"strings"
 )
 
 func RegisterGlobTool(r *Registry, workspacePath string) {
-	absWorkspace, _ := filepath.Abs(workspacePath)
+	ws := newWorkspace(workspacePath, nil)
 
 	r.Register(&Tool{
 		Name: "glob",
@@ -34,11 +34,10 @@ Examples: "**/*.go" (all Go files), "cmd/**/*.go" (Go files under cmd/), "*.yaml
 				return "", err
 			}
 
-			searchRoot := absWorkspace
+			start := "."
 			if params.Path != "" {
 				var err error
-				searchRoot, err = safePath(absWorkspace, params.Path)
-				if err != nil {
+				if start, err = relPath(params.Path); err != nil {
 					return "", err
 				}
 			}
@@ -58,57 +57,62 @@ Examples: "**/*.go" (all Go files), "cmd/**/*.go" (Go files under cmd/), "*.yaml
 					filePattern = "*"
 				}
 				if dirPattern != "" {
-					var err error
-					searchRoot, err = safePath(searchRoot, dirPattern)
+					sub, err := relPath(dirPattern)
 					if err != nil {
 						return "", err
 					}
+					start = filepath.Join(start, sub)
 				}
 			} else {
 				// Non-recursive: might contain directory parts like "cmd/*.go"
 				dir := filepath.Dir(params.Pattern)
 				filePattern = filepath.Base(params.Pattern)
 				if dir != "." {
-					var err error
-					searchRoot, err = safePath(searchRoot, dir)
+					sub, err := relPath(dir)
 					if err != nil {
 						return "", err
 					}
+					start = filepath.Join(start, sub)
 				}
 				recursive = false
 			}
+
+			root, err := ws.open()
+			if err != nil {
+				return "", fmt.Errorf("glob: %w", err)
+			}
+			defer root.Close()
 
 			var matches []string
 			const maxResults = 1000
 
 			if recursive {
-				err := filepath.Walk(searchRoot, func(path string, info os.FileInfo, err error) error {
+				err := fs.WalkDir(walkFS{root}, start, func(rel string, d fs.DirEntry, err error) error {
 					if err != nil {
 						return nil
 					}
-					if info.IsDir() {
-						name := info.Name()
-						if strings.HasPrefix(name, ".") || name == "node_modules" || name == "vendor" {
-							return filepath.SkipDir
+					if d.IsDir() {
+						name := d.Name()
+						if rel != "." && (strings.HasPrefix(name, ".") || name == "node_modules" || name == "vendor") {
+							return fs.SkipDir
 						}
 						return nil
 					}
 
-					matched, _ := filepath.Match(filePattern, info.Name())
+					matched, _ := filepath.Match(filePattern, d.Name())
 					if matched {
-						relPath, _ := filepath.Rel(absWorkspace, path)
-						matches = append(matches, relPath)
+						matches = append(matches, rel)
 						if len(matches) >= maxResults {
-							return filepath.SkipAll
+							return fs.SkipAll
 						}
 					}
 					return nil
 				})
-				if err != nil && err != filepath.SkipAll {
+				if err != nil && err != fs.SkipAll {
 					return "", fmt.Errorf("glob: %w", err)
 				}
 			} else {
-				entries, err := os.ReadDir(searchRoot)
+				entries, err := readDir(root, start)
 				if err != nil {
 					return "", fmt.Errorf("glob: %w", err)
 				}
@@ -118,8 +122,7 @@ Examples: "**/*.go" (all Go files), "cmd/**/*.go" (Go files under cmd/), "*.yaml
 					}
 					matched, _ := filepath.Match(filePattern, e.Name())
 					if matched {
-						relPath, _ := filepath.Rel(absWorkspace, filepath.Join(searchRoot, e.Name()))
-						matches = append(matches, relPath)
+						matches = append(matches, filepath.Join(start, e.Name()))
 						if len(matches) >= maxResults {
 							break
 						}
