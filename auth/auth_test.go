@@ -278,7 +278,8 @@ func TestClientAddrs_Of(t *testing.T) {
 		"client-written entries are left": {req("10.0.0.2:4242", "1.2.3.4, 203.0.113.9"), "203.0.113.9"},
 		"chained proxies":                 {req("10.0.0.2:4242", "203.0.113.9, 10.0.0.3"), "203.0.113.9"},
 		"several headers":                 {req("10.0.0.2:4242", "1.2.3.4", "203.0.113.9"), "203.0.113.9"},
-		"proxy without a header":          {req("10.0.0.2:4242"), "10.0.0.2"},
+		"proxy without a header":          {req("10.0.0.2:4242"), ""},
+		"proxies only":                    {req("10.0.0.2:4242", "10.0.0.3, 10.0.0.4"), ""},
 		"IPv4-mapped peer":                {req("[::ffff:10.0.0.2]:4242", "203.0.113.9"), "203.0.113.9"},
 	} {
 		if got := c.Of(tc.r); got != tc.want {
@@ -288,5 +289,33 @@ func TestClientAddrs_Of(t *testing.T) {
 	// Without trusted proxies, the header is nobody's word.
 	if got := (ClientAddrs{Direct: true}).Of(req("10.0.0.2:4242", "203.0.113.9")); got != "10.0.0.2" {
 		t.Errorf("direct: %q", got)
+	}
+}
+
+// A trusted proxy that names no client gives every client its own address:
+// no limit per address applies to such logins, or twenty wrong passwords
+// through it would lock everyone out. The account limit still does.
+func TestLogin_NoLimitPerAddressForAProxyNamingNoClient(t *testing.T) {
+	s, st := newService(t)
+	hash, _ := HashPassword("bob's password")
+	st.users["bob@example.com"] = &store.User{ID: "u-bob", Email: "bob@example.com", PasswordHash: hash}
+	clients, _ := ParseClientAddrs("172.18.0.5")
+	s.Clients = clients
+	s.Limits = DefaultLoginLimits(clients)
+	ctx := context.Background()
+	r := httptest.NewRequest(http.MethodPost, "/login", nil)
+	r.RemoteAddr = "172.18.0.5:4242"
+
+	for i := 0; i < 25; i++ {
+		s.Login(ctx, s.ClientAddr(r), "mallory-"+string(rune('a'+i))+"@example.com", "guess")
+	}
+	if _, _, err := s.Login(ctx, s.ClientAddr(r), "bob@example.com", "bob's password"); err != nil {
+		t.Errorf("failures through a proxy naming no client locked another account out: %v", err)
+	}
+	for i := 0; i < 10; i++ {
+		s.Login(ctx, s.ClientAddr(r), "bob@example.com", "guess")
+	}
+	if _, _, err := s.Login(ctx, s.ClientAddr(r), "bob@example.com", "bob's password"); !errors.Is(err, ErrTooManyAttempts) {
+		t.Errorf("the account limit no longer applies: %v", err)
 	}
 }

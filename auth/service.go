@@ -55,7 +55,8 @@ type Service struct {
 	Clients ClientAddrs
 }
 
-// ClientAddr is the address r comes from, to pass to Login and Authenticate.
+// ClientAddr is the address r comes from, to pass to Login and Authenticate;
+// "" when it is not known.
 func (s *Service) ClientAddr(r *http.Request) string { return s.Clients.Of(r) }
 
 // Login checks an email and password and opens a login session. It returns
@@ -77,8 +78,8 @@ func (s *Service) Login(ctx context.Context, client, email, password string) (st
 // client's address. The delay on a failure only slows a sequential guesser;
 // the limits stop parallel ones.
 func (s *Service) Authenticate(ctx context.Context, client, email, password string) (*store.User, error) {
-	if s.Limits != nil && (s.Limits.PerClient.Blocked(client) || s.Limits.PerAccount.Blocked(accountKey(email))) {
-		log.Printf("auth: login refused for %q from %s: too many failures", email, client)
+	if s.Limits.Blocked(client, email) {
+		log.Printf("auth: login refused for %q from %s: too many failures", email, describeClient(client))
 		return nil, ErrTooManyAttempts
 	}
 	u, err := s.Store.GetUserByEmail(ctx, email)
@@ -94,18 +95,21 @@ func (s *Service) Authenticate(ctx context.Context, client, email, password stri
 		log.Printf("auth: user %s has an unreadable password hash: %v", u.ID, err)
 	}
 	if u == nil || !ok || u.DisabledAt != nil {
-		log.Printf("auth: failed login for %q from %s", email, client)
-		if s.Limits != nil {
-			s.Limits.PerClient.Fail(client)
-			s.Limits.PerAccount.Fail(accountKey(email))
-		}
+		log.Printf("auth: failed login for %q from %s", email, describeClient(client))
+		s.Limits.Fail(client, email)
 		time.Sleep(LoginFailDelay)
 		return nil, ErrInvalidCredentials
 	}
-	if s.Limits != nil {
-		s.Limits.PerAccount.Reset(accountKey(email))
-	}
+	s.Limits.Succeed(email)
 	return u, nil
+}
+
+// describeClient is client for the logs, an unknown one included.
+func describeClient(client string) string {
+	if client == "" {
+		return "an unknown address"
+	}
+	return client
 }
 
 // StartSession opens a login session for u and returns its token.

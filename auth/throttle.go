@@ -2,6 +2,7 @@ package auth
 
 import (
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/netip"
@@ -113,6 +114,35 @@ func DefaultLoginLimits(clients ClientAddrs) *LoginLimits {
 
 func accountKey(email string) string { return strings.ToLower(strings.TrimSpace(email)) }
 
+// Blocked reports whether a login from client for email is refused for now.
+// An empty client is an address nobody knows (ClientAddrs.Of): no limit per
+// address applies to it, the limit per account does.
+func (l *LoginLimits) Blocked(client, email string) bool {
+	if l == nil {
+		return false
+	}
+	return (client != "" && l.PerClient.Blocked(client)) || l.PerAccount.Blocked(accountKey(email))
+}
+
+// Fail records a failed login from client for email.
+func (l *LoginLimits) Fail(client, email string) {
+	if l == nil {
+		return
+	}
+	if client != "" {
+		l.PerClient.Fail(client)
+	}
+	l.PerAccount.Fail(accountKey(email))
+}
+
+// Succeed forgets the failures of email's account.
+func (l *LoginLimits) Succeed(email string) {
+	if l == nil {
+		return
+	}
+	l.PerAccount.Reset(accountKey(email))
+}
+
 // ClientAddrs finds the address a request comes from, for the login limits
 // and the logs. The zero value knows no address for sure: it returns the
 // connection's peer, which may be a proxy.
@@ -161,6 +191,10 @@ func (c ClientAddrs) Known() bool { return c.Direct || len(c.TrustedProxies) > 0
 // Of returns the address r comes from. From a trusted proxy, it is the
 // rightmost X-Forwarded-For entry that is not a trusted proxy: what the first
 // of them saw. Entries further left were written by the client itself.
+//
+// From a trusted proxy that names no client — no X-Forwarded-For, or proxies
+// only — it is "", an address nobody knows: the proxy's own would be every
+// client's, and a limit on it would lock them all out together.
 func (c ClientAddrs) Of(r *http.Request) string {
 	peer := peerAddr(r)
 	if !c.trusted(peer) {
@@ -172,16 +206,18 @@ func (c ClientAddrs) Of(r *http.Request) string {
 	}
 	for i := len(hops) - 1; i >= 0; i-- {
 		hop := strings.TrimSpace(hops[i])
-		if hop == "" {
-			continue
-		}
-		if !c.trusted(hop) {
+		if hop != "" && !c.trusted(hop) {
 			return hop
 		}
-		peer = hop // every hop so far is a proxy: the leftmost is the client
 	}
-	return peer
+	noClientFromProxy.Do(func() {
+		log.Printf("auth: trusted proxy %s sent a request naming no client in X-Forwarded-For: no limit per address applies to such requests; check that the proxy sets the header", peer)
+	})
+	return ""
 }
+
+// noClientFromProxy logs once that a trusted proxy names no client.
+var noClientFromProxy sync.Once
 
 // trusted reports whether addr is one of the trusted proxies.
 func (c ClientAddrs) trusted(addr string) bool {
