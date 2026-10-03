@@ -53,8 +53,8 @@ func runServer(cmd *cobra.Command, args []string) {
 		log.Println("Warning: INTERNAL_API_KEY is not set, the internal API refuses every worker notification")
 	}
 
-	publicSrv := &http.Server{Addr: cfg.HTTPAddr, Handler: handler}
-	internalSrv := &http.Server{Addr: cfg.InternalAddr, Handler: internalRouter}
+	publicSrv := newHTTPServer(cfg.HTTPAddr, handler)
+	internalSrv := newHTTPServer(cfg.InternalAddr, internalRouter)
 
 	// Start both servers
 	go func() {
@@ -77,5 +77,18 @@ func runServer(cmd *cobra.Command, args []string) {
 	log.Printf("Public API listening on %s", cfg.HTTPAddr)
 	if err := publicSrv.ListenAndServe(); err != http.ErrServerClosed {
 		log.Fatalf("HTTP server error: %v", err)
+	}
+}
+
+// newHTTPServer bounds what a client may hold open without using it: the
+// time to send its headers, and an idle keep-alive connection. There is no
+// ReadTimeout or WriteTimeout: they count the whole request or response, and
+// would cut the SSE streams, which never end, and slow uploads.
+func newHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 }

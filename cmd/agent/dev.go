@@ -50,10 +50,10 @@ func runDev(cmd *cobra.Command, args []string) {
 	if err := rt.start(); err != nil {
 		log.Fatalf("Worker failed: %v", err)
 	}
-	srv := &http.Server{Addr: cfg.HTTPAddr, Handler: newHTTPHandler(cfg, st, temporalClient, hub, httpOptions{
+	srv := newHTTPServer(cfg.HTTPAddr, newHTTPHandler(cfg, st, temporalClient, hub, httpOptions{
 		skills:       func() []skill.Skill { return rt.skills },
 		skillsSource: skillStore.Dir,
-	})}
+	}))
 
 	go func() {
 		waitForSignal()

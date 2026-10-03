@@ -20,6 +20,7 @@
 - Worker = Temporal worker + activities + tools publiés sur sa queue (`worker.yaml`)
 - Communication worker → serveur via `/internal/notify` ; le reste passe par PostgreSQL (agents, tools, skills_version). `/internal/notify` exige `Authorization: Bearer $INTERNAL_API_KEY` (vide = tout refusé) ; le port interne ne doit pas être publié
 - Webhooks : `/webhooks/telegram` vérifie `X-Telegram-Bot-Api-Secret-Token` = `TELEGRAM_WEBHOOK_SECRET`, `/webhooks/skills` la signature GitHub avec `SKILLS_WEBHOOK_SECRET`. Sans secret, la route n'est pas montée (défaut fermé)
+- Serveurs HTTP (public, interne, dev) par `newHTTPServer` : `ReadHeaderTimeout` 10 s, `IdleTimeout` 120 s, jamais de `ReadTimeout`/`WriteTimeout` (les flux SSE ne finissent pas) ; un flux SSE inactif envoie un commentaire `: ping` toutes les 30 s (`sseKeepAlive`) pour que les proxies le gardent
 
 ## Workflows
 

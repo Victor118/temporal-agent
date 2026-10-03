@@ -44,7 +44,15 @@ type api struct {
 	sessions *session.Service
 	store    readStore
 	hub      *sse.Hub
+	// keepAlive is how often an idle SSE stream sends a comment; zero =
+	// sseKeepAlive.
+	keepAlive time.Duration
 }
+
+// sseKeepAlive is how often an SSE stream with nothing to say sends a
+// comment: a proxy closes a connection silent for long (often 60 s), and
+// each reconnection reloads the thread.
+const sseKeepAlive = 30 * time.Second
 
 // notificationsOf is the pseudo-session holding a user's notifications.
 func notificationsOf(userID string) string { return "notifications:" + userID }
@@ -337,11 +345,22 @@ func (a *api) streamTopic(w http.ResponseWriter, r *http.Request, topic string) 
 	ch := a.hub.Subscribe(topic)
 	defer a.hub.Unsubscribe(topic, ch)
 
+	every := a.keepAlive
+	if every <= 0 {
+		every = sseKeepAlive
+	}
+	ping := time.NewTicker(every)
+	defer ping.Stop()
+
 	ctx := r.Context()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-ping.C:
+			// A comment line: EventSource ignores it.
+			fmt.Fprint(w, ": ping\n\n")
+			flusher.Flush()
 		case event, ok := <-ch:
 			if !ok {
 				return
