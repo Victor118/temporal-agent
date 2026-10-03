@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -49,8 +48,7 @@ func (s *memConversation) add(key string, m store.Message) int64 {
 func (s *memConversation) LoadConversation(_ context.Context, _ string, upTo int64, turnKeys []string) ([]store.MessageWithID, error) {
 	var out []store.MessageWithID
 	for _, m := range s.messages {
-		turn, ok := store.TurnOf(m.Key)
-		if m.ID <= upTo || (ok && slices.Contains(turnKeys, turn)) {
+		if store.TurnReads(m.ID, m.Key, upTo, turnKeys) {
 			out = append(out, m)
 		}
 	}

@@ -22,9 +22,10 @@ type LastMessageIDInput struct {
 	SessionID string
 }
 
-// LastMessageID is where a session's history ends, 0 for an empty one: the
-// snapshot the turns answering a message read (TurnHistory.UpTo). The
-// history itself never goes through the workflows, the LLM call loads it.
+// LastMessageID is where a session's history ends, 0 for an empty one. It is
+// only the fallback snapshot (TurnHistory.UpTo) of a message the server did
+// not store, so has no ID: a stored one is its own snapshot. The history
+// itself never goes through the workflows, the LLM call loads it.
 func (a *MemoryActivities) LastMessageID(ctx context.Context, input LastMessageIDInput) (int64, error) {
 	return a.Store.LastMessageID(ctx, input.SessionID)
 }

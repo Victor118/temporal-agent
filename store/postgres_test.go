@@ -537,9 +537,41 @@ func TestAgentNamesClashUnderConcurrency(t *testing.T) {
 	}
 }
 
-// A turn reads its session as it was when it started, plus what it wrote
-// since: a person's message written meanwhile is not in it, nor another
-// turn's whose key merely starts like its own.
+// AppendMessage returns the stored message's ID, the one already stored when
+// its key was written before: a retried write answers like the first.
+func TestAppendMessage_ReturnsItsID(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	const sid = "zz-append-id"
+	cleanup := func() { s.DeleteMessagesBySession(ctx, sid) }
+	cleanup()
+	t.Cleanup(cleanup)
+
+	first, err := s.AppendMessage(ctx, sid, HumanMessageKey("a"), Message{Role: RoleUser, Content: `"a"`})
+	if err != nil || first == 0 {
+		t.Fatalf("first: %d, %v", first, err)
+	}
+	second, err := s.AppendMessage(ctx, sid, HumanMessageKey("b"), Message{Role: RoleUser, Content: `"b"`})
+	if err != nil || second <= first {
+		t.Fatalf("second: %d, %v; want after %d", second, err, first)
+	}
+	if last, _ := s.LastMessageID(ctx, sid); last != second {
+		t.Errorf("last message %d, want %d", last, second)
+	}
+	again, err := s.AppendMessage(ctx, sid, HumanMessageKey("a"), Message{Role: RoleUser, Content: `"changed"`})
+	if err != nil || again != first {
+		t.Errorf("rewrite: %d, %v; want %d", again, err, first)
+	}
+	msgs, _ := s.LoadMessagesWithID(ctx, sid)
+	if len(msgs) != 2 || msgs[0].Content != `"a"` {
+		t.Errorf("after the rewrite: %+v, want the two messages, the first unchanged", msgs)
+	}
+}
+
+// A turn reads its session up to the message it answers, what its own group
+// wrote, and what the turns of earlier messages wrote even after that
+// message; not a person's message stored after it, nor another turn's whose
+// key merely starts like its own.
 func TestLoadConversation(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
@@ -552,36 +584,53 @@ func TestLoadConversation(t *testing.T) {
 		t.Fatalf("empty session: last %d, %v", last, err)
 	}
 	text := func(s string) Message { return Message{Role: RoleUser, Content: `"` + s + `"`} }
-	s.AppendMessage(ctx, sid, HumanMessageKey("q"), text("question"))
-	snapshot, err := s.LastMessageID(ctx, sid)
-	if err != nil || snapshot == 0 {
-		t.Fatalf("last %d, %v", snapshot, err)
+	question, err := s.AppendMessage(ctx, sid, HumanMessageKey("q"), text("question"))
+	if err != nil || question == 0 {
+		t.Fatalf("question %d, %v", question, err)
 	}
-	turn := TurnKey(TurnGroupKey("run-1", snapshot), 0)
+	turn := TurnKey(TurnGroupKey("run-1", question), 0)
 	s.AppendMessages(ctx, sid, turn, 0, []Message{{Role: RoleAssistant, Content: `"searching"`}})
-	s.AppendMessage(ctx, sid, HumanMessageKey("m"), text("meanwhile"))
+	meanwhile, _ := s.AppendMessage(ctx, sid, HumanMessageKey("m"), text("meanwhile"))
 	s.AppendMessages(ctx, sid, turn, 1, []Message{{Role: RoleAssistant, Content: `"found"`}})
 	s.AppendMessages(ctx, sid, turn+"1", 0, []Message{{Role: RoleAssistant, Content: `"another turn"`}})
 
-	got, err := s.LoadConversation(ctx, sid, snapshot, []string{turn})
+	keys := func(got []MessageWithID) []string {
+		var seen []string
+		for _, m := range got {
+			seen = append(seen, m.Key+" "+m.Content)
+		}
+		return seen
+	}
+	got, err := s.LoadConversation(ctx, sid, question, []string{turn})
 	if err != nil {
 		t.Fatal(err)
 	}
-	var seen []string
-	for _, m := range got {
-		seen = append(seen, m.Key+" "+m.Content)
-	}
 	want := []string{`msg:q "question"`, turn + `:0 "searching"`, turn + `:1 "found"`}
-	if !reflect.DeepEqual(seen, want) {
-		t.Errorf("loaded %q\nwant %q", seen, want)
+	if !reflect.DeepEqual(keys(got), want) {
+		t.Errorf("loaded %q\nwant %q", keys(got), want)
 	}
 
-	// No turn: the snapshot alone. Everything once the bound covers it.
-	if got, _ := s.LoadConversation(ctx, sid, snapshot, nil); len(got) != 1 {
-		t.Errorf("without turns: %d messages, want the question", len(got))
+	// No turn: the message alone.
+	if got, _ := s.LoadConversation(ctx, sid, question, nil); len(got) != 1 {
+		t.Errorf("without turns: %q, want the question", keys(got))
 	}
-	last, _ := s.LastMessageID(ctx, sid)
-	if got, _ := s.LoadConversation(ctx, sid, last, nil); len(got) != 5 || got[2].Key != "msg:m" {
-		t.Errorf("up to the last: %+v", got)
+
+	// The turn answering the message written meanwhile reads all that the
+	// turns of the question wrote, after that message too. In ID order:
+	// conversation.Order moves the message after them.
+	next := TurnKey(TurnGroupKey("run-2", meanwhile), 0)
+	s.AppendMessages(ctx, sid, next, 0, []Message{{Role: RoleAssistant, Content: `"answer"`}})
+	got, _ = s.LoadConversation(ctx, sid, meanwhile, []string{next})
+	want = []string{`msg:q "question"`, turn + `:0 "searching"`, `msg:m "meanwhile"`, turn + `:1 "found"`, turn + `1:0 "another turn"`, next + `:0 "answer"`}
+	if !reflect.DeepEqual(keys(got), want) {
+		t.Errorf("the next turn loaded %q\nwant %q", keys(got), want)
+	}
+
+	// A later message's turns are not read by an earlier one's: the question
+	// read again stops before them.
+	got, _ = s.LoadConversation(ctx, sid, question, []string{turn})
+	want = []string{`msg:q "question"`, turn + `:0 "searching"`, turn + `:1 "found"`}
+	if !reflect.DeepEqual(keys(got), want) {
+		t.Errorf("the next turn loaded %q\nwant %q", keys(got), want)
 	}
 }

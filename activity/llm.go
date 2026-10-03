@@ -95,9 +95,9 @@ type PromptRef struct {
 }
 
 // TurnHistory points at a session turn's conversation: the session up to
-// UpTo, where it stood when the message the turn answers started its turns,
-// then those turns' messages. A message someone writes meanwhile is past
-// UpTo: it gets its own turn, and is not read twice.
+// UpTo, the message the turn answers, what the turns answering the earlier
+// messages wrote, then this message's turns' (store.TurnReads). A message
+// someone stores after UpTo is not read: it gets its own turn.
 type TurnHistory struct {
 	SessionID string `json:"session_id"`
 	UpTo      int64  `json:"up_to"`

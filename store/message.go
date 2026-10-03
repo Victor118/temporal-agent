@@ -3,6 +3,7 @@ package store
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -77,9 +78,9 @@ const (
 func HumanMessageKey(id string) string { return humanKeyPrefix + id }
 
 // TurnGroupKey names the turns answering one message: id is unique to the
-// message, upTo the last message of the session they read besides their own
-// (the snapshot they started from). A message stored after upTo while they
-// ran is read after them (see TurnSnapshot).
+// message, upTo the message they answer, the last of the session they read
+// besides the turns' (the snapshot they start from). A message stored after
+// upTo while they ran is read after them (see TurnSnapshot, TurnReads).
 func TurnGroupKey(id string, upTo int64) string {
 	return fmt.Sprintf("%s@%d", id, upTo)
 }
@@ -121,6 +122,28 @@ func TurnSnapshot(group string) (int64, bool) {
 	}
 	upTo, err := strconv.ParseInt(group[i+1:], 10, 64)
 	return upTo, err == nil
+}
+
+// TurnReads reports whether a turn reads the message stored as id under key:
+// upTo is the message the turn answers (its group's snapshot, TurnGroupKey),
+// turnKeys the turns of its group, its own included. It reads the session up
+// to that message, what its group wrote, and what the turns answering earlier
+// messages wrote, even after it: they ran before it, as a session answers its
+// messages one at a time. A person's message stored after upTo is not read:
+// it is answered next, by a turn of its own.
+func TurnReads(id int64, key string, upTo int64, turnKeys []string) bool {
+	if id <= upTo {
+		return true
+	}
+	turn, ok := TurnOf(key)
+	if !ok {
+		return false
+	}
+	if slices.Contains(turnKeys, turn) {
+		return true
+	}
+	snapshot, ok := TurnSnapshot(TurnGroup(turn))
+	return ok && snapshot < upTo
 }
 
 // TurnMessageKey is the idempotency key of the index-th message produced by a

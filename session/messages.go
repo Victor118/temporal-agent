@@ -100,7 +100,8 @@ func (s *Service) Deliver(ctx context.Context, sess *store.Session, author *stor
 
 	content, _ := json.Marshal(text)
 	stored := store.Message{Role: store.RoleUser, Content: string(content), UserID: author.ID, Author: author.Name()}
-	if err := s.store.AppendMessage(ctx, sess.SessionID, store.HumanMessageKey(uuid.New().String()), stored); err != nil {
+	id, err := s.store.AppendMessage(ctx, sess.SessionID, store.HumanMessageKey(uuid.New().String()), stored)
+	if err != nil {
 		return false, fmt.Errorf("store message: %w", err)
 	}
 	go s.setTitleFrom(sess.SessionID, text)
@@ -119,7 +120,9 @@ func (s *Service) Deliver(ctx context.Context, sess *store.Session, author *stor
 	}
 	called := answered(sess.AgentMode, len(members), mentioned)
 	// No agent mentioned: the session's agent answers (an empty list).
-	msg := workflow.UserMessage{Text: text, UserID: author.ID, UserName: author.Name(), Stored: true, Agents: mentioned}
+	// Its ID is the snapshot of the turns answering it: they read the session
+	// up to it, not the messages stored after it.
+	msg := workflow.UserMessage{Text: text, UserID: author.ID, UserName: author.Name(), Stored: true, MessageID: id, Agents: mentioned}
 	s.publishUserMessage(sess.SessionID, msg, answering(called, mentioned, sess.AgentID, s.cfg.DefaultAgentID, agents))
 	if !called {
 		return false, nil

@@ -56,8 +56,9 @@ type Store interface {
 	// TurnMessageKey(turnKey, startIndex+i). Re-writing a message already stored
 	// is a no-op, so a replayed activity never duplicates or renumbers.
 	AppendMessages(ctx context.Context, sessionID, turnKey string, startIndex int, messages []Message) error
-	// AppendMessage appends one message under an explicit idempotency key.
-	AppendMessage(ctx context.Context, sessionID, key string, msg Message) error
+	// AppendMessage appends one message under an explicit idempotency key,
+	// and returns its ID (the stored one, when the key was already written).
+	AppendMessage(ctx context.Context, sessionID, key string, msg Message) (int64, error)
 	DeleteMessage(ctx context.Context, sessionID string, id int64) error
 	DeleteMessagesBySession(ctx context.Context, sessionID string) error
 

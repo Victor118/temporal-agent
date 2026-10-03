@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -554,23 +555,24 @@ func TestSessionWorkflow_AMessageWrittenMidTurnIsTheNextOne(t *testing.T) {
 	var suite testsuite.WorkflowTestSuite
 	env := suite.NewTestWorkflowEnvironment()
 	var f *llmFakes
+	var bob int64
 	f = registerRealTurns(env, func(n int, _ provider.ChatRequest) (provider.ChatResponse, error) {
 		switch n {
 		case 1: // Bob writes while the model thinks: the server stores it
-			f.session.add(store.HumanMessageKey("bob"), store.Message{Role: store.RoleUser, Content: `"and the tests?"`, UserID: "u-bob", Author: "Bob"})
+			bob = f.session.add(store.HumanMessageKey("bob"), store.Message{Role: store.RoleUser, Content: `"and the tests?"`, UserID: "u-bob", Author: "Bob"})
 			return provider.ChatResponse{ToolCalls: []provider.ToolCallInfo{{ID: "t1", Name: "web_fetch", Input: json.RawMessage(`{}`)}}}, nil
 		case 2:
 			return provider.ChatResponse{Content: "read", StopReason: "end_turn"}, nil
 		}
 		return provider.ChatResponse{Content: "tests too", StopReason: "end_turn"}, nil
 	})
-	f.session.add(store.HumanMessageKey("alice"), store.Message{Role: store.RoleUser, Content: `"read the page"`, UserID: "u-alice", Author: "Alice"})
+	alice := f.session.add(store.HumanMessageKey("alice"), store.Message{Role: store.RoleUser, Content: `"read the page"`, UserID: "u-alice", Author: "Alice"})
 
 	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(SignalUserMessage, UserMessage{Text: "read the page", UserID: "u-alice", UserName: "Alice", Stored: true})
+		env.SignalWorkflow(SignalUserMessage, UserMessage{Text: "read the page", UserID: "u-alice", UserName: "Alice", Stored: true, MessageID: alice})
 	}, time.Second)
 	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(SignalUserMessage, UserMessage{Text: "and the tests?", UserID: "u-bob", UserName: "Bob", Stored: true})
+		env.SignalWorkflow(SignalUserMessage, UserMessage{Text: "and the tests?", UserID: "u-bob", UserName: "Bob", Stored: true, MessageID: bob})
 	}, 2*time.Second)
 	env.ExecuteWorkflow(SessionWorkflow, SessionWorkflowInput{SessionID: "s1", AgentID: "default"})
 
@@ -586,6 +588,43 @@ func TestSessionWorkflow_AMessageWrittenMidTurnIsTheNextOne(t *testing.T) {
 	next := requests[2].Messages
 	if n := len(next); n != 5 || next[3].Role != "assistant" || textOf(next[3]) != "read" || next[4].Role != "user" || textOf(next[4]) != "[Bob] and the tests?" {
 		t.Errorf("the next turn read %+v\nwant Alice's message, the first turn (call, result, answer), then Bob's", next)
+	}
+}
+
+// Two messages stored before the first turn starts: each turn reads up to the
+// message it answers. The first does not read the second, and the second
+// reads the first turn's answer before it, so ends on its own message.
+func TestSessionWorkflow_TwoMessagesStoredBeforeTheFirstTurn(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+	f := registerRealTurns(env, func(n int, _ provider.ChatRequest) (provider.ChatResponse, error) {
+		return provider.ChatResponse{Content: fmt.Sprintf("R%d", n), StopReason: "end_turn"}, nil
+	})
+	m1 := f.session.add(store.HumanMessageKey("m1"), store.Message{Role: store.RoleUser, Content: `"M1"`, UserID: "u-alice", Author: "Alice"})
+	m2 := f.session.add(store.HumanMessageKey("m2"), store.Message{Role: store.RoleUser, Content: `"M2"`, UserID: "u-alice", Author: "Alice"})
+
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(SignalUserMessage, UserMessage{Text: "M1", UserID: "u-alice", UserName: "Alice", Stored: true, MessageID: m1})
+		env.SignalWorkflow(SignalUserMessage, UserMessage{Text: "M2", UserID: "u-alice", UserName: "Alice", Stored: true, MessageID: m2})
+	}, time.Second)
+	env.ExecuteWorkflow(SessionWorkflow, SessionWorkflowInput{SessionID: "s1", AgentID: "default"})
+
+	requests := f.model.sent()
+	if len(requests) != 2 {
+		t.Fatalf("%d LLM calls, want one per message", len(requests))
+	}
+	read := func(req provider.ChatRequest) []string {
+		var out []string
+		for _, m := range req.Messages {
+			out = append(out, m.Role+" "+textOf(m))
+		}
+		return out
+	}
+	if got, want := read(requests[0]), []string{"user [Alice] M1"}; !slices.Equal(got, want) {
+		t.Errorf("the first turn read %q, want %q", got, want)
+	}
+	if got, want := read(requests[1]), []string{"user [Alice] M1", "assistant R1", "user [Alice] M2"}; !slices.Equal(got, want) {
+		t.Errorf("the second turn read %q, want %q", got, want)
 	}
 }
 

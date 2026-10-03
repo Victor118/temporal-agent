@@ -33,3 +33,28 @@ func TestTurnSnapshot(t *testing.T) {
 		}
 	}
 }
+
+// The turns answering message 10 read the session up to it, their own, and
+// the turns of earlier messages; not a later message, nor its turns.
+func TestTurnReads(t *testing.T) {
+	own := TurnKey(TurnGroupKey("run", 10), 0)
+	for _, tc := range []struct {
+		id   int64
+		key  string
+		want bool
+	}{
+		{9, HumanMessageKey("before"), true},
+		{10, HumanMessageKey("answered"), true},
+		{11, HumanMessageKey("after"), false},
+		{12, ScheduledMessageKey("s", 1), false},
+		{13, TurnMessageKey(own, 0), true},
+		{14, TurnMessageKey(TurnKey(TurnGroupKey("run", 8), 0), 3), true},   // an earlier message's turn, written after this one
+		{15, TurnMessageKey(TurnKey(TurnGroupKey("run", 10), 1), 0), false}, // its group, not among its turns
+		{16, TurnMessageKey(TurnKey(TurnGroupKey("run", 11), 0), 0), false}, // a later message's
+		{17, TurnMessageKey("fork-summary", 0), false},
+	} {
+		if got := TurnReads(tc.id, tc.key, 10, []string{own}); got != tc.want {
+			t.Errorf("TurnReads(%d, %q) = %v, want %v", tc.id, tc.key, got, tc.want)
+		}
+	}
+}

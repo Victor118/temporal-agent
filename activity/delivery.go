@@ -10,7 +10,7 @@ import (
 
 // MessageAppender stores one message under an idempotency key.
 type MessageAppender interface {
-	AppendMessage(ctx context.Context, sessionID, key string, msg store.Message) error
+	AppendMessage(ctx context.Context, sessionID, key string, msg store.Message) (int64, error)
 }
 
 // DeliveryActivities handles delivering scheduled task results to users.
@@ -42,7 +42,7 @@ func (a *DeliveryActivities) DeliverResult(ctx context.Context, input DeliverInp
 		Content: input.Content,
 	}
 	key := store.ScheduledMessageKey(input.ScheduleID, input.RunUnixMilli)
-	if err := a.Store.AppendMessage(ctx, sessionID, key, msg); err != nil {
+	if _, err := a.Store.AppendMessage(ctx, sessionID, key, msg); err != nil {
 		return fmt.Errorf("persist notification: %w", err)
 	}
 

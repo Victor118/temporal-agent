@@ -11,9 +11,9 @@ import (
 
 type appendedMessages struct{ keys []string }
 
-func (a *appendedMessages) AppendMessage(_ context.Context, _, key string, _ store.Message) error {
+func (a *appendedMessages) AppendMessage(_ context.Context, _, key string, _ store.Message) (int64, error) {
 	a.keys = append(a.keys, key)
-	return nil
+	return int64(len(a.keys)), nil
 }
 
 // A result that could not be shown live fails the delivery, so that it is

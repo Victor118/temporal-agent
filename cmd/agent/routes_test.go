@@ -380,9 +380,9 @@ func (f *routeStore) ListAgents(context.Context) ([]store.Agent, error) {
 
 // --- Messages and @agent ---
 
-func (f *routeStore) AppendMessage(_ context.Context, sessionID, key string, m store.Message) error {
+func (f *routeStore) AppendMessage(_ context.Context, sessionID, key string, m store.Message) (int64, error) {
 	f.appended = append(f.appended, m)
-	return nil
+	return int64(len(f.appended)), nil
 }
 
 func (f *routeStore) SetSessionAgentMode(_ context.Context, _, mode string) error {

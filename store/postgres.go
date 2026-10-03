@@ -281,10 +281,12 @@ func (s *PostgresStore) LoadMessagesUpTo(ctx context.Context, sessionID string, 
 	if err != nil {
 		return nil, err
 	}
-	return scanMessages(rows)
+	return scanMessages(rows, nil)
 }
 
 // LastMessageID is the ID of a session's latest message, 0 when it has none.
+// A turn's snapshot is the message it answers (UserMessage.MessageID); this
+// is only the fallback for a message the server did not store.
 func (s *PostgresStore) LastMessageID(ctx context.Context, sessionID string) (int64, error) {
 	var id int64
 	err := s.db.QueryRowContext(ctx,
@@ -292,28 +294,27 @@ func (s *PostgresStore) LastMessageID(ctx context.Context, sessionID string) (in
 	return id, err
 }
 
-// LoadConversation returns what a turn reads of its session: the messages up
-// to upTo, the snapshot it started from, and those the turns named wrote,
-// whenever they did. A message written meanwhile by someone else is left out:
-// it gets a turn of its own. No index on msg_key: the snapshot holds nearly
-// all of the session's rows, which the (session_id, id) index already finds.
+// LoadConversation returns what a turn reads of its session (TurnReads): the
+// messages up to upTo, the one it answers, then what the turns of earlier
+// messages and those of turnKeys wrote, whenever they did. A message someone
+// wrote after upTo is left out: it gets a turn of its own. The rows past upTo,
+// written since that message, are few: they are picked here rather than by
+// SQL, which would have to parse their keys. No index on msg_key: the rows up
+// to upTo are nearly all of the session's.
 func (s *PostgresStore) LoadConversation(ctx context.Context, sessionID string, upTo int64, turnKeys []string) ([]MessageWithID, error) {
-	if turnKeys == nil {
-		turnKeys = []string{}
-	}
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, created_at, msg_key, data FROM messages
-		WHERE session_id = $1 AND (id <= $2 OR EXISTS (
-			SELECT 1 FROM unnest($3::text[]) AS t(turn) WHERE starts_with(msg_key, t.turn || ':')))
-		ORDER BY id`, sessionID, upTo, turnKeys)
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT id, created_at, msg_key, data FROM messages WHERE session_id = $1 ORDER BY id", sessionID)
 	if err != nil {
 		return nil, err
 	}
-	return scanMessages(rows)
+	return scanMessages(rows, func(id int64, key string) bool {
+		return TurnReads(id, key, upTo, turnKeys)
+	})
 }
 
 // scanMessages reads rows of id, created_at, msg_key and data, and closes them.
-func scanMessages(rows *sql.Rows) ([]MessageWithID, error) {
+// keep, when not nil, picks the rows to decode and return.
+func scanMessages(rows *sql.Rows, keep func(id int64, key string) bool) ([]MessageWithID, error) {
 	defer rows.Close()
 	var messages []MessageWithID
 	for rows.Next() {
@@ -322,6 +323,9 @@ func scanMessages(rows *sql.Rows) ([]MessageWithID, error) {
 		var createdAt sql.NullTime
 		if err := rows.Scan(&m.ID, &createdAt, &m.Key, &data); err != nil {
 			return nil, err
+		}
+		if keep != nil && !keep(m.ID, m.Key) {
+			continue
 		}
 		m.CreatedAt = createdAt.Time
 		if err := json.Unmarshal([]byte(data), &m.Message); err != nil {
@@ -364,16 +368,22 @@ func (s *PostgresStore) AppendMessages(ctx context.Context, sessionID, turnKey s
 	return tx.Commit()
 }
 
-func (s *PostgresStore) AppendMessage(ctx context.Context, sessionID, key string, msg Message) error {
+// AppendMessage stores msg under key, and returns its ID: the new row's, or
+// the one already stored under key (a retried write), left as it was. The
+// no-op update is what makes the conflicting row return its ID.
+func (s *PostgresStore) AppendMessage(ctx context.Context, sessionID, key string, msg Message) (int64, error) {
 	data, err := json.Marshal(msg)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	_, err = s.db.ExecContext(ctx, `
+	var id int64
+	err = s.db.QueryRowContext(ctx, `
 		INSERT INTO messages (session_id, msg_key, data)
-		VALUES ($1, $2, $3) ON CONFLICT (session_id, msg_key) DO NOTHING`,
-		sessionID, key, string(data))
-	return err
+		VALUES ($1, $2, $3)
+		ON CONFLICT (session_id, msg_key) DO UPDATE SET msg_key = EXCLUDED.msg_key
+		RETURNING id`,
+		sessionID, key, string(data)).Scan(&id)
+	return id, err
 }
 
 func (s *PostgresStore) DeleteMessage(ctx context.Context, sessionID string, id int64) error {

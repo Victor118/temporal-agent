@@ -37,6 +37,9 @@ type UserMessage struct {
 	// already. Every human message is stored as it arrives, whether or not it
 	// calls the agent.
 	Stored bool `json:"stored,omitempty"`
+	// MessageID is the stored message's ID: the turns answering it read the
+	// session up to it (activity.TurnHistory.UpTo). 0 when not stored.
+	MessageID int64 `json:"message_id,omitempty"`
 	// Agents answer the message one after another, in this order: the agents
 	// it mentions, as the server resolved them. Empty: the session's agent
 	// alone.
@@ -163,13 +166,18 @@ func processMessage(actCtx, ctx workflow.Context, input SessionWorkflowInput, us
 		agents = []AddressedAgent{{ID: input.AgentID}}
 	}
 
-	// The turns read the conversation as it stands now, and each other's
-	// answers: a message written while they run is the next one to answer,
-	// not part of this one (activity.TurnHistory).
-	var memAct *activity.MemoryActivities
-	var upTo int64
-	if err := workflow.ExecuteActivity(actCtx, memAct.LastMessageID, activity.LastMessageIDInput{SessionID: input.SessionID}).Get(ctx, &upTo); err != nil {
-		return fmt.Errorf("conversation snapshot: %w", err)
+	// The turns read the conversation up to the message they answer, the
+	// turns of the earlier messages, and each other's answers: a message
+	// stored after it is the next one to answer, not part of this one
+	// (activity.TurnHistory, store.TurnReads). A message the server did not
+	// store (Stored false, no MessageID) falls back on the session's last
+	// message: the turn writes it itself, after that.
+	upTo := userMessage.MessageID
+	if upTo == 0 {
+		var memAct *activity.MemoryActivities
+		if err := workflow.ExecuteActivity(actCtx, memAct.LastMessageID, activity.LastMessageIDInput{SessionID: input.SessionID}).Get(ctx, &upTo); err != nil {
+			return fmt.Errorf("conversation snapshot: %w", err)
+		}
 	}
 	// group names the turns answering the message, globally: the run ID
 	// keeps it distinct from the same number in an earlier run of this

@@ -64,9 +64,9 @@ func (m *memStore) ListAgents(context.Context) ([]store.Agent, error) {
 	}
 	return []store.Agent{{ID: "default"}}, nil
 }
-func (m *memStore) AppendMessage(_ context.Context, _, _ string, msg store.Message) error {
+func (m *memStore) AppendMessage(_ context.Context, _, _ string, msg store.Message) (int64, error) {
 	m.appended = append(m.appended, msg)
-	return nil
+	return int64(len(m.appended)), nil
 }
 func (m *memStore) LoadMessages(context.Context, string) ([]store.Message, error) {
 	var out []store.Message

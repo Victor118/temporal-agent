@@ -212,7 +212,8 @@ func TestDeliver_Refusals(t *testing.T) {
 
 // A message to a session whose run timed out starts a new run on the
 // session's fixed ID, in the same call that signals it, with the input the
-// session had: its agent and its channel.
+// session had: its agent and its channel. The message carries the ID it was
+// stored under: its turns read the session up to it.
 func TestDeliver_SignalsWithStartOnTheFixedID(t *testing.T) {
 	st := &memStore{members: []store.SessionMember{{UserID: "u-alice"}}}
 	tc := &fakeTemporal{}
@@ -233,7 +234,7 @@ func TestDeliver_SignalsWithStartOnTheFixedID(t *testing.T) {
 	if got.id != "session-"+sid || got.options.ID != got.id || got.options.TaskQueue != "agent" || got.signal != workflow.SignalUserMessage {
 		t.Errorf("signal-with-start %q, options %+v, signal %q", got.id, got.options, got.signal)
 	}
-	if msg, ok := got.arg.(workflow.UserMessage); !ok || msg.Text != "bonjour" || msg.UserID != "u-alice" || !msg.Stored {
+	if msg, ok := got.arg.(workflow.UserMessage); !ok || msg.Text != "bonjour" || msg.UserID != "u-alice" || !msg.Stored || msg.MessageID != 1 {
 		t.Errorf("message %+v", got.arg)
 	}
 	want := workflow.SessionWorkflowInput{SessionID: sid, AgentID: "analyst", Channel: "telegram", ChannelID: "42"}
