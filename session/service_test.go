@@ -162,10 +162,11 @@ func TestStatusCache_ServesStaleStatesWhileReloading(t *testing.T) {
 // before it.
 func TestStatusCache_InvalidationDiscardsARunningLoad(t *testing.T) {
 	var c statusCache
-	release := make(chan struct{})
+	started, release := make(chan struct{}), make(chan struct{})
 	var loads atomic.Int32
 	load := func(context.Context) map[string]Status {
 		if loads.Add(1) == 1 {
+			close(started)
 			<-release
 			return map[string]Status{sid: StatusActive}
 		}
@@ -174,15 +175,10 @@ func TestStatusCache_InvalidationDiscardsARunningLoad(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { c.get(ctx, load) }()
-	for {
-		c.mu.Lock()
-		started := c.loading != nil
-		c.mu.Unlock()
-		if started {
-			break
-		}
-		time.Sleep(time.Millisecond)
-	}
+	// Wait for the load itself, not for get to mark one as running: the
+	// refresh goroutine may not have called load yet, and a load started
+	// after the invalidation could then be the one that counts as first.
+	<-started
 	c.invalidate()
 	close(release)
 	cancel()
