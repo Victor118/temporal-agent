@@ -407,10 +407,12 @@ func processTurn(actCtx, ctx workflow.Context, input SessionWorkflowInput, userM
 // turnNotifyOptions are those of a turn event: one short attempt. The turn
 // waits for it (a turn's start must not overtake the end of the one before),
 // so a server slow or away must not hold the turn: a page that misses the
-// event falls back on the visibility queries.
+// event falls back on the visibility queries. ScheduleToClose bounds the
+// wait for a worker to pick the attempt up, which StartToClose does not count.
 var turnNotifyOptions = workflow.ActivityOptions{
-	StartToCloseTimeout: 3 * time.Second,
-	RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 1},
+	ScheduleToCloseTimeout: 5 * time.Second,
+	StartToCloseTimeout:    3 * time.Second,
+	RetryPolicy:            &temporal.RetryPolicy{MaximumAttempts: 1},
 }
 
 // notifyTurn sends a turn event to the session's web members. Best effort:

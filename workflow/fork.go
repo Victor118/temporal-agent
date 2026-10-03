@@ -80,7 +80,13 @@ func ForkSessionWorkflow(ctx workflow.Context, in ForkSessionInput) error {
 }
 
 // sessionNotifyOptions are those of an event to a session's members.
-var sessionNotifyOptions = workflow.ActivityOptions{StartToCloseTimeout: 10 * time.Second, RetryPolicy: notifyRetry}
+// ScheduleToClose bounds the whole, attempts and the wait for a worker to
+// pick each up: the workflow waits for it.
+var sessionNotifyOptions = workflow.ActivityOptions{
+	ScheduleToCloseTimeout: 30 * time.Second,
+	StartToCloseTimeout:    10 * time.Second,
+	RetryPolicy:            notifyRetry,
+}
 
 // notifySession sends an event to the members watching a session. Best effort:
 // a member who misses it sees the result when the session reloads.
