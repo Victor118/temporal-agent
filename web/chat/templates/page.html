@@ -73,7 +73,7 @@ if (!window.chatWired) {
   // A reload follows the conversation only for a member who was at its end, or
   // who just sent a message: one reading further up stays where they are.
   var sent = false, follow = false;
-  function fromComposer(e) { return e.detail.elt.closest && e.detail.elt.closest('#composer'); }
+  function fromComposer(e) { return e.detail.elt.closest && e.detail.elt.closest('.composer-box'); }
   document.body.addEventListener('htmx:beforeRequest', function (e) { if (fromComposer(e)) sent = true; });
   document.body.addEventListener('htmx:afterRequest', function (e) { if (fromComposer(e) && !e.detail.successful) sent = false; });
   document.body.addEventListener('htmx:beforeSwap', function (e) {
@@ -85,7 +85,10 @@ if (!window.chatWired) {
     if (target && target.id === 'thread') {
       if (follow) toBottom();
       sent = follow = false;
-    } else if (target === document.body) toHash() || toBottom();
+    } else if (target === document.body) {
+      sent = follow = false;
+      toHash() || toBottom();
+    }
   });
 }
 </script>
