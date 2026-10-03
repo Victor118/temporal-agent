@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -22,6 +23,7 @@ import (
 	"github.com/victor/temporal-agent/sse"
 	"github.com/victor/temporal-agent/store"
 	"github.com/victor/temporal-agent/web/admin"
+	"github.com/victor/temporal-agent/web/chat"
 	"github.com/victor/temporal-agent/workflow"
 )
 
@@ -698,5 +700,75 @@ func TestUI_ReportFromANonFork(t *testing.T) {
 	if body := w.Body.String(); w.Code != http.StatusOK || !strings.Contains(body, `Rapport au parent`) ||
 		!strings.Contains(body, "pas un fork") || strings.Contains(body, "<button") || len(tc.started) != 0 {
 		t.Errorf("%d %s, started %v", w.Code, body, tc.started)
+	}
+}
+
+// get loads a page or a fragment as htmx does, holding version when it is
+// not empty.
+func get(t *testing.T, h http.Handler, path, version string, cookie *http.Cookie) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.Header.Set("HX-Request", "true")
+	if version != "" {
+		req.Header.Set(chat.VersionHeader, version)
+	}
+	req.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	return w
+}
+
+var versionRe = regexp.MustCompile(`data-version="([0-9a-f]+)"`)
+
+// versionIn is the version a fragment carries, and the page holds.
+func versionIn(t *testing.T, body string) string {
+	t.Helper()
+	m := versionRe.FindStringSubmatch(body)
+	if m == nil {
+		t.Fatalf("no version in %s", body)
+	}
+	return m[1]
+}
+
+// A reload of an unchanged fragment is a 204: htmx swaps nothing. The page
+// holds the versions its reloads get, so its first reload is one too.
+func TestUI_UnchangedFragmentsAreNoContent(t *testing.T) {
+	h, st, _ := newReportTest(t)
+	bob := logIn(t, h, "bob@example.com")
+	page := get(t, h, "/s/s1", "", bob).Body.String()
+	for _, path := range []string{"/s/s1/thread", "/tree?current=s1", "/s/s1/report"} {
+		t.Run(path, func(t *testing.T) {
+			w := get(t, h, path, "", bob)
+			if w.Code != http.StatusOK {
+				t.Fatalf("first load: %d %s", w.Code, w.Body)
+			}
+			v := versionIn(t, w.Body.String())
+			if !strings.Contains(page, `data-version="`+v+`"`) {
+				t.Errorf("the page does not hold version %s", v)
+			}
+			if w := get(t, h, path, v, bob); w.Code != http.StatusNoContent || w.Body.Len() != 0 {
+				t.Errorf("unchanged: %d %s", w.Code, w.Body)
+			}
+			if w := get(t, h, path, "stale", bob); w.Code != http.StatusOK || versionIn(t, w.Body.String()) != v {
+				t.Errorf("another version held: %d", w.Code)
+			}
+		})
+	}
+
+	// A change shows: a new message, a new title.
+	thread := versionIn(t, get(t, h, "/s/s1/thread", "", bob).Body.String())
+	tree := versionIn(t, get(t, h, "/tree?current=s1", "", bob).Body.String())
+	report := versionIn(t, get(t, h, "/s/s1/report", "", bob).Body.String())
+	st.messages["s1"] = append(st.messages["s1"], store.MessageWithID{ID: 4, Message: store.Message{Role: store.RoleUser, Content: `"more"`, UserID: "u-bob", Author: "Bob"}})
+	st.session.Title = "Plan B"
+	st.session.LastReportedMessageID = 4 // nothing new: the button goes grey
+	if w := get(t, h, "/s/s1/thread", thread, bob); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "more") || versionIn(t, w.Body.String()) == thread {
+		t.Errorf("thread after a message: %d", w.Code)
+	}
+	if w := get(t, h, "/tree?current=s1", tree, bob); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Plan B") {
+		t.Errorf("tree after a new title: %d", w.Code)
+	}
+	if w := get(t, h, "/s/s1/report", report, bob); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Rien à rapporter") {
+		t.Errorf("report after everything was reported: %d %s", w.Code, w.Body)
 	}
 }

@@ -17,8 +17,10 @@
 {{end}}
 
 {{define "tree-items"}}
-{{range .Roots}}<div class="tree-root">{{template "tree-node" .}}</div>
+<div class="tree-items" data-version="{{index .Versions "tree-items"}}">
+{{range .Roots}}<div class="tree-root" id="root-{{.Session.SessionID}}">{{template "tree-node" .}}</div>
 {{else}}<div class="tree-empty">Aucune session. Crée-en une avec +.</div>{{end}}
+</div>
 {{end}}
 
 {{define "tree-node"}}

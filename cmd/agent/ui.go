@@ -253,7 +253,11 @@ func (u *ui) renderPage(w http.ResponseWriter, r *http.Request, sessionID, view,
 		adjust(p)
 	}
 	p.Fragment = block == "thread"
-	chat.Render(w, block, p)
+	if block == "page" {
+		chat.RenderPage(w, block, p)
+		return
+	}
+	chat.RenderFragment(w, block, p, r.Header.Get(chat.VersionHeader))
 }
 
 // home opens the session most recently active, or the welcome page.
@@ -303,7 +307,7 @@ func (u *ui) treeFragment(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Internal error", http.StatusInternalServerError)
 		return
 	}
-	chat.Render(w, "tree-items", &chat.Page{Roots: chat.BuildTree(sessions, stats, u.sessions.Statuses(r.Context()), current)})
+	chat.RenderFragment(w, "tree-items", &chat.Page{Roots: chat.BuildTree(sessions, stats, u.sessions.Statuses(r.Context()), current)}, r.Header.Get(chat.VersionHeader))
 }
 
 // --- Actions ---

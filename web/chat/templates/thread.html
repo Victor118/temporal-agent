@@ -12,7 +12,7 @@
      out of band, since its state follows the thread's. */}}
 {{define "thread"}}
 {{$sid := .Node.Session.SessionID}}
-<div class="thread-inner" id="thread-inner">
+<div class="thread-inner" id="thread-inner" data-version="{{index .Versions "thread"}}">
   {{/* Polled while the agent works, in case an event is missed. */}}
   {{if or .Working .SummaryPending}}<div id="thread-poll" hidden hx-get="/s/{{$sid}}/thread" hx-trigger="every 4s" hx-target="#thread" hx-swap="morph:innerHTML"></div>{{end}}
   {{with .Parent}}

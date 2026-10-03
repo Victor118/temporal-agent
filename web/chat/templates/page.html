@@ -39,6 +39,12 @@ Idiomorph.defaults.callbacks.beforeAttributeUpdated = function (name, el) {
   if (name === 'open' && el.tagName === 'DETAILS') return false;
   if (name === 'value' && (el.tagName === 'TEXTAREA' || (el.tagName === 'INPUT' && el.type !== 'hidden'))) return false;
 };
+// A reload says which version of its fragment the page holds: when it has not
+// changed, the server answers 204 and htmx swaps nothing.
+document.body.addEventListener('htmx:configRequest', function (e) {
+  var t = e.detail.target, held = e.detail.verb === 'get' && t && t.querySelector(':scope > [data-version]');
+  if (held) e.detail.headers['X-Fragment-Version'] = held.dataset.version;
+});
 // The thread opens at its end, or on the message a link points to (#m<id>).
 function toHash() {
   var t = location.hash && document.querySelector(location.hash);

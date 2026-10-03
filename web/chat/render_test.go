@@ -318,3 +318,37 @@ func TestRender_ReportedMarkAndFailure(t *testing.T) {
 		}
 	}
 }
+
+// A fragment carries its version, a hash of what it shows; the page holds
+// the versions its reloads would get, and one the page holds is a 204.
+func TestRender_FragmentVersions(t *testing.T) {
+	p := testPage("thread")
+	p.Report = &ReportView{ReportState: session.ReportState{ParentSessionID: "root"}}
+	page := httptest.NewRecorder()
+	RenderPage(page, "page", p)
+	for _, name := range []string{"thread", "tree-items", "report"} {
+		v := p.Versions[name]
+		if len(v) != 24 || !strings.Contains(page.Body.String(), `data-version="`+v+`"`) {
+			t.Errorf("%s: version %q not on the page", name, v)
+		}
+		frag := testPage("thread")
+		frag.Report, frag.Fragment = p.Report, name == "thread"
+		w := httptest.NewRecorder()
+		RenderFragment(w, name, frag, v)
+		if w.Code != 204 || w.Body.Len() != 0 {
+			t.Errorf("%s held already: %d %s", name, w.Code, w.Body)
+		}
+	}
+	if strings.Contains(page.Body.String(), versionPlaceholder) || p.Fragment {
+		t.Error("the page kept the placeholder, or the fragment flag")
+	}
+
+	// Another content, another version, and the fragment comes.
+	frag := testPage("thread")
+	frag.Fragment, frag.Working = true, false
+	w := httptest.NewRecorder()
+	RenderFragment(w, "thread", frag, p.Versions["thread"])
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `data-version="`+frag.Versions["thread"]+`"`) || frag.Versions["thread"] == p.Versions["thread"] {
+		t.Errorf("a changed thread: %d", w.Code)
+	}
+}

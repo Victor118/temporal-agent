@@ -81,6 +81,7 @@
 {{define "report"}}
 {{with .Report}}
 {{$sid := $.Node.Session.SessionID}}
+<div class="report-inner" data-version="{{index $.Versions "report"}}">
   {{if .Pending}}<div id="report-poll" hidden hx-get="/s/{{$sid}}/report" hx-trigger="every 3s" hx-target="#report" hx-swap="morph:innerHTML"></div>{{end}}
   <div class="eyebrow">Rapport au parent</div>
   {{if not .Refused}}
@@ -94,5 +95,6 @@
   {{if and .Failed (not .Pending)}}<div class="error">Le dernier rapport n'a pas pu être écrit. Tu peux réessayer.</div>{{end}}
   {{if and .LastReportID (not .Refused)}}<div class="note" style="margin-top:6px">Dernier rapport : <a href="/s/{{.ParentSessionID}}#m{{.LastReportID}}">{{.LastReported}}</a></div>{{end}}
   {{with .Error}}<div class="error">{{.}}</div>{{end}}
+</div>
 {{end}}
 {{end}}

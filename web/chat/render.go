@@ -2,7 +2,9 @@ package chat
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"errors"
 	"html/template"
 	"io/fs"
@@ -67,6 +69,9 @@ type Page struct {
 	// Fragment: the thread is rendered alone, to be swapped in. The composer
 	// then comes with it, out of band, since its state follows the thread's.
 	Fragment bool
+	// Versions of the fragments the page reloads, by template name: each
+	// carries its own in a data-version attribute (see RenderFragment).
+	Versions map[string]string
 }
 
 // SeveralAgents reports whether members can call more than one agent: the
@@ -215,6 +220,73 @@ func Render(w http.ResponseWriter, name string, data any) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	buf.WriteTo(w)
+}
+
+// VersionHeader is the header a fragment's reload sends with the version the
+// page holds (page.html sets it from the fragment's data-version).
+const VersionHeader = "X-Fragment-Version"
+
+// versionPlaceholder stands for a fragment's version while it is rendered to
+// be hashed: the version cannot be part of what it hashes.
+const versionPlaceholder = "fragment-version-placeholder"
+
+// renderVersioned renders the fragment name with its version, a hash of what
+// it shows: the same content always has the same version, whatever data it
+// came from.
+func renderVersioned(name string, p *Page) ([]byte, string, error) {
+	if p.Versions == nil {
+		p.Versions = map[string]string{}
+	}
+	p.Versions[name] = versionPlaceholder
+	var buf bytes.Buffer
+	if err := tmpl.ExecuteTemplate(&buf, name, p); err != nil {
+		return nil, "", err
+	}
+	sum := sha256.Sum256(buf.Bytes())
+	version := hex.EncodeToString(sum[:12])
+	p.Versions[name] = version
+	return bytes.ReplaceAll(buf.Bytes(), []byte(versionPlaceholder), []byte(version)), version, nil
+}
+
+// RenderFragment writes a fragment a page reloads. When the page holds its
+// version already (have, from VersionHeader), it answers 204 No Content:
+// htmx swaps nothing, and nothing on the page moves.
+func RenderFragment(w http.ResponseWriter, name string, p *Page, have string) {
+	body, version, err := renderVersioned(name, p)
+	if err != nil {
+		log.Printf("chat: render %s: %v", name, err)
+		http.Error(w, "Erreur de rendu", http.StatusInternalServerError)
+		return
+	}
+	if have != "" && have == version {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write(body)
+}
+
+// reloaded are the fragments a session's page reloads on its own: the
+// thread, the tree, a fork's report section.
+var reloaded = []string{"thread", "tree-items", "report"}
+
+// RenderPage writes a whole page, its fragments carrying the versions their
+// reloads would get: the first reload of an unchanged one swaps nothing.
+func RenderPage(w http.ResponseWriter, name string, p *Page) {
+	fragment := p.Fragment
+	for _, f := range reloaded {
+		if f == "thread" && (p.Node == nil || p.View == "map") || f == "report" && p.Report == nil {
+			continue
+		}
+		p.Fragment = f == "thread" // as its reload renders it, the composer along
+		if _, _, err := renderVersioned(f, p); err != nil {
+			log.Printf("chat: render %s: %v", f, err)
+			http.Error(w, "Erreur de rendu", http.StatusInternalServerError)
+			return
+		}
+	}
+	p.Fragment = fragment
+	Render(w, name, p)
 }
 
 func clock(t time.Time) string {
