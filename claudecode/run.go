@@ -80,6 +80,9 @@ type Result struct {
 	Subtype   string `json:"subtype"`  // success, error_max_turns, error_during_execution…
 	SessionID string `json:"session_id"`
 	Model     string `json:"model,omitempty"`
+	// APIKeySource is the CLI's own word on what paid the run: "none" for a
+	// subscription, else where its API key came from. Empty if it never said.
+	APIKeySource string `json:"api_key_source,omitempty"`
 
 	NumTurns       int     `json:"num_turns"`
 	DurationMS     int64   `json:"duration_ms"`

@@ -70,3 +70,10 @@ printf '{"type":"result","subtype":"success","is_error":false,"result":"api=%s t
 		}
 	}
 }
+
+// The coding tools tell the model what a run costs in the worker's mode.
+func TestAuthCostNote(t *testing.T) {
+	if !strings.Contains(AuthSubscription.CostNote(), "subscription") || !strings.Contains(AuthAPI.CostNote(), "billed") || Auth("").CostNote() != "" {
+		t.Errorf("notes: %q / %q / %q", AuthSubscription.CostNote(), AuthAPI.CostNote(), Auth("").CostNote())
+	}
+}

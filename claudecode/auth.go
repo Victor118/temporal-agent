@@ -92,6 +92,18 @@ func (a Auth) Describe(environ []string) string {
 	return "authenticate as the CLI finds"
 }
 
+// CostNote tells the model calling a coding tool what a run costs, so it does
+// not weigh the run against a cost it remembers but no longer applies.
+func (a Auth) CostNote() string {
+	switch a {
+	case AuthAPI:
+		return "Each run is billed to the Anthropic API, from a few cents to a few dollars."
+	case AuthSubscription:
+		return "Runs are paid by the operator's Claude subscription, not per call: they only count against its usage limits."
+	}
+	return ""
+}
+
 // envValue is name's value in environ, the last one winning as os/exec has it.
 func envValue(environ []string, name string) string {
 	value := ""

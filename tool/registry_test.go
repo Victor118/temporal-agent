@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -251,4 +252,21 @@ func TestRegistry_ConcurrentReadsAndWrites(t *testing.T) {
 	}
 	close(done)
 	wg.Wait()
+}
+
+// The coding tools end their description with what a run costs, when known.
+func TestClaudeCodeToolsSayWhatARunCosts(t *testing.T) {
+	r := NewRegistry()
+	RegisterClaudeCodeTools(r, func() {}, func() {}, "Runs are paid by a subscription.")
+	for _, name := range []string{"analyze_repo", "implement_feature"} {
+		tl, ok := r.Get(name)
+		if !ok || !strings.HasSuffix(tl.Description, ". Runs are paid by a subscription.") {
+			t.Errorf("%s: %q", name, tl.Description)
+		}
+	}
+	r = NewRegistry()
+	RegisterClaudeCodeTools(r, func() {}, func() {}, "")
+	if tl, _ := r.Get("analyze_repo"); strings.HasSuffix(tl.Description, " ") {
+		t.Errorf("no note, trailing space: %q", tl.Description)
+	}
 }

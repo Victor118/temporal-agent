@@ -23,6 +23,9 @@ type streamLine struct {
 	SessionID string          `json:"session_id"`
 	Model     string          `json:"model"`
 	Message   json.RawMessage `json:"message"`
+	// init line: which API key the CLI uses, "none" when it has none (a
+	// subscription's login or token).
+	APIKeySource string `json:"apiKeySource"`
 
 	// result lines
 	Result            string          `json:"result"`
@@ -120,6 +123,7 @@ func (r *Runner) parseLine(line []byte, res *Result, report *strings.Builder, to
 			if sl.Model != "" {
 				res.Model = sl.Model
 			}
+			res.APIKeySource = sl.APIKeySource
 			return []Event{{Kind: EventInit, Raw: raw}}
 		}
 

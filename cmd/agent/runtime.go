@@ -97,7 +97,7 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 	runs := subproc.NewRuns(runAs)
 
 	workerConf := loadWorkerConfig(cfg)
-	registry := buildRegistry(cfg, st, tc, runAs, runs)
+	registry := buildRegistry(cfg, st, tc, runAs, runs, auth)
 
 	skills := loadSkills(opts.skills)
 	catalog := initCatalog(st)
@@ -177,7 +177,7 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 // buildRegistry registers the built-in tools this process can run. Which of
 // them it exposes is the worker config's decision (exposeTools); the MCP
 // servers' come after (discoverMCPServers).
-func buildRegistry(cfg *config.Config, st store.Store, tc client.Client, runAs *subproc.Identity, runs *subproc.Runs) *tool.Registry {
+func buildRegistry(cfg *config.Config, st store.Store, tc client.Client, runAs *subproc.Identity, runs *subproc.Runs, auth claudecode.Auth) *tool.Registry {
 	registry := tool.NewRegistry()
 	tool.RegisterFilesystemTools(registry, cfg.WorkspacePath, runAs)
 	tool.RegisterGrepTool(registry, cfg.WorkspacePath)
@@ -200,7 +200,7 @@ func buildRegistry(cfg *config.Config, st store.Store, tc client.Client, runAs *
 	// The coding tools only where the CLI is installed: a worker that cannot
 	// run a coding session has none to offer.
 	if (&claudecode.Runner{}).Available() {
-		tool.RegisterClaudeCodeTools(registry, workflow.AnalyzeRepoWorkflow, workflow.ImplementFeatureWorkflow)
+		tool.RegisterClaudeCodeTools(registry, workflow.AnalyzeRepoWorkflow, workflow.ImplementFeatureWorkflow, auth.CostNote())
 		if cfg.ClaudeCodeSSHKey != "" {
 			log.Printf("Coding runs use the git identity at %s", cfg.ClaudeCodeSSHKey)
 		}

@@ -43,7 +43,7 @@ func run(t *testing.T, script string, p Params) (Result, error) {
 
 const successStream = `
 cat <<'EOF'
-{"type":"system","subtype":"init","session_id":"sess-1","model":"claude-opus-5","cwd":"/w"}
+{"type":"system","subtype":"init","session_id":"sess-1","model":"claude-opus-5","cwd":"/w","apiKeySource":"none"}
 {"type":"assistant","message":{"model":"claude-opus-5","content":[{"type":"text","text":"Looking at the repo."}]},"session_id":"sess-1"}
 {"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu_1","name":"Bash","input":{"command":"go test ./..."}}]},"session_id":"sess-1"}
 {"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu_1","is_error":false}]},"session_id":"sess-1"}
@@ -69,8 +69,8 @@ func TestRunParsesSuccessfulStream(t *testing.T) {
 	if res.IsError || res.Subtype != "success" {
 		t.Errorf("IsError = %v, Subtype = %q", res.IsError, res.Subtype)
 	}
-	if res.SessionID != "sess-1" || res.Model != "claude-opus-5" {
-		t.Errorf("SessionID = %q, Model = %q", res.SessionID, res.Model)
+	if res.SessionID != "sess-1" || res.Model != "claude-opus-5" || res.APIKeySource != "none" {
+		t.Errorf("SessionID = %q, Model = %q, APIKeySource = %q", res.SessionID, res.Model, res.APIKeySource)
 	}
 	if res.NumTurns != 3 || res.DurationMS != 4200 || res.CostUSD != 0.0425 {
 		t.Errorf("turns/duration/cost = %d/%d/%v", res.NumTurns, res.DurationMS, res.CostUSD)

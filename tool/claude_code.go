@@ -10,14 +10,18 @@ import "encoding/json"
 // analyze_repo is read-only by construction. The permission mode is set by the
 // workflow and is not part of this schema, so an agent cannot ask for write
 // access: writing is a different tool, with a different workflow behind it.
-func RegisterClaudeCodeTools(registry *Registry, analyzeWorkflowFunc, implementWorkflowFunc interface{}) {
+//
+// costNote, from the worker's way of paying for runs, ends each description:
+// the model weighs a run against what it costs now, not what it remembers.
+func RegisterClaudeCodeTools(registry *Registry, analyzeWorkflowFunc, implementWorkflowFunc interface{}, costNote string) {
 	registry.Register(&Tool{
 		Name: "analyze_repo",
 		Description: "Read a Git repository and answer a question about it, using a coding agent that explores the code on its own. " +
 			"Use it to understand an unfamiliar codebase, locate where something is implemented, review changes, or diagnose a problem. " +
 			"It never modifies the repository: the clone is read-only and is deleted afterwards. " +
 			"It cannot fix what it finds: changing the code is implement_feature's job, if you have that tool. " +
-			"Ask a precise question — the answer comes back as a written report, and the agent cannot ask you for clarification mid-run.",
+			"Ask a precise question — the answer comes back as a written report, and the agent cannot ask you for clarification mid-run." +
+			withSpace(costNote),
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -46,7 +50,8 @@ func RegisterClaudeCodeTools(registry *Registry, analyzeWorkflowFunc, implementW
 			"Use it to implement a feature, fix a bug, or carry out a refactor described in prose. " +
 			"It branches from base, commits its own work, and pushes the branch — it never writes to the base branch and never opens a pull request. " +
 			"Describe the outcome you want and any constraint that matters; the agent cannot ask you for clarification mid-run. " +
-			"A run that produces no commit is reported as a failure.",
+			"A run that produces no commit is reported as a failure." +
+			withSpace(costNote),
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -77,4 +82,12 @@ func RegisterClaudeCodeTools(registry *Registry, analyzeWorkflowFunc, implementW
 		Sensitive:    true,
 		WorkflowFunc: implementWorkflowFunc,
 	})
+}
+
+// withSpace prefixes a non-empty sentence with the space that joins it.
+func withSpace(s string) string {
+	if s == "" {
+		return ""
+	}
+	return " " + s
 }

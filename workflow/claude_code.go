@@ -72,7 +72,10 @@ type ClaudeCodeOutput struct {
 	// Dirty reports changes the run left uncommitted; they died with the clone.
 	Dirty bool `json:"dirty,omitempty"`
 
-	CostUSD    float64        `json:"cost_usd,omitempty"`
+	CostUSD float64 `json:"cost_usd,omitempty"`
+	// PaidBy says what paid the run, as the CLI reported it: "subscription",
+	// "api", or empty when it did not say.
+	PaidBy     string         `json:"paid_by,omitempty"`
 	DurationMS int64          `json:"duration_ms,omitempty"`
 	NumTurns   int            `json:"num_turns,omitempty"`
 	ToolUses   map[string]int `json:"tool_uses,omitempty"`
@@ -170,6 +173,7 @@ func analyzeRepo(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCodeOutp
 
 	out.Report = result.Report
 	out.CostUSD = result.CostUSD
+	out.PaidBy = paidBy(result.APIKeySource)
 	out.DurationMS = result.DurationMS
 	out.NumTurns = result.NumTurns
 	out.ToolUses = result.ToolUses
@@ -190,6 +194,8 @@ type claudeCodeResult struct {
 	DurationMS int64          `json:"duration_ms"`
 	CostUSD    float64        `json:"cost_usd"`
 	ToolUses   map[string]int `json:"tool_uses"`
+	// APIKeySource is "none" when a subscription paid the run.
+	APIKeySource string `json:"api_key_source"`
 }
 
 // Summary renders the output for the calling agent: the report, then the facts
@@ -227,7 +233,26 @@ func (o ClaudeCodeOutput) Summary() string {
 	}
 	fmt.Fprintf(&sb, "run: %d turns, %s, $%.4f",
 		o.NumTurns, (time.Duration(o.DurationMS) * time.Millisecond).Round(time.Second), o.CostUSD)
+	switch o.PaidBy {
+	case "subscription":
+		sb.WriteString(" (an estimate: paid by a Claude subscription, not billed)")
+	case "api":
+		sb.WriteString(" (billed to the Anthropic API)")
+	}
 	return sb.String()
+}
+
+// paidBy reads the CLI's apiKeySource: "none" means no API key, so a
+// subscription's login or token paid the run.
+func paidBy(apiKeySource string) string {
+	switch apiKeySource {
+	case "":
+		return ""
+	case "none":
+		return "subscription"
+	default:
+		return "api"
+	}
 }
 
 func shortCommit(c string) string {

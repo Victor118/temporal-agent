@@ -207,6 +207,27 @@ func TestClaudeCodeOutputSummary(t *testing.T) {
 		t.Error("summary should shorten the commit")
 	}
 
+	// What paid the run, as the CLI said: an agent must not take a
+	// subscription's estimate for a bill, nor the other way round.
+	for paidBy, want := range map[string]string{
+		"subscription": "paid by a Claude subscription, not billed",
+		"api":          "billed to the Anthropic API",
+	} {
+		o := out
+		o.PaidBy = paidBy
+		if !strings.Contains(o.Summary(), want) {
+			t.Errorf("paid by %s: summary lacks %q", paidBy, want)
+		}
+	}
+	if strings.Contains(s, "billed") {
+		t.Error("an unknown payer should not be named")
+	}
+	for source, want := range map[string]string{"none": "subscription", "ANTHROPIC_API_KEY": "api", "": ""} {
+		if got := paidBy(source); got != want {
+			t.Errorf("paidBy(%q) = %q, want %q", source, got, want)
+		}
+	}
+
 	failed := ClaudeCodeOutput{Error: "the run reported a failure (error_max_turns)"}
 	if !strings.Contains(failed.Summary(), "error_max_turns") {
 		t.Error("a failed run's summary should lead with the failure")

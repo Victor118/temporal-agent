@@ -143,6 +143,7 @@ func implementFeature(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCod
 
 	out.Report = result.Report
 	out.CostUSD = result.CostUSD
+	out.PaidBy = paidBy(result.APIKeySource)
 	out.DurationMS = result.DurationMS
 	out.NumTurns = result.NumTurns
 	out.ToolUses = result.ToolUses
