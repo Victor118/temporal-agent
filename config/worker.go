@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"slices"
 
+	"github.com/victor/temporal-agent/tool"
 	"gopkg.in/yaml.v3"
 )
 
@@ -56,8 +58,8 @@ func LoadWorkerConfig(file string) (*WorkerConfig, error) {
 		if m.Name == "" || m.URL == "" {
 			return nil, fmt.Errorf("%s: mcp[%d] requires name and url", file, i)
 		}
-		if m.Transport != "" && m.Transport != "http" && m.Transport != "sse" {
-			return nil, fmt.Errorf("%s: mcp %q: transport %q is neither http nor sse", file, m.Name, m.Transport)
+		if m.Transport != "" && !slices.Contains(tool.MCPTransports(), m.Transport) {
+			return nil, fmt.Errorf("%s: mcp %q: transport %q is not one of %v", file, m.Name, m.Transport, tool.MCPTransports())
 		}
 		if seen[m.Name] {
 			return nil, fmt.Errorf("%s: duplicate mcp name %q", file, m.Name)

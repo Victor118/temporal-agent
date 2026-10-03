@@ -578,3 +578,32 @@ func TestMCPClient_LegacyBoundsRepliesToTheServer(t *testing.T) {
 		t.Errorf("%d replies, want %d", n, mcpMaxReplies)
 	}
 }
+
+// A server reached by the wrong transport fails with a hint naming the right
+// one; an authentication error does not.
+func TestMCPClient_WrongTransportHint(t *testing.T) {
+	streamable := newFakeMCP(t, nil)
+	asSSE := streamable.config("srv")
+	asSSE.Transport = "sse"
+	if _, err := NewMCPClient(asSSE).Discover(context.Background()); err == nil || !strings.Contains(err.Error(), "takes transport: http") {
+		t.Errorf("Streamable server as sse: %v", err)
+	}
+
+	legacy := newFakeMCP(t, func(f *fakeMCP) { f.legacy = true })
+	asHTTP := legacy.config("srv")
+	asHTTP.Transport = "http"
+	if _, err := NewMCPClient(asHTTP).Discover(context.Background()); err == nil || !strings.Contains(err.Error(), "takes transport: sse") {
+		t.Errorf("HTTP+SSE server as http: %v", err)
+	}
+
+	locked := newFakeMCP(t, func(f *fakeMCP) { f.legacy, f.apiKey = true, "right" })
+	wrongKey := locked.config("srv")
+	wrongKey.APIKey = "wrong"
+	if _, err := NewMCPClient(wrongKey).Discover(context.Background()); err == nil || strings.Contains(err.Error(), "takes transport") {
+		t.Errorf("wrong key: %v", err)
+	}
+
+	if _, err := NewMCPClient(MCPServerConfig{Name: "srv", URL: "http://unused", Transport: "ws"}).Discover(context.Background()); err == nil || !strings.Contains(err.Error(), `unknown transport "ws" (one of [http sse])`) {
+		t.Errorf("unknown transport: %v", err)
+	}
+}

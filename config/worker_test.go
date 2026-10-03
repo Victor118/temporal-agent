@@ -36,12 +36,12 @@ mcp:
 
 func TestLoadWorkerConfig_Invalid(t *testing.T) {
 	cases := map[string]string{
-		"missing queue":        `tools: ["*"]`,
-		"no tools listed":      `queue: q`,
-		"invalid tool":         "queue: q\ntools: [\"[bad\"]",
-		"requires name":        "queue: q\ntools: [\"*\"]\nmcp:\n  - url: http://x",
-		"duplicate mcp":        "queue: q\ntools: [\"*\"]\nmcp:\n  - {name: a, url: u}\n  - {name: a, url: u}",
-		"neither http nor sse": "queue: q\ntools: [\"*\"]\nmcp:\n  - {name: a, url: u, transport: websocket}",
+		"missing queue":            `tools: ["*"]`,
+		"no tools listed":          `queue: q`,
+		"invalid tool":             "queue: q\ntools: [\"[bad\"]",
+		"requires name":            "queue: q\ntools: [\"*\"]\nmcp:\n  - url: http://x",
+		"duplicate mcp":            "queue: q\ntools: [\"*\"]\nmcp:\n  - {name: a, url: u}\n  - {name: a, url: u}",
+		"is not one of [http sse]": "queue: q\ntools: [\"*\"]\nmcp:\n  - {name: a, url: u, transport: websocket}",
 	}
 	for want, content := range cases {
 		_, err := LoadWorkerConfig(writeFile(t, content))

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -14,6 +15,10 @@ import (
 	"sync/atomic"
 	"time"
 )
+
+// errNoEventStream: the server answered the GET that opens the session with
+// something else than an event stream.
+var errNoEventStream = errors.New("no event stream")
 
 // mcpMaxReplies bounds the replies to a legacy server's requests being sent
 // at once.
@@ -64,11 +69,14 @@ func dialSSE(ctx context.Context, httpc *http.Client, rawURL, apiKey string, ids
 	if resp.StatusCode != http.StatusOK {
 		err := statusError(resp)
 		resp.Body.Close()
-		return fail(fmt.Errorf("%w (an HTTP+SSE server streams events on GET; a Streamable HTTP server takes transport: http)", err))
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			return fail(fmt.Errorf("mcp sse connect: %w", err))
+		}
+		return fail(fmt.Errorf("mcp sse connect: %w: %w", errNoEventStream, err))
 	}
 	if mt := mediaType(resp); mt != "text/event-stream" {
 		resp.Body.Close()
-		return fail(fmt.Errorf("mcp sse connect: %q is not an event stream (a Streamable HTTP server takes transport: http)", mt))
+		return fail(fmt.Errorf("mcp sse connect: %w: answered %q", errNoEventStream, mt))
 	}
 
 	// The server names the endpoint in its first event; anything before is

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"regexp"
 	"slices"
@@ -382,15 +383,53 @@ func (c *MCPClient) drop(conn mcpConn) {
 	conn.close()
 }
 
-func (c *MCPClient) dial(ctx context.Context) (mcpConn, error) {
-	switch c.config.Transport {
-	case "sse":
-		return dialSSE(ctx, c.http, c.config.URL, c.config.APIKey, &c.ids)
-	case "http":
-		return &streamableConn{http: c.http, url: c.config.URL, apiKey: c.config.APIKey, ids: &c.ids}, nil
-	default:
-		return nil, fmt.Errorf("unknown transport %q (http or sse)", c.config.Transport)
+// mcpTransport is a way to reach an MCP server, under the name the worker
+// config gives it.
+type mcpTransport struct {
+	dial func(ctx context.Context, c *MCPClient) (mcpConn, error)
+	// misfit tells an error opening a session that means the server speaks
+	// another transport, which hint then names.
+	misfit func(error) bool
+	hint   string
+}
+
+var mcpTransports = map[string]mcpTransport{
+	"http": { // Streamable HTTP, MCP 2025-03-26 and later
+		dial: func(_ context.Context, c *MCPClient) (mcpConn, error) {
+			return &streamableConn{http: c.http, url: c.config.URL, apiKey: c.config.APIKey, ids: &c.ids}, nil
+		},
+		// An HTTP+SSE server takes no POST at its stream's URL.
+		misfit: func(err error) bool {
+			var httpErr *mcpHTTPError
+			return errors.As(err, &httpErr) && (httpErr.Status == http.StatusNotFound || httpErr.Status == http.StatusMethodNotAllowed)
+		},
+		hint: "an HTTP+SSE server takes transport: sse",
+	},
+	"sse": { // HTTP+SSE, MCP 2024-11-05
+		dial: func(ctx context.Context, c *MCPClient) (mcpConn, error) {
+			conn, err := dialSSE(ctx, c.http, c.config.URL, c.config.APIKey, &c.ids)
+			if err != nil {
+				return nil, err
+			}
+			return conn, nil
+		},
+		// A Streamable HTTP server opens no event stream on a GET alone.
+		misfit: func(err error) bool { return errors.Is(err, errNoEventStream) },
+		hint:   "a Streamable HTTP server takes transport: http",
+	},
+}
+
+// MCPTransports names the transports an MCP server may be reached by.
+func MCPTransports() []string {
+	return slices.Sorted(maps.Keys(mcpTransports))
+}
+
+// explain adds the transport's hint to an error that calls for it.
+func (t mcpTransport) explain(err error) error {
+	if t.misfit(err) {
+		return fmt.Errorf("%w (%s)", err, t.hint)
 	}
+	return err
 }
 
 type mcpImplementation struct {
@@ -413,9 +452,13 @@ type mcpInitializeResult struct {
 // protocol version, then the initialized notification. Nothing else may be
 // sent before.
 func (c *MCPClient) initialize(ctx context.Context) (mcpConn, error) {
-	conn, err := c.dial(ctx)
+	t, ok := mcpTransports[c.config.Transport]
+	if !ok {
+		return nil, fmt.Errorf("unknown transport %q (one of %v)", c.config.Transport, MCPTransports())
+	}
+	conn, err := t.dial(ctx, c)
 	if err != nil {
-		return nil, err
+		return nil, t.explain(err)
 	}
 	raw, err := conn.call(ctx, "initialize", mcpInitializeParams{
 		ProtocolVersion: mcpVersions[0],
@@ -423,11 +466,7 @@ func (c *MCPClient) initialize(ctx context.Context) (mcpConn, error) {
 	}, mcpMaxHandshake)
 	if err != nil {
 		conn.close()
-		var httpErr *mcpHTTPError
-		if c.config.Transport == "http" && errors.As(err, &httpErr) && (httpErr.Status == http.StatusNotFound || httpErr.Status == http.StatusMethodNotAllowed) {
-			return nil, fmt.Errorf("initialize: %w (an HTTP+SSE server takes transport: sse)", err)
-		}
-		return nil, fmt.Errorf("initialize: %w", err)
+		return nil, fmt.Errorf("initialize: %w", t.explain(err))
 	}
 	var res mcpInitializeResult
 	if err := json.Unmarshal(raw, &res); err != nil {
