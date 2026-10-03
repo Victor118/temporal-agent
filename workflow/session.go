@@ -168,7 +168,7 @@ func processMessage(actCtx, ctx workflow.Context, input SessionWorkflowInput, us
 		}
 		turn := agentTurn{
 			agentID:  a.ID,
-			partNote: partNote(agents, i),
+			partNote: partNote(agents, i, userMessage),
 			// On the channel, an answer that could be taken for another
 			// agent's is signed.
 			signReply: len(agents) > 1 || a.ID != input.AgentID,
@@ -194,29 +194,39 @@ type agentTurn struct {
 	signReply    bool
 }
 
+// maxQuotedMessageBytes bounds the quote of the message a part note is about.
+const maxQuotedMessageBytes = 200
+
 // partNote tells the i-th of the agents a message addresses which part is its
 // own: they answer one after another, and each sees the whole message. Its
 // text is not split, since a part can refer to another ("from there, tell
-// me…"). Empty when the message addresses one agent.
-func partNote(agents []AddressedAgent, i int) string {
+// me…"). The note quotes the message: one written meanwhile is stored after
+// it, and the agent must still answer this one. Empty when the message
+// addresses one agent.
+func partNote(agents []AddressedAgent, i int, msg UserMessage) string {
 	if len(agents) < 2 {
 		return ""
 	}
-	mentions := make([]string, len(agents))
+	names := make([]string, len(agents))
 	for j, a := range agents {
-		mentions[j] = "@" + cmp.Or(a.Mention, a.ID)
+		names[j] = strings.TrimPrefix(agentLabel(cmp.Or(a.Name, a.ID), cmp.Or(a.Mention, a.ID)), "agent ")
+	}
+	quote := clipText(strings.Join(strings.Fields(msg.Text), " "), maxQuotedMessageBytes)
+	from := ""
+	if msg.UserName != "" {
+		from = " from " + msg.UserName
 	}
 	var sb strings.Builder
 	sb.WriteString("\n## Several agents addressed\n\n")
-	fmt.Fprintf(&sb, "The message you are answering addresses several agents, who answer it one after another, in this order: %s. You are %s: answer only the part meant for you.",
-		strings.Join(mentions, ", "), mentions[i])
+	fmt.Fprintf(&sb, "You are answering the message%s that reads “%s”. It addresses several agents, who answer it one after another, in this order: %s. You are %s: answer only the part meant for you.",
+		from, quote, strings.Join(names, ", "), names[i])
 	if i > 0 {
-		sb.WriteString(" The agents before you have answered already, above: build on what they said rather than repeat it.")
+		sb.WriteString(" The agents before you have answered already, above, in their [agent …] blocks: build on what they said rather than repeat it.")
 	}
 	if i < len(agents)-1 {
 		sb.WriteString(" The agents after you answer next and will see your reply: leave their part to them.")
 	}
-	sb.WriteString("\n")
+	sb.WriteString(" Messages written after it get their own turn: answer this one.\n")
 	return sb.String()
 }
 

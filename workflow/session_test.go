@@ -266,8 +266,8 @@ func TestSessionWorkflow_RunsTheAddressedAgentsInOrder(t *testing.T) {
 		sign              bool
 		part              []string
 	}{
-		{"jarvis", "s1-turn-1", "", true, []string{"@jarvis, @smith", "You are @jarvis", "after you"}},
-		{"smith", "s1-turn-2", "", true, []string{"You are @smith", "before you"}},
+		{"jarvis", "s1-turn-1", "", true, []string{"from Alice that reads “@jarvis résume, @smith juge”", "Jarvis (@jarvis), Agent Smith (@smith)", "You are Jarvis (@jarvis)", "after you", "answer this one"}},
+		{"smith", "s1-turn-2", "", true, []string{"You are Agent Smith (@smith)", "before you", "answer this one"}},
 		{"default", "s1-turn-3", "OVERRIDE", false, nil},
 	} {
 		got := runs[i]
@@ -437,5 +437,24 @@ func TestSessionWorkflow_TheNextAgentSeesTheAnswerBefore(t *testing.T) {
 
 	if len(history) != 5 || history[1].AgentID != "jarvis" || history[3].AgentID != "jarvis" || history[4].AgentID != "smith" || history[4].Author != "Agent Smith" {
 		t.Errorf("history %+v, want the question, jarvis's search and answer, smith's", history)
+	}
+}
+
+// The part note quotes the message it is about, on one line and clipped, and
+// names each agent as the history does.
+func TestPartNote_QuotesTheMessage(t *testing.T) {
+	agents := []AddressedAgent{{ID: "cr", Name: "Reviewer de code", Mention: "cr"}, {ID: "smith"}}
+	long := "@cr relis\n\n" + strings.Repeat("é", 300) + " FIN"
+	note := partNote(agents, 1, UserMessage{Text: long})
+	for _, want := range []string{"the message that reads “@cr relis éé", "…”", "Reviewer de code (@cr), smith (@smith)", "You are smith (@smith)"} {
+		if !strings.Contains(note, want) {
+			t.Errorf("note %q lacks %q", note, want)
+		}
+	}
+	if strings.Contains(note, "FIN") || strings.Contains(note, "relis\n") || !utf8.ValidString(note) {
+		t.Errorf("note %q: the quote is not clipped to one line", note)
+	}
+	if partNote(agents[:1], 0, UserMessage{Text: long}) != "" {
+		t.Error("a message to one agent got a part note")
 	}
 }
