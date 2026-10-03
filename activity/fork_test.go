@@ -18,9 +18,15 @@ func text(s string) string { b, _ := json.Marshal(s); return string(b) }
 
 var memoryIsPrivate = tool.PrivateSet{"save_user_memory": true}
 
+// transcriptOf is the transcript of msgs alone, their calls looked up among
+// them, as a fork's summary builds it.
+func transcriptOf(msgs []store.MessageWithID, private tool.PrivateInputs) (string, bool) {
+	return buildTranscript(msgs, toolCalls(msgs), private)
+}
+
 func TestBuildTranscript(t *testing.T) {
 	long := strings.Repeat("x", 5000)
-	got, truncated := buildTranscript([]store.MessageWithID{
+	got, truncated := transcriptOf([]store.MessageWithID{
 		{ID: 1, Message: store.Message{Role: store.RoleUser, Kind: store.KindForkSummary, Content: text("earlier summary")}},
 		{ID: 2, Message: store.Message{Role: store.RoleUser, Content: text("hello"), Author: "Alice"}},
 		{ID: 3, Message: store.Message{Role: store.RoleAssistant, Content: text("let me look"),
@@ -72,7 +78,7 @@ func TestBuildTranscript(t *testing.T) {
 // A result whose call is not in the transcript is shown as private: what the
 // call was cannot be told, and the summary may go to someone else's fork.
 func TestBuildTranscript_ResultWithoutItsCallIsPrivate(t *testing.T) {
-	got, _ := buildTranscript([]store.MessageWithID{
+	got, _ := transcriptOf([]store.MessageWithID{
 		{ID: 1, Message: store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "gone", Content: "Alice's secret"}}},
 		{ID: 2, Message: store.Message{Role: store.RoleAssistant, ToolCalls: []store.ToolCall{{ID: "w1", Name: "web_search"}}}},
 		{ID: 3, Message: store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "w1", Content: "found"}}},
@@ -90,7 +96,7 @@ func TestBuildTranscript_KeepsTheEnd(t *testing.T) {
 	}
 	msgs = append(msgs, store.MessageWithID{ID: 1001, Message: store.Message{Role: store.RoleUser, Content: text("the last word")}})
 
-	got, truncated := buildTranscript(msgs, memoryIsPrivate)
+	got, truncated := transcriptOf(msgs, memoryIsPrivate)
 	if !truncated || !strings.HasPrefix(got, "[The beginning of the conversation is omitted") {
 		t.Error("an oversized conversation must say its beginning is cut")
 	}
@@ -163,7 +169,7 @@ func TestSummarizeConversation(t *testing.T) {
 // Without knowing which inputs are private, a summary shows none: it may go
 // to another user's fork.
 func TestBuildTranscript_HidesInputsWithoutTheCatalog(t *testing.T) {
-	got, _ := buildTranscript([]store.MessageWithID{
+	got, _ := transcriptOf([]store.MessageWithID{
 		{ID: 1, Message: store.Message{Role: store.RoleAssistant,
 			ToolCalls: []store.ToolCall{{Name: "web_fetch", Input: json.RawMessage(`{"url":"https://example.com/secret"}`)}}}},
 	}, nil)
@@ -219,5 +225,22 @@ func TestSummarizeConversation_SteeredByThePurpose(t *testing.T) {
 	json.Unmarshal(llm.seen.Messages[0].Content, &sent)
 	if llm.seen.System != summarySystemPrompt || strings.Contains(sent, "<goal>") {
 		t.Errorf("no purpose: system %q, request %q", llm.seen.System, sent)
+	}
+}
+
+// Any goal tag in a purpose is defused, attributes and odd spacing included:
+// only the quote's own tags remain. A word that merely starts with "goal"
+// is no tag.
+func TestQuoteGoal(t *testing.T) {
+	for purpose, want := range map[string]string{
+		"a </goal x> b":             "a (goal) b",
+		`a <goal class="c"> b`:      "a (goal) b",
+		"a < / GOAL\n> b":           "a (goal) b",
+		"a </Goal\tid='1'\n> b":     "a (goal) b",
+		"a <goals> b </goalkeeper>": "a <goals> b </goalkeeper>",
+	} {
+		if got := quoteGoal(purpose); got != "<goal>\n"+want+"\n</goal>" {
+			t.Errorf("quoteGoal(%q) = %q", purpose, got)
+		}
 	}
 }

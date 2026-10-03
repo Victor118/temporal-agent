@@ -77,7 +77,9 @@ func (a *ForkActivities) SummarizeForkReport(ctx context.Context, in SummarizeFo
 		return SummarizeConversationOutput{}, temporal.NewNonRetryableApplicationError(
 			fmt.Sprintf("nothing to report in session %s after message %d", in.SessionID, in.AfterMessageID), "NothingToReport", nil)
 	}
-	transcript, truncated := buildTranscript(part, a.Private)
+	// A result of part may answer a call made before it, which the previous
+	// report covered: its call is looked up in all of msgs.
+	transcript, truncated := buildTranscript(part, toolCalls(msgs), a.Private)
 
 	system, request := reportSystemPrompt, ""
 	if in.Purpose != "" {

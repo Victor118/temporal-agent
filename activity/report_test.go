@@ -173,3 +173,27 @@ func TestReportable(t *testing.T) {
 		}
 	}
 }
+
+// A result in the report's range may answer a call made before it, which the
+// previous report covered: it is shown as its tool allows, not as private
+// for want of its call. A private tool's result stays private.
+func TestSummarizeForkReport_ResultOfACallBeforeTheRange(t *testing.T) {
+	thread := []store.MessageWithID{
+		{ID: 1, Message: store.Message{Role: store.RoleUser, Kind: store.KindForkSummary, Content: text("plan")}},
+		{ID: 2, Message: store.Message{Role: store.RoleAssistant,
+			ToolCalls: []store.ToolCall{{ID: "w1", Name: "web_fetch"}, {ID: "m1", Name: "save_user_memory"}}}},
+		{ID: 3, Message: store.Message{Role: store.RoleUser, Content: text("meanwhile"), Author: "Victor"}},
+		{ID: 4, Message: store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "w1", Content: "the changelog"}}},
+		{ID: 5, Message: store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "m1", Content: "Victor's secret"}}},
+	}
+	llm := &fakeLLM{reply: "since"}
+	a := &ForkActivities{Store: &forkStore{msgs: thread}, LLM: llm, Private: memoryIsPrivate}
+	if _, err := a.SummarizeForkReport(context.Background(), SummarizeForkReportInput{SessionID: "f", AfterMessageID: 3, UpToMessageID: 5}); err != nil {
+		t.Fatal(err)
+	}
+	sent := sentText(t, llm)
+	if !strings.Contains(sent, "Tool result: the changelog") || !strings.Contains(sent, "Tool result: (private)") ||
+		strings.Contains(sent, "secret") || strings.Contains(sent, "meanwhile") {
+		t.Errorf("request %q", sent)
+	}
+}
