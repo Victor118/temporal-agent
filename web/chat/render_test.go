@@ -2,6 +2,7 @@ package chat
 
 import (
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -108,8 +109,7 @@ func TestRender_Pages(t *testing.T) {
 	for _, want := range []string{
 		`<div class="columns" sse-connect="/s/fork/stream?last_event_id=e-7">`, // one stream, from where the page stands
 		`<aside class="col-tree">`,
-		`hx-trigger="sse:changed, sse:reload, every 60s"`,
-		`sse:turn_done, sse:reload, every 60s"`,
+		`hx-trigger="sse:changed, sse:reload, every 60s"`, // the tree
 	} {
 		if !strings.Contains(page, want) {
 			t.Errorf("page lacks %q", want)
@@ -146,14 +146,16 @@ func TestRender_Pages(t *testing.T) {
 
 	frag := testPage("thread")
 	frag.Fragment = true
-	if out := render(t, "thread", frag); !strings.Contains(out, `id="composer" hx-swap-oob="morph"`) {
+	fw := httptest.NewRecorder()
+	RenderFragment(fw, "thread", frag, "")
+	if out := fw.Body.String(); !strings.Contains(out, `id="thread-inner"`) || !strings.Contains(out, `id="composer" hx-swap-oob="morph"`) {
 		t.Error("the thread fragment must bring the composer along, out of band, morphed")
 	}
 	if strings.Contains(page, `hx-swap-oob`) {
 		t.Error("the full page must not mark its composer out of band")
 	}
 
-	for _, frag := range []string{"thread", "rail", "tree-items"} {
+	for _, frag := range []string{"thread-inner", "rail", "tree-items"} {
 		if out := render(t, frag, testPage("thread")); strings.Contains(out, "<html") {
 			t.Errorf("%s fragment carries a whole page", frag)
 		}
@@ -208,7 +210,7 @@ func TestRender_ForkReport(t *testing.T) {
 		{ID: 12, Message: store.Message{Role: store.RoleUser, Kind: store.KindForkReport, Content: j("**fait** <b>x</b>"), UserID: "u2", Author: "Bob",
 			Fork: &store.ForkRef{SessionID: "f2", Title: "Export <CSV>", UpToMessageID: 30}}},
 	}, "u1", map[int64][]ForkLink{9: {{SessionID: "f2", Title: "Export"}}}, nil, AgentDirectory{Session: p.Agent})
-	out := render(t, "thread", p)
+	out := render(t, "thread-inner", p)
 	for _, want := range []string{
 		`id="m12"`,
 		`⑂ Rapport du fork « Export &lt;CSV&gt; »</span><span class="agent-meta">— par Bob</span>`,
@@ -230,7 +232,7 @@ func TestRender_ForkReport(t *testing.T) {
 		{ID: 12, Message: store.Message{Role: store.RoleUser, Kind: store.KindForkReport, Content: j("fait"), UserID: "u2", Author: "Bob",
 			Fork: &store.ForkRef{SessionID: "f2", Title: "Export", UpToMessageID: 30}}},
 	}, "u1", nil, nil, AgentDirectory{Session: p.Agent})
-	if out := render(t, "thread", p); !strings.Contains(out, `<span class="note">Fork inaccessible</span>`) || strings.Contains(out, `href="/s/f2"`) {
+	if out := render(t, "thread-inner", p); !strings.Contains(out, `<span class="note">Fork inaccessible</span>`) || strings.Contains(out, `href="/s/f2"`) {
 		t.Error("a report from a fork the viewer cannot open")
 	}
 }
@@ -290,7 +292,7 @@ func TestRender_ReportButton(t *testing.T) {
 				}
 			}
 			if rail := render(t, "rail", p); !strings.Contains(rail, `<section id="report" hx-get="/s/fork/report" hx-swap="morph:innerHTML"`) ||
-				!strings.Contains(rail, `hx-trigger="sse:fork_reported, sse:fork_report_failed,`) {
+				!strings.Contains(rail, `hx-trigger="`+mustReloadOn(t, "report")+`"`) {
 				t.Errorf("the rail lacks the report section, reloaded on the fork's events: %s", rail)
 			}
 		})
@@ -317,7 +319,7 @@ func TestRender_ReportedMarkAndFailure(t *testing.T) {
 	fork := store.Session{SessionID: "fork", ParentSessionID: "root", LastReportedMessageID: 2, LastReportID: 31, LastReportedAt: &at}
 	p.Thread = MarkReported(p.Thread, fork, true)
 	p.Report = &ReportView{ReportState: session.ReportState{ParentSessionID: "root", Failed: true}}
-	out := render(t, "thread", p)
+	out := render(t, "thread-inner", p)
 	page := render(t, "page", p)
 	mark := `⑂ Rapport envoyé à la session parente · ` + clock(at) + ` · <a href="/s/root#m31">le voir</a>`
 	if !strings.Contains(out, mark) {
@@ -361,6 +363,17 @@ func TestRender_FragmentVersions(t *testing.T) {
 		t.Error("the page kept the placeholder, or the fragment flag")
 	}
 
+	// The page shows each fragment as it was rendered for its version, once.
+	for name, id := range map[string]string{"thread": `id="thread-inner"`, "tree-items": `class="tree-items"`, "report": `class="report-inner"`} {
+		got := string(p.Rendered[name])
+		if got == "" || !strings.Contains(page.Body.String(), got) || strings.Count(page.Body.String(), id) != 1 {
+			t.Errorf("%s: not shown once as rendered for its version", name)
+		}
+	}
+	if strings.Contains(string(p.Rendered["thread"]), `id="composer"`) {
+		t.Error("the page's thread brought the fragment's composer along")
+	}
+
 	// Another content, another version, and the fragment comes.
 	frag := testPage("thread")
 	frag.Fragment, frag.Working = true, false
@@ -376,14 +389,64 @@ func TestRender_FragmentVersions(t *testing.T) {
 func TestRender_WorkingLineNamesTheAgent(t *testing.T) {
 	p := testPage("thread")
 	p.WorkingAgent = "Agent <Smith>"
-	if out := render(t, "thread", p); !strings.Contains(out, "Agent &lt;Smith&gt; travaille…") || strings.Contains(out, "L'agent travaille") {
+	if out := render(t, "thread-inner", p); !strings.Contains(out, "Agent &lt;Smith&gt; travaille…") || strings.Contains(out, "L'agent travaille") {
 		t.Errorf("named: %s", out)
 	}
 	p.WorkingAgent = ""
-	if out := render(t, "thread", p); !strings.Contains(out, "L'agent travaille…") {
+	if out := render(t, "thread-inner", p); !strings.Contains(out, "L'agent travaille…") {
 		t.Errorf("unnamed: %s", out)
 	}
-	if page := render(t, "page", p); !strings.Contains(page, "sse:turn_started, sse:turn_done") {
-		t.Error("the thread does not reload on the turn events")
+	if page := render(t, "page", p); !strings.Contains(page, `hx-trigger="`+mustReloadOn(t, "thread")+`"`) {
+		t.Error("the thread does not reload on its events")
+	}
+}
+
+func mustReloadOn(t *testing.T, pane string) string {
+	t.Helper()
+	got, err := reloadOn(pane)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
+
+// A pane reloads on the events the session package lists for it, on a
+// reload of the stream, and once a minute; the thread on every event that
+// changes the session's state.
+func TestReloadOn(t *testing.T) {
+	thread := mustReloadOn(t, "thread")
+	for _, ev := range append(slices.Clone(session.StateEvents), session.EventUserMessage, "message", "tool_calls", "turn_started", "turn_done", "ask_user", "reload") {
+		if !strings.Contains(thread, "sse:"+ev+",") {
+			t.Errorf("the thread does not reload on %s: %s", ev, thread)
+		}
+	}
+	if !strings.HasSuffix(thread, "sse:reload, every 60s") {
+		t.Errorf("thread: %s", thread)
+	}
+	if report := mustReloadOn(t, "report"); strings.Contains(report, "sse:tool_calls") || !strings.Contains(report, "sse:fork_reported,") {
+		t.Errorf("report: %s", report)
+	}
+	if tree := mustReloadOn(t, "tree"); tree != "sse:changed, sse:reload, every 60s" {
+		t.Errorf("tree: %s", tree)
+	}
+	if _, err := reloadOn("rail"); err == nil {
+		t.Error("a pane with no events")
+	}
+}
+
+// The placeholder a fragment's version replaces is drawn by each process: a
+// member cannot write it in a message.
+func TestRender_PlaceholderIsNotGuessable(t *testing.T) {
+	if len(versionPlaceholder) != 33 || versionPlaceholder == "fragment-version-placeholder" {
+		t.Fatalf("placeholder %q", versionPlaceholder)
+	}
+	p := testPage("thread")
+	p.Thread = BuildThread([]store.MessageWithID{
+		{ID: 2, Message: store.Message{Role: store.RoleUser, Content: j("fragment-version-placeholder v0123"), UserID: "u2", Author: "Bob"}},
+	}, "u1", nil, nil, AgentDirectory{Session: p.Agent})
+	w := httptest.NewRecorder()
+	RenderFragment(w, "thread", p, "")
+	if !strings.Contains(w.Body.String(), "fragment-version-placeholder v0123") {
+		t.Error("a member's text was taken for the placeholder")
 	}
 }

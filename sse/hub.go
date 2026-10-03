@@ -30,6 +30,10 @@ const (
 	subscriberBuffer = 64
 )
 
+// EventReload tells a client its stream lost events it cannot be sent: what
+// it shows must be reloaded.
+const EventReload = "reload"
+
 // Event is an event as a topic's subscribers get it: with its ID, which a
 // client sends back when it reconnects.
 type Event struct {

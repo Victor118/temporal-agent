@@ -1,17 +1,19 @@
 {{/* The thread's pane: it stays, and a reload morphs its content in place,
      so the scroll, an open menu and a half-typed answer survive. Reloaded on
-     every event of the session's stream; on reload, the stream lost events
-     it cannot replay. Once a minute too, in case: unchanged, that is a 204. */}}
+     the session's events that change it (session.ThreadEvents), on reload
+     (the stream lost events it cannot replay), and once a minute, in case:
+     unchanged, that is a 204. */}}
 {{define "thread-pane"}}
 <div id="thread" hx-get="/s/{{.Node.Session.SessionID}}/thread" hx-swap="morph:innerHTML"
-     hx-trigger="sse:message, sse:user_message, sse:ask_user, sse:fork_ready, sse:fork_failed, sse:fork_report, sse:fork_reported, sse:fork_report_failed, sse:tool_calls, sse:turn_started, sse:turn_done, sse:reload, every 60s">
-{{template "thread" .}}
+     hx-trigger="{{reloadOn "thread"}}">
+{{with index .Rendered "thread"}}{{.}}{{else}}{{template "thread-inner" .}}{{end}}
 </div>
 {{end}}
 
-{{/* The thread's content, swapped into its pane; the composer comes with it,
-     out of band, since its state follows the thread's. */}}
-{{define "thread"}}
+{{/* The thread's content, swapped into its pane. Its reload (the "thread"
+     fragment) brings the composer along, out of band, since its state
+     follows the thread's. */}}
+{{define "thread-inner"}}
 {{$sid := .Node.Session.SessionID}}
 <div class="thread-inner" id="thread-inner" data-version="{{index .Versions "thread"}}">
   {{with .Parent}}
@@ -35,7 +37,6 @@
   {{end}}
   {{with .Error}}<div class="composer-error" id="thread-error">{{.}}</div>{{end}}
 </div>
-{{if .Fragment}}{{template "composer" .}}{{end}}
 {{end}}
 
 {{define "item"}}

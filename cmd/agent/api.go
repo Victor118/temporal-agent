@@ -371,7 +371,7 @@ func relaySSE(w http.ResponseWriter, r *http.Request, hub *sse.Hub, keepAlive ti
 	sub := hub.Subscribe(lastEventID(r), topics...)
 	defer hub.Unsubscribe(sub)
 	if sub.Stale {
-		writeSSE(w, sse.Event{ID: sub.At, SSEEvent: activity.SSEEvent{Type: sseReload, Data: []byte("{}")}})
+		writeSSE(w, sse.Event{ID: sub.At, SSEEvent: activity.SSEEvent{Type: sse.EventReload, Data: []byte("{}")}})
 	}
 	for _, event := range sub.Missed {
 		writeSSE(w, event)
@@ -405,10 +405,6 @@ func relaySSE(w http.ResponseWriter, r *http.Request, hub *sse.Hub, keepAlive ti
 		}
 	}
 }
-
-// sseReload tells a client its stream lost events it cannot be sent: what it
-// shows must be reloaded.
-const sseReload = "reload"
 
 // lastEventID is the ID of the last event a reconnecting client got:
 // EventSource sends it in a header when it reconnects on its own; the page

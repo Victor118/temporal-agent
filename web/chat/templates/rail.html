@@ -75,7 +75,7 @@
 {{define "report-section"}}
 {{with .Report}}
 <section id="report" hx-get="/s/{{$.Node.Session.SessionID}}/report" hx-swap="morph:innerHTML"
-         hx-trigger="sse:fork_reported, sse:fork_report_failed, sse:fork_ready, sse:fork_failed, sse:user_message, sse:message, sse:turn_started, sse:turn_done, sse:reload, every 60s">{{template "report" $}}</section>
+         hx-trigger="{{reloadOn "report"}}">{{with index $.Rendered "report"}}{{.}}{{else}}{{template "report" $}}{{end}}</section>
 {{end}}
 {{end}}
 

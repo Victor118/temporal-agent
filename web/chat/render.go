@@ -2,19 +2,24 @@ package chat
 
 import (
 	"bytes"
+	"crypto/rand"
 	"crypto/sha256"
 	"embed"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"html/template"
 	"io/fs"
 	"log"
 	"net/http"
 	"regexp"
+	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/victor/temporal-agent/session"
+	"github.com/victor/temporal-agent/sse"
 	"github.com/victor/temporal-agent/store"
 )
 
@@ -76,9 +81,13 @@ type Page struct {
 	// Fragment: the thread is rendered alone, to be swapped in. The composer
 	// then comes with it, out of band, since its state follows the thread's.
 	Fragment bool
-	// Versions of the fragments the page reloads, by template name: each
-	// carries its own in a data-version attribute (see RenderFragment).
+	// Versions of the fragments the page reloads, by name: each carries its
+	// own in a data-version attribute (see RenderFragment).
 	Versions map[string]string
+	// Rendered are those fragments as RenderPage rendered them to learn
+	// their versions: the page shows these bytes rather than render them
+	// again. Without one, the page renders the fragment.
+	Rendered map[string]template.HTML
 }
 
 // SeveralAgents reports whether members can call more than one agent: the
@@ -214,6 +223,7 @@ var tmpl = template.Must(template.New("").Funcs(template.FuncMap{
 	"add":         func(a, b int) int { return a + b },
 	"itemOf":      func(p *Page, it ThreadItem) ItemView { return ItemView{Page: p, Item: it} },
 	"purposeMax":  func() int { return session.MaxPurposeRunes },
+	"reloadOn":    reloadOn,
 }).ParseFS(templateFS, "templates/*.html"))
 
 // Render writes the named template (a page or a fragment) for data. It
@@ -234,32 +244,54 @@ func Render(w http.ResponseWriter, name string, data any) {
 const VersionHeader = "X-Fragment-Version"
 
 // versionPlaceholder stands for a fragment's version while it is rendered to
-// be hashed: the version cannot be part of what it hashes.
-const versionPlaceholder = "fragment-version-placeholder"
+// be hashed: the version cannot be part of what it hashes. It is drawn at
+// random by each process, so that no member can write it in a message.
+var versionPlaceholder = func() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	return "v" + hex.EncodeToString(b)
+}()
 
-// renderVersioned renders the fragment name with its version, a hash of what
-// it shows: the same content always has the same version, whatever data it
-// came from.
-func renderVersioned(name string, p *Page) ([]byte, string, error) {
+// fragmentParts are the templates a fragment is made of, in order, when it
+// is more than its own: the thread's reload brings the composer along, out
+// of band, since its state follows the thread's.
+var fragmentParts = map[string][]string{"thread": {"thread-inner", "composer"}}
+
+// renderVersioned renders the fragment name, part by part, with its version,
+// a hash of what it shows: the same content always has the same version,
+// whatever data it came from.
+func renderVersioned(name string, p *Page) ([][]byte, string, error) {
 	if p.Versions == nil {
 		p.Versions = map[string]string{}
 	}
 	p.Versions[name] = versionPlaceholder
-	var buf bytes.Buffer
-	if err := tmpl.ExecuteTemplate(&buf, name, p); err != nil {
-		return nil, "", err
+	parts, ok := fragmentParts[name]
+	if !ok {
+		parts = []string{name}
 	}
-	sum := sha256.Sum256(buf.Bytes())
-	version := hex.EncodeToString(sum[:12])
+	out := make([][]byte, len(parts))
+	hash := sha256.New()
+	for i, part := range parts {
+		var buf bytes.Buffer
+		if err := tmpl.ExecuteTemplate(&buf, part, p); err != nil {
+			return nil, "", err
+		}
+		out[i] = buf.Bytes()
+		hash.Write(out[i])
+	}
+	version := hex.EncodeToString(hash.Sum(nil)[:12])
 	p.Versions[name] = version
-	return bytes.ReplaceAll(buf.Bytes(), []byte(versionPlaceholder), []byte(version)), version, nil
+	for i := range out {
+		out[i] = bytes.ReplaceAll(out[i], []byte(versionPlaceholder), []byte(version))
+	}
+	return out, version, nil
 }
 
 // RenderFragment writes a fragment a page reloads. When the page holds its
 // version already (have, from VersionHeader), it answers 204 No Content:
 // htmx swaps nothing, and nothing on the page moves.
 func RenderFragment(w http.ResponseWriter, name string, p *Page, have string) {
-	body, version, err := renderVersioned(name, p)
+	parts, version, err := renderVersioned(name, p)
 	if err != nil {
 		log.Printf("chat: render %s: %v", name, err)
 		http.Error(w, "Erreur de rendu", http.StatusInternalServerError)
@@ -270,7 +302,9 @@ func RenderFragment(w http.ResponseWriter, name string, p *Page, have string) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write(body)
+	for _, part := range parts {
+		w.Write(part)
+	}
 }
 
 // reloaded are the fragments a session's page reloads on its own: the
@@ -279,21 +313,50 @@ var reloaded = []string{"thread", "tree-items", "report"}
 
 // RenderPage writes a whole page, its fragments carrying the versions their
 // reloads would get: the first reload of an unchanged one swaps nothing.
+// Each fragment is rendered once, as its reload renders it; the page shows
+// its first part (the thread without the composer, which the page has in
+// its place).
 func RenderPage(w http.ResponseWriter, name string, p *Page) {
 	fragment := p.Fragment
+	p.Rendered = map[string]template.HTML{}
 	for _, f := range reloaded {
 		if f == "thread" && (p.Node == nil || p.View == "map") || f == "report" && p.Report == nil {
 			continue
 		}
 		p.Fragment = f == "thread" // as its reload renders it, the composer along
-		if _, _, err := renderVersioned(f, p); err != nil {
+		parts, _, err := renderVersioned(f, p)
+		if err != nil {
 			log.Printf("chat: render %s: %v", f, err)
 			http.Error(w, "Erreur de rendu", http.StatusInternalServerError)
 			return
 		}
+		p.Rendered[f] = template.HTML(parts[0]) // our own template's output, escaped
 	}
 	p.Fragment = fragment
 	Render(w, name, p)
+}
+
+// reloadOn is the hx-trigger of a pane the page's stream reloads: on the
+// events that change it, on a reload of the stream (it lost events), and
+// once a minute, in case (unchanged, that is a 204).
+func reloadOn(pane string) (string, error) {
+	var events []string
+	switch pane {
+	case "thread":
+		events = session.ThreadEvents
+	case "report":
+		events = session.ReportEvents
+	case "tree":
+		events = []string{session.EventTreeChanged}
+	default:
+		return "", fmt.Errorf("no events for pane %q", pane)
+	}
+	var b strings.Builder
+	for _, e := range append(slices.Clone(events), sse.EventReload) {
+		b.WriteString("sse:" + e + ", ")
+	}
+	b.WriteString("every 60s")
+	return b.String(), nil
 }
 
 func clock(t time.Time) string {
