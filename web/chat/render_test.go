@@ -67,7 +67,9 @@ func TestRender_Pages(t *testing.T) {
 		`name="workflow_id" value="fork-tool-ask_user-1"`,
 		`href="/s/root#m3"`, // back to the message forked from
 		"L'agent travaille",
-		"@jarvis pour le solliciter",
+		"@jarvis pour le solliciter, la mention d'un autre agent pour l'appeler", // other agents can be called
+		"les autres agents à leur mention",
+		"Plusieurs dans un message répondent l'un après l'autre",
 		`class="dot waiting"`,
 		"Configuration",
 		`<span class="who">Default Agent</span><span class="agent-meta">@jarvis</span>`, // each answer signed by its agent
@@ -80,6 +82,18 @@ func TestRender_Pages(t *testing.T) {
 	}
 	if strings.Contains(page, "<b>hi</b>") {
 		t.Error("a member's HTML reached the page")
+	}
+
+	// One agent to call: nothing about the others.
+	for _, onMention := range []bool{true, false} {
+		alone := testPage("thread")
+		alone.Agents, alone.AgentOnMention = alone.Agents[:1], onMention
+		out := render(t, "page", alone)
+		for _, unwanted := range []string{"autre agent", "autres agents", "Plusieurs dans un message"} {
+			if strings.Contains(out, unwanted) {
+				t.Errorf("with one agent, the page says %q", unwanted)
+			}
+		}
 	}
 
 	mp := render(t, "page", testPage("map"))

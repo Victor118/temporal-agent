@@ -120,7 +120,7 @@ func (s *Service) Deliver(ctx context.Context, sess *store.Session, author *stor
 	called := answered(sess.AgentMode, len(members), mentioned)
 	// No agent mentioned: the session's agent answers (an empty list).
 	msg := workflow.UserMessage{Text: text, UserID: author.ID, UserName: author.Name(), Stored: true, Agents: mentioned}
-	s.publishUserMessage(sess.SessionID, msg, called)
+	s.publishUserMessage(sess.SessionID, msg, answering(called, mentioned, sess.AgentID, s.cfg.DefaultAgentID, agents))
 	if !called {
 		return false, nil
 	}
@@ -159,16 +159,41 @@ func (s *Service) signalSession(ctx context.Context, sess *store.Session, msg wo
 }
 
 // publishUserMessage shows a user's message to the other members of the
-// session, live, and whether it called the agent. The sender displays it
-// already and skips its own.
-func (s *Service) publishUserMessage(sessionID string, msg workflow.UserMessage, called bool) {
+// session, live, and which agents it called, by name (none: no agent
+// answers). The sender displays it already and skips its own.
+func (s *Service) publishUserMessage(sessionID string, msg workflow.UserMessage, agents []string) {
 	data, _ := json.Marshal(map[string]any{
 		"content":      msg.Text,
 		"user_id":      msg.UserID,
 		"author":       msg.UserName,
-		"agent_called": called,
+		"agent_called": len(agents) > 0,
+		"agents":       agents,
 	})
 	s.hub.Publish(sessionID, activity.SSEEvent{Type: "user_message", Data: data})
+}
+
+// answering names the agents a message calls, in the order they answer: the
+// ones it mentions, or the session's agent (the default one when it names
+// none, or is gone). Nil when the message calls none.
+func answering(called bool, mentioned []workflow.AddressedAgent, sessionAgent, defaultAgent string, agents []store.Agent) []string {
+	if !called {
+		return nil
+	}
+	names := make([]string, 0, max(len(mentioned), 1))
+	for _, a := range mentioned {
+		names = append(names, a.Name)
+	}
+	if len(names) > 0 {
+		return names
+	}
+	for _, id := range []string{sessionAgent, defaultAgent} {
+		for _, a := range agents {
+			if id != "" && a.ID == id {
+				return append(names, cmp.Or(a.Name, a.ID))
+			}
+		}
+	}
+	return append(names, cmp.Or(sessionAgent, defaultAgent))
 }
 
 // maxTitleRunes bounds a session title taken from its first message.

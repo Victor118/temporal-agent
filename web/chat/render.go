@@ -64,6 +64,10 @@ type Page struct {
 	Fragment bool
 }
 
+// SeveralAgents reports whether members can call more than one agent: the
+// interface then tells how.
+func (p Page) SeveralAgents() bool { return len(p.Agents) > 1 }
+
 // Member is a session member, for the rail.
 type Member struct {
 	Person

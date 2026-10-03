@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 
@@ -67,6 +68,28 @@ func TestMentionedAgents_AMentionWinsOverAnID(t *testing.T) {
 	}
 }
 
+// The live event names the agents that answer: those mentioned, or the
+// session's, or the default one when the session's is gone.
+func TestAnswering(t *testing.T) {
+	two := []workflow.AddressedAgent{{ID: "smith", Name: "Agent Smith"}, {ID: "default", Name: "Jarvis"}}
+	for _, c := range []struct {
+		called    bool
+		mentioned []workflow.AddressedAgent
+		session   string
+		want      string
+	}{
+		{false, nil, "default", "[]"},
+		{true, two, "default", "[Agent Smith Jarvis]"},
+		{true, nil, "code-reviewer", "[Reviewer]"},
+		{true, nil, "gone", "[Jarvis]"},
+		{true, nil, "", "[Jarvis]"},
+	} {
+		if got := fmt.Sprint(answering(c.called, c.mentioned, c.session, "default", team)); got != c.want {
+			t.Errorf("answering(%v, %v, %q) = %s, want %s", c.called, c.mentioned, c.session, got, c.want)
+		}
+	}
+}
+
 // Each agent runs a full turn: past the cap, the mentions are dropped, and
 // reported to be logged.
 func TestMentionedAgents_Cap(t *testing.T) {
@@ -122,7 +145,8 @@ func TestDeliver_SignalsTheMentionedAgents(t *testing.T) {
 			}
 			tc := &fakeTemporal{}
 			sess := &store.Session{SessionID: sid, AgentID: "default", AgentMode: c.mode}
-			called, err := newTest(st, tc).Deliver(context.Background(), sess, alice, c.text)
+			svc := newTest(st, tc)
+			called, err := svc.Deliver(context.Background(), sess, alice, c.text)
 			if err != nil || called != c.wantCalled {
 				t.Fatalf("Deliver = %v, %v; want %v", called, err, c.wantCalled)
 			}
@@ -138,6 +162,15 @@ func TestDeliver_SignalsTheMentionedAgents(t *testing.T) {
 			msg := tc.signalStarts[0].arg.(workflow.UserMessage)
 			if got := fmt.Sprint(mentions(msg.Agents)); got != c.wantAgents {
 				t.Errorf("agents %s, want %s", got, c.wantAgents)
+			}
+			// The members see live who answers.
+			ev := svc.hub.(*nopHub).events
+			var data struct {
+				Called bool     `json:"agent_called"`
+				Agents []string `json:"agents"`
+			}
+			if len(ev) != 1 || json.Unmarshal(ev[0].Data, &data) != nil || !data.Called || len(data.Agents) == 0 {
+				t.Errorf("event %+v, want the agents that answer", ev)
 			}
 		})
 	}
