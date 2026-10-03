@@ -36,7 +36,7 @@ const catalogRefresh = 30 * time.Second
 // workerStopTimeout is how long a stopping worker waits for the tasks under
 // way, and for their answers to go out, before it cancels them and returns
 // (worker.Options.WorkerStopTimeout; zero would not wait at all). A coding
-// run ends at once on a stop (ClaudeCodeActivities.Stop): its CLI is dead
+// run ends at once on a stop (activity.RunStop): its CLI is dead
 // within claudecode's kill grace (10s), its output drained within as much
 // again, and the bound leaves room for the answer. A session's creation
 // waits it out whole (its session never ends on its own): a stop takes 30
@@ -65,7 +65,7 @@ type workerRuntime struct {
 	skills    []skill.Skill      // as loaded at startup
 	stop      context.CancelFunc // ends the polling
 	// endRuns ends the coding runs under way, before the workers stop
-	// (ClaudeCodeActivities.Stop).
+	// (activity.RunStop).
 	endRuns func()
 	// releaseRuns gives up this process's claim on the coding runs' root
 	// (claimRunsRoot).
@@ -130,12 +130,13 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 	// the coding runs share it, or one would end the other's processes.
 	runs := subproc.NewRuns(runAs)
 
-	codeAct := &activity.ClaudeCodeActivities{Root: cfg.ClaudeCodeWorkspace, SSHKeyPath: cfg.ClaudeCodeSSHKey, AllowedRepos: cfg.ClaudeCodeRepos, RunAs: runAs, Runs: runs, ClaudeConfigDir: cfg.ClaudeConfigDir, Model: cfg.ClaudeCodeModel, MaxBudgetUSD: budget, Auth: auth, QueueWait: queueWait}
+	stopRuns := &activity.RunStop{}
+	codeAct := &activity.ClaudeCodeActivities{Root: cfg.ClaudeCodeWorkspace, SSHKeyPath: cfg.ClaudeCodeSSHKey, AllowedRepos: cfg.ClaudeCodeRepos, RunAs: runAs, Runs: runs, ClaudeConfigDir: cfg.ClaudeConfigDir, Model: cfg.ClaudeCodeModel, MaxBudgetUSD: budget, Auth: auth, QueueWait: queueWait, Stopper: stopRuns}
 	// Before this worker offers a run: what a run left on this machine's
 	// disk when its worker died is reachable from here alone.
 	releaseRuns := func() {}
 	if coding {
-		if releaseRuns, err = claimRunsRoot(codeAct, rootClaimWait); err != nil {
+		if releaseRuns, err = claimRunsRoot(codeAct.Root, codeAct.Runs, rootClaimWait); err != nil {
 			return nil, err
 		}
 	}
@@ -175,8 +176,12 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 	}
 	endRuns := func() {}
 	if coding {
-		endRuns = codeAct.Stop
+		endRuns = stopRuns.Stop
 	}
+	acts := workerActivities(activityDeps{
+		llm: llmProvider, store: st, catalog: catalog, skills: skillAct, maxContext: maxContext,
+		code: codeAct, registry: registry, notifiers: notifiers, web: opts.web, schedules: tc.ScheduleClient(),
+	})
 	rt := &workerRuntime{queues: queues, workflows: workerConf.Workflows, skills: skills, endRuns: endRuns, releaseRuns: releaseRuns}
 	for _, queue := range queues {
 		wopts := worker.Options{
@@ -197,16 +202,9 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 		w.RegisterWorkflow(workflow.ForkSessionWorkflow)
 		w.RegisterWorkflow(workflow.ReportToParentWorkflow)
 
-		w.RegisterActivity(&activity.LLMActivities{Provider: llmProvider, Store: st, Catalog: catalog, Prompts: skillAct.Prompts, MaxContextBytes: maxContext})
-		w.RegisterActivity(&activity.ForkActivities{Store: st, LLM: llmProvider, Private: catalog})
-		w.RegisterActivity(&activity.MemoryActivities{Store: st})
-		w.RegisterActivity(&activity.ForkPostActivities{Store: st})
-		w.RegisterActivity(codeAct)
-		w.RegisterActivity(&activity.ToolActivities{Registry: registry, Catalog: catalog})
-		w.RegisterActivity(&activity.NotificationActivities{Notifiers: notifiers})
-		w.RegisterActivity(&activity.DeliveryActivities{Web: opts.web, Store: st})
-		w.RegisterActivity(&activity.ScheduleActivities{Client: tc.ScheduleClient(), Store: st})
-		w.RegisterActivity(skillAct)
+		for _, act := range acts {
+			w.RegisterActivity(act)
+		}
 
 		rt.workers = append(rt.workers, w)
 		log.Printf("Worker registered on task queue %q", queue)
@@ -229,6 +227,41 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 		})
 	}
 	return rt, nil
+}
+
+// activityDeps is what a worker's activities are built from.
+type activityDeps struct {
+	llm        provider.LLMProvider
+	store      store.Store
+	catalog    *activity.Catalog
+	skills     *activity.SkillActivities
+	maxContext int
+	code       *activity.ClaudeCodeActivities
+	registry   *tool.Registry
+	notifiers  map[string]activity.Notifier
+	web        activity.Notifier
+	schedules  activity.ScheduleHandles
+}
+
+// workerActivities are the activity structs every worker registers, on each
+// of its queues. RegisterActivity makes an activity of every exported method
+// of each, and panics on one that returns neither a result nor an error:
+// what is not an activity is no exported method of these structs. The tests
+// register this very list (TestWorkerActivities_Register) and pin the
+// activities it holds (TestWorkerActivities_AreTheActivities).
+func workerActivities(d activityDeps) []any {
+	return []any{
+		&activity.LLMActivities{Provider: d.llm, Store: d.store, Catalog: d.catalog, Prompts: d.skills.Prompts, MaxContextBytes: d.maxContext},
+		&activity.ForkActivities{Store: d.store, LLM: d.llm, Private: d.catalog},
+		&activity.MemoryActivities{Store: d.store},
+		&activity.ForkPostActivities{Store: d.store},
+		d.code,
+		&activity.ToolActivities{Registry: d.registry, Catalog: d.catalog},
+		&activity.NotificationActivities{Notifiers: d.notifiers},
+		&activity.DeliveryActivities{Web: d.web, Store: d.store},
+		&activity.ScheduleActivities{Client: d.schedules, Store: d.store},
+		d.skills,
+	}
 }
 
 // withCodingSessions sets wopts for the coding runs' sessions, which pin a
@@ -361,21 +394,21 @@ const rootClaimWait = 2 * time.Minute
 // (activity.RootClaim). Failing to claim the root is an error: a worker
 // serving runs without a claim could see its clones deleted by the next one
 // to start. A failed deletion is only logged.
-func claimRunsRoot(codeAct *activity.ClaudeCodeActivities, wait time.Duration) (release func(), err error) {
-	claim, err := codeAct.ClaimRoot(wait)
+func claimRunsRoot(root string, runs activity.RunCounter, wait time.Duration) (release func(), err error) {
+	claim, err := activity.ClaimRoot(root, wait)
 	if err != nil {
-		return nil, fmt.Errorf("claim the coding runs' workspace %q (CLAUDE_CODE_WORKSPACE): %w", codeAct.Root, err)
+		return nil, fmt.Errorf("claim the coding runs' workspace %q (CLAUDE_CODE_WORKSPACE): %w", root, err)
 	}
-	removed, err := claim.Sweep(workflow.RunWorkspaceLifetime)
+	removed, err := claim.Sweep(workflow.RunWorkspaceLifetime, runs)
 	if len(removed) > 0 {
-		log.Printf("Removed %d leftovers of coding runs that are over from %s", len(removed), codeAct.Root)
+		log.Printf("Removed %d leftovers of coding runs that are over from %s", len(removed), root)
 	}
 	if err != nil {
 		log.Printf("Warning: sweeping the coding runs' workspaces: %v", err)
 	}
 	if err := claim.Share(wait); err != nil {
 		claim.Release()
-		return nil, fmt.Errorf("share the claim on the coding runs' workspace %q: %w", codeAct.Root, err)
+		return nil, fmt.Errorf("share the claim on the coding runs' workspace %q: %w", root, err)
 	}
 	return claim.Release, nil
 }

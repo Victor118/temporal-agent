@@ -141,13 +141,13 @@ func TestClaimRunsRoot_FailureIsFatal(t *testing.T) {
 	if err := os.Symlink(filepath.Join(t.TempDir(), "elsewhere"), filepath.Join(root, ".workers.lock")); err != nil {
 		t.Fatal(err)
 	}
-	if release, err := claimRunsRoot(&activity.ClaudeCodeActivities{Root: root}, time.Second); err == nil {
+	if release, err := claimRunsRoot(root, nil, time.Second); err == nil {
 		release()
 		t.Fatal("claimed a root whose claim file is a link")
 	}
 
 	ok := t.TempDir()
-	release, err := claimRunsRoot(&activity.ClaudeCodeActivities{Root: ok}, time.Second)
+	release, err := claimRunsRoot(ok, nil, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,12 +188,12 @@ func TestWithCodingSessions(t *testing.T) {
 // never serves runs without the claim.
 func TestClaimRunsRoot_FatalPastTheWait(t *testing.T) {
 	root := t.TempDir()
-	sweeping, err := (&activity.ClaudeCodeActivities{Root: root}).ClaimRoot(time.Second)
+	sweeping, err := activity.ClaimRoot(root, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer sweeping.Release()
-	if release, err := claimRunsRoot(&activity.ClaudeCodeActivities{Root: root}, 100*time.Millisecond); err == nil {
+	if release, err := claimRunsRoot(root, nil, 100*time.Millisecond); err == nil {
 		release()
 		t.Fatal("started while another process holds the root to itself")
 	}

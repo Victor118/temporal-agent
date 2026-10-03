@@ -32,32 +32,35 @@ const rootClaimFile = ".workers.lock"
 // run's lifetime. flock(2) holds across containers sharing a local volume; on
 // a network filesystem it depends on the filesystem.
 type RootClaim struct {
-	a  *ClaudeCodeActivities
-	f  *os.File
-	fd int
+	root string
+	f    *os.File
+	fd   int
 	// alone: the lock is held exclusively, no other live process uses Root.
 	alone bool
 }
 
-// ClaimRoot claims Root for this process: exclusively when no other live
-// process holds a claim, else shared. A process sweeping Root holds it
-// exclusively: this one waits for it at most wait, then fails. Every failure
-// is an error, the worker's end: a process that served runs without a claim
-// could see its clones deleted by the next worker to start, which would
-// think itself alone. Whatever runs the worker starts it again; by then the
-// sweep is over.
-func (a *ClaudeCodeActivities) ClaimRoot(wait time.Duration) (*RootClaim, error) {
-	if a.Root == "" {
+// ClaimRoot claims root, the coding runs' (ClaudeCodeActivities.Root), for
+// this process: exclusively when no other live process holds a claim, else
+// shared. A process sweeping root holds it exclusively: this one waits for
+// it at most wait, then fails. Every failure is an error, the worker's end:
+// a process that served runs without a claim could see its clones deleted
+// by the next worker to start, which would think itself alone. Whatever runs
+// the worker starts it again; by then the sweep is over.
+//
+// A function, not a method of ClaudeCodeActivities: every exported method of
+// that struct is registered as an activity.
+func ClaimRoot(root string, wait time.Duration) (*RootClaim, error) {
+	if root == "" {
 		return nil, fmt.Errorf("claude code: workspace root is not configured")
 	}
-	if err := os.MkdirAll(a.Root, 0o755); err != nil {
+	if err := os.MkdirAll(root, 0o755); err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(filepath.Join(a.Root, rootClaimFile), os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, 0o600)
+	f, err := os.OpenFile(filepath.Join(root, rootClaimFile), os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return nil, err
 	}
-	c := &RootClaim{a: a, f: f, fd: int(f.Fd())}
+	c := &RootClaim{root: root, f: f, fd: int(f.Fd())}
 	switch err := syscall.Flock(c.fd, syscall.LOCK_EX|syscall.LOCK_NB); {
 	case err == nil:
 		c.alone = true
@@ -87,10 +90,10 @@ func (c *RootClaim) share(wait time.Duration) error {
 			return err
 		}
 		if !time.Now().Before(deadline) {
-			return fmt.Errorf("another worker process still holds %s to itself (it sweeps it) after %s; try again later", c.a.Root, wait)
+			return fmt.Errorf("another worker process still holds %s to itself (it sweeps it) after %s; try again later", c.root, wait)
 		}
 		if !logged {
-			log.Printf("Another worker process holds %s to itself (it sweeps it): waiting up to %s", c.a.Root, wait)
+			log.Printf("Another worker process holds %s to itself (it sweeps it): waiting up to %s", c.root, wait)
 		}
 		time.Sleep(min(claimPoll, time.Until(deadline)))
 	}
@@ -105,7 +108,8 @@ func (c *RootClaim) Alone() bool { return c.alone }
 // Sweep deletes what runs left under Root when their worker stopped mid-run:
 // alone, every run's entry; else only those not modified within lifetime,
 // past which no run's workspace is still in use
-// (workflow.RunWorkspaceLifetime).
+// (workflow.RunWorkspaceLifetime). runs is the worker's count of the
+// commands run as RunAs (ClaudeCodeActivities.Runs); nil = none.
 //
 // Only entries named after a run (RunWorkspacePrefix), and their companions
 // (the CLI's configuration, the copy of the git configuration), directly
@@ -113,12 +117,12 @@ func (c *RootClaim) Alone() bool { return c.alone }
 // removed without following a link (os.RemoveAll removes a link, not its
 // target); anything else is removed as an entry. A failure is reported and
 // the sweep goes on.
-func (c *RootClaim) Sweep(lifetime time.Duration) (removed []string, err error) {
+func (c *RootClaim) Sweep(lifetime time.Duration, runs RunCounter) (removed []string, err error) {
 	var keepAfter time.Time
 	if !c.alone {
 		keepAfter = time.Now().Add(-lifetime)
 	}
-	return c.a.sweep(keepAfter, c.alone)
+	return sweepRoot(c.root, runs, keepAfter, c.alone)
 }
 
 // Share turns an exclusive claim into a shared one, once its sweep is done:
@@ -137,12 +141,12 @@ func (c *RootClaim) Share(wait time.Duration) error {
 // Release gives the claim up: when the process stops.
 func (c *RootClaim) Release() { c.f.Close() }
 
-// sweep removes the runs' entries of Root not modified after keepAfter (zero:
-// all of them). Alone, it first ends what a run left running as RunAs
-// (Runs.KillStrays): nothing of this process runs yet, and a stray could
+// sweepRoot removes the runs' entries of root not modified after keepAfter
+// (zero: all of them). Alone, it first ends what a run left running as RunAs
+// (runs.KillStrays): nothing of this process runs yet, and a stray could
 // still write in a tree being removed.
-func (a *ClaudeCodeActivities) sweep(keepAfter time.Time, alone bool) (removed []string, err error) {
-	entries, err := os.ReadDir(a.Root)
+func sweepRoot(root string, runs RunCounter, keepAfter time.Time, alone bool) (removed []string, err error) {
+	entries, err := os.ReadDir(root)
 	if err != nil {
 		return nil, err
 	}
@@ -151,7 +155,7 @@ func (a *ClaudeCodeActivities) sweep(keepAfter time.Time, alone bool) (removed [
 		if !isRunEntry(e.Name()) {
 			continue
 		}
-		path, perr := a.workspacePath(e.Name())
+		path, perr := rootPath(root, e.Name())
 		if perr != nil {
 			continue
 		}
@@ -164,8 +168,8 @@ func (a *ClaudeCodeActivities) sweep(keepAfter time.Time, alone bool) (removed [
 		}
 		stale = append(stale, path)
 	}
-	if len(stale) > 0 && alone && a.Runs != nil {
-		a.Runs.KillStrays()
+	if len(stale) > 0 && alone && runs != nil {
+		runs.KillStrays()
 	}
 	var errs []error
 	for _, path := range stale {

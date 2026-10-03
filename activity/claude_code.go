@@ -70,9 +70,9 @@ type ClaudeCodeActivities struct {
 	// run to spare (CLAUDE_CODE_QUEUE_WAIT); zero = DefaultRunQueueWait.
 	// The workflow learns it from ProbeRunWorker.
 	QueueWait time.Duration
-
-	stopOnce, stopped sync.Once
-	stopping          chan struct{} // closed by Stop
+	// Stopper ends the runs under way when the worker stops (RunStop.Stop);
+	// nil = never.
+	Stopper *RunStop
 }
 
 // DefaultRunQueueWait is how long a run waits for a worker with a run to
@@ -129,32 +129,45 @@ func (a *ClaudeCodeActivities) ProbeRunWorker(ctx context.Context) (ProbeRunWork
 }
 
 // ErrWorkerStopping is the type of the error of a run its worker ended
-// because it was stopping (ClaudeCodeActivities.Stop): the workflow reads it
-// as a lost worker.
+// because it was stopping (RunStop): the workflow reads it as a lost worker.
 const ErrWorkerStopping = "WorkerStopping"
 
-// Stop ends the runs under way, when the worker stops: each kills its CLI
-// and answers ErrWorkerStopping, while the worker still polls the session's
-// queue and waits for the answer to go out (worker.Options
+// RunStop ends the coding runs under way when their worker stops: each
+// kills its CLI and answers ErrWorkerStopping, while the worker still polls
+// the session's queue and waits for the answer to go out (worker.Options
 // WorkerStopTimeout). Waiting for the SDK to cancel them instead would come
 // last: it stops the session's creation first, which waits that whole
 // timeout for a session that does not end on its own.
-func (a *ClaudeCodeActivities) Stop() {
-	ch := a.stopChannel()
-	a.stopped.Do(func() { close(ch) })
+//
+// It is a type of its own, held by ClaudeCodeActivities, and not a method
+// of it: every exported method of a struct given to RegisterActivity is an
+// activity, and the SDK refuses (panics on) one without a result or error.
+type RunStop struct {
+	init, closed sync.Once
+	stopping     chan struct{}
 }
 
-func (a *ClaudeCodeActivities) stopChannel() chan struct{} {
-	a.stopOnce.Do(func() { a.stopping = make(chan struct{}) })
-	return a.stopping
+// Stop ends the runs under way; later calls do nothing.
+func (s *RunStop) Stop() {
+	ch := s.channel()
+	s.closed.Do(func() { close(ch) })
 }
 
-// endOnStop is ctx, cancelled once the worker stops (Stop), and whether it
-// was.
+// channel is closed once Stop is called; nil (never closed) for a nil s.
+func (s *RunStop) channel() chan struct{} {
+	if s == nil {
+		return nil
+	}
+	s.init.Do(func() { s.stopping = make(chan struct{}) })
+	return s.stopping
+}
+
+// endOnStop is ctx, cancelled once the worker stops (Stopper), and whether
+// it was.
 func (a *ClaudeCodeActivities) endOnStop(ctx context.Context) (context.Context, func() bool, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(ctx)
 	var stopped atomic.Bool
-	stopping := a.stopChannel()
+	stopping := a.Stopper.channel()
 	go func() {
 		select {
 		case <-stopping:
@@ -589,13 +602,18 @@ func lowerCap(a, b float64) float64 {
 // workspacePath resolves a run's directory and refuses anything that would
 // land outside Root.
 func (a *ClaudeCodeActivities) workspacePath(name string) (string, error) {
-	if a.Root == "" {
+	return rootPath(a.Root, name)
+}
+
+// rootPath is the entry name directly under root.
+func rootPath(root, name string) (string, error) {
+	if root == "" {
 		return "", fmt.Errorf("claude code: workspace root is not configured")
 	}
 	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\`) {
 		return "", fmt.Errorf("claude code: %q is not a valid workspace name", name)
 	}
-	return filepath.Join(filepath.Clean(a.Root), name), nil
+	return filepath.Join(filepath.Clean(root), name), nil
 }
 
 // git runs one git command, heartbeating so a clone that hangs is noticed in

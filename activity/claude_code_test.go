@@ -1110,6 +1110,7 @@ func TestRunClaudeCode_EndsWhenTheWorkerStops(t *testing.T) {
 	}
 	a := &ClaudeCodeActivities{
 		AllowedRepos: testRepos, Root: subproctest.Dir(t, nil), RunAs: id, Runner: &claudecode.Runner{Binary: bin},
+		Stopper: &RunStop{},
 	}
 	if id != nil {
 		a.Runs = subproc.NewRuns(id)
@@ -1128,7 +1129,7 @@ func TestRunClaudeCode_EndsWhenTheWorkerStops(t *testing.T) {
 		done <- err
 	}()
 	time.Sleep(300 * time.Millisecond)
-	a.Stop()
+	a.Stopper.Stop()
 	select {
 	case err := <-done:
 		var appErr *temporal.ApplicationError
@@ -1163,5 +1164,28 @@ func TestProbeRunWorker(t *testing.T) {
 	var appErr *temporal.ApplicationError
 	if !errors.As(err, &appErr) || appErr.Type() != ErrNoClaudeCLI || !appErr.NonRetryable() {
 		t.Errorf("no CLI: %v, want a non-retryable %s", err, ErrNoClaudeCLI)
+	}
+}
+
+// A RunStop stops once, however many times it is called; a nil one never
+// stops a run.
+func TestRunStop(t *testing.T) {
+	var none *RunStop
+	if none.channel() != nil {
+		t.Error("a nil RunStop has a channel")
+	}
+	s := &RunStop{}
+	ch := s.channel()
+	select {
+	case <-ch:
+		t.Fatal("stopped before Stop")
+	default:
+	}
+	s.Stop()
+	s.Stop()
+	select {
+	case <-ch:
+	default:
+		t.Fatal("not stopped after Stop")
 	}
 }

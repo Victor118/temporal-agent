@@ -57,11 +57,11 @@ func entries(t *testing.T, root string) []string {
 // claimAndSweep is a worker's startup: claim Root, sweep it, share the claim.
 func claimAndSweep(t *testing.T, a *ClaudeCodeActivities, lifetime time.Duration) (removed []string, release func()) {
 	t.Helper()
-	claim, err := a.ClaimRoot(time.Second)
+	claim, err := ClaimRoot(a.Root, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	removed, err = claim.Sweep(lifetime)
+	removed, err = claim.Sweep(lifetime, a.Runs)
 	if err != nil {
 		claim.Release()
 		t.Fatal(err)
@@ -152,7 +152,7 @@ func TestSweep_SharedRootKeepsRecentRuns(t *testing.T) {
 
 func TestClaimRoot_CreatesTheRoot(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "runs")
-	claim, err := (&ClaudeCodeActivities{Root: root}).ClaimRoot(time.Second)
+	claim, err := ClaimRoot(root, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +164,7 @@ func TestClaimRoot_CreatesTheRoot(t *testing.T) {
 		t.Error("not alone on a new root")
 	}
 
-	if claim, err := (&ClaudeCodeActivities{}).ClaimRoot(time.Second); err == nil {
+	if claim, err := ClaimRoot("", time.Second); err == nil {
 		claim.Release()
 		t.Error("claimed with no root configured")
 	}
@@ -175,7 +175,7 @@ func TestClaimRoot_CreatesTheRoot(t *testing.T) {
 func TestClaimRoot_FailsOnALink(t *testing.T) {
 	root := t.TempDir()
 	os.Symlink(filepath.Join(t.TempDir(), "elsewhere"), filepath.Join(root, rootClaimFile))
-	if claim, err := (&ClaudeCodeActivities{Root: root}).ClaimRoot(time.Second); err == nil {
+	if claim, err := ClaimRoot(root, time.Second); err == nil {
 		claim.Release()
 		t.Error("claimed through a link")
 	}
@@ -186,7 +186,7 @@ func TestClaimRoot_FailsOnALink(t *testing.T) {
 // claim. Once the sweep is over, it claims Root, shared.
 func TestClaimRoot_WaitsForASweepThenFails(t *testing.T) {
 	root := t.TempDir()
-	sweeping, err := (&ClaudeCodeActivities{Root: root}).ClaimRoot(time.Second)
+	sweeping, err := ClaimRoot(root, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +196,7 @@ func TestClaimRoot_WaitsForASweepThenFails(t *testing.T) {
 
 	a := &ClaudeCodeActivities{Root: root}
 	start := time.Now()
-	if claim, err := a.ClaimRoot(200 * time.Millisecond); err == nil {
+	if claim, err := ClaimRoot(a.Root, 200*time.Millisecond); err == nil {
 		claim.Release()
 		t.Fatal("claimed while another process sweeps")
 	}
@@ -210,7 +210,7 @@ func TestClaimRoot_WaitsForASweepThenFails(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	claim, err := a.ClaimRoot(5 * time.Second)
+	claim, err := ClaimRoot(a.Root, 5*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
