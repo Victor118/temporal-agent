@@ -57,8 +57,10 @@ func TestWithCallContext(t *testing.T) {
 // a reserved field by changing the case of its key, least of all one the
 // caller leaves empty (an unsigned turn: no Agent), which nothing replaces.
 func TestWithCallContext_AnyCase(t *testing.T) {
+	// "memory_verſion" (long s) folds to memory_version, for encoding/json as
+	// for strings.EqualFold.
 	forged := `{"question":"ok?","AGENT":"forged","Notify_Queue":"forged","Memory_Version":99,"MEMORY_UNREAD":true,` +
-		`"Channel":"forged","channel_ID":"forged","Agent_Chain":["forged"],"aGeNt":"forged"}`
+		`"Channel":"forged","channel_ID":"forged","Agent_Chain":["forged"],"aGeNt":"forged","memory_verſion":99}`
 	for name, cc := range map[string]CallContext{
 		"empty": {},
 		"set":   {AgentChain: []string{"default"}, Channel: "telegram", ChannelID: "42", Agent: "Jarvis", NotifyQueue: "agent"},
@@ -80,7 +82,7 @@ func TestWithCallContext_AnyCase(t *testing.T) {
 		var keys map[string]json.RawMessage
 		json.Unmarshal(got, &keys)
 		for k := range keys {
-			if k != "question" && strings.ToLower(k) != k {
+			if k != "question" && !slices.Contains(callContextKeys, k) {
 				t.Errorf("%s: the model's key %q is left", name, k)
 			}
 		}
@@ -91,6 +93,31 @@ func TestCallContextKeys(t *testing.T) {
 	want := []string{"agent_chain", "channel", "channel_id", "agent", "notify_queue", "memory_version", "memory_unread"}
 	if !slices.Equal(callContextKeys, want) {
 		t.Errorf("reserved keys %v, want %v", callContextKeys, want)
+	}
+}
+
+// The keys of a field encoding/json decodes as it does: by its Go name with
+// no tag name, and through an embedded struct with none.
+func TestJSONKeys(t *testing.T) {
+	type inner struct {
+		Deep string `json:"deep"`
+		Bare int
+	}
+	type Promoted struct{ Up string }
+	type fields struct {
+		Tagged  string `json:"tagged,omitempty"`
+		Untag   string
+		OptOnly string `json:",omitempty"`
+		Skipped string `json:"-"`
+		hidden  string
+		inner
+		*Promoted
+		Named inner `json:"named"`
+	}
+	_ = fields{}.hidden
+	want := []string{"tagged", "Untag", "OptOnly", "deep", "Bare", "Up", "named"}
+	if got := jsonKeys(reflect.TypeFor[fields]()); !slices.Equal(got, want) {
+		t.Errorf("jsonKeys = %v, want %v", got, want)
 	}
 }
 

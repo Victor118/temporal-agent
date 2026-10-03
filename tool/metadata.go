@@ -86,17 +86,41 @@ type CallContext struct {
 
 // callContextKeys are the input keys CallContext's fields decode from: its
 // JSON names, read from its tags so that a field added there is reserved too.
-var callContextKeys = func() []string {
+var callContextKeys = jsonKeys(reflect.TypeFor[CallContext]())
+
+// jsonKeys are the keys encoding/json decodes into the fields of struct t:
+// a field's tag name, else its Go name; the fields of an embedded struct
+// with no tag name, as their own (promoted). A field tagged "-", or
+// unexported and not embedded, takes no key.
+func jsonKeys(t reflect.Type) []string {
 	var keys []string
-	t := reflect.TypeFor[CallContext]()
 	for i := range t.NumField() {
-		name, _, _ := strings.Cut(t.Field(i).Tag.Get("json"), ",")
-		if name != "" && name != "-" {
-			keys = append(keys, name)
+		f := t.Field(i)
+		tag := f.Tag.Get("json")
+		if tag == "-" {
+			continue
 		}
+		name, _, _ := strings.Cut(tag, ",")
+		if f.Anonymous && name == "" {
+			ft := f.Type
+			if ft.Kind() == reflect.Pointer {
+				ft = ft.Elem()
+			}
+			if ft.Kind() == reflect.Struct {
+				keys = append(keys, jsonKeys(ft)...)
+				continue
+			}
+		}
+		if !f.IsExported() {
+			continue
+		}
+		if name == "" {
+			name = f.Name
+		}
+		keys = append(keys, name)
 	}
 	return keys
-}()
+}
 
 // WithCallContext adds cc's fields to a tool's input object. They are the
 // caller's to set, never the model's: a key the model put that one of them
