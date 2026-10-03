@@ -267,6 +267,29 @@ func TestConvert_OwnTurnsForAnotherUserHidePrivateCalls(t *testing.T) {
 	})
 }
 
+// A result whose call is nowhere in the conversation says nothing of the tool
+// that made it: read as a private one, whoever the reader, as in a fork's
+// transcript. The result block stays.
+func TestConvert_ResultWithoutItsCallIsPrivate(t *testing.T) {
+	for _, user := range []string{"u-alice", "u-bob"} {
+		msgs := Convert([]store.Message{
+			{Role: store.RoleUser, Content: `"hello"`, UserID: "u-alice", Author: "Alice"},
+			{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "lost", Content: "Alice's secret", IsError: true}},
+			{Role: store.RoleAssistant, AgentID: "smith", UserID: "u-alice", ToolCalls: []store.ToolCall{{ID: "s1", Name: "web_search"}}},
+			{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "s1", Content: "found"}},
+		}, View{Self: "smith", User: user, Private: tool.PrivateSet{}})
+		if len(msgs) != 4 || msgs[1].ToolResult == nil || msgs[3].ToolResult == nil {
+			t.Fatalf("%s: messages %+v", user, msgs)
+		}
+		if r := msgs[1].ToolResult; r.ToolCallID != "lost" || r.Content != "(private)" || !r.IsError {
+			t.Errorf("%s: orphan result %+v, want it hidden", user, r)
+		}
+		if r := msgs[3].ToolResult; r.Content != "found" {
+			t.Errorf("%s: result of a public call %+v, want it in full", user, r)
+		}
+	}
+}
+
 // Why a turn failed is for the members: the model never sees it, or it would
 // answer the error instead of the user. The two user messages around it are
 // read as one.

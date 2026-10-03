@@ -97,12 +97,17 @@ type otherCall struct {
 // keeps its tool blocks, but a private tool's input and result are replaced
 // as the members see them (tool.DisplayInput, tool.DisplayResult): what the
 // agent saved of Alice's memory is not read when it answers Bob. The blocks
-// stay, so each call still has its result.
+// stay, so each call still has its result. A result whose call is nowhere in
+// the conversation is private too: nothing says what made it.
 func Convert(messages []store.Message, view View) []provider.ChatMessage {
 	// Tool results carry no agent nor user: they are found by their calls.
 	others := map[string]otherCall{}
 	hidden := map[string]bool{} // private calls of the agent's turns for another user
+	called := map[string]bool{}
 	for _, m := range messages {
+		for _, tc := range m.ToolCalls {
+			called[tc.ID] = true
+		}
 		if view.other(m) {
 			for _, tc := range m.ToolCalls {
 				others[tc.ID] = otherCall{tool: tc.Name, agent: view.label(m)}
@@ -156,7 +161,7 @@ func Convert(messages []store.Message, view View) []provider.ChatMessage {
 		if r := msg.ToolResult; r != nil {
 			cm.ToolResult = &provider.ToolResultInfo{
 				ToolCallID: r.ToolCallID,
-				Content:    tool.DisplayResult(hidden[r.ToolCallID], r.Content),
+				Content:    tool.DisplayResult(hidden[r.ToolCallID] || !called[r.ToolCallID], r.Content),
 				IsError:    r.IsError,
 			}
 		}
