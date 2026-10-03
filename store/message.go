@@ -131,6 +131,18 @@ func TurnSnapshot(group string) (int64, bool) {
 // messages wrote, even after it: they ran before it, as a session answers its
 // messages one at a time. A person's message stored after upTo is not read:
 // it is answered next, by a turn of its own.
+//
+// Known race, left alone: ids are not in commit order. Two messages stored a
+// few milliseconds apart (autocommit INSERTs): Bob's takes its id before M1's
+// but commits after M1's turn began. It is <= upTo, so the second call of
+// M1's turn reads it, placed before the turn's own messages (the prefix
+// changes, the cache misses, the model sees a message appear before its tool
+// calls). Then Bob's turn, upTo = id(Bob) < id(M1), reads neither M1 nor its
+// answer R1 (the snapshot of M1's group, id(M1), is above upTo); the turn of
+// the next message M3 reads [Bob, R1, R2, M1 + M3], M1 released after both
+// answers. Very rare, and no request the API refuses. upTo = max(MessageID,
+// LastMessageID on receipt) is no fix (it was the queued-messages bug): it
+// would take an order by commit.
 func TurnReads(id int64, key string, upTo int64, turnKeys []string) bool {
 	if id <= upTo {
 		return true
