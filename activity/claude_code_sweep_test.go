@@ -160,8 +160,8 @@ func TestClaimRoot_CreatesTheRoot(t *testing.T) {
 	if _, err := os.Stat(root); err != nil {
 		t.Error(err)
 	}
-	if !claim.Alone() || !claim.Held() {
-		t.Errorf("alone %v, held %v on a new root", claim.Alone(), claim.Held())
+	if !claim.Alone() {
+		t.Error("not alone on a new root")
 	}
 
 	if claim, err := (&ClaudeCodeActivities{}).ClaimRoot(time.Second); err == nil {
@@ -182,9 +182,9 @@ func TestClaimRoot_FailsOnALink(t *testing.T) {
 }
 
 // A process that sweeps holds the claim exclusively. One starting meanwhile
-// waits for it a bounded time, then goes on without sweeping, and takes the
-// claim, shared, as soon as the other lets it go.
-func TestClaimRoot_WaitsForASweepThenClaimsLater(t *testing.T) {
+// waits for it a bounded time, then fails: it must not serve runs without a
+// claim. Once the sweep is over, it claims Root, shared.
+func TestClaimRoot_WaitsForASweepThenFails(t *testing.T) {
 	root := t.TempDir()
 	sweeping, err := (&ClaudeCodeActivities{Root: root}).ClaimRoot(time.Second)
 	if err != nil {
@@ -196,38 +196,28 @@ func TestClaimRoot_WaitsForASweepThenClaimsLater(t *testing.T) {
 
 	a := &ClaudeCodeActivities{Root: root}
 	start := time.Now()
-	claim, err := a.ClaimRoot(200 * time.Millisecond)
+	if claim, err := a.ClaimRoot(200 * time.Millisecond); err == nil {
+		claim.Release()
+		t.Fatal("claimed while another process sweeps")
+	}
+	if waited := time.Since(start); waited < 200*time.Millisecond || waited > 5*time.Second {
+		t.Errorf("waited %s, want about the 200ms given", waited)
+	}
+
+	// The sweep ends within the wait: the claim is taken, shared.
+	time.AfterFunc(100*time.Millisecond, func() {
+		if err := sweeping.Share(time.Second); err != nil {
+			t.Error(err)
+		}
+	})
+	claim, err := a.ClaimRoot(5 * time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer claim.Release()
-	if waited := time.Since(start); waited < 200*time.Millisecond || waited > 5*time.Second {
-		t.Errorf("waited %s, want about the 200ms given", waited)
-	}
-	if claim.Held() || claim.Alone() {
-		t.Fatalf("held %v, alone %v while another process sweeps", claim.Held(), claim.Alone())
-	}
-	if _, err := claim.Sweep(time.Hour); err == nil {
-		t.Error("swept without holding the claim")
-	}
-
-	sweeping.Release()
-	// Taken in the background: a newcomer is no longer alone.
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		probe, err := (&ClaudeCodeActivities{Root: root}).ClaimRoot(0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		alone := probe.Alone()
-		probe.Release()
-		if !alone {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the waiting process never took its claim")
-		}
-		time.Sleep(20 * time.Millisecond)
+	defer sweeping.Release()
+	if claim.Alone() {
+		t.Error("alone beside another process")
 	}
 }
 

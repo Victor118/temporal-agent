@@ -37,18 +37,15 @@ type RootClaim struct {
 	fd int
 	// alone: the lock is held exclusively, no other live process uses Root.
 	alone bool
-	// held: the lock is held. Not held = another process kept it exclusive
-	// (its own sweep) past the wait: this one takes it, shared, as soon as
-	// that process lets it go (claimLater).
-	held bool
 }
 
 // ClaimRoot claims Root for this process: exclusively when no other live
 // process holds a claim, else shared. A process sweeping Root holds it
-// exclusively: this one waits for it at most wait, then goes on without
-// holding the claim yet (Held). Any other failure is an error: a process
-// that serves runs without a claim could see its clones deleted by the next
-// worker to start, which would think itself alone.
+// exclusively: this one waits for it at most wait, then fails. Every failure
+// is an error, the worker's end: a process that served runs without a claim
+// could see its clones deleted by the next worker to start, which would
+// think itself alone. Whatever runs the worker starts it again; by then the
+// sweep is over.
 func (a *ClaudeCodeActivities) ClaimRoot(wait time.Duration) (*RootClaim, error) {
 	if a.Root == "" {
 		return nil, fmt.Errorf("claude code: workspace root is not configured")
@@ -63,7 +60,7 @@ func (a *ClaudeCodeActivities) ClaimRoot(wait time.Duration) (*RootClaim, error)
 	c := &RootClaim{a: a, f: f, fd: int(f.Fd())}
 	switch err := syscall.Flock(c.fd, syscall.LOCK_EX|syscall.LOCK_NB); {
 	case err == nil:
-		c.alone, c.held = true, true
+		c.alone = true
 		return c, nil
 	case !errors.Is(err, syscall.EWOULDBLOCK):
 		f.Close()
@@ -77,22 +74,20 @@ func (a *ClaudeCodeActivities) ClaimRoot(wait time.Duration) (*RootClaim, error)
 }
 
 // share takes the lock shared, waiting at most wait for a process that holds
-// it exclusively; past that, it is taken in the background (claimLater).
+// it exclusively; past that, it fails.
 func (c *RootClaim) share(wait time.Duration) error {
-	c.alone, c.held = false, false
+	c.alone = false
 	deadline := time.Now().Add(wait)
 	for logged := false; ; logged = true {
 		err := syscall.Flock(c.fd, syscall.LOCK_SH|syscall.LOCK_NB)
 		if err == nil {
-			c.held = true
 			return nil
 		}
 		if !errors.Is(err, syscall.EWOULDBLOCK) {
 			return err
 		}
 		if !time.Now().Before(deadline) {
-			c.claimLater()
-			return nil
+			return fmt.Errorf("another worker process still holds %s to itself (it sweeps it) after %s; try again later", c.a.Root, wait)
 		}
 		if !logged {
 			log.Printf("Another worker process holds %s to itself (it sweeps it): waiting up to %s", c.a.Root, wait)
@@ -104,26 +99,8 @@ func (c *RootClaim) share(wait time.Duration) error {
 // claimPoll is how often share tries the lock again.
 const claimPoll = 500 * time.Millisecond
 
-// claimLater takes the lock shared once the process holding it exclusively
-// lets it go, for as long as this one runs.
-func (c *RootClaim) claimLater() {
-	log.Printf("Warning: %s is still held by another worker process: no sweep of it this time; "+
-		"it is claimed as soon as that process lets it go", c.a.Root)
-	go func() {
-		if err := syscall.Flock(c.fd, syscall.LOCK_SH); err != nil {
-			log.Printf("Warning: claim %s: %v", c.a.Root, err)
-			return
-		}
-		log.Printf("Claimed %s, shared with the other worker processes", c.a.Root)
-	}()
-}
-
 // Alone tells whether no other live process uses Root.
 func (c *RootClaim) Alone() bool { return c.alone }
-
-// Held tells whether the claim was held when ClaimRoot returned. Not held,
-// Sweep refuses: another process is sweeping Root.
-func (c *RootClaim) Held() bool { return c.held }
 
 // Sweep deletes what runs left under Root when their worker stopped mid-run:
 // alone, every run's entry; else only those not modified within lifetime,
@@ -137,9 +114,6 @@ func (c *RootClaim) Held() bool { return c.held }
 // target); anything else is removed as an entry. A failure is reported and
 // the sweep goes on.
 func (c *RootClaim) Sweep(lifetime time.Duration) (removed []string, err error) {
-	if !c.held {
-		return nil, fmt.Errorf("claim on %s not held: another worker process is sweeping it", c.a.Root)
-	}
 	var keepAfter time.Time
 	if !c.alone {
 		keepAfter = time.Now().Add(-lifetime)
@@ -151,7 +125,8 @@ func (c *RootClaim) Sweep(lifetime time.Duration) (removed []string, err error) 
 // from then on a newcomer is not alone. The runs of this process start only
 // after it returns. The conversion is not atomic (flock(2)): a newcomer may
 // take the lock exclusively in between, and sweep, before this process has
-// any run there; Share then waits for it as ClaimRoot does.
+// any run there; Share then waits for it as ClaimRoot does, and fails as it
+// does past wait.
 func (c *RootClaim) Share(wait time.Duration) error {
 	if !c.alone {
 		return nil

@@ -355,9 +355,6 @@ func claimRunsRoot(codeAct *activity.ClaudeCodeActivities, wait time.Duration) (
 	if err != nil {
 		return nil, fmt.Errorf("claim the coding runs' workspace %q (CLAUDE_CODE_WORKSPACE): %w", codeAct.Root, err)
 	}
-	if !claim.Held() {
-		return claim.Release, nil // logged by the claim
-	}
 	removed, err := claim.Sweep(workflow.RunWorkspaceLifetime)
 	if len(removed) > 0 {
 		log.Printf("Removed %d leftovers of coding runs that are over from %s", len(removed), codeAct.Root)
