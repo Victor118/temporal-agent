@@ -61,6 +61,9 @@ type ClaudeCodeActivities struct {
 	// workflow may only lower it. Both the operator's, like AllowedRepos.
 	Model        string
 	MaxBudgetUSD float64
+	// Auth is how runs authenticate: the API or a subscription
+	// (claudecode.ResolveAuth, CLAUDE_CODE_AUTH). Zero: as the CLI finds.
+	Auth claudecode.Auth
 }
 
 // RunCounter is what the coding activities need of subproc.Runs: a run
@@ -421,7 +424,7 @@ func (a *ClaudeCodeActivities) RunClaudeCode(ctx context.Context, in RunClaudeCo
 		defer func() {
 			// The CLI's environment is the worker's, filtered: whether it has
 			// an API key is the worker's.
-			if err := claudecode.KeepCredentials(configDir, a.ClaudeConfigDir, os.Environ()); err != nil {
+			if err := claudecode.KeepCredentials(configDir, a.ClaudeConfigDir, a.Auth.Filter(os.Environ())); err != nil {
 				log.Printf("Warning: claude code: the login the run renewed was not kept: %v", err)
 			}
 		}()
@@ -432,6 +435,7 @@ func (a *ClaudeCodeActivities) RunClaudeCode(ctx context.Context, in RunClaudeCo
 		runner = *a.Runner
 	}
 	runner.RunAs = a.RunAs
+	runner.Auth = a.Auth
 	if a.Runs != nil {
 		runner.Runs = a.Runs
 	}

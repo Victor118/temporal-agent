@@ -107,7 +107,11 @@ func newDebugRunner(cfg *config.Config, binary string) (*claudecode.Runner, erro
 	if err := runAs.PrepareHome(); err != nil {
 		return nil, fmt.Errorf("RUN_AS_UID: %w", err)
 	}
-	return &claudecode.Runner{Binary: binary, RunAs: runAs, Runs: subproc.NewRuns(runAs)}, nil
+	auth, err := claudecode.ResolveAuth(cfg.ClaudeCodeAuth, os.Environ())
+	if err != nil {
+		return nil, err
+	}
+	return &claudecode.Runner{Binary: binary, RunAs: runAs, Runs: subproc.NewRuns(runAs), Auth: auth}, nil
 }
 
 // debugConfigDir is the CLI's configuration for a manual run: a copy of the
@@ -188,7 +192,7 @@ func runClaudeCodeRun(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	configDir, done, err := debugConfigDir(cfg.ClaudeConfigDir, runner.RunAs,
-		append(os.Environ(), claudeCodeFlags.env...), claudeCodeFlags.persistSession)
+		runner.Auth.Filter(append(os.Environ(), claudeCodeFlags.env...)), claudeCodeFlags.persistSession)
 	if err != nil {
 		return err
 	}

@@ -73,6 +73,17 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 		return nil, fmt.Errorf("CLAUDE_CODE_MAX_BUDGET_USD: %w", err)
 	}
 
+	// Who pays for a coding run, the API or a subscription, is settled before
+	// any run, where the CLI is installed: never left to the CLI picking
+	// whichever credential it finds.
+	var auth claudecode.Auth
+	if (&claudecode.Runner{}).Available() {
+		if auth, err = claudecode.ResolveAuth(cfg.ClaudeCodeAuth, os.Environ()); err != nil {
+			return nil, err
+		}
+		log.Printf("Coding runs %s", auth.Describe(os.Environ()))
+	}
+
 	runAs, err := subproc.ParseIdentity(cfg.RunAsUID, cfg.RunAsGID)
 	if err != nil {
 		return nil, err
@@ -133,7 +144,7 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 		w.RegisterActivity(&activity.LLMActivities{Provider: llmProvider})
 		w.RegisterActivity(&activity.ForkActivities{Store: st, LLM: llmProvider, Private: catalog})
 		w.RegisterActivity(&activity.MemoryActivities{Store: st})
-		w.RegisterActivity(&activity.ClaudeCodeActivities{Root: cfg.ClaudeCodeWorkspace, SSHKeyPath: cfg.ClaudeCodeSSHKey, AllowedRepos: cfg.ClaudeCodeRepos, RunAs: runAs, Runs: runs, ClaudeConfigDir: cfg.ClaudeConfigDir, Model: cfg.ClaudeCodeModel, MaxBudgetUSD: budget})
+		w.RegisterActivity(&activity.ClaudeCodeActivities{Root: cfg.ClaudeCodeWorkspace, SSHKeyPath: cfg.ClaudeCodeSSHKey, AllowedRepos: cfg.ClaudeCodeRepos, RunAs: runAs, Runs: runs, ClaudeConfigDir: cfg.ClaudeConfigDir, Model: cfg.ClaudeCodeModel, MaxBudgetUSD: budget, Auth: auth})
 		w.RegisterActivity(&activity.ToolActivities{Registry: registry, Catalog: catalog})
 		w.RegisterActivity(&activity.NotificationActivities{Notifiers: notifiers})
 		w.RegisterActivity(&activity.DeliveryActivities{Web: opts.web, Store: st})

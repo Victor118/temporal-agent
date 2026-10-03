@@ -146,6 +146,9 @@ type Runner struct {
 	// with the rest of the worker). Required with RunAs: what a run left
 	// running would otherwise never be ended.
 	Runs Holder
+	// Auth keeps the CLI to the worker's way of authenticating (ResolveAuth):
+	// the other mode's credential never reaches it. Zero: as found.
+	Auth Auth
 }
 
 // Holder counts a command while it runs, and once none runs, ends every
@@ -184,7 +187,7 @@ func (r *Runner) Run(ctx context.Context, p Params) (Result, error) {
 	// command that carries a context.
 	cmd := exec.CommandContext(ctx, r.binary(), buildArgs(p)...)
 	cmd.Dir = p.Cwd
-	cmd.Env = r.RunAs.Env(append(cliEnv(os.Environ()), p.Env...))
+	cmd.Env = r.RunAs.Env(r.Auth.Filter(append(cliEnv(os.Environ()), p.Env...)))
 	// The CLI's version is the image's: it does not update itself, wherever
 	// the user it runs as could write.
 	cmd.Env = append(cmd.Env, "DISABLE_AUTOUPDATER=1")
@@ -339,7 +342,7 @@ func buildArgs(p Params) []string {
 // environment beyond what any subprocess keeps (subproc.Env): the CLI's own
 // settings, and the Go toolchain's, named as exec names them.
 var (
-	cliEnvNames    = append([]string{"CLAUDE_CONFIG_DIR", "NODE_EXTRA_CA_CERTS"}, subproc.GoToolchainNames...)
+	cliEnvNames    = append([]string{"CLAUDE_CONFIG_DIR", "NODE_EXTRA_CA_CERTS", OAuthTokenEnv}, subproc.GoToolchainNames...)
 	cliEnvPrefixes = []string{"ANTHROPIC_"}
 )
 

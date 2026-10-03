@@ -77,6 +77,10 @@ type Config struct {
 	// key, so the model asking for it does not choose its price.
 	ClaudeCodeModel        string
 	ClaudeCodeMaxBudgetUSD string
+	// ClaudeCodeAuth is how this worker's coding runs authenticate: "api"
+	// (ANTHROPIC_API_KEY) or "subscription" (CLAUDE_CODE_OAUTH_TOKEN, or the
+	// CLI's login); empty = the one credential set (claudecode.ResolveAuth).
+	ClaudeCodeAuth string
 	// RunAsUID and RunAsGID are the user commands chosen by a model (exec,
 	// a coding run) run as, in place of the worker's: subproc.Identity. A
 	// worker running as root refuses them without one. Empty GID = the UID.
@@ -175,6 +179,7 @@ func Load() *Config {
 
 		ClaudeCodeModel:        os.Getenv("CLAUDE_CODE_MODEL"),
 		ClaudeCodeMaxBudgetUSD: os.Getenv("CLAUDE_CODE_MAX_BUDGET_USD"),
+		ClaudeCodeAuth:         os.Getenv("CLAUDE_CODE_AUTH"),
 
 		SkillsRepo:          os.Getenv("SKILLS_REPO"),
 		SkillsBranch:        envOr("SKILLS_BRANCH", "main"),

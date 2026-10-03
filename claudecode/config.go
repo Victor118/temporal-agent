@@ -9,7 +9,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
@@ -146,13 +145,7 @@ func KeepCredentials(dir, base string, environ []string) error {
 // hasAPIKey tells whether environ gives the CLI an API key: a non-empty
 // ANTHROPIC_API_KEY, the last one winning as os/exec has it.
 func hasAPIKey(environ []string) bool {
-	key := ""
-	for _, kv := range environ {
-		if name, value, _ := strings.Cut(kv, "="); name == "ANTHROPIC_API_KEY" {
-			key = value
-		}
-	}
-	return key != ""
+	return envValue(environ, "ANTHROPIC_API_KEY") != ""
 }
 
 // sameShape tells whether renewed, a JSON document, holds everything current
