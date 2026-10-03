@@ -29,10 +29,14 @@ type ToolResult struct {
 type Message struct {
 	Role    Role   `json:"role"`
 	Content string `json:"content,omitempty"`
-	// UserID and Author identify who wrote a user message, in a session
-	// several users share. Author is the name at the time of writing.
-	UserID string `json:"user_id,omitempty"`
-	Author string `json:"author,omitempty"`
+	// UserID identifies who wrote a user message, AgentID which agent wrote
+	// an assistant message (or the turn a KindTurnError ended): a session is
+	// shared by several users, and several agents answer in it. Author is
+	// the writer's name at the time of writing, user or agent; the interface
+	// shows the agent's current name, Author only once the agent is gone.
+	UserID  string `json:"user_id,omitempty"`
+	AgentID string `json:"agent_id,omitempty"`
+	Author  string `json:"author,omitempty"`
 	// Kind marks a message the system wrote: KindForkSummary is the summary
 	// a fork starts from, KindTurnError why a turn failed. Empty for an
 	// ordinary message.

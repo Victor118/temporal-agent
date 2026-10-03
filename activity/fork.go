@@ -25,7 +25,7 @@ const (
 	maxSummaryTokens          = 4096
 )
 
-const summarySystemPrompt = `You summarize a conversation between users and an AI assistant, so that a new conversation can continue from where this one stops.
+const summarySystemPrompt = `You summarize a conversation between users and one or more AI assistants, so that a new conversation can continue from where this one stops.
 
 Write the summary in the language of the conversation. Keep:
 - the goals pursued, and where each stands;
@@ -35,7 +35,7 @@ Write the summary in the language of the conversation. Keep:
 - every concrete reference: repositories, branches, files, URLs, names, figures, commands;
 - the preferences the users expressed about how to work.
 
-Drop greetings, small talk and dead ends that led nowhere. Name who said what when several users take part. Never add anything the conversation does not contain. Write a structured note, not a narrative; no preamble.`
+Drop greetings, small talk and dead ends that led nowhere. Name who said what when several users or assistants take part. Never add anything the conversation does not contain. Write a structured note, not a narrative; no preamble.`
 
 // TranscriptReader reads a conversation up to one of its messages.
 type TranscriptReader interface {
@@ -136,15 +136,20 @@ func transcriptEntry(m store.Message, private tool.PrivateInputs) string {
 	case m.Role == store.RoleUser:
 		return "User: " + text
 	case m.Role == store.RoleAssistant:
+		// Several agents may answer in a session: each is named.
+		who := "Assistant"
+		if m.Author != "" {
+			who += " (" + m.Author + ")"
+		}
 		var parts []string
 		if text != "" {
-			parts = append(parts, "Assistant: "+text)
+			parts = append(parts, who+": "+text)
 		}
 		for _, tc := range m.ToolCalls {
 			// Shown as the session's members see it: a user's memory stays out
 			// of the summary, which may go to someone else's fork.
 			input := tool.DisplayInput(private == nil || private.PrivateInput(tc.Name), tc.Input)
-			parts = append(parts, "Assistant called "+tc.Name+" "+clip(string(input), maxSummaryToolInputBytes))
+			parts = append(parts, who+" called "+tc.Name+" "+clip(string(input), maxSummaryToolInputBytes))
 		}
 		return strings.Join(parts, "\n")
 	case m.ToolResult != nil:

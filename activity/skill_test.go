@@ -65,3 +65,17 @@ func TestLoadSkillsForAgent_SaysWhatCallsIt(t *testing.T) {
 		t.Errorf("prompt %q", out.SystemPrompt)
 	}
 }
+
+// The agent's name signs its messages; an agent the catalog does not know
+// signs with its ID.
+func TestLoadSkillsForAgent_GivesTheName(t *testing.T) {
+	c := NewCatalog()
+	c.SetAgents([]AgentCatalogEntry{{ID: "default", Name: "Jarvis", Mention: "jarvis"}})
+	a := NewSkillActivities(nil, c)
+	for id, want := range map[string]string{"default": "Jarvis", "gone": "gone"} {
+		out, err := a.LoadSkillsForAgent(context.Background(), LoadSkillsForAgentInput{AgentID: id})
+		if err != nil || out.Name != want {
+			t.Errorf("%s: name %q (%v), want %q", id, out.Name, err, want)
+		}
+	}
+}

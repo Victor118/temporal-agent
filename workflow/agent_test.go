@@ -631,11 +631,52 @@ func TestConvertMessages_NamesTheAuthor(t *testing.T) {
 		{Role: store.RoleUser, Content: `"hello"`, UserID: "u-alice", Author: "Alice"},
 		{Role: store.RoleAssistant, Content: `"hi Alice"`},
 		{Role: store.RoleUser, Content: `"scheduled prompt"`}, // no author: a scheduled run
-	})
+	}, "default")
 	for i, want := range []string{`"[Alice] hello"`, `"hi Alice"`, `"scheduled prompt"`} {
 		if got := string(msgs[i].Content); got != want {
 			t.Errorf("message %d = %s, want %s", i, got, want)
 		}
+	}
+}
+
+// Several agents answer in a session: the model reads another agent's words
+// under its name, so as not to take them for its own, and its own as they
+// are. A tool call keeps its result right after it, whoever made it.
+func TestConvertMessages_NamesTheOtherAgents(t *testing.T) {
+	msgs := convertMessages([]store.Message{
+		{Role: store.RoleUser, Content: `"@jarvis résume, @smith juge"`, Author: "Alice"},
+		{Role: store.RoleAssistant, Content: `"je cherche"`, AgentID: "jarvis", Author: "Jarvis",
+			ToolCalls: []store.ToolCall{{ID: "t1", Name: "web_search"}}},
+		{Role: store.RoleUser, Content: `"meanwhile"`, Author: "Bob"},
+		{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "t1", Content: "found"}},
+		{Role: store.RoleAssistant, Content: `"voici le résumé"`, AgentID: "jarvis", Author: "Jarvis"},
+		{Role: store.RoleAssistant, Content: `"gone"`, AgentID: "old"}, // no name kept: its ID
+		{Role: store.RoleAssistant, Content: `"mine"`, AgentID: "smith", Author: "Agent Smith"},
+	}, "smith")
+
+	want := []struct{ role, content, toolResult string }{
+		{"user", `"[Alice] @jarvis résume, @smith juge"`, ""},
+		{"assistant", `"[Jarvis] je cherche"`, ""},
+		{"tool", "", "t1"},
+		{"user", `"[Bob] meanwhile"`, ""},
+		{"assistant", `"[Jarvis] voici le résumé"`, ""},
+		{"assistant", `"[old] gone"`, ""},
+		{"assistant", `"mine"`, ""},
+	}
+	if len(msgs) != len(want) {
+		t.Fatalf("%d messages, want %d", len(msgs), len(want))
+	}
+	for i, w := range want {
+		m := msgs[i]
+		if m.Role != w.role || string(m.Content) != w.content {
+			t.Errorf("message %d = %s %s, want %s %s", i, m.Role, m.Content, w.role, w.content)
+		}
+		if w.toolResult != "" && (m.ToolResult == nil || m.ToolResult.ToolCallID != w.toolResult) {
+			t.Errorf("message %d: result %+v, want the result of %s", i, m.ToolResult, w.toolResult)
+		}
+	}
+	if len(msgs[1].ToolCalls) != 1 || msgs[1].ToolCalls[0].ID != "t1" {
+		t.Errorf("the other agent's tool call was lost: %+v", msgs[1].ToolCalls)
 	}
 }
 
@@ -646,7 +687,7 @@ func TestConvertMessages_SkipsTurnErrors(t *testing.T) {
 		{Role: store.RoleUser, Content: `"analyse the repo"`},
 		{Role: store.RoleAssistant, Kind: store.KindTurnError, Content: `"call LLM: credit balance is too low"`},
 		{Role: store.RoleUser, Content: `"try again"`},
-	})
+	}, "default")
 	if len(msgs) != 2 || string(msgs[1].Content) != `"try again"` {
 		t.Errorf("messages = %+v, want the two user messages alone", msgs)
 	}
@@ -876,5 +917,64 @@ func TestAgentWorkflow_RefusesADelegationLoop(t *testing.T) {
 	}
 	if result == nil || !result.IsError || !strings.Contains(result.Content, `agent "root" is already in the call chain`) {
 		t.Errorf("tool result = %+v, want the refusal as an error", result)
+	}
+}
+
+// A turn signs what it writes with its agent, tells its model the part the
+// message gives it, and signs the answer sent to the channel when asked to:
+// several agents answer in the session.
+func TestAgentWorkflow_SignsItsMessages(t *testing.T) {
+	for _, sign := range []bool{false, true} {
+		t.Run(fmt.Sprint("sign=", sign), func(t *testing.T) {
+			var suite testsuite.WorkflowTestSuite
+			env := suite.NewTestWorkflowEnvironment()
+			env.RegisterActivityWithOptions(func(ctx context.Context, in activity.LoadContextInput) (activity.LoadContextOutput, error) {
+				return activity.LoadContextOutput{}, nil
+			}, sdkactivity.RegisterOptions{Name: "LoadContext"})
+			env.RegisterActivityWithOptions(func(ctx context.Context, in activity.ListToolsInput) (activity.ListToolsOutput, error) {
+				return activity.ListToolsOutput{}, nil
+			}, sdkactivity.RegisterOptions{Name: "ListTools"})
+			env.RegisterActivityWithOptions(func(ctx context.Context, in activity.LoadSkillsForAgentInput) (activity.LoadSkillsForAgentOutput, error) {
+				return activity.LoadSkillsForAgentOutput{SystemPrompt: "prompt", Name: "Agent Smith"}, nil
+			}, sdkactivity.RegisterOptions{Name: "LoadSkillsForAgent"})
+			env.RegisterActivityWithOptions(func(ctx context.Context, in activity.PersistContextInput) error {
+				return nil
+			}, sdkactivity.RegisterOptions{Name: "PersistContext"})
+			var system string
+			env.RegisterActivityWithOptions(func(ctx context.Context, req provider.ChatRequest) (provider.ChatResponse, error) {
+				system = req.System
+				return provider.ChatResponse{Content: "it fits", StopReason: "end_turn"}, nil
+			}, sdkactivity.RegisterOptions{Name: "CallLLM"})
+			var answers []string
+			env.RegisterActivityWithOptions(func(ctx context.Context, in activity.NotifyInput) error {
+				answers = append(answers, string(in.Event.Data))
+				return nil
+			}, sdkactivity.RegisterOptions{Name: "NotifyStep"})
+
+			env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{
+				SessionID: "s1", AgentID: "smith", UserMessage: "go", UserMessageStored: true, TurnKey: "run-1",
+				Channel: "telegram", ChannelID: "42", PartNote: "\n## PART\n", SignReply: sign,
+			})
+			if err := env.GetWorkflowError(); err != nil {
+				t.Fatal(err)
+			}
+			var out AgentWorkflowOutput
+			if err := env.GetWorkflowResult(&out); err != nil {
+				t.Fatal(err)
+			}
+			if len(out.NewMessages) != 1 || out.NewMessages[0].AgentID != "smith" || out.NewMessages[0].Author != "Agent Smith" {
+				t.Errorf("wrote %+v, want the answer signed by smith (Agent Smith)", out.NewMessages)
+			}
+			if !strings.HasSuffix(system, "\n## PART\n") {
+				t.Errorf("system prompt %q does not end with the part note", system)
+			}
+			want := `{"content":"it fits","type":"message"}`
+			if sign {
+				want = `{"agent":"Agent Smith","content":"it fits","type":"message"}`
+			}
+			if len(answers) != 1 || answers[0] != want {
+				t.Errorf("answer sent %v, want %s", answers, want)
+			}
+		})
 	}
 }

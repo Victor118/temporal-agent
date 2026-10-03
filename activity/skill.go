@@ -116,6 +116,9 @@ type LoadSkillsForAgentInput struct {
 
 type LoadSkillsForAgentOutput struct {
 	SystemPrompt string `json:"system_prompt"`
+	// Name is the agent's name, which signs its messages; its ID when the
+	// catalog does not know it.
+	Name string `json:"name,omitempty"`
 }
 
 // LoadSkillsForAgent returns the system prompt for the given agent: behaviors
@@ -139,7 +142,11 @@ func (a *SkillActivities) LoadSkillsForAgent(ctx context.Context, input LoadSkil
 	prompt := identitySection(self) + buildSystemPrompt(matchSkills(a.skills, self.Skills), allowed)
 	a.mu.RUnlock()
 
-	return LoadSkillsForAgentOutput{SystemPrompt: prompt}, nil
+	name := self.Name
+	if name == "" {
+		name = input.AgentID
+	}
+	return LoadSkillsForAgentOutput{SystemPrompt: prompt, Name: name}, nil
 }
 
 // matchSkills returns the skills named in names, in order, skipping unknown ones.

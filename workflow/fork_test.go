@@ -84,7 +84,7 @@ func TestForkSessionWorkflow_ReportsFailure(t *testing.T) {
 // The summary reaches the model as context carried over, not as something the
 // user said.
 func TestConvertMessages_FramesForkSummary(t *testing.T) {
-	msgs := convertMessages([]store.Message{{Role: store.RoleUser, Kind: store.KindForkSummary, Content: `"what happened"`}})
+	msgs := convertMessages([]store.Message{{Role: store.RoleUser, Kind: store.KindForkSummary, Content: `"what happened"`}}, "default")
 	var got string
 	json.Unmarshal(msgs[0].Content, &got)
 	if !strings.HasPrefix(got, "[Context carried over from an earlier conversation") || !strings.HasSuffix(got, "what happened") {

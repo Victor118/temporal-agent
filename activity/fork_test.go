@@ -30,6 +30,9 @@ func TestBuildTranscript(t *testing.T) {
 		{ID: 6, Message: store.Message{Role: store.RoleAssistant,
 			ToolCalls: []store.ToolCall{{Name: "save_user_memory", Input: json.RawMessage(`{"content":"Alice's secret"}`)}}}},
 		{ID: 7, Message: store.Message{Role: store.RoleAssistant, Kind: store.KindTurnError, Content: text("call LLM: boom")}},
+		// Several agents answer in a session: each is named.
+		{ID: 8, Message: store.Message{Role: store.RoleAssistant, Content: text("it fits"), AgentID: "smith", Author: "Agent Smith",
+			ToolCalls: []store.ToolCall{{Name: "web_search", Input: json.RawMessage(`{"q":"temporal"}`)}}}},
 	}, memoryIsPrivate)
 	if truncated {
 		t.Error("a short conversation reported truncated")
@@ -39,6 +42,7 @@ func TestBuildTranscript(t *testing.T) {
 		"User (Alice): hello",
 		"Assistant: let me look\nAssistant called read_file {\"path\":\"xxx",
 		"Tool error: boom",
+		"Assistant (Agent Smith): it fits\nAssistant (Agent Smith) called web_search",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("transcript lacks %q", want)

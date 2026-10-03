@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -60,6 +61,13 @@ type AgentWorkflowInput struct {
 	// reach the user; only the session's own turn sends its answer there.
 	Channel   string `json:"channel,omitempty"`
 	ChannelID string `json:"channel_id,omitempty"`
+	// PartNote ends the system prompt of a run that answers a message
+	// addressed to several agents: which part is its own (see partNote).
+	PartNote string `json:"part_note,omitempty"`
+	// SignReply signs the answer sent to the user's channel with the agent's
+	// name: when several agents answer in a session, a reader there must
+	// know which one speaks.
+	SignReply bool `json:"sign_reply,omitempty"`
 }
 
 type AgentWorkflowOutput struct {
@@ -239,6 +247,17 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 	if userMemory != "" {
 		systemPrompt += userMemorySection(input.UserName, userMemory)
 	}
+	systemPrompt += input.PartNote
+	// The agent signs its messages: other agents answer in the same session,
+	// and the interface and the next turns must tell them apart.
+	agentName := skillsResult.Name
+	if agentName == "" {
+		agentName = currentAgentID
+	}
+	signed := ""
+	if input.SignReply {
+		signed = agentName
+	}
 
 	// Load the tools this agent may use, with the queue serving each one
 	var toolAct *activity.ToolActivities
@@ -273,7 +292,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 			}, nil
 		}
 
-		chatMessages := convertMessages(messages)
+		chatMessages := convertMessages(messages, currentAgentID)
 
 		// Mark cache breakpoints:
 		// 1. System prompt (stable across iterations)
@@ -321,11 +340,13 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 				messages = append(messages, store.Message{
 					Role:    store.RoleAssistant,
 					Content: string(respJSON),
+					AgentID: currentAgentID,
+					Author:  agentName,
 				})
 			}
 
 			cancelSafeFlush()
-			notifyResponse(ctx, input.SessionID, replyChannel, replyChannelID, response.Content)
+			notifyResponse(ctx, input.SessionID, replyChannel, replyChannelID, signed, response.Content)
 
 			return AgentWorkflowOutput{
 				Response:     response.Content,
@@ -346,6 +367,8 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 		assistantMsg := store.Message{
 			Role:      store.RoleAssistant,
 			ToolCalls: toolCalls,
+			AgentID:   currentAgentID,
+			Author:    agentName,
 		}
 		if response.Content != "" {
 			cJSON, _ := json.Marshal(response.Content)
@@ -526,7 +549,9 @@ func deferInterleaved(messages []store.Message) []store.Message {
 	return append(out, deferred...)
 }
 
-func convertMessages(messages []store.Message) []provider.ChatMessage {
+// convertMessages turns the stored conversation into what the model of agent
+// self reads.
+func convertMessages(messages []store.Message, self string) []provider.ChatMessage {
 	messages = deferInterleaved(messages)
 	result := make([]provider.ChatMessage, 0, len(messages))
 	for _, msg := range messages {
@@ -542,6 +567,10 @@ func convertMessages(messages []store.Message) []provider.ChatMessage {
 			content = asForkContext(content)
 		case msg.Role == store.RoleUser && msg.Author != "":
 			content = withAuthor(content, msg.Author)
+		case msg.Role == store.RoleAssistant && msg.AgentID != "" && msg.AgentID != self:
+			// Another agent answered in this session: without its name, the
+			// model would take those words for its own.
+			content = withAuthor(content, cmp.Or(msg.Author, msg.AgentID))
 		}
 		cm := provider.ChatMessage{
 			Role:    string(msg.Role),
@@ -592,13 +621,14 @@ func asForkContext(content json.RawMessage) json.RawMessage {
 	return framed
 }
 
-// withAuthor prefixes a user message with its author's name, so the model
-// knows who speaks when a session has several users. Only the text sent to the
-// model changes: the stored message keeps the author in its own field.
+// withAuthor prefixes a message with its author's name, so the model knows who
+// speaks when a session has several users, or several agents. Only the text
+// sent to the model changes: the stored message keeps the author in its own
+// field.
 func withAuthor(content json.RawMessage, author string) json.RawMessage {
 	var text string
-	if json.Unmarshal(content, &text) != nil {
-		return content // not plain text: leave it alone
+	if json.Unmarshal(content, &text) != nil || text == "" {
+		return content // not plain text, or none (tool calls alone): leave it alone
 	}
 	prefixed, _ := json.Marshal("[" + author + "] " + text)
 	return prefixed
@@ -616,14 +646,19 @@ var notifyRetry = &temporal.RetryPolicy{MaximumAttempts: 3}
 // the next.
 const channelNotifyTimeout = time.Minute
 
-// notifyResponse sends the agent's answer to the session's channel. A failure
-// is logged, not returned: the answer is in the transcript already, and the
-// turn must end.
-func notifyResponse(ctx workflow.Context, sessionID, channel, channelID, content string) {
-	data, _ := json.Marshal(map[string]string{
+// notifyResponse sends the agent's answer to the session's channel, signed by
+// agent when it is not empty (the channel shows who speaks). A failure is
+// logged, not returned: the answer is in the transcript already, and the turn
+// must end.
+func notifyResponse(ctx workflow.Context, sessionID, channel, channelID, agent, content string) {
+	event := map[string]string{
 		"type":    "message",
 		"content": content,
-	})
+	}
+	if agent != "" {
+		event["agent"] = agent
+	}
+	data, _ := json.Marshal(event)
 	var notifAct *activity.NotificationActivities
 	err := workflow.ExecuteActivity(
 		workflow.WithActivityOptions(ctx, workflow.ActivityOptions{

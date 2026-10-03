@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -34,6 +35,18 @@ type UserMessage struct {
 	// already. Every human message is stored as it arrives, whether or not it
 	// calls the agent.
 	Stored bool `json:"stored,omitempty"`
+	// Agents answer the message one after another, in this order: the agents
+	// it mentions, as the server resolved them. Empty: the session's agent
+	// alone.
+	Agents []AddressedAgent `json:"agents,omitempty"`
+}
+
+// AddressedAgent is an agent a message calls by its mention. The server
+// resolves it: a workflow cannot read the agents.
+type AddressedAgent struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Mention string `json:"mention"`
 }
 
 type SessionWorkflowInput struct {
@@ -88,18 +101,18 @@ func SessionWorkflow(ctx workflow.Context, input SessionWorkflowInput) error {
 			return nil
 		}
 
-		if err := processTurn(actCtx, ctx, input, userMessage, &state); err != nil {
+		if err := processMessage(actCtx, ctx, input, userMessage, &state); err != nil {
 			logger.Error("Turn failed", "session_id", input.SessionID, "turn", state.TurnCount, "error", err)
 			// Notify the error to the client, don't kill the session
-			notifyResponse(ctx, input.SessionID, input.Channel, input.ChannelID, fmt.Sprintf("Error processing message: %v", err))
+			notifyResponse(ctx, input.SessionID, input.Channel, input.ChannelID, "", fmt.Sprintf("Error processing message: %v", err))
 			continue
 		}
 
 		// Drain queued messages
 		for msgCh.ReceiveAsync(&userMessage) {
-			if err := processTurn(actCtx, ctx, input, userMessage, &state); err != nil {
+			if err := processMessage(actCtx, ctx, input, userMessage, &state); err != nil {
 				logger.Error("Turn failed", "error", err)
-				notifyResponse(ctx, input.SessionID, input.Channel, input.ChannelID, fmt.Sprintf("Error processing message: %v", err))
+				notifyResponse(ctx, input.SessionID, input.Channel, input.ChannelID, "", fmt.Sprintf("Error processing message: %v", err))
 			}
 		}
 
@@ -123,10 +136,11 @@ func sessionHistoryIsLarge(ctx workflow.Context) bool {
 		info.GetCurrentHistorySize() >= maxSessionHistoryBytes
 }
 
-// processTurn handles a single user message: run the agent, then persist what
-// the turn produced. The agent loads the conversation itself. processTurn
-// listens for cancel-agent signals to interrupt the agent mid-execution.
-func processTurn(actCtx, ctx workflow.Context, input SessionWorkflowInput, userMessage UserMessage, state *SessionState) error {
+// processMessage runs the turns a human message calls for: one per agent it
+// addresses, in order, or the session's agent's alone. Each turn loads the
+// conversation, so an agent sees the answers of the agents before it. A turn
+// that fails or is stopped ends the message: the agents after it do not run.
+func processMessage(actCtx, ctx workflow.Context, input SessionWorkflowInput, userMessage UserMessage, state *SessionState) error {
 	// Backstop for every channel that can signal a session: an empty user
 	// message is rejected by the LLM API, and once persisted it breaks every
 	// later turn of this session.
@@ -135,21 +149,91 @@ func processTurn(actCtx, ctx workflow.Context, input SessionWorkflowInput, userM
 		return nil
 	}
 
-	state.Status = "processing"
-	state.TurnCount++
-
 	// A cancel sent while no turn ran — the stop button clicked just as the
-	// last turn ended — is about that turn, not this one: left in the channel,
-	// it would interrupt this turn before it starts and lose its message.
+	// last turn ended — is about that turn, not this message: left in the
+	// channel, it would interrupt the message before it starts.
 	cancelCh := workflow.GetSignalChannel(ctx, SignalCancelAgent)
 	for cancelCh.ReceiveAsync(nil) {
 	}
+
+	agents := userMessage.Agents
+	if len(agents) == 0 {
+		agents = []AddressedAgent{{ID: input.AgentID}}
+	}
+	for i, a := range agents {
+		// A stop sent between two turns of the message is for the rest of it.
+		if i > 0 && cancelCh.ReceiveAsync(nil) {
+			notifyResponse(ctx, input.SessionID, input.Channel, input.ChannelID, "", "Agent interrupted by user.")
+			return nil
+		}
+		turn := agentTurn{
+			agentID:  a.ID,
+			partNote: partNote(agents, i),
+			// On the channel, an answer that could be taken for another
+			// agent's is signed.
+			signReply: len(agents) > 1 || a.ID != input.AgentID,
+		}
+		// The session's prompt override is its own agent's: another agent
+		// answers with its own prompt.
+		if a.ID == input.AgentID {
+			turn.systemPrompt = input.SystemPrompt
+		}
+		stopped, err := processTurn(actCtx, ctx, input, userMessage, turn, state, cancelCh)
+		if err != nil || stopped {
+			return err
+		}
+	}
+	return nil
+}
+
+// agentTurn is the agent one turn runs, and what it is told.
+type agentTurn struct {
+	agentID      string
+	systemPrompt string // override; empty = the agent's own
+	partNote     string // see partNote
+	signReply    bool
+}
+
+// partNote tells the i-th of the agents a message addresses which part is its
+// own: they answer one after another, and each sees the whole message. Its
+// text is not split, since a part can refer to another ("from there, tell
+// me…"). Empty when the message addresses one agent.
+func partNote(agents []AddressedAgent, i int) string {
+	if len(agents) < 2 {
+		return ""
+	}
+	mentions := make([]string, len(agents))
+	for j, a := range agents {
+		mentions[j] = "@" + cmp.Or(a.Mention, a.ID)
+	}
+	var sb strings.Builder
+	sb.WriteString("\n## Several agents addressed\n\n")
+	fmt.Fprintf(&sb, "The message you are answering addresses several agents, who answer it one after another, in this order: %s. You are %s: answer only the part meant for you.",
+		strings.Join(mentions, ", "), mentions[i])
+	if i > 0 {
+		sb.WriteString(" The agents before you have answered already, above: build on what they said rather than repeat it.")
+	}
+	if i < len(agents)-1 {
+		sb.WriteString(" The agents after you answer next and will see your reply: leave their part to them.")
+	}
+	sb.WriteString("\n")
+	return sb.String()
+}
+
+// processTurn runs one agent on a user message, then persists what the turn
+// produced. The agent loads the conversation itself. processTurn listens for
+// cancel-agent signals to interrupt the agent mid-execution, and reports
+// whether it was stopped.
+func processTurn(actCtx, ctx workflow.Context, input SessionWorkflowInput, userMessage UserMessage, turn agentTurn, state *SessionState, cancelCh workflow.ReceiveChannel) (bool, error) {
+	state.Status = "processing"
+	state.TurnCount++
 
 	var memAct *activity.MemoryActivities
 
 	// turnKey names this turn globally: the run ID keeps it distinct from the
 	// same turn number in an earlier workflow run for this session, which a
-	// resumed session would otherwise reuse.
+	// resumed session would otherwise reuse. Each agent a message addresses
+	// has a turn, and so a number, of its own.
 	turnKey := fmt.Sprintf("%s-%d", workflow.GetInfo(ctx).WorkflowExecution.RunID, state.TurnCount)
 
 	// 1. Launch agent child workflow with a cancellable context. It loads the
@@ -167,14 +251,16 @@ func processTurn(actCtx, ctx workflow.Context, input SessionWorkflowInput, userM
 		// them.
 		UserID:            userMessage.UserID,
 		UserName:          userMessage.UserName,
-		AgentID:           input.AgentID,
+		AgentID:           turn.agentID,
 		TurnKey:           turnKey,
 		UserMessage:       userMessage.Text,
 		UserMessageStored: userMessage.Stored,
-		SystemPrompt:      input.SystemPrompt,
+		SystemPrompt:      turn.systemPrompt,
 		Model:             input.Model,
 		Channel:           input.Channel,
 		ChannelID:         input.ChannelID,
+		PartNote:          turn.partNote,
+		SignReply:         turn.signReply,
 	})
 
 	// Listen for cancel signal in parallel
@@ -202,7 +288,7 @@ func processTurn(actCtx, ctx workflow.Context, input SessionWorkflowInput, userM
 		// Wait for the child to actually finish after cancellation
 		_ = agentFuture.Get(ctx, &result)
 		// Notify the user
-		notifyResponse(ctx, input.SessionID, input.Channel, input.ChannelID, "Agent interrupted by user.")
+		notifyResponse(ctx, input.SessionID, input.Channel, input.ChannelID, "", "Agent interrupted by user.")
 	}
 
 	// 2. Persist before reporting anything, so a failed or cancelled turn keeps
@@ -213,7 +299,7 @@ func processTurn(actCtx, ctx workflow.Context, input SessionWorkflowInput, userM
 	// on every channel and after a reload, not only in a notification.
 	messages := result.NewMessages
 	if !cancelled && result.Error != "" {
-		messages = append(messages, store.Message{Role: store.RoleAssistant, Kind: store.KindTurnError, Content: turnErrorContent(result.Error)})
+		messages = append(messages, store.Message{Role: store.RoleAssistant, Kind: store.KindTurnError, AgentID: turn.agentID, Content: turnErrorContent(result.Error)})
 	}
 	if len(messages) > 0 {
 		if err := workflow.ExecuteActivity(actCtx, memAct.PersistContext, activity.PersistContextInput{
@@ -221,17 +307,17 @@ func processTurn(actCtx, ctx workflow.Context, input SessionWorkflowInput, userM
 			TurnKey:   turnKey,
 			Messages:  messages,
 		}).Get(ctx, nil); err != nil {
-			return fmt.Errorf("persist context: %w", err)
+			return cancelled, fmt.Errorf("persist context: %w", err)
 		}
 	}
 
 	// 3. Report failures once the transcript is safe
 	if !cancelled {
 		if agentErr != nil {
-			return fmt.Errorf("agent workflow: %w", agentErr)
+			return false, fmt.Errorf("agent workflow: %w", agentErr)
 		}
 		if result.Error != "" {
-			return fmt.Errorf("agent workflow: %s", result.Error)
+			return false, fmt.Errorf("agent workflow: %s", result.Error)
 		}
 	}
 
@@ -240,7 +326,7 @@ func processTurn(actCtx, ctx workflow.Context, input SessionWorkflowInput, userM
 		state.Status = "completed"
 	}
 
-	return nil
+	return cancelled, nil
 }
 
 // maxTurnErrorBytes bounds the error kept in the conversation: an API error can
