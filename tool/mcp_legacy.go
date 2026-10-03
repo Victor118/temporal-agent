@@ -240,7 +240,7 @@ func (c *sseConn) send(ctx context.Context, msg any) error {
 	if err != nil {
 		return fmt.Errorf("mcp sse post: %w", err)
 	}
-	defer drain(resp)
+	defer resp.Body.Close()
 	switch {
 	case resp.StatusCode/100 == 2:
 		return nil

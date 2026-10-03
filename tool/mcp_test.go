@@ -112,6 +112,22 @@ func TestMCPClient_EventStreamResponse(t *testing.T) {
 	}
 }
 
+// A server may hold the stream open after the response: the call returns
+// with the response all the same.
+func TestMCPClient_StreamHeldOpenAfterTheResponse(t *testing.T) {
+	f := newFakeMCP(t, func(f *fakeMCP) { f.sse, f.linger = true, true })
+	c := NewMCPClient(f.config("srv"))
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	tools, err := c.Discover(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := tools[0].Execute(ctx, json.RawMessage(`{}`)); err != nil || got != "echo {}" {
+		t.Errorf("call = %q, %v", got, err)
+	}
+}
+
 // A server may close the stream before the response, having given its
 // events IDs: the client resumes it from the last one.
 func TestMCPClient_ResumesAClosedStream(t *testing.T) {

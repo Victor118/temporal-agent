@@ -26,6 +26,7 @@ type fakeMCP struct {
 	sse     bool     // answer requests with an event stream
 	preface bool     // ... starting with a notification and a ping
 	early   bool     // ... closed after a priming event, the response on resume
+	linger  bool     // ... held open after the response
 	pages   int      // > 0: tools/list answers this many tools a page
 	gate    *barrier // non-nil: tools/list waits for every server sharing it
 
@@ -185,7 +186,7 @@ func (f *fakeMCP) servePost(w http.ResponseWriter, r *http.Request) {
 		}
 		result, id := f.initialize(m, nil)
 		w.Header().Set("Mcp-Session-Id", id)
-		f.respond(w, m.ID, result, nil, false)
+		f.respond(w, r, m.ID, result, nil, false)
 		return
 	}
 
@@ -213,7 +214,7 @@ func (f *fakeMCP) servePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, rpcErr := f.answer(m)
-	f.respond(w, m.ID, result, rpcErr, f.preface)
+	f.respond(w, r, m.ID, result, rpcErr, f.preface)
 }
 
 func (f *fakeMCP) initialize(m fakeMessage, out chan string) (any, string) {
@@ -305,7 +306,7 @@ func encodeResponse(id json.RawMessage, result any, rpcErr *jsonRPCError) string
 	return string(b)
 }
 
-func (f *fakeMCP) respond(w http.ResponseWriter, id json.RawMessage, result any, rpcErr *jsonRPCError, preface bool) {
+func (f *fakeMCP) respond(w http.ResponseWriter, r *http.Request, id json.RawMessage, result any, rpcErr *jsonRPCError, preface bool) {
 	resp := encodeResponse(id, result, rpcErr)
 	if !f.sse {
 		w.Header().Set("Content-Type", "application/json")
@@ -328,6 +329,10 @@ func (f *fakeMCP) respond(w http.ResponseWriter, id json.RawMessage, result any,
 	}
 	// The response, split over two data lines as the format allows.
 	io.WriteString(w, "id: ev-9\ndata: "+resp[:1]+"\ndata: "+resp[1:]+"\n\n")
+	if f.linger {
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}
 }
 
 // serveResume answers a GET resuming a stream after its last event.

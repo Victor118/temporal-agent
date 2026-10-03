@@ -44,7 +44,9 @@ func (c *streamableConn) call(ctx context.Context, method string, params any) (j
 	if err != nil {
 		return nil, err
 	}
-	defer drain(resp)
+	// Closed, not drained: a server may hold an event stream open after
+	// the response.
+	defer resp.Body.Close()
 	if err := c.check(resp); err != nil {
 		return nil, err
 	}
@@ -98,7 +100,7 @@ func (c *streamableConn) readStream(ctx context.Context, body io.Reader, id int6
 		next := newSSEReader(resp.Body)
 		next.lastID, next.retry = sse.lastID, sse.retry
 		res, done, err = c.untilResponse(ctx, next, id)
-		drain(resp)
+		resp.Body.Close()
 		sse = next
 	}
 	return res, err
@@ -150,7 +152,7 @@ func (c *streamableConn) resume(ctx context.Context, lastID string) (*http.Respo
 		return nil, fmt.Errorf("mcp resume stream: %w", err)
 	}
 	if err := c.check(resp); err != nil {
-		drain(resp)
+		resp.Body.Close()
 		// The request was accepted: sending it again in a new session
 		// could run it twice.
 		if errors.Is(err, errSessionExpired) {
@@ -159,7 +161,7 @@ func (c *streamableConn) resume(ctx context.Context, lastID string) (*http.Respo
 		return nil, err
 	}
 	if mediaType(resp) != "text/event-stream" {
-		drain(resp)
+		resp.Body.Close()
 		return nil, errors.New("mcp resume stream: not an event stream")
 	}
 	return resp, nil
@@ -176,7 +178,7 @@ func (c *streamableConn) send(ctx context.Context, msg any) error {
 	if err != nil {
 		return err
 	}
-	defer drain(resp)
+	defer resp.Body.Close()
 	return c.check(resp)
 }
 
@@ -252,7 +254,7 @@ func (c *streamableConn) close() {
 	}
 	c.headers(req)
 	if resp, err := c.http.Do(req); err == nil {
-		drain(resp)
+		resp.Body.Close()
 	}
 }
 

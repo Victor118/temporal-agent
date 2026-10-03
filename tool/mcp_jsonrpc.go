@@ -144,9 +144,3 @@ func mediaType(resp *http.Response) string {
 	mt, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 	return mt
 }
-
-// drain lets the connection be reused once the body is no longer needed.
-func drain(resp *http.Response) {
-	io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
-	resp.Body.Close()
-}
