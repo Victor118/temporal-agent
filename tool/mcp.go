@@ -1,11 +1,13 @@
 package tool
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -37,7 +39,9 @@ const (
 
 // mcpConn is one MCP session over a transport, as MCPClient uses it.
 type mcpConn interface {
-	call(ctx context.Context, method string, params any) (json.RawMessage, error)
+	// call sends a request and returns its result; a response larger than
+	// limit bytes is an error that wraps errTooLarge.
+	call(ctx context.Context, method string, params any, limit int) (json.RawMessage, error)
 	notify(ctx context.Context, method string, params any) error
 	setVersion(v string) // the negotiated version, before the conn is shared
 	alive() bool         // false once the conn cannot carry a request again
@@ -88,11 +92,16 @@ func (c *MCPClient) Close() {
 }
 
 // Discover asks the server for its tools, named after the server. It
-// registers nothing: what to do with them is the caller's decision.
+// registers nothing: what to do with them is the caller's decision. A list
+// this worker cannot take whole (see checkTools) is refused whole, with an
+// error that wraps errToolsRefused.
 func (c *MCPClient) Discover(ctx context.Context) ([]*Tool, error) {
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 	infos, err := c.listTools(ctx)
+	if err == nil {
+		err = checkTools(c.config.Name, infos)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("mcp %s: discover tools: %w", c.config.Name, err)
 	}
@@ -100,16 +109,82 @@ func (c *MCPClient) Discover(ctx context.Context) ([]*Tool, error) {
 	tools := make([]*Tool, 0, len(infos))
 	for _, info := range infos {
 		tools = append(tools, &Tool{
-			Name:        c.config.Name + "_" + info.Name,
+			Name:        exposedName(c.config.Name, info.Name),
 			Description: fmt.Sprintf("[MCP:%s] %s", c.config.Name, info.Description),
 			InputSchema: info.InputSchema,
 			Kind:        ToolKindMCP,
 			Execute: func(ctx context.Context, input json.RawMessage) (string, error) {
-				return c.callTool(ctx, info.Name, input)
+				return c.callTool(ctx, info.Name, input) // the server's own name
 			},
 		})
 	}
 	return tools, nil
+}
+
+// What a server may give in a tools/list. Its tools go to every agent the
+// allowlist lets see them, in each LLM request: a name the model's API
+// refuses, or a list too big, would break all those agents, not just this
+// server's tools.
+const (
+	mcpMaxTools       = 500      // tools a server may give
+	mcpMaxDescription = 8 << 10  // bytes of a tool's description
+	mcpMaxSchema      = 64 << 10 // bytes of a tool's input schema
+	mcpMaxList        = 4 << 20  // bytes of all the pages of a tools/list
+	mcpMaxHandshake   = 1 << 20  // bytes of an initialize response
+)
+
+// errToolsRefused: the server answered tools/list with a list this worker
+// does not take. Nothing of it is registered; the server keeps the tools it
+// had.
+var errToolsRefused = errors.New("tools list refused")
+
+// toolNamePattern is what a tool name may be for the model's API.
+var toolNamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+// exposedName is the name the model knows a server's tool by: the server's
+// name, then the tool's with every character a name may not have replaced by
+// _ (MCP allows "search.web"). Calls still use the server's own name.
+func exposedName(server, name string) string {
+	return server + "_" + strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
+			return r
+		}
+		return '_'
+	}, name)
+}
+
+// checkTools refuses a list that has a tool this worker cannot take: no
+// name, a name that does not fit the model's API once exposed, two tools
+// exposed under one name, a description or schema too big, a schema that is
+// not a JSON object. One such tool refuses the list: half a server's tools
+// would be a list that moves with whatever the server sends. (listTools
+// already bounded the number of tools and the bytes.)
+func checkTools(server string, infos []mcpToolInfo) error {
+	exposed := make(map[string]string, len(infos))
+	for _, info := range infos {
+		if info.Name == "" {
+			return fmt.Errorf("%w: a tool has no name", errToolsRefused)
+		}
+		name := exposedName(server, info.Name)
+		if !toolNamePattern.MatchString(name) {
+			return fmt.Errorf("%w: tool %.100q: exposed as %.100q, which is not 1 to 64 letters, digits, _ or -", errToolsRefused, info.Name, name)
+		}
+		if other, ok := exposed[name]; ok {
+			return fmt.Errorf("%w: tools %.100q and %.100q are both exposed as %q", errToolsRefused, other, info.Name, name)
+		}
+		exposed[name] = info.Name
+		if len(info.Description) > mcpMaxDescription {
+			return fmt.Errorf("%w: tool %q: description of %d bytes, at most %d", errToolsRefused, info.Name, len(info.Description), mcpMaxDescription)
+		}
+		if len(info.InputSchema) > mcpMaxSchema {
+			return fmt.Errorf("%w: tool %q: input schema of %d bytes, at most %d", errToolsRefused, info.Name, len(info.InputSchema), mcpMaxSchema)
+		}
+		if s := bytes.TrimSpace(info.InputSchema); len(s) == 0 || s[0] != '{' {
+			return fmt.Errorf("%w: tool %q: input schema is not a JSON object", errToolsRefused, info.Name)
+		}
+	}
+	return nil
 }
 
 type mcpToolInfo struct {
@@ -127,25 +202,38 @@ type mcpToolListResult struct {
 	NextCursor string        `json:"nextCursor,omitempty"`
 }
 
+// listTools reads every page of tools/list. The pages share one budget of
+// bytes, which bounds each one as it is read, and one of tools.
 func (c *MCPClient) listTools(ctx context.Context) ([]mcpToolInfo, error) {
 	var all []mcpToolInfo
 	var params any // the first page takes no cursor
+	budget := mcpMaxList
 	for range mcpMaxPages {
-		raw, err := c.request(ctx, "tools/list", params)
+		raw, err := c.request(ctx, "tools/list", params, budget)
+		if errors.Is(err, errTooLarge) {
+			return nil, fmt.Errorf("%w: more than %d bytes", errToolsRefused, mcpMaxList)
+		}
 		if err != nil {
 			return nil, err
 		}
+		budget -= len(raw)
 		var page mcpToolListResult
 		if err := json.Unmarshal(raw, &page); err != nil {
 			return nil, fmt.Errorf("parse tools/list result: %w", err)
 		}
 		all = append(all, page.Tools...)
+		if len(all) > mcpMaxTools {
+			return nil, fmt.Errorf("%w: more than %d tools", errToolsRefused, mcpMaxTools)
+		}
 		if page.NextCursor == "" {
 			return all, nil
 		}
+		if budget <= 0 {
+			return nil, fmt.Errorf("%w: more than %d bytes", errToolsRefused, mcpMaxList)
+		}
 		params = mcpListParams{Cursor: page.NextCursor}
 	}
-	return nil, fmt.Errorf("tools/list: more than %d pages", mcpMaxPages)
+	return nil, fmt.Errorf("%w: more than %d pages", errToolsRefused, mcpMaxPages)
 }
 
 type mcpCallToolParams struct {
@@ -180,7 +268,7 @@ func (c *MCPClient) callTool(ctx context.Context, name string, arguments json.Ra
 		arguments = json.RawMessage(`{}`)
 	}
 
-	raw, err := c.request(ctx, "tools/call", mcpCallToolParams{Name: name, Arguments: arguments})
+	raw, err := c.request(ctx, "tools/call", mcpCallToolParams{Name: name, Arguments: arguments}, mcpMaxMessage)
 	if err != nil {
 		return "", fmt.Errorf("mcp %s: %w", c.config.Name, err)
 	}
@@ -220,13 +308,14 @@ func (r mcpCallToolResult) text() string {
 // request sends a request in the current session, opening one if needed. A
 // server that forgot the session did not process the request: it is sent
 // again, once, in a new session.
-func (c *MCPClient) request(ctx context.Context, method string, params any) (json.RawMessage, error) {
+// limit bounds the response, in bytes.
+func (c *MCPClient) request(ctx context.Context, method string, params any, limit int) (json.RawMessage, error) {
 	for attempt := 0; ; attempt++ {
 		conn, err := c.connect(ctx)
 		if err != nil {
 			return nil, err
 		}
-		res, err := conn.call(ctx, method, params)
+		res, err := conn.call(ctx, method, params, limit)
 		if errors.Is(err, errSessionExpired) && attempt == 0 {
 			c.drop(conn)
 			continue
@@ -321,7 +410,7 @@ func (c *MCPClient) initialize(ctx context.Context) (mcpConn, error) {
 	raw, err := conn.call(ctx, "initialize", mcpInitializeParams{
 		ProtocolVersion: mcpVersions[0],
 		ClientInfo:      mcpImplementation{Name: "temporal-agent", Version: "1"},
-	})
+	}, mcpMaxHandshake)
 	if err != nil {
 		conn.close()
 		var httpErr *mcpHTTPError

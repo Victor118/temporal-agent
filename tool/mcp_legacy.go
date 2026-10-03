@@ -67,7 +67,7 @@ func dialSSE(ctx context.Context, httpc *http.Client, rawURL, apiKey string, ids
 
 	// The server names the endpoint in its first event; anything before is
 	// skipped.
-	sse := newSSEReader(resp.Body)
+	sse := newSSEReader(resp.Body, mcpMaxMessage) // one stream for every response
 	var endpoint string
 	for endpoint == "" {
 		ev, err := sse.next()
@@ -184,7 +184,7 @@ func (c *sseConn) alive() bool {
 
 func (c *sseConn) setVersion(string) {} // this transport has no version header
 
-func (c *sseConn) call(ctx context.Context, method string, params any) (json.RawMessage, error) {
+func (c *sseConn) call(ctx context.Context, method string, params any, limit int) (json.RawMessage, error) {
 	id := c.ids.Add(1)
 	ch := make(chan jsonRPCMessage, 1)
 	c.mu.Lock()
@@ -205,17 +205,27 @@ func (c *sseConn) call(ctx context.Context, method string, params any) (json.Raw
 	}
 	select {
 	case msg := <-ch:
-		return msg.outcome()
+		return outcomeWithin(msg, limit)
 	case <-c.done:
 		select {
 		case msg := <-ch: // came in just before the end
-			return msg.outcome()
+			return outcomeWithin(msg, limit)
 		default:
 			return nil, c.err
 		}
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+}
+
+// outcomeWithin is msg's outcome, if its result fits the request's limit.
+// The stream carries every response, so it can only bound them all as one
+// (mcpMaxMessage); a request that asked for less is held to it here.
+func outcomeWithin(msg jsonRPCMessage, limit int) (json.RawMessage, error) {
+	if len(msg.Result) > limit {
+		return nil, errTooLarge
+	}
+	return msg.outcome()
 }
 
 func (c *sseConn) notify(ctx context.Context, method string, params any) error {

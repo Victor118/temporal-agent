@@ -10,8 +10,12 @@ import (
 )
 
 // mcpMaxMessage bounds one message from an MCP server (a JSON body or one
-// event): a server must not make the worker hold an unbounded answer.
+// event): a server must not make the worker hold an unbounded answer. A
+// request whose answer should be smaller asks for less (see MCPClient.request).
 const mcpMaxMessage = 16 << 20
+
+// errTooLarge: a message from the server is larger than the limit.
+var errTooLarge = errors.New("mcp: message larger than the limit")
 
 // sseEvent is one event of a text/event-stream.
 type sseEvent struct {
@@ -24,15 +28,14 @@ type sseEvent struct {
 // which resuming a stream needs.
 type sseReader struct {
 	r      *bufio.Reader
+	max    int // bytes of an event's data, and of a line
 	lastID string
 	retry  time.Duration
 }
 
-func newSSEReader(r io.Reader) *sseReader {
-	return &sseReader{r: bufio.NewReader(r)}
+func newSSEReader(r io.Reader, limit int) *sseReader {
+	return &sseReader{r: bufio.NewReader(r), max: limit}
 }
-
-var errSSETooLarge = errors.New("mcp: event larger than the limit")
 
 // next returns the next event with data. Comments and events without data
 // (a priming event carrying only an ID) are consumed, not returned.
@@ -70,8 +73,8 @@ func (s *sseReader) next() (sseEvent, error) {
 			}
 			data.WriteString(value)
 			hasData = true
-			if data.Len() > mcpMaxMessage {
-				return sseEvent{}, errSSETooLarge
+			if data.Len() > s.max {
+				return sseEvent{}, errTooLarge
 			}
 		case "id":
 			if !strings.ContainsRune(value, 0) {
@@ -94,8 +97,8 @@ func (s *sseReader) readLine() (string, error) {
 			return "", err
 		}
 		line = append(line, chunk...)
-		if len(line) > mcpMaxMessage {
-			return "", errSSETooLarge
+		if len(line) > s.max {
+			return "", errTooLarge
 		}
 		if !isPrefix {
 			return string(line), nil

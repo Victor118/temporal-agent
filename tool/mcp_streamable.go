@@ -38,7 +38,7 @@ func (c *streamableConn) alive() bool { return true } // an expired session answ
 
 func (c *streamableConn) setVersion(v string) { c.version = v }
 
-func (c *streamableConn) call(ctx context.Context, method string, params any) (json.RawMessage, error) {
+func (c *streamableConn) call(ctx context.Context, method string, params any, limit int) (json.RawMessage, error) {
 	id := c.ids.Add(1)
 	resp, err := c.post(ctx, jsonRPCRequest{JSONRPC: "2.0", ID: id, Method: method, Params: params})
 	if err != nil {
@@ -58,12 +58,12 @@ func (c *streamableConn) call(ctx context.Context, method string, params any) (j
 
 	switch mt := mediaType(resp); mt {
 	case "application/json":
-		body, err := io.ReadAll(io.LimitReader(resp.Body, mcpMaxMessage+1))
+		body, err := io.ReadAll(io.LimitReader(resp.Body, int64(limit)+1))
 		if err != nil {
 			return nil, fmt.Errorf("mcp read response: %w", err)
 		}
-		if len(body) > mcpMaxMessage {
-			return nil, errors.New("mcp: response larger than the limit")
+		if len(body) > limit {
+			return nil, errTooLarge
 		}
 		msg, ok := parseMessage(body)
 		if !ok || !(msg.answers(id) || msg.unattributedError()) {
@@ -71,7 +71,7 @@ func (c *streamableConn) call(ctx context.Context, method string, params any) (j
 		}
 		return msg.outcome()
 	case "text/event-stream":
-		return c.readStream(ctx, resp.Body, id)
+		return c.readStream(ctx, resp.Body, id, limit)
 	default:
 		if resp.StatusCode == http.StatusAccepted {
 			return nil, errors.New("mcp: the server accepted the request without answering it")
@@ -83,8 +83,8 @@ func (c *streamableConn) call(ctx context.Context, method string, params any) (j
 // readStream reads the event stream a POST was answered with until the
 // response to request id. The server may close it early, having given each
 // event an ID: the stream is then resumed with a GET from the last one.
-func (c *streamableConn) readStream(ctx context.Context, body io.Reader, id int64) (json.RawMessage, error) {
-	sse := newSSEReader(body)
+func (c *streamableConn) readStream(ctx context.Context, body io.Reader, id int64, limit int) (json.RawMessage, error) {
+	sse := newSSEReader(body, limit)
 	res, done, err := c.untilResponse(ctx, sse, id)
 	for resumes := 0; !done; resumes++ {
 		if sse.lastID == "" || resumes == mcpMaxResumes {
@@ -97,7 +97,7 @@ func (c *streamableConn) readStream(ctx context.Context, body io.Reader, id int6
 		if rerr != nil {
 			return nil, rerr
 		}
-		next := newSSEReader(resp.Body)
+		next := newSSEReader(resp.Body, limit)
 		next.lastID, next.retry = sse.lastID, sse.retry
 		res, done, err = c.untilResponse(ctx, next, id)
 		resp.Body.Close()
@@ -116,7 +116,7 @@ func (c *streamableConn) untilResponse(ctx context.Context, sse *sseReader, id i
 			if ctx.Err() != nil {
 				return nil, true, ctx.Err()
 			}
-			if errors.Is(err, errSSETooLarge) {
+			if errors.Is(err, errTooLarge) {
 				return nil, true, err
 			}
 			return nil, false, err

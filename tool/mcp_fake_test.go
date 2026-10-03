@@ -83,6 +83,13 @@ func (f *fakeMCP) setTools(names ...string) {
 	}
 }
 
+// setToolInfos makes the server give these tools, as they are.
+func (f *fakeMCP) setToolInfos(tools ...mcpToolInfo) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.tools = tools
+}
+
 // expire forgets every session, as a server does when they time out or
 // when it restarts.
 func (f *fakeMCP) expire() {

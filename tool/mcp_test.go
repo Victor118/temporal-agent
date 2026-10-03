@@ -331,7 +331,7 @@ func TestSSEReader(t *testing.T) {
 		"event: message\ndata: a\ndata: b\n\n" +
 		"data:no space\nretry: 250\nid: 2\n\n" +
 		"data: cut by the end"
-	r := newSSEReader(strings.NewReader(stream))
+	r := newSSEReader(strings.NewReader(stream), mcpMaxMessage)
 	ev, err := r.next()
 	if err != nil || ev.data != "a\nb" || ev.event != "message" || r.lastID != "1" {
 		t.Errorf("first: %+v, %v, last ID %q", ev, err, r.lastID)
@@ -394,5 +394,104 @@ func TestMCPServers_DiscoverRegistersInConfigOrder(t *testing.T) {
 	}
 	if names(r.All()) != "[a_b_c a_b_d]" {
 		t.Errorf("registry = %s", names(r.All()))
+	}
+}
+
+// schemaOf is an input schema of about n bytes.
+func schemaOf(n int) json.RawMessage {
+	return json.RawMessage(`{"type":"object","description":"` + strings.Repeat("x", max(n-40, 0)) + `"}`)
+}
+
+func toolInfo(name string) mcpToolInfo {
+	return mcpToolInfo{Name: name, Description: "tool " + name, InputSchema: json.RawMessage(`{"type":"object"}`)}
+}
+
+// A tool whose name has characters the model's API does not allow (MCP
+// allows "search.web") is exposed with _ in their place, and called by its
+// own name.
+func TestMCPClient_ExposedNameReachesTheRealName(t *testing.T) {
+	f := newFakeMCP(t, nil)
+	f.setToolInfos(toolInfo("search.web"), toolInfo("files/read"), toolInfo("plain-name_1"))
+	tools := discover(t, NewMCPClient(f.config("srv")))
+	if got := names(tools); got != "[srv_search_web srv_files_read srv_plain-name_1]" {
+		t.Fatalf("tools = %s", got)
+	}
+	if got, err := call(t, tools, "srv_search_web", `{"q":1}`); err != nil || got != `search.web {"q":1}` {
+		t.Errorf("call = %q, %v", got, err)
+	}
+	if got, err := call(t, tools, "srv_files_read", `{}`); err != nil || got != `files/read {}` {
+		t.Errorf("call = %q, %v", got, err)
+	}
+}
+
+// One tool this worker cannot take refuses the whole list, and so does a
+// list too big: too many tools, or too many bytes, on one page or across
+// pages, as JSON or as an event stream.
+func TestMCPClient_RefusesAToolList(t *testing.T) {
+	many := func(n int) []mcpToolInfo {
+		var tools []mcpToolInfo
+		for i := range n {
+			tools = append(tools, toolInfo(fmt.Sprintf("t%d", i)))
+		}
+		return tools
+	}
+	heavy := func(n int) []mcpToolInfo { // n tools of 60 KiB each
+		var tools []mcpToolInfo
+		for i := range n {
+			tools = append(tools, mcpToolInfo{Name: fmt.Sprintf("t%d", i), InputSchema: schemaOf(60 << 10)})
+		}
+		return tools
+	}
+	withSchema := func(schema string) []mcpToolInfo {
+		return []mcpToolInfo{{Name: "t", InputSchema: json.RawMessage(schema)}}
+	}
+	cases := []struct {
+		name      string
+		server    string // the server's name in the config; "" = srv
+		configure func(*fakeMCP)
+		tools     []mcpToolInfo
+		want      string
+	}{
+		{name: "no name", tools: []mcpToolInfo{toolInfo("")}, want: "no name"},
+		{name: "too long once exposed", tools: []mcpToolInfo{toolInfo(strings.Repeat("x", 61))}, want: "not 1 to 64"},
+		{name: "invalid server name", server: "my.srv", tools: []mcpToolInfo{toolInfo("echo")}, want: "not 1 to 64"},
+		{name: "two tools exposed as one", tools: []mcpToolInfo{toolInfo("a.b"), toolInfo("a_b")}, want: "both exposed as \"srv_a_b\""},
+		{name: "same name twice", tools: []mcpToolInfo{toolInfo("a"), toolInfo("a")}, want: "both exposed"},
+		{name: "description too big", tools: []mcpToolInfo{{Name: "t", Description: strings.Repeat("d", mcpMaxDescription+1), InputSchema: schemaOf(10)}}, want: "description of"},
+		{name: "schema too big", tools: []mcpToolInfo{{Name: "t", InputSchema: schemaOf(mcpMaxSchema + 100)}}, want: "input schema of"},
+		{name: "schema an array", tools: withSchema(`[]`), want: "not a JSON object"},
+		{name: "schema a string", tools: withSchema(`"object"`), want: "not a JSON object"},
+		{name: "no schema", tools: withSchema(`null`), want: "not a JSON object"},
+		{name: "too many tools", tools: many(mcpMaxTools + 1), want: "more than 500 tools"},
+		{name: "too many tools across pages", configure: func(f *fakeMCP) { f.pages = 50 }, tools: many(mcpMaxTools + 1), want: "more than 500 tools"},
+		{name: "too many bytes", tools: heavy(80), want: "more than 4194304 bytes"},
+		{name: "too many bytes in a stream", configure: func(f *fakeMCP) { f.sse = true }, tools: heavy(80), want: "more than 4194304 bytes"},
+		{name: "too many bytes across pages", configure: func(f *fakeMCP) { f.pages = 10 }, tools: heavy(80), want: "more than 4194304 bytes"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeMCP(t, tc.configure)
+			f.setToolInfos(tc.tools...)
+			server := tc.server
+			if server == "" {
+				server = "srv"
+			}
+			tools, err := NewMCPClient(f.config(server)).Discover(context.Background())
+			if !errors.Is(err, errToolsRefused) || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("err = %.300v, want a refusal saying %q", err, tc.want)
+			}
+			if tools != nil {
+				t.Errorf("tools = %s", names(tools))
+			}
+		})
+	}
+
+	// At the limits, the list is taken.
+	f := newFakeMCP(t, func(f *fakeMCP) { f.pages = 100 })
+	limits := many(mcpMaxTools)
+	limits[0] = mcpToolInfo{Name: strings.Repeat("x", 60), Description: strings.Repeat("d", mcpMaxDescription), InputSchema: schemaOf(mcpMaxSchema)}
+	f.setToolInfos(limits...)
+	if n := len(discover(t, NewMCPClient(f.config("srv")))); n != mcpMaxTools {
+		t.Errorf("%d tools at the limits, want %d", n, mcpMaxTools)
 	}
 }

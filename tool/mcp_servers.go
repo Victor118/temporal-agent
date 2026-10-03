@@ -2,6 +2,7 @@ package tool
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -35,6 +36,7 @@ type mcpServer struct {
 	client  *MCPClient
 	tried   bool     // a discovery came back
 	up      bool     // the last one succeeded
+	failure string   // why the last one failed, as last logged: "down", or the refusal
 	hidden  string   // tools not exposed, as last logged
 	refused string   // tools whose names are taken, as last logged
 	retry   []string // names a publish could not write
@@ -144,20 +146,31 @@ func (m *MCPServers) watch(ctx context.Context, i int, up bool, out chan<- mcpDi
 // apply registers what a discovery found and publishes the difference (pub
 // nil: nothing published). A failed discovery changes nothing: the server's
 // tools stay registered, their calls fail as tool errors, and the model's
-// tool list does not move. Only the server's state changes are logged.
+// tool list does not move. So does a refused one (a tools/list the client
+// would not take). Only the server's state changes are logged: down, up, a
+// refusal and its reason.
 func (m *MCPServers) apply(ctx context.Context, d mcpDiscovery, pub MCPPublisher) {
 	s := m.servers[d.index]
 	name := s.client.Name()
 	if d.err != nil {
-		switch {
-		case !s.tried:
-			log.Printf("Warning: MCP server %s unreachable, retrying in the background: %v", name, d.err)
-		case s.up:
-			log.Printf("Warning: MCP server %s unreachable, retrying in the background; its tools stay registered, their calls fail meanwhile: %v", name, d.err)
+		failure := "down"
+		if errors.Is(d.err, errToolsRefused) {
+			failure = d.err.Error()
 		}
-		s.tried, s.up = true, false
+		if failure != s.failure {
+			switch {
+			case failure != "down":
+				log.Printf("Error: MCP server %s: %v; the tools it had stay as they were, it is asked again in the background", name, d.err)
+			case !s.tried:
+				log.Printf("Warning: MCP server %s unreachable, retrying in the background: %v", name, d.err)
+			default:
+				log.Printf("Warning: MCP server %s unreachable, retrying in the background; its tools stay registered, their calls fail meanwhile: %v", name, d.err)
+			}
+		}
+		s.tried, s.up, s.failure = true, false, failure
 		return
 	}
+	s.failure = ""
 
 	var exposed []*Tool
 	var hidden []string

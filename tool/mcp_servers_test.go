@@ -3,10 +3,13 @@ package tool
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -59,6 +62,16 @@ func run(t *testing.T, m *MCPServers, pub MCPPublisher) {
 	done := make(chan struct{})
 	go func() { m.Run(ctx, pub); close(done) }()
 	t.Cleanup(func() { cancel(); <-done })
+}
+
+// discovered waits until Run has applied a discovery of f that started
+// after the call. A watcher asks again only once Run took its last result,
+// and Run takes a result only once it applied the one before: the third
+// tools/list from now means the first one is applied.
+func discovered(t *testing.T, f *fakeMCP) {
+	t.Helper()
+	n := f.count("tools/list")
+	eventually(t, "a discovery is applied", func() bool { return f.count("tools/list") >= n+3 })
 }
 
 func eventually(t *testing.T, what string, cond func() bool) {
@@ -238,5 +251,73 @@ func TestMCPServers_RunStopsOnCancel(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not stop")
+	}
+}
+
+// A list the client refuses changes nothing: the server keeps the tools it
+// had, nothing is published, and a list it takes later is applied.
+func TestMCPServers_RefusedListKeepsTheTools(t *testing.T) {
+	f := newFakeMCP(t, nil)
+	f.setTools("a")
+	r := NewRegistry()
+	m := fastServers(t, r, exposeAll, f.config("srv"))
+	m.Discover(context.Background())
+	pub := &fakePublisher{}
+	run(t, m, pub)
+
+	f.setToolInfos(toolInfo("a"), toolInfo("b.c"), toolInfo("b_c"))
+	discovered(t, f)
+	if got := names(r.All()); got != "[srv_a]" {
+		t.Errorf("registry = %s after a refused list", got)
+	}
+	if got := pub.published(); len(got) != 0 {
+		t.Errorf("published %v from a refused list", got)
+	}
+
+	f.setTools("a", "b")
+	eventually(t, "the list taken later is published", func() bool { return len(pub.published()) > 0 })
+	if got := pub.published()[0]; got != "put [srv_b] drop []" {
+		t.Errorf("published %q", got)
+	}
+}
+
+// A refusal is logged when it starts or its reason changes, not at every
+// discovery; so are the other changes of state.
+func TestMCPServers_LogsEachChangeOfStateOnce(t *testing.T) {
+	var buf strings.Builder
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	m := NewMCPServers(NewRegistry(), []MCPServerConfig{{Name: "srv", URL: "http://unused"}}, exposeAll)
+	refused := func(why string) error {
+		return fmt.Errorf("mcp srv: discover tools: %w: %s", errToolsRefused, why)
+	}
+	down := errors.New("mcp srv: connection refused")
+	for _, err := range []error{
+		refused("x"), refused("x"), refused("x"), // one line
+		refused("y"), // the reason changed
+		down, down,   // one line
+		nil, nil, // up: one line
+		refused("y"),                   // refused again
+		down,                           // down again
+		errors.New("mcp srv: timeout"), // still down
+	} {
+		m.apply(context.Background(), mcpDiscovery{0, []*Tool{}, err}, nil)
+	}
+
+	var lines []string
+	for _, l := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		if strings.Contains(l, "MCP server srv") {
+			lines = append(lines, l)
+		}
+	}
+	want := []string{"refused: x", "refused: y", "unreachable", "reachable: 0 tools", "refused: y", "unreachable"}
+	if len(lines) != len(want) {
+		t.Fatalf("logged %d lines, want %d:\n%s", len(lines), len(want), strings.Join(lines, "\n"))
+	}
+	for i, w := range want {
+		if !strings.Contains(lines[i], w) {
+			t.Errorf("line %d = %q, want %q", i, lines[i], w)
+		}
 	}
 }
