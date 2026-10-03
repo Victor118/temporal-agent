@@ -557,7 +557,7 @@ func TestLoadConversation(t *testing.T) {
 	if err != nil || snapshot == 0 {
 		t.Fatalf("last %d, %v", snapshot, err)
 	}
-	turn := TurnKey("run-1", 0)
+	turn := TurnKey(TurnGroupKey("run-1", snapshot), 0)
 	s.AppendMessages(ctx, sid, turn, 0, []Message{{Role: RoleAssistant, Content: `"searching"`}})
 	s.AppendMessage(ctx, sid, HumanMessageKey("m"), text("meanwhile"))
 	s.AppendMessages(ctx, sid, turn, 1, []Message{{Role: RoleAssistant, Content: `"found"`}})
@@ -571,7 +571,7 @@ func TestLoadConversation(t *testing.T) {
 	for _, m := range got {
 		seen = append(seen, m.Key+" "+m.Content)
 	}
-	want := []string{`msg:q "question"`, `run-1.0:0 "searching"`, `run-1.0:1 "found"`}
+	want := []string{`msg:q "question"`, turn + `:0 "searching"`, turn + `:1 "found"`}
 	if !reflect.DeepEqual(seen, want) {
 		t.Errorf("loaded %q\nwant %q", seen, want)
 	}

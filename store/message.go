@@ -3,6 +3,7 @@ package store
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -75,11 +76,18 @@ const (
 // being unique.
 func HumanMessageKey(id string) string { return humanKeyPrefix + id }
 
-// TurnKey names the turn of the agent-th agent answering a message, under
-// messageKey, the key the session gives that message: the turns answering
-// one message share it (TurnGroup), and are read as one block.
-func TurnKey(messageKey string, agent int) string {
-	return fmt.Sprintf("%s.%d", messageKey, agent)
+// TurnGroupKey names the turns answering one message: id is unique to the
+// message, upTo the last message of the session they read besides their own
+// (the snapshot they started from). A message stored after upTo while they
+// ran is read after them (see TurnSnapshot).
+func TurnGroupKey(id string, upTo int64) string {
+	return fmt.Sprintf("%s@%d", id, upTo)
+}
+
+// TurnKey names the turn of the agent-th agent answering a message, in the
+// group of turns that answer it (TurnGroupKey): they are read as one block.
+func TurnKey(group string, agent int) string {
+	return fmt.Sprintf("%s.%d", group, agent)
 }
 
 // TurnOf returns the key of the turn that wrote the message stored under
@@ -95,13 +103,24 @@ func TurnOf(msgKey string) (string, bool) {
 	return msgKey[:i], true
 }
 
-// TurnGroup returns the message a turn answers (see TurnKey): a turn key
-// made otherwise is its own group.
+// TurnGroup returns the group of turns a turn belongs to (see TurnKey): a
+// turn key made otherwise is its own group.
 func TurnGroup(turnKey string) string {
 	if i := strings.LastIndexByte(turnKey, '.'); i > 0 {
 		return turnKey[:i]
 	}
 	return turnKey
+}
+
+// TurnSnapshot returns the last message the turns of group read besides their
+// own (see TurnGroupKey); false for a group named otherwise.
+func TurnSnapshot(group string) (int64, bool) {
+	i := strings.LastIndexByte(group, '@')
+	if i < 0 {
+		return 0, false
+	}
+	upTo, err := strconv.ParseInt(group[i+1:], 10, 64)
+	return upTo, err == nil
 }
 
 // TurnMessageKey is the idempotency key of the index-th message produced by a
