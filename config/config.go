@@ -85,6 +85,10 @@ type Config struct {
 	// a time (Temporal sessions); empty = 1, and more than 1 is refused until
 	// each run slot has a RunAs uid of its own (parseMaxRuns).
 	ClaudeCodeMaxConcurrentRuns string
+	// ClaudeCodeQueueWait is how long a coding run waits for a worker of its
+	// queue with a run to spare, a Go duration (30m); empty =
+	// activity.DefaultRunQueueWait.
+	ClaudeCodeQueueWait string
 	// ClaudeCodeAuth is how this worker's coding runs authenticate: "api"
 	// (ANTHROPIC_API_KEY) or "subscription" (CLAUDE_CODE_OAUTH_TOKEN, or the
 	// CLI's login); empty = the one credential set (claudecode.ResolveAuth).
@@ -193,6 +197,7 @@ func Load() *Config {
 		ClaudeCodeModel:             os.Getenv("CLAUDE_CODE_MODEL"),
 		ClaudeCodeMaxBudgetUSD:      os.Getenv("CLAUDE_CODE_MAX_BUDGET_USD"),
 		ClaudeCodeMaxConcurrentRuns: os.Getenv("CLAUDE_CODE_MAX_CONCURRENT_RUNS"),
+		ClaudeCodeQueueWait:         os.Getenv("CLAUDE_CODE_QUEUE_WAIT"),
 		ClaudeCodeAuth:              os.Getenv("CLAUDE_CODE_AUTH"),
 
 		SkillsRepo:          os.Getenv("SKILLS_REPO"),

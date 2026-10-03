@@ -255,18 +255,26 @@ func TestRegistry_ConcurrentReadsAndWrites(t *testing.T) {
 	wg.Wait()
 }
 
-// The coding tools end their description with what a run costs, when known.
+// The coding tools end their description with what a run costs, when known,
+// say how long a run may wait for a worker, and get the call's context (a
+// run that waits tells its user on the turn's channel).
 func TestClaudeCodeToolsSayWhatARunCosts(t *testing.T) {
 	r := NewRegistry()
-	RegisterClaudeCodeTools(r, func() {}, func() {}, "Runs are paid by a subscription.")
+	RegisterClaudeCodeTools(r, func() {}, func() {}, "Runs are paid by a subscription.", 20*time.Minute)
 	for _, name := range []string{"analyze_repo", "implement_feature"} {
 		tl, ok := r.Get(name)
 		if !ok || !strings.HasSuffix(tl.Description, ". Runs are paid by a subscription.") {
 			t.Errorf("%s: %q", name, tl.Description)
 		}
+		if !strings.Contains(tl.Description, "the run waits up to 20m0s for one to free up") {
+			t.Errorf("%s does not say a run may wait: %q", name, tl.Description)
+		}
+		if !tl.NeedsCallContext {
+			t.Errorf("%s gets no call context", name)
+		}
 	}
 	r = NewRegistry()
-	RegisterClaudeCodeTools(r, func() {}, func() {}, "")
+	RegisterClaudeCodeTools(r, func() {}, func() {}, "", time.Minute)
 	if tl, _ := r.Get("analyze_repo"); strings.HasSuffix(tl.Description, " ") {
 		t.Errorf("no note, trailing space: %q", tl.Description)
 	}

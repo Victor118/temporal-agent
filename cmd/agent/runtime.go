@@ -99,6 +99,10 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 	if err != nil {
 		return nil, fmt.Errorf("CLAUDE_CODE_MAX_CONCURRENT_RUNS: %w", err)
 	}
+	queueWait, err := parseQueueWait(cfg.ClaudeCodeQueueWait)
+	if err != nil {
+		return nil, fmt.Errorf("CLAUDE_CODE_QUEUE_WAIT: %w", err)
+	}
 
 	// Who pays for a coding run, the API or a subscription, is settled before
 	// any run, where the CLI is installed: never left to the CLI picking
@@ -124,7 +128,7 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 	// the coding runs share it, or one would end the other's processes.
 	runs := subproc.NewRuns(runAs)
 
-	codeAct := &activity.ClaudeCodeActivities{Root: cfg.ClaudeCodeWorkspace, SSHKeyPath: cfg.ClaudeCodeSSHKey, AllowedRepos: cfg.ClaudeCodeRepos, RunAs: runAs, Runs: runs, ClaudeConfigDir: cfg.ClaudeConfigDir, Model: cfg.ClaudeCodeModel, MaxBudgetUSD: budget, Auth: auth}
+	codeAct := &activity.ClaudeCodeActivities{Root: cfg.ClaudeCodeWorkspace, SSHKeyPath: cfg.ClaudeCodeSSHKey, AllowedRepos: cfg.ClaudeCodeRepos, RunAs: runAs, Runs: runs, ClaudeConfigDir: cfg.ClaudeConfigDir, Model: cfg.ClaudeCodeModel, MaxBudgetUSD: budget, Auth: auth, QueueWait: queueWait}
 	// Before this worker offers a run: what a run left on this machine's
 	// disk when its worker died is reachable from here alone.
 	releaseRuns := func() {}
@@ -135,7 +139,7 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 	}
 
 	workerConf := loadWorkerConfig(cfg)
-	registry := buildRegistry(cfg, st, tc, runAs, runs, auth)
+	registry := buildRegistry(cfg, st, tc, runAs, runs, auth, queueWait)
 
 	skills := loadSkills(opts.skills)
 	catalog := initCatalog(st)
@@ -164,7 +168,8 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 	// A coding run is a Temporal session on its tool's queue: all of its
 	// steps on the worker that took it.
 	if coding {
-		log.Printf("Coding runs: at most %d at a time on this worker (CLAUDE_CODE_MAX_CONCURRENT_RUNS)", maxRuns)
+		log.Printf("Coding runs: at most %d at a time on this worker (CLAUDE_CODE_MAX_CONCURRENT_RUNS); "+
+			"a run waits up to %s for a worker with one to spare (CLAUDE_CODE_QUEUE_WAIT)", maxRuns, queueWait)
 	}
 	rt := &workerRuntime{queues: queues, workflows: workerConf.Workflows, skills: skills, endRuns: codeAct.Stop, releaseRuns: releaseRuns}
 	for _, queue := range queues {
@@ -231,7 +236,7 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 // buildRegistry registers the built-in tools this process can run. Which of
 // them it exposes is the worker config's decision (exposeTools); the MCP
 // servers' come after (discoverMCPServers).
-func buildRegistry(cfg *config.Config, st store.Store, tc client.Client, runAs *subproc.Identity, runs *subproc.Runs, auth claudecode.Auth) *tool.Registry {
+func buildRegistry(cfg *config.Config, st store.Store, tc client.Client, runAs *subproc.Identity, runs *subproc.Runs, auth claudecode.Auth, queueWait time.Duration) *tool.Registry {
 	registry := tool.NewRegistry()
 	tool.RegisterFilesystemTools(registry, cfg.WorkspacePath, runAs)
 	tool.RegisterGrepTool(registry, cfg.WorkspacePath)
@@ -254,7 +259,7 @@ func buildRegistry(cfg *config.Config, st store.Store, tc client.Client, runAs *
 	// The coding tools only where the CLI is installed: a worker that cannot
 	// run a coding session has none to offer.
 	if (&claudecode.Runner{}).Available() {
-		tool.RegisterClaudeCodeTools(registry, workflow.AnalyzeRepoWorkflow, workflow.ImplementFeatureWorkflow, auth.CostNote())
+		tool.RegisterClaudeCodeTools(registry, workflow.AnalyzeRepoWorkflow, workflow.ImplementFeatureWorkflow, auth.CostNote(), queueWait)
 		if cfg.ClaudeCodeSSHKey != "" {
 			log.Printf("Coding runs use the git identity at %s", cfg.ClaudeCodeSSHKey)
 		}
@@ -318,6 +323,21 @@ func parseMaxRuns(raw string) (int, error) {
 			"that takes one uid per run slot first (set %d)", v, maxRunsPerUID)
 	}
 	return v, nil
+}
+
+// parseQueueWait reads CLAUDE_CODE_QUEUE_WAIT, a Go duration: empty is
+// activity.DefaultRunQueueWait, and what is no positive duration stops the
+// worker rather than leave runs waiting for ever (the SDK reads zero as no
+// bound).
+func parseQueueWait(raw string) (time.Duration, error) {
+	if raw == "" {
+		return activity.DefaultRunQueueWait, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("%q is not a positive duration (e.g. 30m)", raw)
+	}
+	return d, nil
 }
 
 // rootClaimWait bounds how long a starting worker waits for another worker

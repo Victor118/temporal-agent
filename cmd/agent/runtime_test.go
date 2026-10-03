@@ -151,3 +151,18 @@ func TestClaimRunsRoot_FailureIsFatal(t *testing.T) {
 	}
 	release()
 }
+
+// A coding run's wait for a free worker: a Go duration, empty the default;
+// anything else stops the worker rather than leave runs waiting for ever.
+func TestParseQueueWait(t *testing.T) {
+	for raw, want := range map[string]time.Duration{"": activity.DefaultRunQueueWait, "45m": 45 * time.Minute, "1h": time.Hour} {
+		if got, err := parseQueueWait(raw); err != nil || got != want {
+			t.Errorf("parseQueueWait(%q) = %s, %v; want %s", raw, got, err, want)
+		}
+	}
+	for _, raw := range []string{"0", "0s", "-5m", "30", "soon"} {
+		if _, err := parseQueueWait(raw); err == nil {
+			t.Errorf("parseQueueWait(%q) accepted", raw)
+		}
+	}
+}

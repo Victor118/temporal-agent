@@ -20,6 +20,7 @@ import (
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/victor/temporal-agent/activity"
+	"github.com/victor/temporal-agent/tool"
 )
 
 // testRunQueue is the tool's queue the coding workflows run on in the tests.
@@ -31,10 +32,16 @@ const (
 	sessionCompletion = "internalSessionCompletionActivity"
 )
 
-// activityQueues records the task queue each activity ran on, in order.
+// testRunWorkflowID is the coding workflow's ID in the tests: a tool call of
+// session "s1" (childWorkflowID).
+const testRunWorkflowID = "s1-tool-implement_feature-c1"
+
+// activityQueues records the task queue each activity ran on, in order, and
+// the notifications sent.
 type activityQueues struct {
-	mu   sync.Mutex
-	runs []activityRun
+	mu      sync.Mutex
+	runs    []activityRun
+	notices []activity.NotifyInput
 }
 
 type activityRun struct{ name, queue string }
@@ -45,33 +52,55 @@ func (q *activityQueues) all() []activityRun {
 	return append([]activityRun(nil), q.runs...)
 }
 
+func (q *activityQueues) sent() []activity.NotifyInput {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return append([]activity.NotifyInput(nil), q.notices...)
+}
+
 // asRunWorker makes env what a coding worker is: one of testRunQueue that
-// takes sessions (EnableSessionWorker). It records where each activity ran.
+// takes sessions (EnableSessionWorker), and answers the probe. It records
+// where each activity ran, and the notifications.
 func asRunWorker(env *testsuite.TestWorkflowEnvironment) *activityQueues {
 	env.SetWorkerOptions(worker.Options{EnableSessionWorker: true})
-	env.SetStartWorkflowOptions(client.StartWorkflowOptions{TaskQueue: testRunQueue})
+	env.SetStartWorkflowOptions(client.StartWorkflowOptions{ID: testRunWorkflowID, TaskQueue: testRunQueue})
 	q := &activityQueues{}
 	env.SetOnActivityStartedListener(func(info *sdkactivity.Info, _ context.Context, _ converter.EncodedValues) {
 		q.mu.Lock()
 		defer q.mu.Unlock()
 		q.runs = append(q.runs, activityRun{info.ActivityType.Name, info.TaskQueue})
 	})
+	env.RegisterActivityWithOptions(func(context.Context) (activity.ProbeRunWorkerOutput, error) {
+		return activity.ProbeRunWorkerOutput{QueueWait: activity.DefaultRunQueueWait}, nil
+	}, sdkactivity.RegisterOptions{Name: probeActivity})
+	env.RegisterActivityWithOptions(func(_ context.Context, in activity.NotifyInput) error {
+		q.mu.Lock()
+		defer q.mu.Unlock()
+		q.notices = append(q.notices, in)
+		return nil
+	}, sdkactivity.RegisterOptions{Name: "NotifyStep"})
 	return q
 }
 
-// checkOneWorker fails unless the session was asked of testRunQueue, every
-// step of the run went to the session's own queue, and the session was
-// completed last.
+// probeActivity is the probe's name (ClaudeCodeActivities.ProbeRunWorker).
+const probeActivity = "ProbeRunWorker"
+
+// checkOneWorker fails unless the queue was probed, the session was asked of
+// testRunQueue, every step of the run went to the session's own queue, and
+// the session was completed last.
 func checkOneWorker(t *testing.T, runs []activityRun, steps ...string) {
 	t.Helper()
-	if len(runs) == 0 || runs[0].name != sessionCreation {
-		t.Fatalf("activities %v, want the session opened first", runs)
+	if len(runs) < 2 || runs[0].name != probeActivity || runs[1].name != sessionCreation {
+		t.Fatalf("activities %v, want the queue probed, then the session opened", runs)
 	}
-	if want := testRunQueue + "__internal_session_creation"; runs[0].queue != want {
-		t.Errorf("session asked of %q, want %q", runs[0].queue, want)
+	if runs[0].queue != testRunQueue {
+		t.Errorf("probed %q, want %q", runs[0].queue, testRunQueue)
+	}
+	if want := testRunQueue + "__internal_session_creation"; runs[1].queue != want {
+		t.Errorf("session asked of %q, want %q", runs[1].queue, want)
 	}
 	var got []string
-	for _, r := range runs[1:] {
+	for _, r := range runs[2:] {
 		if r.name == sessionCompletion {
 			continue
 		}
@@ -80,8 +109,8 @@ func checkOneWorker(t *testing.T, runs []activityRun, steps ...string) {
 		if r.queue == testRunQueue || !strings.Contains(r.queue, "@") {
 			t.Errorf("%s ran on %q, not on the session's worker", r.name, r.queue)
 		}
-		if r.queue != runs[1].queue {
-			t.Errorf("%s ran on %q, %s on %q: two workers", r.name, r.queue, runs[1].name, runs[1].queue)
+		if r.queue != runs[2].queue {
+			t.Errorf("%s ran on %q, %s on %q: two workers", r.name, r.queue, runs[2].name, runs[2].queue)
 		}
 	}
 	if strings.Join(got, " ") != strings.Join(steps, " ") {
@@ -107,17 +136,22 @@ func TestImplementFeatureWorkflow_RunsOnOneWorker(t *testing.T) {
 	checkOneWorker(t, e.queues.all(), "PrepareWorkspace", "RunClaudeCode", "InspectWorkspace", "PushBranch", "CleanupWorkspace")
 }
 
-// noWorker stands for a queue no worker takes a session of: the creation
-// activity is never started, and times out.
-func noWorker(env *testsuite.TestWorkflowEnvironment) {
-	env.OnActivity(sessionCreation, mock.Anything, mock.Anything).
-		Return(temporal.NewTimeoutError(enumspb.TIMEOUT_TYPE_SCHEDULE_TO_START, nil))
-}
-
-// No worker to take the run: the output says so and names the queue, and
-// nothing was started.
+// No worker answers the probe: the run says so at once, names the queue,
+// and asks for no session.
 func TestCodingRuns_NoWorkerAvailable(t *testing.T) {
+	noWorker := func(env *testsuite.TestWorkflowEnvironment) {
+		env.OnActivity(probeActivity, mock.Anything).
+			Return(activity.ProbeRunWorkerOutput{}, temporal.NewTimeoutError(enumspb.TIMEOUT_TYPE_SCHEDULE_TO_START, nil))
+	}
 	const want = `no worker available for "tools-claude-code"`
+	noSession := func(t *testing.T, q *activityQueues) {
+		t.Helper()
+		for _, r := range q.all() {
+			if r.name != probeActivity {
+				t.Errorf("%s ran with no worker", r.name)
+			}
+		}
+	}
 
 	a := newAnalyzeEnv(t, nil, claudeCodeResult{Report: "ok", Subtype: "success"}, nil)
 	noWorker(a.env)
@@ -125,9 +159,7 @@ func TestCodingRuns_NoWorkerAvailable(t *testing.T) {
 	if !strings.Contains(out.Error, want) || !strings.Contains(out.Content, want) {
 		t.Errorf("analyze: Error = %q", out.Error)
 	}
-	if a.prepared != nil || len(a.cleaned) != 0 {
-		t.Errorf("analyze: prepared %v, cleaned %v, want nothing done", a.prepared, a.cleaned)
-	}
+	noSession(t, a.queues)
 
 	e := newImplementEnv(t, claudeCodeResult{Report: "ok", Subtype: "success"}, nil, oneCommit(), nil)
 	noWorker(e.env)
@@ -135,8 +167,106 @@ func TestCodingRuns_NoWorkerAvailable(t *testing.T) {
 	if !strings.Contains(iout.Error, want) || iout.Pushed {
 		t.Errorf("implement: Error = %q, pushed %v", iout.Error, iout.Pushed)
 	}
+	noSession(t, e.queues)
+}
+
+// Every worker answers, none has a slot to spare for as long as the queue's
+// wait, which the worker that answered the probe says: the run says they are
+// busy and to try again later. The operator's setting is the worker's log's
+// business, not the model's.
+func TestCodingRuns_AllWorkersBusy(t *testing.T) {
+	e := newImplementEnv(t, claudeCodeResult{Report: "ok", Subtype: "success"}, nil, oneCommit(), nil)
+	e.env.OnActivity(probeActivity, mock.Anything).Return(activity.ProbeRunWorkerOutput{QueueWait: 7 * time.Minute}, nil)
+	e.env.OnActivity(sessionCreation, mock.Anything, mock.Anything).
+		Return(temporal.NewTimeoutError(enumspb.TIMEOUT_TYPE_SCHEDULE_TO_START, nil))
+
+	out := e.run_(t, ImplementFeatureInput{Repo: "/src/repo", Task: "do it"})
+
+	want := `the workers of "tools-claude-code" are all busy (maximum runs reached); waited 7m0s; try again later`
+	if !strings.Contains(out.Error, want) {
+		t.Errorf("Error = %q, want %q", out.Error, want)
+	}
+	if strings.Contains(out.Error, "CLAUDE_CODE") {
+		t.Errorf("Error = %q names an operator's setting", out.Error)
+	}
 	if e.run != nil || e.pushed != nil || len(e.cleaned) != 0 {
-		t.Error("implement: a step ran with no worker reserved")
+		t.Error("a step ran with no worker reserved")
+	}
+}
+
+// workerTakesSessionAfter stands for a worker that frees a slot after d: the
+// session opens then, on "resource@host-a".
+func workerTakesSessionAfter(env *testsuite.TestWorkflowEnvironment, d time.Duration) {
+	env.OnActivity(sessionCreation, mock.Anything, mock.Anything).After(d).Return(
+		func(_ context.Context, sessionID string) error {
+			env.SignalWorkflow(sessionID, map[string]string{
+				"Taskqueue": "resource@host-a", "HostName": "host-a", "ResourceID": "resource",
+			})
+			return nil
+		})
+}
+
+// A run that waits for a slot more than a minute tells its user so, once, on
+// the turn's channel, through the turn's queue; then runs when a slot frees.
+func TestCodingRuns_WaitForAWorkerThenRun(t *testing.T) {
+	e := newImplementEnv(t, claudeCodeResult{Report: "Done.", Subtype: "success"}, nil, oneCommit(), nil)
+	workerTakesSessionAfter(e.env, 3*time.Minute)
+
+	out := e.run_(t, ImplementFeatureInput{
+		Repo: "/src/repo", Task: "do it",
+		CallContext: tool.CallContext{Channel: "telegram", ChannelID: "42", Agent: "Jarvis", NotifyQueue: "agent"},
+	})
+
+	if !out.Pushed || out.Error != "" {
+		t.Fatalf("pushed %v, Error %q: want the run done once a slot freed", out.Pushed, out.Error)
+	}
+	notices := e.queues.sent()
+	if len(notices) != 1 {
+		t.Fatalf("sent %+v, want one notice", notices)
+	}
+	n := notices[0]
+	var data struct{ Type, Text, Agent string }
+	json.Unmarshal(n.Event.Data, &data)
+	if n.SessionID != "s1" || n.Channel != "telegram" || n.ChannelID != "42" || n.Event.Type != activity.EventNotice ||
+		data.Agent != "Jarvis" || !strings.Contains(data.Text, "attend un worker libre") || !strings.Contains(data.Text, "30 min") {
+		t.Errorf("notice %+v %s", n, n.Event.Data)
+	}
+	var notifyQueue string
+	for _, r := range e.queues.all() {
+		if r.name == "NotifyStep" {
+			notifyQueue = r.queue
+		}
+	}
+	if notifyQueue != "agent" {
+		t.Errorf("notice sent through %q, want the turn's queue", notifyQueue)
+	}
+}
+
+// A slot free within the minute: no notice.
+func TestCodingRuns_NoNoticeWhenASlotIsFree(t *testing.T) {
+	e := newImplementEnv(t, claudeCodeResult{Report: "Done.", Subtype: "success"}, nil, oneCommit(), nil)
+	workerTakesSessionAfter(e.env, 30*time.Second)
+	out := e.run_(t, ImplementFeatureInput{Repo: "/src/repo", Task: "do it", CallContext: tool.CallContext{Channel: "web"}})
+	if !out.Pushed {
+		t.Fatalf("not pushed: %s", out.Error)
+	}
+	if notices := e.queues.sent(); len(notices) != 0 {
+		t.Errorf("sent %+v, want no notice", notices)
+	}
+}
+
+func TestToolCallSession(t *testing.T) {
+	for id, want := range map[string]string{
+		"s1-tool-implement_feature-c1":                  "s1",
+		"s1-tool-agent_analyst-c1-tool-analyze_repo-c2": "s1",
+		"9f0e-aa-tool-ask_user-3":                       "9f0e-aa",
+	} {
+		if got, ok := toolCallSession(id); !ok || got != want {
+			t.Errorf("toolCallSession(%q) = %q, %v; want %q", id, got, ok, want)
+		}
+	}
+	if _, ok := toolCallSession("scheduled-x"); ok {
+		t.Error("a session read from an ID with none")
 	}
 }
 
@@ -191,7 +321,7 @@ func TestImplementFeatureWorkflow_WorkerLostMidRun(t *testing.T) {
 		t.Errorf("cleaned %v on another worker than the clone's", e.cleaned)
 	}
 	for _, r := range e.queues.all() {
-		if r.name != sessionCreation && r.queue != "resource@host-a" {
+		if r.name != probeActivity && r.name != sessionCreation && r.queue != "resource@host-a" {
 			t.Errorf("%s ran on %q, off the lost worker", r.name, r.queue)
 		}
 	}
@@ -268,7 +398,7 @@ func TestImplementFeatureWorkflow_WorkerLostAfterTheRun(t *testing.T) {
 // expiryWorkflow opens a run of the given bound, and runs one step that
 // fails as a lost worker's does, after the step's own time.
 func expiryWorkflow(ctx workflow.Context, execution time.Duration) (string, error) {
-	r, err := openRun(ctx, execution)
+	r, err := openRun(ctx, execution, tool.CallContext{})
 	if err != nil {
 		return "", err
 	}

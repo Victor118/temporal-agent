@@ -1,25 +1,30 @@
 package workflow
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/victor/temporal-agent/activity"
+	"github.com/victor/temporal-agent/tool"
 )
 
 // A coding run's steps share a clone on one worker's disk: they run in a
 // Temporal session, which pins every activity of it to the worker that took
 // the session (its own task queue, "<resource>@<host>").
 const (
-	// runCreationTimeout is how long a run waits for a worker of its queue
-	// to take it: one that runs, with a run to spare
-	// (CLAUDE_CODE_MAX_CONCURRENT_RUNS). A full worker does not poll for new
-	// sessions, so waiting for a slot and finding no worker look the same.
-	runCreationTimeout = 5 * time.Minute
+	// runProbeTimeout bounds the wait for any worker of the run's queue to
+	// answer the probe (activity.ClaudeCodeActivities.ProbeRunWorker): a
+	// live one does at once, busy or not. Past it, there is none.
+	runProbeTimeout = time.Minute
+	// runWaitNotice is how long a run waits for a worker with a slot to
+	// spare before its user is told that it waits.
+	runWaitNotice = time.Minute
 	// runHeartbeatTimeout is how long the worker may go silent before the
 	// session fails. The SDK beats every 10s at most: six missed beats, not
 	// one blip, end a run that may have cost an hour.
@@ -80,23 +85,119 @@ type run struct {
 // openRun reserves a worker for a run that lasts at most execution. The
 // error says, for the output, why no worker was reserved. The caller
 // completes the run (complete) once it is over.
-func openRun(ctx workflow.Context, execution time.Duration) (*run, error) {
+//
+// A worker that runs as many runs as it may stops polling for new sessions:
+// to the session alone, a busy queue and one no worker serves look the same.
+// So a probe first asks the queue itself, which every worker polls: no
+// answer within runProbeTimeout, no worker. Then the run waits for a slot,
+// as long as the worker that answered says (its CLAUDE_CODE_QUEUE_WAIT); past
+// runWaitNotice, its user is told (call: where the user is).
+func openRun(ctx workflow.Context, execution time.Duration, call tool.CallContext) (*run, error) {
 	queue := runQueue(ctx)
+	logger := workflow.GetLogger(ctx)
+
+	var ccAct *activity.ClaudeCodeActivities
+	var probe activity.ProbeRunWorkerOutput
+	err := workflow.ExecuteActivity(
+		workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+			TaskQueue:              queue,
+			ScheduleToStartTimeout: runProbeTimeout,
+			StartToCloseTimeout:    10 * time.Second,
+			RetryPolicy:            &temporal.RetryPolicy{MaximumAttempts: 1},
+		}),
+		ccAct.ProbeRunWorker,
+	).Get(ctx, &probe)
+	switch {
+	case isScheduleToStartTimeout(err):
+		logger.Warn("No worker answered on the coding runs' queue: none is running", "queue", queue, "waited", runProbeTimeout)
+		return nil, fmt.Errorf("no worker available for %q; nothing was done", queue)
+	case err != nil:
+		return nil, fmt.Errorf("could not reach a worker of %q: %w", queue, err)
+	}
+
+	// Told only past runWaitNotice: most runs find a slot at once. The
+	// notice runs beside the wait, which needs this coroutine's context.
+	waiting, stopWaiting := workflow.WithCancel(ctx)
+	workflow.Go(waiting, func(ctx workflow.Context) {
+		if workflow.Sleep(ctx, runWaitNotice) == nil {
+			notifyRunWaiting(ctx, call, probe.QueueWait)
+		}
+	})
 	runCtx, err := workflow.CreateSession(workflow.WithTaskQueue(ctx, queue), &workflow.SessionOptions{
-		CreationTimeout:  runCreationTimeout,
+		CreationTimeout:  probe.QueueWait,
 		ExecutionTimeout: execution,
 		HeartbeatTimeout: runHeartbeatTimeout,
 	})
+	stopWaiting()
 	switch {
 	case err == nil:
 		return &run{ctx: runCtx, started: workflow.Now(ctx), execution: execution}, nil
 	case isScheduleToStartTimeout(err):
-		return nil, fmt.Errorf("no worker available for %q: none took the run within %s "+
-			"(none is running, or each already runs as many as it may, CLAUDE_CODE_MAX_CONCURRENT_RUNS); nothing was done",
-			queue, runCreationTimeout)
+		logger.Warn("No worker of the coding runs' queue had a slot to spare: each runs its maximum "+
+			"(CLAUDE_CODE_MAX_CONCURRENT_RUNS); more workers, or a longer CLAUDE_CODE_QUEUE_WAIT, would take it",
+			"queue", queue, "waited", probe.QueueWait)
+		return nil, fmt.Errorf("the workers of %q are all busy (maximum runs reached); waited %s; try again later; nothing was done",
+			queue, probe.QueueWait)
 	default:
 		return nil, fmt.Errorf("could not reserve a worker of %q for the run: %w", queue, err)
 	}
+}
+
+// notifyRunWaiting tells the run's user, on the turn's channel, that the run
+// waits for a free worker. Best effort: a failure is logged, and the run
+// goes on waiting.
+func notifyRunWaiting(ctx workflow.Context, call tool.CallContext, wait time.Duration) {
+	logger := workflow.GetLogger(ctx)
+	sessionID, ok := toolCallSession(workflow.GetInfo(ctx).WorkflowExecution.ID)
+	if !ok || sessionID == "" {
+		logger.Warn("A coding run waits for a worker, and has no session to say it to")
+		return
+	}
+	data, _ := json.Marshal(map[string]string{
+		"type": activity.EventNotice,
+		"text": fmt.Sprintf("Ton run attend un worker libre (tous occupés) : il démarre dès qu'un worker se libère, "+
+			"ou abandonne au bout de %s.", inMinutes(wait)),
+		"agent": call.Agent,
+	})
+	var notifAct *activity.NotificationActivities
+	err := workflow.ExecuteActivity(
+		workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+			// Where the channels' notifiers are: a coding worker may have none.
+			TaskQueue:           call.NotifyQueue,
+			StartToCloseTimeout: channelNotifyTimeout,
+			RetryPolicy:         notifyRetry,
+		}),
+		notifAct.NotifyStep,
+		activity.NotifyInput{
+			SessionID: sessionID,
+			Channel:   call.Channel,
+			ChannelID: call.ChannelID,
+			Event:     activity.SSEEvent{Type: activity.EventNotice, Data: data},
+		},
+	).Get(ctx, nil)
+	if err != nil && ctx.Err() == nil {
+		logger.Warn("The notice that a coding run waits for a worker was not delivered", "session_id", sessionID, "error", err)
+	}
+}
+
+// inMinutes writes a wait for the user: "30 min", or as Go does under a
+// minute.
+func inMinutes(d time.Duration) string {
+	if d < time.Minute {
+		return d.String()
+	}
+	return fmt.Sprintf("%d min", int(d.Round(time.Minute)/time.Minute))
+}
+
+// toolCallSession is the session of a workflow tool's call, read from its
+// workflow ID: "<session>-tool-<name>-<call>" (childWorkflowID). A
+// sub-agent's own tools carry the session's ID first too.
+func toolCallSession(workflowID string) (string, bool) {
+	i := strings.Index(workflowID, "-tool-")
+	if i < 0 {
+		return "", false
+	}
+	return workflowID[:i], true
 }
 
 // complete releases the worker: the session's end.

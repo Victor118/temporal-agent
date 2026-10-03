@@ -293,7 +293,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 	}
 
 	// What a tool flagged NeedsCallContext receives of this run.
-	call := callContext(input, currentChain, signed)
+	call := callContext(input, currentChain, signed, workflow.GetInfo(ctx).TaskQueueName)
 
 	// ReAct loop
 	for i := 0; i < maxReActIterations; i++ {
@@ -611,15 +611,17 @@ func buildChildInput(rawInput json.RawMessage, parent AgentWorkflowInput, childI
 }
 
 // callContext is what a tool flagged NeedsCallContext receives of the run
-// input: the agent chain, the user's channel, and signer, the name that signs
-// on that channel (empty: unsigned). A workflow tool gets it in its input, an
-// activity tool in its context (tool.CallFromContext).
-func callContext(input AgentWorkflowInput, chain []string, signer string) tool.CallContext {
+// input: the agent chain, the user's channel, signer, the name that signs
+// on that channel (empty: unsigned), and queue, the turn's own, where the
+// channels' notifiers are. A workflow tool gets it in its input, an activity
+// tool in its context (tool.CallFromContext).
+func callContext(input AgentWorkflowInput, chain []string, signer, queue string) tool.CallContext {
 	return tool.CallContext{
-		AgentChain: chain,
-		Channel:    input.Channel,
-		ChannelID:  input.ChannelID,
-		Agent:      signer,
+		AgentChain:  chain,
+		Channel:     input.Channel,
+		ChannelID:   input.ChannelID,
+		Agent:       signer,
+		NotifyQueue: queue,
 	}
 }
 

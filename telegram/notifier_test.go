@@ -16,7 +16,7 @@ func (f *fakeSender) SendMessage(_ context.Context, chatID, text string) error {
 	return nil
 }
 
-func TestNotifier_AnswersAndQuestionsOnly(t *testing.T) {
+func TestNotifier_AnswersQuestionsAndNoticesOnly(t *testing.T) {
 	s := &fakeSender{}
 	n := &Notifier{Client: s}
 	for _, ev := range []activity.SSEEvent{
@@ -24,12 +24,15 @@ func TestNotifier_AnswersAndQuestionsOnly(t *testing.T) {
 		{Type: "ask_user", Data: []byte(`{"type":"ask_user","question":"ok?"}`)},
 		{Type: "tool_calls", Data: []byte(`{"tool_calls":[]}`)},
 		{Type: "message", Data: []byte(`{"content":""}`)},
+		{Type: "notice", Data: []byte(`{"type":"notice","text":"waiting","agent":"Agent Smith"}`)},
+		{Type: "notice", Data: []byte(`{"type":"notice","text":""}`)},
 	} {
 		if err := n.Notify(context.Background(), activity.Notification{SessionID: "s1", ChannelID: "42", Event: ev}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if len(s.sent) != 2 || s.sent[0] != (sent{"42", "the answer"}) || s.sent[1] != (sent{"42", "❓ ok?"}) {
+	if len(s.sent) != 3 || s.sent[0] != (sent{"42", "the answer"}) || s.sent[1] != (sent{"42", "❓ ok?"}) ||
+		s.sent[2] != (sent{"42", "Agent Smith :\n⏳ waiting"}) {
 		t.Errorf("sent %+v", s.sent)
 	}
 }

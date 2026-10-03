@@ -11,6 +11,7 @@ import (
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/victor/temporal-agent/activity"
+	"github.com/victor/temporal-agent/tool"
 )
 
 const (
@@ -65,6 +66,9 @@ type ImplementFeatureInput struct {
 	// lower the worker's own cap (CLAUDE_CODE_MAX_BUDGET_USD); zero = that
 	// cap alone.
 	MaxBudgetUSD float64 `json:"max_budget_usd,omitempty"`
+	// The caller's, never the model's (tool.WithCallContext): where to tell
+	// the user that the run waits for a worker.
+	tool.CallContext
 }
 
 // ImplementFeatureWorkflow makes a change to a repository and publishes it as
@@ -97,7 +101,7 @@ func implementFeature(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCod
 	out := ClaudeCodeOutput{Repo: input.Repo, Ref: input.Base, Branch: branch}
 	var ccAct *activity.ClaudeCodeActivities
 
-	r, err := openRun(ctx, implementSessionTimeout)
+	r, err := openRun(ctx, implementSessionTimeout, input.CallContext)
 	if err != nil {
 		out.Error = err.Error()
 		return out, nil

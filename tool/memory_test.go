@@ -30,8 +30,8 @@ func TestDisplayInput_HidesMemory(t *testing.T) {
 }
 
 func TestWithCallContext(t *testing.T) {
-	cc := CallContext{AgentChain: []string{"default", "analyst"}, Channel: "telegram", ChannelID: "42"}
-	got, err := WithCallContext(json.RawMessage(`{"question":"ok?","channel":"forged","agent":"forged","memory_version":99,"memory_unread":true}`), cc)
+	cc := CallContext{AgentChain: []string{"default", "analyst"}, Channel: "telegram", ChannelID: "42", NotifyQueue: "agent"}
+	got, err := WithCallContext(json.RawMessage(`{"question":"ok?","channel":"forged","agent":"forged","notify_queue":"forged","memory_version":99,"memory_unread":true}`), cc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +40,7 @@ func TestWithCallContext(t *testing.T) {
 		CallContext
 	}
 	json.Unmarshal(got, &in)
-	if in.Question != "ok?" || in.Channel != "telegram" || in.ChannelID != "42" || len(in.AgentChain) != 2 || in.Agent != "" || in.MemoryVersion != nil || in.MemoryUnread {
+	if in.Question != "ok?" || in.Channel != "telegram" || in.ChannelID != "42" || len(in.AgentChain) != 2 || in.Agent != "" || in.NotifyQueue != "agent" || in.MemoryVersion != nil || in.MemoryUnread {
 		t.Errorf("input %s", got)
 	}
 	if _, err := WithCallContext(json.RawMessage(`null`), cc); err != nil {

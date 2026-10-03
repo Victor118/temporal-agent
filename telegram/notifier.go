@@ -13,7 +13,7 @@ type Sender interface {
 }
 
 // Notifier is the Telegram channel's side of the notifications: the agent's
-// answers and its questions become messages in the user's chat. The stream of
+// answers, its questions and its notices become messages in the user's chat. The stream of
 // tool calls, and the rest, stays on the web.
 type Notifier struct {
 	Client Sender
@@ -42,6 +42,16 @@ func (n *Notifier) Notify(ctx context.Context, note activity.Notification) error
 			return nil
 		}
 		return n.Client.SendMessage(ctx, note.ChannelID, signed(data.Agent, "❓ "+data.Question))
+
+	case activity.EventNotice:
+		var data struct {
+			Text  string `json:"text"`
+			Agent string `json:"agent"` // signed as the answer is
+		}
+		if err := json.Unmarshal(note.Event.Data, &data); err != nil || data.Text == "" {
+			return nil
+		}
+		return n.Client.SendMessage(ctx, note.ChannelID, signed(data.Agent, "⏳ "+data.Text))
 
 	default:
 		return nil

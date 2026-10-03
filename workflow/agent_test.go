@@ -696,7 +696,7 @@ func TestAgentWorkflow_SubAgentRepliesToItsParentOnly(t *testing.T) {
 func TestBuildChildInput_AskUserGetsTheChannel(t *testing.T) {
 	sub := AgentWorkflowInput{SessionID: "s1-tool-agent_analyst-1", Channel: "telegram", ChannelID: "42"}
 	res := activity.ToolResolution{Kind: "workflow", WorkflowName: "AskUserWorkflow", NeedsCallContext: true}
-	_, in, err := buildChildInput(json.RawMessage(`{"question":"ok?","agent":"forged"}`), sub, "child", &res, callContext(sub, []string{"default", "analyst"}, "Analyst"), "analyst", "agent")
+	_, in, err := buildChildInput(json.RawMessage(`{"question":"ok?","agent":"forged"}`), sub, "child", &res, callContext(sub, []string{"default", "analyst"}, "Analyst", "agent"), "analyst", "agent")
 	if err != nil {
 		t.Fatal(err)
 	}

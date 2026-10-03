@@ -253,7 +253,10 @@ diagnostic.
   Temporal sur la queue de l'outil, toutes leurs étapes (nettoyage compris) sur
   le worker qui l'a prise. Un worker perdu en cours de run termine le run (rien
   n'est poussé), sans reprise ailleurs ; son clone est supprimé à son
-  redémarrage. Pas encore de queue de repli.
+  redémarrage. Pas encore de queue de repli. Un run sonde d'abord la queue
+  (aucun worker = échec immédiat), puis attend un worker libre jusqu'à
+  `CLAUDE_CODE_QUEUE_WAIT` ; un seul run par worker tant que chaque run n'a pas
+  son propre uid.
 - **Tous les workflows et activities sont enregistrés sur toutes les queues**
   d'un worker, y compris sa queue d'outils. Les outils de type workflow
   (`ask_user`) tournent donc sur la queue de l'outil.

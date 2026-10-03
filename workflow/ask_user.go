@@ -3,7 +3,6 @@ package workflow
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 
 	"go.temporal.io/sdk/workflow"
@@ -42,14 +41,12 @@ func AskUserWorkflow(ctx workflow.Context, rawInput json.RawMessage) (tool.Resul
 		return tool.Result{}, fmt.Errorf("parse input: %w", err)
 	}
 
-	// Extract session ID from workflow ID convention: "{sessionID}-tool-ask_user-{N}"
-	info := workflow.GetInfo(ctx)
-	wfID := info.WorkflowExecution.ID
-	idx := strings.Index(wfID, "-tool-")
-	if idx == -1 {
+	// The session, from the workflow ID: "{sessionID}-tool-ask_user-{N}"
+	wfID := workflow.GetInfo(ctx).WorkflowExecution.ID
+	sessionID, ok := toolCallSession(wfID)
+	if !ok {
 		return tool.Result{}, fmt.Errorf("cannot extract session ID from workflow ID: %s", wfID)
 	}
-	sessionID := wfID[:idx]
 
 	// A page rendered while the question waits reads it from here: the SSE
 	// event below reaches only the members watching at that moment.

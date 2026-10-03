@@ -67,6 +67,11 @@ type CallContext struct {
 	// Agent signs what the tool sends to the channel, as the agent's answer
 	// is (AgentWorkflowInput.SignReply). Empty: unsigned.
 	Agent string `json:"agent,omitempty"`
+	// NotifyQueue is the calling turn's task queue, whose workers hold the
+	// channels' notifiers: a workflow tool that writes to the channel sends
+	// there, since its own queue's workers may have none (a coding worker).
+	// Empty: the tool's own queue.
+	NotifyQueue string `json:"notify_queue,omitempty"`
 	// MemoryVersion is the version of the user's memory the model read in
 	// the prompt of the call that made this one: what save_user_memory
 	// replaces. Nil: the prompt held none.
@@ -92,6 +97,7 @@ func WithCallContext(input json.RawMessage, cc CallContext) (json.RawMessage, er
 	delete(fields, "channel")
 	delete(fields, "channel_id")
 	delete(fields, "agent")
+	delete(fields, "notify_queue")
 	delete(fields, "memory_version")
 	delete(fields, "memory_unread")
 	extra, _ := json.Marshal(cc)

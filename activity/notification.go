@@ -26,6 +26,7 @@ const (
 	EventMessage   = "message"    // an answer
 	EventToolCalls = "tool_calls" // the tools a step calls
 	EventAskUser   = "ask_user"   // a question waits for a member's answer
+	EventNotice    = "notice"     // a word on what the turn waits for ({"text", "agent"})
 )
 
 // ChannelWeb is the web interface's channel, and the one a session without a

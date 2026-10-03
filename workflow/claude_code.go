@@ -10,6 +10,7 @@ import (
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/victor/temporal-agent/activity"
+	"github.com/victor/temporal-agent/tool"
 )
 
 const (
@@ -47,6 +48,9 @@ type AnalyzeRepoInput struct {
 	Repo string `json:"repo"`
 	Task string `json:"task"`
 	Ref  string `json:"ref,omitempty"`
+	// The caller's, never the model's (tool.WithCallContext): where to tell
+	// the user that the run waits for a worker.
+	tool.CallContext
 }
 
 // ClaudeCodeOutput is what a coding workflow returns. Error carries a run that
@@ -114,7 +118,7 @@ func analyzeRepo(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCodeOutp
 	out := ClaudeCodeOutput{Repo: input.Repo, Ref: input.Ref}
 	var ccAct *activity.ClaudeCodeActivities
 
-	r, err := openRun(ctx, analyzeSessionTimeout)
+	r, err := openRun(ctx, analyzeSessionTimeout, input.CallContext)
 	if err != nil {
 		out.Error = err.Error()
 		return out, nil

@@ -66,9 +66,38 @@ type ClaudeCodeActivities struct {
 	// Auth is how runs authenticate: the API or a subscription
 	// (claudecode.ResolveAuth, CLAUDE_CODE_AUTH). Zero: as the CLI finds.
 	Auth claudecode.Auth
+	// QueueWait is how long a run waits for a worker of this queue with a
+	// run to spare (CLAUDE_CODE_QUEUE_WAIT); zero = DefaultRunQueueWait.
+	// The workflow learns it from ProbeRunWorker.
+	QueueWait time.Duration
 
 	stopOnce, stopped sync.Once
 	stopping          chan struct{} // closed by Stop
+}
+
+// DefaultRunQueueWait is how long a run waits for a worker with a run to
+// spare when CLAUDE_CODE_QUEUE_WAIT is empty: about a short run's length.
+const DefaultRunQueueWait = 30 * time.Minute
+
+// ProbeRunWorkerOutput is what a worker of a coding queue says to a run
+// about to ask it for a slot.
+type ProbeRunWorkerOutput struct {
+	// QueueWait is how long the run may wait for a slot (QueueWait).
+	QueueWait time.Duration `json:"queue_wait"`
+}
+
+// ProbeRunWorker answers a run before it asks for a slot: some worker polls
+// its queue. It runs on the tool's queue, which a worker polls whether or
+// not it has a run to spare; a full one stops polling for sessions, so the
+// session's wait alone cannot tell a busy queue from an empty one. It also
+// tells how long the run may wait for a slot: this worker's setting, which
+// the workflow has no other way to read, and which its history then keeps.
+func (a *ClaudeCodeActivities) ProbeRunWorker(ctx context.Context) (ProbeRunWorkerOutput, error) {
+	wait := a.QueueWait
+	if wait <= 0 {
+		wait = DefaultRunQueueWait
+	}
+	return ProbeRunWorkerOutput{QueueWait: wait}, nil
 }
 
 // ErrWorkerStopping is the type of the error of a run its worker ended

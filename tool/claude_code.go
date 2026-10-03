@@ -1,6 +1,10 @@
 package tool
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+	"time"
+)
 
 // RegisterClaudeCodeTools registers the coding tools backed by the Claude Code
 // CLI. They are workflow-kind tools, not activities: a coding run lasts minutes
@@ -13,15 +17,21 @@ import "encoding/json"
 //
 // costNote, from the worker's way of paying for runs, ends each description:
 // the model weighs a run against what it costs now, not what it remembers.
-func RegisterClaudeCodeTools(registry *Registry, analyzeWorkflowFunc, implementWorkflowFunc interface{}, costNote string) {
+// queueWait, how long a run waits for a free worker, is said too: the model
+// can warn its user that a run may not start at once.
+//
+// Both need the call's context (NeedsCallContext): a run that waits for a
+// worker tells its user so, on the turn's channel.
+func RegisterClaudeCodeTools(registry *Registry, analyzeWorkflowFunc, implementWorkflowFunc interface{}, costNote string, queueWait time.Duration) {
+	wait := waitNote(queueWait)
 	registry.Register(&Tool{
 		Name: "analyze_repo",
 		Description: "Read a Git repository and answer a question about it, using a coding agent that explores the code on its own. " +
 			"Use it to understand an unfamiliar codebase, locate where something is implemented, review changes, or diagnose a problem. " +
 			"It never modifies the repository: the clone is read-only and is deleted afterwards. " +
 			"It cannot fix what it finds: changing the code is implement_feature's job, if you have that tool. " +
-			"Ask a precise question — the answer comes back as a written report, and the agent cannot ask you for clarification mid-run." +
-			withSpace(costNote),
+			"Ask a precise question — the answer comes back as a written report, and the agent cannot ask you for clarification mid-run. " +
+			wait + withSpace(costNote),
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -40,8 +50,9 @@ func RegisterClaudeCodeTools(registry *Registry, analyzeWorkflowFunc, implementW
 			},
 			"required": ["repo", "task"]
 		}`),
-		Kind:         ToolKindWorkflow,
-		WorkflowFunc: analyzeWorkflowFunc,
+		Kind:             ToolKindWorkflow,
+		WorkflowFunc:     analyzeWorkflowFunc,
+		NeedsCallContext: true,
 	})
 
 	registry.Register(&Tool{
@@ -50,8 +61,8 @@ func RegisterClaudeCodeTools(registry *Registry, analyzeWorkflowFunc, implementW
 			"Use it to implement a feature, fix a bug, or carry out a refactor described in prose. " +
 			"It branches from base, commits its own work, and pushes the branch — it never writes to the base branch and never opens a pull request. " +
 			"Describe the outcome you want and any constraint that matters; the agent cannot ask you for clarification mid-run. " +
-			"A run that produces no commit is reported as a failure." +
-			withSpace(costNote),
+			"A run that produces no commit is reported as a failure. " +
+			wait + withSpace(costNote),
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -78,10 +89,17 @@ func RegisterClaudeCodeTools(registry *Registry, analyzeWorkflowFunc, implementW
 			},
 			"required": ["repo", "task"]
 		}`),
-		Kind:         ToolKindWorkflow,
-		Sensitive:    true,
-		WorkflowFunc: implementWorkflowFunc,
+		Kind:             ToolKindWorkflow,
+		Sensitive:        true,
+		WorkflowFunc:     implementWorkflowFunc,
+		NeedsCallContext: true,
 	})
+}
+
+// waitNote tells the model that a run may wait for a worker, and how long.
+func waitNote(wait time.Duration) string {
+	return fmt.Sprintf("When every coding worker is busy, the run waits up to %s for one to free up before it starts; "+
+		"if none does, it fails, and can be tried again later.", wait)
 }
 
 // withSpace prefixes a non-empty sentence with the space that joins it.
