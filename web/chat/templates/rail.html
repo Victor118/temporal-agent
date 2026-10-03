@@ -17,7 +17,7 @@
       </div>
       {{end}}
     </div>
-    <form class="invite" hx-post="/s/{{$sid}}/members" hx-target="#rail" hx-swap="outerHTML">
+    <form class="invite" hx-post="/s/{{$sid}}/members" hx-target="#rail" hx-swap="morph">
       <input class="input" type="email" name="email" placeholder="Inviter par email" required>
       <button class="btn" type="submit">Inviter</button>
     </form>
@@ -30,7 +30,7 @@
       <div class="ttl">{{.Agent.Name}}</div>
       <div class="meta"><div>@{{.Agent.Mention}}</div></div>
       {{with .Agent.Description}}<div class="note" style="margin-top:6px">{{.}}</div>{{end}}
-      <form hx-post="/s/{{$sid}}/agent-mode" hx-trigger="change" hx-target="#rail" hx-swap="outerHTML">
+      <form hx-post="/s/{{$sid}}/agent-mode" hx-trigger="change" hx-target="#rail" hx-swap="morph">
         <select class="input" name="mode" aria-label="Quand l'agent répond">
           <option value="auto" {{if eq .AgentMode "auto"}}selected{{end}}>Répond : auto</option>
           <option value="always" {{if eq .AgentMode "always"}}selected{{end}}>Répond : à chaque message</option>
@@ -53,7 +53,7 @@
   </section>
   {{end}}
 
-  {{template "report" .}}
+  {{template "report-section" .}}
 
   <section class="rail-actions">
     {{if .IsCreator}}
@@ -69,15 +69,22 @@
 </div>
 {{end}}
 
-{{/* A fork's report to its parent. Swapped alone: by its button, and every
-     few seconds while a report is written. */}}
+{{/* A fork's report to its parent. Its section stays; its content is swapped
+     alone, morphed in place: by its button, and every few seconds while a
+     report is written. */}}
+{{define "report-section"}}
+{{with .Report}}
+<section id="report" hx-swap="morph:innerHTML">{{template "report" $}}</section>
+{{end}}
+{{end}}
+
 {{define "report"}}
 {{with .Report}}
 {{$sid := $.Node.Session.SessionID}}
-<section id="report"{{if .Pending}} hx-get="/s/{{$sid}}/report" hx-trigger="every 3s" hx-swap="outerHTML"{{end}}>
+  {{if .Pending}}<div id="report-poll" hidden hx-get="/s/{{$sid}}/report" hx-trigger="every 3s" hx-target="#report" hx-swap="morph:innerHTML"></div>{{end}}
   <div class="eyebrow">Rapport au parent</div>
   {{if not .Refused}}
-  <form hx-post="/s/{{$sid}}/report" hx-target="#report" hx-swap="outerHTML" hx-confirm="{{$.ReportConfirm}}">
+  <form id="report-form" hx-post="/s/{{$sid}}/report" hx-target="#report" hx-swap="morph:innerHTML" hx-confirm="{{$.ReportConfirm}}">
     <button class="btn" type="submit" {{if not .CanReport}}disabled{{end}}>{{if .Pending}}Rapport en cours…{{else}}⑂ Rapporter au parent{{end}}</button>
   </form>
   <div class="note" style="margin-top:6px">Résume ce qui s'est fait ici depuis le dernier rapport et le poste dans la session parente, signé de ton nom : ses membres le liront, même ceux qui ne sont pas dans ce fork.</div>
@@ -87,6 +94,5 @@
   {{if and .Failed (not .Pending)}}<div class="error">Le dernier rapport n'a pas pu être écrit. Tu peux réessayer.</div>{{end}}
   {{if and .LastReportID (not .Refused)}}<div class="note" style="margin-top:6px">Dernier rapport : <a href="/s/{{.ParentSessionID}}#m{{.LastReportID}}">{{.LastReported}}</a></div>{{end}}
   {{with .Error}}<div class="error">{{.}}</div>{{end}}
-</section>
 {{end}}
 {{end}}

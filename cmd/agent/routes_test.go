@@ -646,7 +646,7 @@ func TestUI_ReportToParent(t *testing.T) {
 	bob, alice := logIn(t, h, "bob@example.com"), logIn(t, h, "alice@example.com")
 
 	w := form(t, h, "/s/s1/report", url.Values{}, bob)
-	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `<section id="report"`) || len(tc.started) != 1 {
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `Rapport au parent`) || len(tc.started) != 1 {
 		t.Errorf("bob: %d %s, started %v", w.Code, w.Body, tc.started)
 	}
 	// The section says why alice cannot, once: the refusal is its reason.
@@ -681,7 +681,7 @@ func TestUI_ReportToParent(t *testing.T) {
 	section := httptest.NewRecorder()
 	st.loads = nil
 	h.ServeHTTP(section, req)
-	if section.Code != http.StatusOK || !strings.Contains(section.Body.String(), `<section id="report"`) || st.loads["s1"] > 1 {
+	if section.Code != http.StatusOK || !strings.Contains(section.Body.String(), `Rapport au parent`) || st.loads["s1"] > 1 {
 		t.Errorf("report section: %d, %d loads %s", section.Code, st.loads["s1"], section.Body)
 	}
 	st.loads = nil
@@ -695,7 +695,7 @@ func TestUI_ReportToParent(t *testing.T) {
 func TestUI_ReportFromANonFork(t *testing.T) {
 	h, _, tc := newForkTest(t)
 	w := form(t, h, "/s/s1/report", url.Values{}, logIn(t, h, "bob@example.com"))
-	if body := w.Body.String(); w.Code != http.StatusOK || !strings.Contains(body, `<section id="report"`) ||
+	if body := w.Body.String(); w.Code != http.StatusOK || !strings.Contains(body, `Rapport au parent`) ||
 		!strings.Contains(body, "pas un fork") || strings.Contains(body, "<button") || len(tc.started) != 0 {
 		t.Errorf("%d %s, started %v", w.Code, body, tc.started)
 	}

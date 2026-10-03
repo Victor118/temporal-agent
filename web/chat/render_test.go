@@ -85,6 +85,24 @@ func TestRender_Pages(t *testing.T) {
 	if strings.Contains(page, "<b>hi</b>") {
 		t.Error("a member's HTML reached the page")
 	}
+	// Reloads morph the panes in place; nothing is swapped whole.
+	for _, want := range []string{
+		`<script src="/static/idiomorph-ext-0.8.0.min.js"></script>`,
+		`<body hx-boost="true" hx-ext="morph">`,
+		`<div id="thread" hx-get="/s/fork/thread" hx-swap="morph:innerHTML"`,
+		`hx-post="/s/fork/messages" hx-target="#thread" hx-swap="morph:innerHTML"`,
+		`hx-swap="morph:innerHTML">`, // the tree
+		`hx-target="#rail" hx-swap="morph"`,
+		`id="composer-text"`, // focus comes back to it after a morph
+		`id="q-fork-tool-ask_user-1"`,
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("page lacks %q", want)
+		}
+	}
+	if strings.Contains(page, "outerHTML") || strings.Contains(page, "hx-preserve") {
+		t.Error("a pane is still swapped whole")
+	}
 
 	// One agent to call: nothing about the others.
 	for _, onMention := range []bool{true, false} {
@@ -111,8 +129,8 @@ func TestRender_Pages(t *testing.T) {
 
 	frag := testPage("thread")
 	frag.Fragment = true
-	if out := render(t, "thread", frag); !strings.Contains(out, `id="composer" hx-swap-oob="true"`) {
-		t.Error("the thread fragment must bring the composer along, out of band")
+	if out := render(t, "thread", frag); !strings.Contains(out, `id="composer" hx-swap-oob="morph"`) {
+		t.Error("the thread fragment must bring the composer along, out of band, morphed")
 	}
 	if strings.Contains(page, `hx-swap-oob`) {
 		t.Error("the full page must not mark its composer out of band")
@@ -282,6 +300,7 @@ func TestRender_ReportedMarkAndFailure(t *testing.T) {
 	p.Thread = MarkReported(p.Thread, fork, true)
 	p.Report = &ReportView{ReportState: session.ReportState{ParentSessionID: "root", Failed: true}}
 	out := render(t, "thread", p)
+	page := render(t, "page", p)
 	mark := `⑂ Rapport envoyé à la session parente · ` + clock(at) + ` · <a href="/s/root#m31">le voir</a>`
 	if !strings.Contains(out, mark) {
 		t.Errorf("thread lacks the mark %q", mark)
@@ -294,7 +313,7 @@ func TestRender_ReportedMarkAndFailure(t *testing.T) {
 		t.Error("the thread does not say the report failed")
 	}
 	for _, ev := range []string{"sse:fork_report,", "sse:fork_reported,", "sse:fork_report_failed,"} {
-		if !strings.Contains(out, ev) {
+		if !strings.Contains(page, ev) {
 			t.Errorf("the thread does not reload on %s", ev)
 		}
 	}

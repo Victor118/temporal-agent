@@ -4,6 +4,7 @@
 <link rel="stylesheet" href="/static/chat.css">
 <script src="/static/htmx-2.0.4.min.js"></script>
 <script src="/static/htmx-ext-sse-2.2.2.js"></script>
+<script src="/static/idiomorph-ext-0.8.0.min.js"></script>
 {{end}}
 
 {{define "page"}}<!doctype html>
@@ -12,7 +13,7 @@
 <title>{{if .Node}}{{.Node.Title}} · {{end}}temporal-agent</title>
 {{template "head"}}
 </head>
-<body hx-boost="true">
+<body hx-boost="true" hx-ext="morph">
 <div class="app" id="app">
   {{template "topbar" .}}
   <div class="columns">
@@ -22,7 +23,7 @@
       {{else if eq .View "map"}}{{template "map" .}}
       {{else}}
       <div style="display:contents" hx-ext="sse" sse-connect="/sessions/{{.Node.Session.SessionID}}/stream">
-        {{template "thread" .}}
+        {{template "thread-pane" .}}
         {{template "composer" .}}
       </div>
       {{end}}
@@ -31,6 +32,13 @@
   </div>
 </div>
 <script>
+// A reload morphs what it changes in place: what the member set on the page
+// stays theirs, an open menu or a half-typed text. Hidden fields follow the
+// server.
+Idiomorph.defaults.callbacks.beforeAttributeUpdated = function (name, el) {
+  if (name === 'open' && el.tagName === 'DETAILS') return false;
+  if (name === 'value' && (el.tagName === 'TEXTAREA' || (el.tagName === 'INPUT' && el.type !== 'hidden'))) return false;
+};
 // The thread opens at its end, or on the message a link points to (#m<id>).
 function toHash() {
   var t = location.hash && document.querySelector(location.hash);

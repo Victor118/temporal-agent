@@ -1,31 +1,40 @@
+{{/* The thread's pane: it stays, and a reload morphs its content in place,
+     so the scroll, an open menu and a half-typed answer survive. Reloaded on
+     every event of the session's stream. */}}
+{{define "thread-pane"}}
+<div id="thread" hx-get="/s/{{.Node.Session.SessionID}}/thread" hx-swap="morph:innerHTML"
+     hx-trigger="sse:message, sse:user_message, sse:ask_user, sse:fork_ready, sse:fork_failed, sse:fork_report, sse:fork_reported, sse:fork_report_failed, sse:tool_calls">
+{{template "thread" .}}
+</div>
+{{end}}
+
+{{/* The thread's content, swapped into its pane; the composer comes with it,
+     out of band, since its state follows the thread's. */}}
 {{define "thread"}}
 {{$sid := .Node.Session.SessionID}}
-{{/* Reloaded on every event of the session's stream; also polled while the
-     agent works, in case an event is missed. */}}
-<div id="thread" hx-get="/s/{{$sid}}/thread" hx-swap="outerHTML"
-     hx-trigger="sse:message, sse:user_message, sse:ask_user, sse:fork_ready, sse:fork_failed, sse:fork_report, sse:fork_reported, sse:fork_report_failed, sse:tool_calls{{if or .Working .SummaryPending}}, every 4s{{end}}">
-<div class="thread-inner">
+<div class="thread-inner" id="thread-inner">
+  {{/* Polled while the agent works, in case an event is missed. */}}
+  {{if or .Working .SummaryPending}}<div id="thread-poll" hidden hx-get="/s/{{$sid}}/thread" hx-trigger="every 4s" hx-target="#thread" hx-swap="morph:innerHTML"></div>{{end}}
   {{with .Parent}}
   <div class="divider"><span>forké depuis {{if .Accessible}}<a href="/s/{{.SessionID}}#m{{.MessageID}}">{{.Title}}</a>{{else}}une session à laquelle tu n'as pas accès{{end}}</span></div>
   {{end}}
   {{with .Node.Session.ForkPurpose}}<div class="purpose"><span class="eyebrow">But du fork</span>{{.}}</div>{{end}}
-  {{if .SummaryPending}}<div class="working-line"><span class="dot"></span>Résumé de la session parente en cours…</div>{{end}}
-  {{if .SummaryFailed}}<div class="note">Le résumé de la session parente n'a pas pu être écrit : ce fork démarre sans.</div>{{end}}
+  {{if .SummaryPending}}<div class="working-line" id="summary-pending"><span class="dot"></span>Résumé de la session parente en cours…</div>{{end}}
+  {{if .SummaryFailed}}<div class="note" id="summary-failed">Le résumé de la session parente n'a pas pu être écrit : ce fork démarre sans.</div>{{end}}
 
   {{range .Thread}}{{template "item" itemOf $ .}}{{end}}
 
-  {{with .Report}}{{if and .Failed (not .Pending)}}<div class="note">Le rapport à la session parente n'a pas pu être écrit. Tu peux réessayer depuis le panneau « Rapport au parent ».</div>{{end}}{{end}}
+  {{with .Report}}{{if and .Failed (not .Pending)}}<div class="note" id="report-failed">Le rapport à la session parente n'a pas pu être écrit. Tu peux réessayer depuis le panneau « Rapport au parent ».</div>{{end}}{{end}}
 
-  {{if and (not .Thread) (not .SummaryPending)}}<div class="empty-thread">Rien encore. Écris le premier message.</div>{{end}}
+  {{if and (not .Thread) (not .SummaryPending)}}<div class="empty-thread" id="empty-thread">Rien encore. Écris le premier message.</div>{{end}}
 
   {{if .Working}}
-  <div class="working-line">
+  <div class="working-line" id="working">
     <span class="dot"></span>L'agent travaille…
-    <form hx-post="/s/{{$sid}}/cancel" hx-target="#thread" hx-swap="outerHTML"><button class="btn ghost" type="submit">Arrêter</button></form>
+    <form hx-post="/s/{{$sid}}/cancel" hx-target="#thread" hx-swap="morph:innerHTML"><button class="btn ghost" type="submit">Arrêter</button></form>
   </div>
   {{end}}
-  {{with .Error}}<div class="composer-error">{{.}}</div>{{end}}
-</div>
+  {{with .Error}}<div class="composer-error" id="thread-error">{{.}}</div>{{end}}
 </div>
 {{if .Fragment}}{{template "composer" .}}{{end}}
 {{end}}
@@ -79,7 +88,7 @@
 </div>
 
 {{else if eq .Kind "reported"}}
-<div class="divider reported"><span>⑂ Rapport envoyé à la session parente · {{clock .Time}}{{if .Report.Accessible}} · <a href="/s/{{.Report.SessionID}}#m{{.Report.MessageID}}">le voir</a>{{end}}</span></div>
+<div class="divider reported" id="reported"><span>⑂ Rapport envoyé à la session parente · {{clock .Time}}{{if .Report.Accessible}} · <a href="/s/{{.Report.SessionID}}#m{{.Report.MessageID}}">le voir</a>{{end}}</span></div>
 
 {{else if eq .Kind "error"}}
 <div class="notice failed" id="m{{.ID}}">
@@ -91,14 +100,14 @@
 </div>
 
 {{else if eq .Kind "question"}}
-<div class="notice waiting">
+<div class="notice waiting" id="q-{{.WorkflowID}}">
   <div class="arrow">↑</div>
   <div style="flex-grow:1">
     <div class="ttl">L'agent attend une réponse{{with .AgentChain}} — {{range $i, $a := .}}{{if $i}} › {{end}}{{$a}}{{end}}{{end}}</div>
     <div class="txt">{{.Text}}</div>
-    <form hx-post="/s/{{$sid}}/answer" hx-target="#thread" hx-swap="outerHTML">
+    <form hx-post="/s/{{$sid}}/answer" hx-target="#thread" hx-swap="morph:innerHTML">
       <input type="hidden" name="workflow_id" value="{{.WorkflowID}}">
-      <input class="input" name="answer" placeholder="Ta réponse" required autocomplete="off">
+      <input class="input" id="answer-{{.WorkflowID}}" name="answer" placeholder="Ta réponse" required autocomplete="off">
       <button class="btn" type="submit">Répondre</button>
     </form>
   </div>
@@ -112,11 +121,12 @@
 {{end}}
 
 {{/* Forking asks what for: the purpose titles the fork and steers its brief.
-     The form survives the thread's reloads (hx-preserve), typing included. */}}
+     The menu survives the thread's reloads, open and typed in: a morph keeps
+     both (page.html). */}}
 {{define "fork-action"}}
 {{if not .Page.SummaryPending}}
 <div class="msg-actions">
-  <details class="fork-menu" id="fork-m{{.Item.ID}}" hx-preserve="true">
+  <details class="fork-menu" id="fork-m{{.Item.ID}}">
     <summary class="btn" title="Nouvelle session à partir de ce message">⑂ Forker ici</summary>
     <form class="fork-form" hx-post="/s/{{.Page.Node.Session.SessionID}}/fork">
       <input type="hidden" name="message_id" value="{{.Item.ID}}">
@@ -133,10 +143,10 @@
 
 {{define "composer"}}
 {{$sid := .Node.Session.SessionID}}
-<div class="composer" id="composer"{{if .Fragment}} hx-swap-oob="true"{{end}}>
-  <form class="composer-box" hx-post="/s/{{$sid}}/messages" hx-target="#thread" hx-swap="outerHTML"
+<div class="composer" id="composer"{{if .Fragment}} hx-swap-oob="morph"{{end}}>
+  <form class="composer-box" hx-post="/s/{{$sid}}/messages" hx-target="#thread" hx-swap="morph:innerHTML"
         hx-on::after-request="if (event.detail.successful) this.reset()">
-    <textarea name="content" rows="2" required {{if .SummaryPending}}disabled{{end}}
+    <textarea id="composer-text" name="content" rows="2" required {{if .SummaryPending}}disabled{{end}}
       placeholder="{{if .AgentOnMention}}Écrire dans ce fil — @{{.Agent.Mention}} pour le solliciter{{if .SeveralAgents}}, la mention d'un autre agent pour l'appeler{{end}}{{else}}Écrire à {{.Agent.Name}}…{{if .SeveralAgents}} ou @mention d'un autre agent{{end}}{{end}}"
       onkeydown="if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); this.form.requestSubmit(); }"></textarea>
     <div class="composer-bar">
@@ -144,7 +154,7 @@
         {{if and .LastMessageID (not .SummaryPending)}}
         {{/* A form cannot sit in the composer's: the fields belong to
              fork-last by their form attribute. */}}
-        <details class="fork-menu up" id="fork-last-menu" hx-preserve="true">
+        <details class="fork-menu up" id="fork-last-menu">
           <summary class="btn">Forker un fil</summary>
           <div class="fork-form">
             <label for="fork-purpose-last">Pour quoi faire ?</label>

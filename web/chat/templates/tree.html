@@ -3,8 +3,9 @@
   <span class="eyebrow">Sessions</span>
   <form hx-post="/s/new"><button type="submit" aria-label="Nouvelle session" title="Nouvelle session">+</button></form>
 </div>
-{{/* Refreshed in place: the container stays, so does its scroll. */}}
-<div class="tree-body" hx-get="/tree{{with .Node}}?current={{.Session.SessionID}}{{end}}" hx-trigger="every 8s" hx-swap="innerHTML">
+{{/* Refreshed in place: the container stays, so does its scroll, and a
+     morph touches only the nodes that changed. */}}
+<div class="tree-body" id="tree" hx-get="/tree{{with .Node}}?current={{.Session.SessionID}}{{end}}" hx-trigger="every 8s" hx-swap="morph:innerHTML">
   {{template "tree-items" .}}
 </div>
 <div class="legend">
@@ -21,7 +22,7 @@
 {{end}}
 
 {{define "tree-node"}}
-<a class="node{{if .Current}} current{{end}}{{if eq .Depth 0}} root{{end}}" href="/s/{{.Session.SessionID}}" title="{{.Title}} — {{statusLabel .Status}}">
+<a class="node{{if .Current}} current{{end}}{{if eq .Depth 0}} root{{end}}" id="node-{{.Session.SessionID}}" href="/s/{{.Session.SessionID}}" title="{{.Title}} — {{statusLabel .Status}}">
   <span class="dot {{.Status}}"></span>
   <span class="title">{{if .Orphan}}↳ {{end}}{{.Title}}</span>
   {{if eq .Status "waiting"}}<span class="raise" title="Une question attend une réponse">↑</span>
