@@ -157,7 +157,7 @@ func analyzeRepo(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCodeOutp
 		}),
 		ccAct.RunClaudeCode,
 		activity.RunClaudeCodeInput{
-			Dir:            prepared.Dir,
+			Dir:                prepared.Dir,
 			Task:               input.Task,
 			PermissionMode:     analyzePermissionMode,
 			AppendSystemPrompt: analyzeSystemPrompt,

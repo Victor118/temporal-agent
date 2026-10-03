@@ -309,7 +309,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 			// produced, since a failed workflow carries no result.
 			return AgentWorkflowOutput{
 				NewMessages: messages[newStart:],
-				Error:       fmt.Sprintf("call LLM: %s", err),
+				Error:       "call LLM: " + failureText(err),
 			}, nil
 		}
 
@@ -746,6 +746,20 @@ func notifyToolCalls(ctx workflow.Context, sessionID, channel, channelID string,
 func isScheduleToStartTimeout(err error) bool {
 	var timeoutErr *temporal.TimeoutError
 	return errors.As(err, &timeoutErr) && timeoutErr.TimeoutType() == enumspb.TIMEOUT_TYPE_SCHEDULE_TO_START
+}
+
+// failureText is what an activity's failure says, without the envelope
+// Temporal wraps it in (activity type, event IDs, the worker's pid@host): the
+// members of the session read it.
+func failureText(err error) string {
+	var actErr *temporal.ActivityError
+	if errors.As(err, &actErr) && actErr.Unwrap() != nil {
+		err = actErr.Unwrap()
+	}
+	if appErr, ok := err.(*temporal.ApplicationError); ok {
+		return appErr.Message()
+	}
+	return err.Error()
 }
 
 // subAgentContent is what the parent reads of a sub-agent's run: its final

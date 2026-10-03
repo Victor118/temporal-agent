@@ -456,8 +456,9 @@ func TestAgentWorkflow_LLMFailureKeepsTranscript(t *testing.T) {
 	if err := env.GetWorkflowResult(&out); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.Error, "call LLM") {
-		t.Errorf("Error = %q, want it to report the LLM failure", out.Error)
+	// The members read it: the API's message, not Temporal's envelope.
+	if out.Error != "call LLM: overloaded" {
+		t.Errorf("Error = %q, want the LLM failure's own message", out.Error)
 	}
 	if len(out.NewMessages) != 1 || out.NewMessages[0].Role != "user" {
 		t.Errorf("NewMessages = %+v, want the user message to survive", out.NewMessages)

@@ -128,6 +128,8 @@ Admins manage the other accounts in the back-office, under `/admin/users`.
 | `MCP_SERVERS` | JSON array of MCP servers, used only without a worker config |
 | `RUN_AS_UID`, `RUN_AS_GID` | User (and group, default: the uid) that `exec` and coding runs run as. Set to `10001` (`agent-run`) by both images. Empty on a worker running as root = `exec` and coding runs are refused. Must be a uid of its own: its processes are killed whenever no command runs |
 | `CLAUDE_CODE_REPOS` | Comma-separated globs of the repositories a coding worker (`analyze_repo`, `implement_feature`) may clone and push to, e.g. `git@github.com:acme/*,https://github.com/acme/*` (`*` stops at a `/`). Empty = every repository is refused |
+| `CLAUDE_CODE_MODEL` | Model of a coding worker's runs, e.g. `sonnet`. The calling model cannot choose it. Empty = the CLI's default |
+| `CLAUDE_CODE_MAX_BUDGET_USD` | Spending cap of each coding run, in US dollars; `implement_feature`'s `max_budget_usd` can only lower it. Empty = no cap; not a positive number = the worker does not start |
 | `INTERNAL_ADDR` | Address of the internal API that receives worker notifications (default `:9999`). Keep it off the public network |
 | `NOTIFY_URL` | Base URL a worker posts its notifications to (default `http://localhost:9999`) |
 | `INTERNAL_API_KEY` | Secret shared by the server and its workers for `/internal/notify` (`Authorization: Bearer …`). Empty = the server refuses every notification; a worker checks it at startup and logs a refusal as an error |

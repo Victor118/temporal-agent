@@ -95,29 +95,9 @@ func TestSessionWorkflow_EachTurnAnswersItsAuthor(t *testing.T) {
 // not only in a notification a page that reloads its thread from the store
 // never shows.
 func TestSessionWorkflow_RecordsWhyATurnFailed(t *testing.T) {
-	var suite testsuite.WorkflowTestSuite
-	env := suite.NewTestWorkflowEnvironment()
-
 	call := store.Message{Role: store.RoleAssistant, ToolCalls: []store.ToolCall{{ID: "t1", Name: "analyze_repo"}}}
 	result := store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "t1", Content: "report"}}
-	env.RegisterWorkflowWithOptions(func(ctx sdkworkflow.Context, in AgentWorkflowInput) (AgentWorkflowOutput, error) {
-		return AgentWorkflowOutput{NewMessages: []store.Message{call, result}, Error: "call LLM: " + strings.Repeat("é", 2000)}, nil
-	}, sdkworkflow.RegisterOptions{Name: "AgentWorkflow"})
-	var persisted []activity.PersistContextInput
-	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.PersistContextInput) error {
-		persisted = append(persisted, in)
-		return nil
-	}, sdkactivity.RegisterOptions{Name: "PersistContext"})
-	var notified []string
-	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.NotifyInput) error {
-		notified = append(notified, string(in.Event.Data))
-		return nil
-	}, sdkactivity.RegisterOptions{Name: "NotifyStep"})
-
-	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(SignalUserMessage, UserMessage{Text: "analyse", UserID: "victor", Stored: true})
-	}, time.Second)
-	env.ExecuteWorkflow(SessionWorkflow, SessionWorkflowInput{SessionID: "s1", AgentID: "default"})
+	persisted, notified := runFailedTurn(AgentWorkflowOutput{NewMessages: []store.Message{call, result}, Error: "call LLM: " + strings.Repeat("é", 2000)})
 
 	if len(persisted) != 1 {
 		t.Fatalf("persisted %d times, want once", len(persisted))
@@ -136,6 +116,44 @@ func TestSessionWorkflow_RecordsWhyATurnFailed(t *testing.T) {
 	if len(notified) == 0 {
 		t.Error("the failure was not notified: the page would not reload its thread")
 	}
+}
+
+// The first LLM call of a turn fails: the turn produced nothing (the human
+// message is stored already), and the error is all there is to write.
+func TestSessionWorkflow_RecordsAFailureThatProducedNothing(t *testing.T) {
+	persisted, _ := runFailedTurn(AgentWorkflowOutput{Error: "call LLM: credit balance is too low"})
+
+	if len(persisted) != 1 {
+		t.Fatalf("persisted %d times, want once", len(persisted))
+	}
+	if msgs := persisted[0].Messages; len(msgs) != 1 || msgs[0].Kind != store.KindTurnError || msgs[0].Content != `"call LLM: credit balance is too low"` {
+		t.Errorf("persisted %+v, want the error alone", msgs)
+	}
+}
+
+// runFailedTurn runs one session turn whose agent returns out, and reports
+// what was persisted and notified.
+func runFailedTurn(out AgentWorkflowOutput) (persisted []activity.PersistContextInput, notified []string) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+
+	env.RegisterWorkflowWithOptions(func(ctx sdkworkflow.Context, in AgentWorkflowInput) (AgentWorkflowOutput, error) {
+		return out, nil
+	}, sdkworkflow.RegisterOptions{Name: "AgentWorkflow"})
+	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.PersistContextInput) error {
+		persisted = append(persisted, in)
+		return nil
+	}, sdkactivity.RegisterOptions{Name: "PersistContext"})
+	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.NotifyInput) error {
+		notified = append(notified, string(in.Event.Data))
+		return nil
+	}, sdkactivity.RegisterOptions{Name: "NotifyStep"})
+
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(SignalUserMessage, UserMessage{Text: "analyse", UserID: "victor", Stored: true})
+	}, time.Second)
+	env.ExecuteWorkflow(SessionWorkflow, SessionWorkflowInput{SessionID: "s1", AgentID: "default"})
+	return persisted, notified
 }
 
 // A stop sent while no turn runs must not interrupt the next one before it

@@ -258,7 +258,7 @@ func (a *api) getHistory(w http.ResponseWriter, r *http.Request) {
 	// Convert store messages to a frontend-friendly format
 	type historyEntry struct {
 		ID        int64       `json:"id"`             // what a fork starts from
-		Type      string      `json:"type"`           // "message", "tool_calls", "fork_summary"
+		Type      string      `json:"type"`           // "message", "tool_calls", "fork_summary", "turn_error"
 		Role      string      `json:"role,omitempty"` // "user", "assistant"
 		Content   string      `json:"content,omitempty"`
 		UserID    string      `json:"user_id,omitempty"` // author of a user message
@@ -281,6 +281,10 @@ func (a *api) getHistory(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case msg.Kind == store.KindForkSummary:
 			history = append(history, historyEntry{ID: msg.ID, Type: "fork_summary", Content: content})
+		case msg.Kind == store.KindTurnError:
+			// The system's words, not the agent's: an assistant role would pass
+			// the error off as its answer.
+			history = append(history, historyEntry{ID: msg.ID, Type: "turn_error", Content: content})
 		case msg.Role == store.RoleUser:
 			history = append(history, historyEntry{ID: msg.ID, Type: "message", Role: "user", Content: content, UserID: msg.UserID, Author: msg.Author})
 		case msg.Role == store.RoleAssistant:

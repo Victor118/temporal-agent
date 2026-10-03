@@ -472,3 +472,20 @@ func TestRoutes_HistoryHidesPrivateInputs(t *testing.T) {
 		t.Errorf("history %d %s", w.Code, w.Body)
 	}
 }
+
+// Why a turn failed is listed as such, not as an answer of the agent.
+func TestRoutes_HistoryListsATurnErrorApart(t *testing.T) {
+	h, st := newRouteTest(t)
+	st.messages = map[string][]store.MessageWithID{"s1": {
+		{ID: 1, Message: store.Message{Role: store.RoleAssistant, Kind: store.KindTurnError, Content: `"call LLM: credit balance is too low"`}},
+	}}
+	bob := logIn(t, h, "bob@example.com")
+	w := call(t, h, http.MethodGet, "/sessions/s1/history", "", bob)
+	var history []map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &history); err != nil || len(history) != 1 {
+		t.Fatalf("history %d %s (%v)", w.Code, w.Body, err)
+	}
+	if e := history[0]; e["type"] != "turn_error" || e["role"] != nil || e["content"] != "call LLM: credit balance is too low" {
+		t.Errorf("entry %v, want a turn_error with no role", e)
+	}
+}

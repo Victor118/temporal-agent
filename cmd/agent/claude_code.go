@@ -72,7 +72,7 @@ func init() {
 	f.StringVar(&claudeCodeFlags.cwd, "cwd", ".", "Working directory for the run (writable by RUN_AS_UID, which the CLI runs as)")
 	f.StringVar(&claudeCodeFlags.task, "task", "", "Task to give Claude Code")
 	f.StringVar(&claudeCodeFlags.taskFile, "task-file", "", "Read the task from this file")
-	f.StringVar(&claudeCodeFlags.model, "model", "", "Model (alias or full name)")
+	f.StringVar(&claudeCodeFlags.model, "model", "", "Model (alias or full name; default CLAUDE_CODE_MODEL)")
 	f.StringVar(&claudeCodeFlags.permissionMode, "permission-mode", "", "plan, acceptEdits, bypassPermissions…")
 	f.StringVar(&claudeCodeFlags.permissionPrompts, "permission-prompts", "", `Who answers permission prompts (default "none")`)
 	f.StringSliceVar(&claudeCodeFlags.allowedTools, "allowed-tools", nil, "Tools to allow")
@@ -82,7 +82,7 @@ func init() {
 	f.StringSliceVar(&claudeCodeFlags.addDirs, "add-dir", nil, "Extra directories the CLI may touch")
 	f.StringSliceVar(&claudeCodeFlags.mcpConfig, "mcp-config", nil, "MCP server config (JSON string or file path)")
 	f.BoolVar(&claudeCodeFlags.strictMCPConfig, "strict-mcp-config", false, "Ignore MCP servers other than --mcp-config")
-	f.Float64Var(&claudeCodeFlags.maxBudgetUSD, "max-budget-usd", 0, "Stop the run past this API spend")
+	f.Float64Var(&claudeCodeFlags.maxBudgetUSD, "max-budget-usd", 0, "Stop the run past this API spend (default CLAUDE_CODE_MAX_BUDGET_USD)")
 	f.StringVar(&claudeCodeFlags.sessionID, "session-id", "", "Pin the CLI session id (UUID)")
 	f.BoolVar(&claudeCodeFlags.persistSession, "persist-session", false, "Let the CLI save the transcript to disk")
 	f.StringArrayVar(&claudeCodeFlags.env, "env", nil, "Extra environment entry KEY=value (repeatable)")
@@ -146,6 +146,22 @@ func debugConfigDir(base string, runAs *subproc.Identity, environ []string, keep
 	}, nil
 }
 
+// debugRunLimits is the model and spending cap of a manual run: the worker's
+// (CLAUDE_CODE_MODEL, CLAUDE_CODE_MAX_BUDGET_USD), so that a run in its
+// container is bounded as its own are, unless a flag says otherwise.
+func debugRunLimits(changed func(flag string) bool, cfg *config.Config) (model string, budget float64, err error) {
+	model, budget = claudeCodeFlags.model, claudeCodeFlags.maxBudgetUSD
+	if !changed("model") {
+		model = cfg.ClaudeCodeModel
+	}
+	if !changed("max-budget-usd") {
+		if budget, err = parseBudget(cfg.ClaudeCodeMaxBudgetUSD); err != nil {
+			return "", 0, fmt.Errorf("CLAUDE_CODE_MAX_BUDGET_USD: %w", err)
+		}
+	}
+	return model, budget, nil
+}
+
 func runClaudeCodeRun(cmd *cobra.Command, args []string) error {
 	task, err := resolveTask(cmd.InOrStdin())
 	if err != nil {
@@ -163,6 +179,10 @@ func runClaudeCodeRun(cmd *cobra.Command, args []string) error {
 	}
 
 	cfg := config.Load()
+	model, budget, err := debugRunLimits(cmd.Flags().Changed, cfg)
+	if err != nil {
+		return err
+	}
 	runner, err := newDebugRunner(cfg, claudeCodeFlags.binary)
 	if err != nil {
 		return err
@@ -185,7 +205,7 @@ func runClaudeCodeRun(cmd *cobra.Command, args []string) error {
 	res, err := runner.Run(ctx, claudecode.Params{
 		Cwd:                  claudeCodeFlags.cwd,
 		Task:                 task,
-		Model:                claudeCodeFlags.model,
+		Model:                model,
 		PermissionMode:       claudeCodeFlags.permissionMode,
 		PermissionPrompts:    claudeCodeFlags.permissionPrompts,
 		AllowedTools:         claudeCodeFlags.allowedTools,
@@ -195,7 +215,7 @@ func runClaudeCodeRun(cmd *cobra.Command, args []string) error {
 		AddDirs:              claudeCodeFlags.addDirs,
 		MCPConfig:            claudeCodeFlags.mcpConfig,
 		StrictMCPConfig:      claudeCodeFlags.strictMCPConfig,
-		MaxBudgetUSD:         claudeCodeFlags.maxBudgetUSD,
+		MaxBudgetUSD:         budget,
 		SessionID:            claudeCodeFlags.sessionID,
 		NoSessionPersistence: !claudeCodeFlags.persistSession,
 		Env:                  claudeCodeFlags.env,

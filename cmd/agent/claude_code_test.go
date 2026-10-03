@@ -57,3 +57,23 @@ func TestDebugConfigDir(t *testing.T) {
 		t.Errorf("the copy outlived the run: %v", err)
 	}
 }
+
+// A manual run in a worker's container is bounded as the worker's runs are,
+// unless a flag says otherwise; a mistyped cap stops it as it stops the worker.
+func TestDebugRunLimits(t *testing.T) {
+	cfg := &config.Config{ClaudeCodeModel: "sonnet", ClaudeCodeMaxBudgetUSD: "2"}
+	unset := func(string) bool { return false }
+	if model, budget, err := debugRunLimits(unset, cfg); err != nil || model != "sonnet" || budget != 2 {
+		t.Errorf("defaults: %q, %g, %v; want the worker's", model, budget, err)
+	}
+	if _, _, err := debugRunLimits(unset, &config.Config{ClaudeCodeMaxBudgetUSD: "2$"}); err == nil {
+		t.Error("a mistyped cap was accepted")
+	}
+
+	claudeCodeFlags.model, claudeCodeFlags.maxBudgetUSD = "opus", 10
+	t.Cleanup(func() { claudeCodeFlags.model, claudeCodeFlags.maxBudgetUSD = "", 0 })
+	set := func(string) bool { return true }
+	if model, budget, err := debugRunLimits(set, cfg); err != nil || model != "opus" || budget != 10 {
+		t.Errorf("flags: %q, %g, %v; want them over the worker's", model, budget, err)
+	}
+}
