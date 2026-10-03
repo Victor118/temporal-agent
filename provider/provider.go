@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"time"
 )
 
 type LLMProvider interface {
@@ -66,3 +67,14 @@ type PermanentAPIError struct {
 
 func (e *PermanentAPIError) Error() string { return e.Err.Error() }
 func (e *PermanentAPIError) Unwrap() error { return e.Err }
+
+// RetryAfterError is a passing API error whose answer said how long to wait
+// before the next attempt (Retry-After): an attempt sooner would be refused
+// again. The caller decides how to wait; the provider knows no retry policy.
+type RetryAfterError struct {
+	Err   error
+	Delay time.Duration
+}
+
+func (e *RetryAfterError) Error() string { return e.Err.Error() }
+func (e *RetryAfterError) Unwrap() error { return e.Err }

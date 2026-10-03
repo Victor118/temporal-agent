@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 )
 
 const anthropicAPIURL = "https://api.anthropic.com/v1/messages"
@@ -15,6 +16,7 @@ type AnthropicProvider struct {
 	apiKey       string
 	defaultModel string
 	client       *http.Client
+	url          string // the Messages API; a test server in tests
 }
 
 // NewAnthropicProvider creates a provider. defaultModel is used for requests
@@ -24,6 +26,7 @@ func NewAnthropicProvider(apiKey, defaultModel string) *AnthropicProvider {
 		apiKey:       apiKey,
 		defaultModel: defaultModel,
 		client:       &http.Client{},
+		url:          anthropicAPIURL,
 	}
 }
 
@@ -146,7 +149,7 @@ func (p *AnthropicProvider) Chat(ctx context.Context, request ChatRequest) (Chat
 		return ChatResponse{}, fmt.Errorf("marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", anthropicAPIURL, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.url, bytes.NewReader(body))
 	if err != nil {
 		return ChatResponse{}, fmt.Errorf("create request: %w", err)
 	}
@@ -171,6 +174,11 @@ func (p *AnthropicProvider) Chat(ctx context.Context, request ChatRequest) (Chat
 		err := fmt.Errorf("anthropic API error (status %d): %s", resp.StatusCode, string(respBody))
 		if !transientStatus(resp.StatusCode) {
 			return ChatResponse{}, &PermanentAPIError{Err: err}
+		}
+		// Rate limited or overloaded (429, 529, 503), the API may say when
+		// to come back.
+		if d, ok := parseRetryAfter(resp.Header.Get("Retry-After"), time.Now()); ok {
+			return ChatResponse{}, &RetryAfterError{Err: err, Delay: d}
 		}
 		return ChatResponse{}, err
 	}
