@@ -33,6 +33,15 @@ import (
 // catalogRefresh is how often a worker reloads its catalog and routes.
 const catalogRefresh = 30 * time.Second
 
+// workerStopTimeout is how long a stopping worker waits for the tasks under
+// way, and for their answers to go out, before it cancels them and returns
+// (worker.Options.WorkerStopTimeout; zero would not wait at all). A coding
+// run ends at once on a stop (ClaudeCodeActivities.Stop): its CLI is dead
+// within claudecode's kill grace (10s), its output drained within as much
+// again, and the bound leaves room for the answer. Whatever runs the
+// process must give it that long before killing it.
+const workerStopTimeout = 30 * time.Second
+
 // workerOptions is where `agent worker` and `agent dev` differ.
 type workerOptions struct {
 	// web is the web channel's notifier: the server's in-process hub in dev
@@ -53,6 +62,9 @@ type workerRuntime struct {
 	workflows bool
 	skills    []skill.Skill      // as loaded at startup
 	stop      context.CancelFunc // ends the polling
+	// endRuns ends the coding runs under way, before the workers stop
+	// (ClaudeCodeActivities.Stop).
+	endRuns func()
 	// releaseRuns gives up this process's claim on the coding runs' root
 	// (claimRunsRoot).
 	releaseRuns func()
@@ -154,12 +166,13 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 	if coding {
 		log.Printf("Coding runs: at most %d at a time on this worker (CLAUDE_CODE_MAX_CONCURRENT_RUNS)", maxRuns)
 	}
-	rt := &workerRuntime{queues: queues, workflows: workerConf.Workflows, skills: skills, releaseRuns: releaseRuns}
+	rt := &workerRuntime{queues: queues, workflows: workerConf.Workflows, skills: skills, endRuns: codeAct.Stop, releaseRuns: releaseRuns}
 	for _, queue := range queues {
 		wopts := worker.Options{
 			// A worker that stops polling for good takes the process with
 			// it, so that whatever runs it starts a new one.
-			OnFatalError: func(err error) { log.Fatalf("Worker on %q failed: %v", queue, err) },
+			OnFatalError:      func(err error) { log.Fatalf("Worker on %q failed: %v", queue, err) },
+			WorkerStopTimeout: workerStopTimeout,
 		}
 		// Sessions pin a coding run's steps to one worker of the tool queue.
 		// Where runs can happen, how many at once is the machine's limit;
@@ -424,9 +437,12 @@ func (rt *workerRuntime) start() error {
 	return nil
 }
 
-// shutdown stops the polling and the workers.
+// shutdown stops the polling and the workers. The coding runs end first:
+// each answers while its worker still waits for it (workerStopTimeout), so
+// the workflow learns at once that the worker is gone.
 func (rt *workerRuntime) shutdown() {
 	rt.stop()
+	rt.endRuns()
 	for _, w := range rt.workers {
 		w.Stop()
 	}

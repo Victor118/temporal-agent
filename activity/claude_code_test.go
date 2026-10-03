@@ -1095,3 +1095,47 @@ func TestInspectWorkspaceRefusesARefTheRunLinkedElsewhere(t *testing.T) {
 		t.Errorf("err = %v, want a non-retryable WorkspaceTampered", err)
 	}
 }
+
+// A worker that stops ends its runs at once, and says so: each kills its CLI
+// and answers ErrWorkerStopping, which the workflow reads as a lost worker,
+// before the process exits.
+func TestRunClaudeCode_EndsWhenTheWorkerStops(t *testing.T) {
+	id := subproctest.Identity(t)
+	if os.Geteuid() == 0 && id == nil {
+		t.Skip("no identity to run as")
+	}
+	bin := filepath.Join(subproctest.Dir(t, nil), "fake-claude")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexec sleep 60\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a := &ClaudeCodeActivities{
+		AllowedRepos: testRepos, Root: subproctest.Dir(t, nil), RunAs: id, Runner: &claudecode.Runner{Binary: bin},
+	}
+	if id != nil {
+		a.Runs = subproc.NewRuns(id)
+	}
+	dir := filepath.Join(a.Root, "run-1")
+	os.Mkdir(dir, 0o755)
+	if id != nil {
+		if err := id.Give(dir); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := a.RunClaudeCode(context.Background(), RunClaudeCodeInput{Dir: dir, Task: "x"})
+		done <- err
+	}()
+	time.Sleep(300 * time.Millisecond)
+	a.Stop()
+	select {
+	case err := <-done:
+		var appErr *temporal.ApplicationError
+		if !errors.As(err, &appErr) || appErr.Type() != ErrWorkerStopping {
+			t.Errorf("err = %v, want %s", err, ErrWorkerStopping)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("the run outlived its worker's stop")
+	}
+}

@@ -16,6 +16,8 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 	"go.temporal.io/sdk/worker"
+
+	"github.com/victor/temporal-agent/activity"
 )
 
 // testRunQueue is the tool's queue the coding workflows run on in the tests.
@@ -213,6 +215,24 @@ func TestAnalyzeRepoWorkflow_WorkerLostMidRun(t *testing.T) {
 func TestImplementFeatureWorkflow_WorkerStoppedCancelsTheRun(t *testing.T) {
 	e := newImplementEnv(t, claudeCodeResult{Report: "Done.", Subtype: "success"}, nil, oneCommit(), nil)
 	e.duringRun = func(context.Context) error { return temporal.NewCanceledError() }
+
+	out := e.run_(t, ImplementFeatureInput{Repo: "/src/repo", Task: "do it"})
+
+	if out.Pushed || e.inspects != 0 {
+		t.Errorf("pushed %v after %d inspections, want nothing", out.Pushed, e.inspects)
+	}
+	if !strings.Contains(out.Error, "the worker that held the run stopped before the run finished") {
+		t.Errorf("Error = %q", out.Error)
+	}
+}
+
+// A worker that stops ends its run itself and says so
+// (activity.ErrWorkerStopping): the worker is gone.
+func TestImplementFeatureWorkflow_WorkerStoppingEndsTheRun(t *testing.T) {
+	e := newImplementEnv(t, claudeCodeResult{}, nil, oneCommit(), nil)
+	e.duringRun = func(context.Context) error {
+		return temporal.NewNonRetryableApplicationError("the worker stopped during the run", activity.ErrWorkerStopping, nil)
+	}
 
 	out := e.run_(t, ImplementFeatureInput{Repo: "/src/repo", Task: "do it"})
 

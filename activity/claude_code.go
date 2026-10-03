@@ -10,6 +10,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.temporal.io/sdk/activity"
@@ -64,6 +66,47 @@ type ClaudeCodeActivities struct {
 	// Auth is how runs authenticate: the API or a subscription
 	// (claudecode.ResolveAuth, CLAUDE_CODE_AUTH). Zero: as the CLI finds.
 	Auth claudecode.Auth
+
+	stopOnce, stopped sync.Once
+	stopping          chan struct{} // closed by Stop
+}
+
+// ErrWorkerStopping is the type of the error of a run its worker ended
+// because it was stopping (ClaudeCodeActivities.Stop): the workflow reads it
+// as a lost worker.
+const ErrWorkerStopping = "WorkerStopping"
+
+// Stop ends the runs under way, when the worker stops: each kills its CLI
+// and answers ErrWorkerStopping, while the worker still polls the session's
+// queue and waits for the answer to go out (worker.Options
+// WorkerStopTimeout). Waiting for the SDK to cancel them instead would come
+// last: it stops the session's creation first, which waits that whole
+// timeout for a session that does not end on its own.
+func (a *ClaudeCodeActivities) Stop() {
+	ch := a.stopChannel()
+	a.stopped.Do(func() { close(ch) })
+}
+
+func (a *ClaudeCodeActivities) stopChannel() chan struct{} {
+	a.stopOnce.Do(func() { a.stopping = make(chan struct{}) })
+	return a.stopping
+}
+
+// endOnStop is ctx, cancelled once the worker stops (Stop), and whether it
+// was.
+func (a *ClaudeCodeActivities) endOnStop(ctx context.Context) (context.Context, func() bool, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(ctx)
+	var stopped atomic.Bool
+	stopping := a.stopChannel()
+	go func() {
+		select {
+		case <-stopping:
+			stopped.Store(true)
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, stopped.Load, cancel
 }
 
 // RunCounter is what the coding activities need of subproc.Runs: a run
@@ -439,6 +482,8 @@ func (a *ClaudeCodeActivities) RunClaudeCode(ctx context.Context, in RunClaudeCo
 	if a.Runs != nil {
 		runner.Runs = a.Runs
 	}
+	ctx, stopped, cancel := a.endOnStop(ctx)
+	defer cancel()
 	res, err := runner.Run(ctx, claudecode.Params{
 		ConfigDir:          configDir,
 		Cwd:                in.Dir,
@@ -454,6 +499,10 @@ func (a *ClaudeCodeActivities) RunClaudeCode(ctx context.Context, in RunClaudeCo
 		// disk would only outlive the tree it talks about.
 		NoSessionPersistence: true,
 	})
+	if stopped() {
+		return res, temporal.NewNonRetryableApplicationError(
+			"claude code: the worker stopped during the run", ErrWorkerStopping, err)
+	}
 	if err != nil {
 		return res, err
 	}

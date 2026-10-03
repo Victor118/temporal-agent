@@ -89,8 +89,9 @@ func onRunWorker(runCtx workflow.Context, opts workflow.ActivityOptions) workflo
 
 // workerLost tells whether a step failed because the worker that holds the
 // run is gone: the session failed (it died, or lost touch with Temporal), no
-// one picked the step up, or the worker cancelled the step itself — it
-// stopped — when the workflow had not asked it to.
+// one picked the step up, or the worker ended the step itself — it stopped
+// (activity.ErrWorkerStopping, or a cancellation the workflow had not asked
+// for).
 func workerLost(runCtx workflow.Context, err error) bool {
 	if err == nil {
 		return false
@@ -99,6 +100,10 @@ func workerLost(runCtx workflow.Context, err error) bool {
 		return true
 	}
 	if errors.Is(err, workflow.ErrSessionFailed) || isScheduleToStartTimeout(err) {
+		return true
+	}
+	var appErr *temporal.ApplicationError
+	if errors.As(err, &appErr) && appErr.Type() == activity.ErrWorkerStopping {
 		return true
 	}
 	var canceled *temporal.CanceledError
