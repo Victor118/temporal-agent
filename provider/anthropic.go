@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -36,6 +37,32 @@ func NewAnthropicProvider(apiKey, defaultModel string) *AnthropicProvider {
 // unknown model, no credit left (400, 401, 403, 404…).
 func transientStatus(code int) bool {
 	return code == http.StatusRequestTimeout || code == http.StatusTooManyRequests || code >= 500
+}
+
+// anthropicError is the body of an API error.
+type anthropicError struct {
+	Error struct {
+		Type    string `json:"type"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+// contextOverflow tells an API error that refuses the request for its size:
+// a prompt longer than the model's window ("prompt is too long: … tokens >
+// … maximum", an invalid_request_error), or a request over the API's size
+// limit (413, request_too_large).
+func contextOverflow(status int, body []byte) bool {
+	var e anthropicError
+	if json.Unmarshal(body, &e) != nil {
+		return status == http.StatusRequestEntityTooLarge
+	}
+	switch {
+	case status == http.StatusRequestEntityTooLarge || e.Error.Type == "request_too_large":
+		return true
+	case e.Error.Type == "invalid_request_error":
+		return strings.Contains(strings.ToLower(e.Error.Message), "prompt is too long")
+	}
+	return false
 }
 
 // resolveModel returns the requested model, or the provider default.
@@ -172,6 +199,9 @@ func (p *AnthropicProvider) Chat(ctx context.Context, request ChatRequest) (Chat
 
 	if resp.StatusCode != http.StatusOK {
 		err := fmt.Errorf("anthropic API error (status %d): %s", resp.StatusCode, string(respBody))
+		if contextOverflow(resp.StatusCode, respBody) {
+			return ChatResponse{}, &PermanentAPIError{Err: fmt.Errorf("%w: %w", ErrContextTooLong, err)}
+		}
 		if !transientStatus(resp.StatusCode) {
 			return ChatResponse{}, &PermanentAPIError{Err: err}
 		}

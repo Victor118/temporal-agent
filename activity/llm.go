@@ -118,13 +118,20 @@ func (a *LLMActivities) CallLLM(ctx context.Context, req LLMTurnRequest) (provid
 	if err != nil {
 		return provider.ChatResponse{}, err
 	}
-	if size, limit := requestSize(request), a.maxContextBytes(); size > limit {
+	size, limit := requestSize(request), a.maxContextBytes()
+	if size > limit {
 		log.Printf("LLM call refused: agent %s, %d bytes over the %d limit (LLM_MAX_CONTEXT_BYTES)", req.AgentID, size, limit)
 		return provider.ChatResponse{}, temporal.NewNonRetryableApplicationError(ContextTooLongMessage, ErrContextTooLong, nil)
 	}
 
 	resp, err := a.Provider.Chat(ctx, request)
 	if err != nil {
+		// Under the guard, the model refused it all the same: the same
+		// advice, never retried.
+		if errors.Is(err, provider.ErrContextTooLong) {
+			log.Printf("LLM call refused by the model: agent %s, %d bytes: %v", req.AgentID, size, err)
+			return resp, temporal.NewNonRetryableApplicationError(ContextTooLongMessage, ErrContextTooLong, err)
+		}
 		var permErr *provider.PermanentAPIError
 		if errors.As(err, &permErr) {
 			return resp, temporal.NewNonRetryableApplicationError(err.Error(), "PermanentAPIError", err)

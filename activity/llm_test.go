@@ -114,8 +114,17 @@ func TestCallLLM_TranslatesTheRetry(t *testing.T) {
 		}
 	}
 
+	// The model refusing a prompt too long reads as the guard does: never
+	// retried, with what to do.
+	tooLong := &provider.PermanentAPIError{Err: fmt.Errorf("%w: %w", provider.ErrContextTooLong, errors.New("prompt is too long"))}
+	_, err := newLLM(failingProvider{tooLong}, nil).CallLLM(context.Background(), LLMTurnRequest{AgentID: "default"})
+	var tooLongErr *temporal.ApplicationError
+	if !errors.As(err, &tooLongErr) || tooLongErr.Type() != ErrContextTooLong || !tooLongErr.NonRetryable() || tooLongErr.Message() != ContextTooLongMessage {
+		t.Errorf("prompt too long: %v, want the non-retryable %s", err, ErrContextTooLong)
+	}
+
 	// Anything else is left to the retry policy.
-	_, err := newLLM(failingProvider{apiErr}, nil).CallLLM(context.Background(), LLMTurnRequest{AgentID: "default"})
+	_, err = newLLM(failingProvider{apiErr}, nil).CallLLM(context.Background(), LLMTurnRequest{AgentID: "default"})
 	var appErr *temporal.ApplicationError
 	if err != apiErr || errors.As(err, &appErr) {
 		t.Errorf("plain error: %v", err)

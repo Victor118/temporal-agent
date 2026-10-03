@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 )
 
@@ -59,6 +60,11 @@ type ChatResponse struct {
 	ToolCalls  []ToolCallInfo `json:"tool_calls,omitempty"`
 	StopReason string         `json:"stop_reason"`
 }
+
+// ErrContextTooLong is in the error of a request the model refuses for its
+// size: the conversation no longer fits its context window. It comes wrapped
+// in a PermanentAPIError: the same request would be refused again.
+var ErrContextTooLong = errors.New("context too long for the model")
 
 // PermanentAPIError wraps API errors that should not be retried (auth, billing, bad request, etc.)
 type PermanentAPIError struct {
