@@ -145,18 +145,30 @@ func TestReportToParentWorkflow_SummaryFails(t *testing.T) {
 	}
 }
 
-// The parent was deleted while the report was written: the post is refused
-// once and for all, and the fork says so.
-func TestReportToParentWorkflow_ParentDeletedMeanwhile(t *testing.T) {
-	env, run := reportEnv(t, summary("## Fait"), func(int, activity.PostForkReportInput, parentReports) error {
-		return temporal.NewNonRetryableApplicationError(store.ErrReportParentGone.Error(), "ParentGone", nil)
-	})
-	env.ExecuteWorkflow(ReportToParentWorkflow, reportIn)
-	if env.GetWorkflowError() == nil {
-		t.Error("a report with no parent must fail")
-	}
-	if run.posts != 1 || len(run.parent) != 0 || strings.Join(run.events, ",") != "fork1:"+EventForkReportFailed {
-		t.Errorf("%d attempts, parent's reports %v, events %v", run.posts, run.parent, run.events)
+// The fork or the parent was deleted while the report was written, or the
+// reporter left one of them: the post is refused once and for all, and the
+// fork says so.
+func TestReportToParentWorkflow_RefusedMeanwhile(t *testing.T) {
+	for refusal, errType := range map[error]string{
+		store.ErrReportForkGone:        activity.ErrTypeReportForkGone,
+		store.ErrReportParentGone:      activity.ErrTypeReportParentGone,
+		store.ErrReportNotForkMember:   activity.ErrTypeReportNotForkMember,
+		store.ErrReportNotParentMember: activity.ErrTypeReportNotParentMember,
+	} {
+		t.Run(errType, func(t *testing.T) {
+			env, run := reportEnv(t, summary("## Fait"), func(int, activity.PostForkReportInput, parentReports) error {
+				// Retryable as returned: the workflow's policy alone must
+				// stop at the first attempt.
+				return temporal.NewApplicationError(refusal.Error(), errType)
+			})
+			env.ExecuteWorkflow(ReportToParentWorkflow, reportIn)
+			if err := env.GetWorkflowError(); err == nil || !strings.Contains(err.Error(), refusal.Error()) {
+				t.Errorf("workflow error %v, want %q", err, refusal)
+			}
+			if run.posts != 1 || len(run.parent) != 0 || strings.Join(run.events, ",") != "fork1:"+EventForkReportFailed {
+				t.Errorf("%d attempts, parent's reports %v, events %v", run.posts, run.parent, run.events)
+			}
+		})
 	}
 }
 

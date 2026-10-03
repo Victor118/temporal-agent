@@ -125,12 +125,18 @@ func TestPostForkReport(t *testing.T) {
 		t.Errorf("posted %+v", st.got)
 	}
 
-	for _, refusal := range []error{store.ErrReportParentGone, store.ErrReportNotMember, store.ErrReportStale} {
+	for refusal, errType := range map[error]string{
+		store.ErrReportForkGone:        ErrTypeReportForkGone,
+		store.ErrReportParentGone:      ErrTypeReportParentGone,
+		store.ErrReportNotForkMember:   ErrTypeReportNotForkMember,
+		store.ErrReportNotParentMember: ErrTypeReportNotParentMember,
+		store.ErrReportStale:           ErrTypeReportStale,
+	} {
 		st.err = fmt.Errorf("append: %w", refusal)
 		_, err := a.PostForkReport(context.Background(), in)
 		var appErr *temporal.ApplicationError
-		if !errors.As(err, &appErr) || !appErr.NonRetryable() {
-			t.Errorf("%v: %v", refusal, err)
+		if !errors.As(err, &appErr) || !appErr.NonRetryable() || appErr.Type() != errType {
+			t.Errorf("%v: %v, want a final %s", refusal, err, errType)
 		}
 	}
 	st.err = errors.New("connection reset")

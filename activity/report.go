@@ -122,8 +122,8 @@ type PostForkReportInput struct {
 // PostForkReport posts a report into the fork's parent, as a message of the
 // member who sends it, and records it on the fork; it returns its message ID
 // in the parent. A retry posts nothing more (store.ForkReportKey). Refusals
-// are final: the parent is gone, the member left it, or another report was
-// posted meanwhile.
+// are final: the fork or the parent is gone, the member left either, or
+// another report was posted meanwhile.
 func (a *ReportActivities) PostForkReport(ctx context.Context, in PostForkReportInput) (int64, error) {
 	content, _ := json.Marshal(in.Report)
 	id, err := a.Store.AppendForkReport(ctx, store.ForkReport{
@@ -141,14 +141,36 @@ func (a *ReportActivities) PostForkReport(ctx context.Context, in PostForkReport
 			Fork:    &store.ForkRef{SessionID: in.ForkSessionID, Title: in.ForkTitle, UpToMessageID: in.UpTo},
 		},
 	})
-	for errType, refusal := range map[string]error{
-		"ParentGone":      store.ErrReportParentGone,
-		"NotParentMember": store.ErrReportNotMember,
-		"ReportStale":     store.ErrReportStale,
-	} {
-		if errors.Is(err, refusal) {
-			return 0, temporal.NewNonRetryableApplicationError(err.Error(), errType, err)
-		}
+	if errType := reportRefusal(err); errType != "" {
+		return 0, temporal.NewNonRetryableApplicationError(err.Error(), errType, err)
 	}
 	return id, err
+}
+
+// Error types of the store's refusals to post a report: none goes away on a
+// retry (workflow.ReportToParentWorkflow lists them).
+const (
+	ErrTypeReportForkGone        = "ForkGone"
+	ErrTypeReportParentGone      = "ParentGone"
+	ErrTypeReportNotForkMember   = "NotForkMember"
+	ErrTypeReportNotParentMember = "NotParentMember"
+	ErrTypeReportStale           = "ReportStale"
+)
+
+// reportRefusal is the error type of a store's refusal to post a report; ""
+// for any other error, retried.
+func reportRefusal(err error) string {
+	switch {
+	case errors.Is(err, store.ErrReportForkGone):
+		return ErrTypeReportForkGone
+	case errors.Is(err, store.ErrReportParentGone):
+		return ErrTypeReportParentGone
+	case errors.Is(err, store.ErrReportNotForkMember):
+		return ErrTypeReportNotForkMember
+	case errors.Is(err, store.ErrReportNotParentMember):
+		return ErrTypeReportNotParentMember
+	case errors.Is(err, store.ErrReportStale):
+		return ErrTypeReportStale
+	}
+	return ""
 }

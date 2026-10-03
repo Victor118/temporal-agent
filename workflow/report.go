@@ -81,8 +81,11 @@ func ReportToParentWorkflow(ctx workflow.Context, in ReportToParentInput) error 
 	postCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		StartToCloseTimeout: 30 * time.Second,
 		RetryPolicy: &temporal.RetryPolicy{
-			MaximumAttempts:        5,
-			NonRetryableErrorTypes: []string{"ParentGone", "NotParentMember", "ReportStale"},
+			MaximumAttempts: 5,
+			NonRetryableErrorTypes: []string{
+				activity.ErrTypeReportForkGone, activity.ErrTypeReportParentGone,
+				activity.ErrTypeReportNotForkMember, activity.ErrTypeReportNotParentMember, activity.ErrTypeReportStale,
+			},
 		},
 	})
 	var reportAct *activity.ReportActivities

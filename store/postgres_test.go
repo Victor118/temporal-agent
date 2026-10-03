@@ -806,10 +806,21 @@ func TestForkReports(t *testing.T) {
 
 	// Bob left the parent: he reports there no more.
 	s.RemoveSessionMember(ctx, "zz-parent", "zz-bob")
-	if _, err := s.AppendForkReport(ctx, report(50, 60, "third")); !errors.Is(err, ErrReportNotMember) {
+	if _, err := s.AppendForkReport(ctx, report(50, 60, "third")); !errors.Is(err, ErrReportNotParentMember) {
 		t.Errorf("a reporter who left the parent: %v", err)
 	}
 	s.AddSessionMember(ctx, "zz-parent", "zz-bob", "zz-alice")
+	// Bob left the fork while its report was written: he no longer signs
+	// what it says, even with other members left in it.
+	s.AddSessionMember(ctx, "zz-fork", "zz-alice", "zz-bob")
+	s.RemoveSessionMember(ctx, "zz-fork", "zz-bob")
+	if _, err := s.AppendForkReport(ctx, report(50, 60, "third")); !errors.Is(err, ErrReportNotForkMember) {
+		t.Errorf("a reporter who left the fork: %v", err)
+	}
+	s.AddSessionMember(ctx, "zz-fork", "zz-bob", "zz-alice")
+	if msgs, _ := s.LoadMessagesWithID(ctx, "zz-parent"); len(msgs) != 3 {
+		t.Errorf("%d messages in the parent after the refusals, want 3", len(msgs))
+	}
 
 	// The parent is deleted: the fork has nowhere to report, and the
 	// parent's messages are gone with it.
@@ -824,4 +835,79 @@ func TestForkReports(t *testing.T) {
 	if n != 0 {
 		t.Errorf("%d messages left in the deleted parent", n)
 	}
+
+	// The fork is deleted: told apart from a parent gone.
+	if err := s.DeleteSession(ctx, "zz-fork"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AppendForkReport(ctx, report(50, 60, "third")); !errors.Is(err, ErrReportForkGone) {
+		t.Errorf("fork deleted: %v", err)
+	}
+}
+
+// A report posted while its parent is deleted: whichever goes first, the
+// deletion takes every message of the parent with it, and the report is
+// either refused or gone with them. Never a report left behind.
+func TestForkReportRacesParentDeletion(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	cleanup := func() {
+		s.db.Exec("DELETE FROM messages WHERE session_id LIKE 'zz-race-%'")
+		s.db.Exec("DELETE FROM sessions WHERE session_id LIKE 'zz-race-f%'")
+		s.db.Exec("DELETE FROM sessions WHERE session_id LIKE 'zz-race-%'")
+		s.db.Exec("DELETE FROM users WHERE id = 'zz-race-alice'")
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+	if err := s.CreateUser(ctx, User{ID: "zz-race-alice", Email: "zz-race-alice@example.com", Role: UserRoleStandard, PasswordHash: "h"}); err != nil {
+		t.Fatal(err)
+	}
+
+	posted, refused := 0, 0
+	for i := range 20 {
+		parent, fork := fmt.Sprintf("zz-race-p%d", i), fmt.Sprintf("zz-race-f%d", i)
+		if err := s.CreateSession(ctx, Session{SessionID: parent, CreatedBy: "zz-race-alice", Channel: "web"}); err != nil {
+			t.Fatal(err)
+		}
+		at, _ := s.AppendMessage(ctx, parent, "k0", Message{Role: RoleUser, Content: `"plan"`})
+		if err := s.CreateSession(ctx, Session{SessionID: fork, CreatedBy: "zz-race-alice", Channel: "web",
+			ParentSessionID: parent, ForkedAtMessageID: at, ForkedBy: "zz-race-alice"}); err != nil {
+			t.Fatal(err)
+		}
+
+		start := make(chan struct{})
+		reportErr, deleteErr := make(chan error, 1), make(chan error, 1)
+		go func() {
+			<-start
+			_, err := s.AppendForkReport(ctx, ForkReport{ForkSessionID: fork, ParentSessionID: parent, ReporterID: "zz-race-alice", UpTo: 10,
+				Message: Message{Role: RoleUser, Kind: KindForkReport, Content: `"report"`, UserID: "zz-race-alice"}})
+			reportErr <- err
+		}()
+		go func() {
+			<-start
+			deleteErr <- s.DeleteSession(ctx, parent)
+		}()
+		close(start)
+
+		if err := <-deleteErr; err != nil {
+			t.Fatalf("round %d: delete: %v", i, err)
+		}
+		switch err := <-reportErr; {
+		case err == nil:
+			posted++
+		case errors.Is(err, ErrReportParentGone):
+			refused++
+		default:
+			t.Fatalf("round %d: report: %v", i, err)
+		}
+		var n int
+		s.db.QueryRow("SELECT count(*) FROM messages WHERE session_id = $1", parent).Scan(&n)
+		if n != 0 {
+			t.Fatalf("round %d: %d messages left in the deleted parent", i, n)
+		}
+		if f, _ := s.GetSession(ctx, fork); f == nil || f.ParentSessionID != "" {
+			t.Fatalf("round %d: fork after its parent's deletion: %+v", i, f)
+		}
+	}
+	t.Logf("%d reports posted then deleted, %d refused", posted, refused)
 }

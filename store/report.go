@@ -9,16 +9,19 @@ import (
 
 // Why a fork's report cannot be posted. None goes away on a retry.
 var (
-	ErrReportParentGone = errors.New("the fork no longer has this parent session")
-	ErrReportNotMember  = errors.New("the reporter is not a member of the parent session")
-	ErrReportStale      = errors.New("another report of this fork was posted since this one started")
+	ErrReportForkGone        = errors.New("the fork was deleted")
+	ErrReportParentGone      = errors.New("the fork no longer has this parent session")
+	ErrReportNotForkMember   = errors.New("the reporter is no longer a member of the fork")
+	ErrReportNotParentMember = errors.New("the reporter is not a member of the parent session")
+	ErrReportStale           = errors.New("another report of this fork was posted since this one started")
 )
 
 // ForkReport is a fork's report, to post into its parent session.
 type ForkReport struct {
 	ForkSessionID   string
 	ParentSessionID string
-	// ReporterID sends it: a member of the parent, who signs Message.
+	// ReporterID sends it: a member of the fork and of the parent, who
+	// signs Message.
 	ReporterID string
 	// The fork's messages it covers: after From (the fork's last reported
 	// message when it started), up to UpTo.
@@ -34,9 +37,11 @@ type ForkReport struct {
 // The fork's row is held while it runs: two reports of one fork are posted
 // one after the other, and the parent cannot be deleted in between (deleting
 // it unlinks the fork, which waits). Refused, with nothing written: the fork
-// is no longer the parent's (ErrReportParentGone), the reporter left the
-// parent (ErrReportNotMember), another report moved the fork's last reported
-// message since From (ErrReportStale): this one would cover it again.
+// is gone (ErrReportForkGone) or no longer the parent's
+// (ErrReportParentGone), the reporter left the fork (ErrReportNotForkMember)
+// or the parent (ErrReportNotParentMember), another report moved the fork's
+// last reported message since From (ErrReportStale): this one would cover it
+// again.
 func (s *PostgresStore) AppendForkReport(ctx context.Context, r ForkReport) (int64, error) {
 	key := ForkReportKey(r.ForkSessionID, r.From, r.UpTo)
 	data, err := json.Marshal(r.Message)
@@ -50,11 +55,13 @@ func (s *PostgresStore) AppendForkReport(ctx context.Context, r ForkReport) (int
 		err := tx.QueryRowContext(ctx,
 			"SELECT parent_session_id, last_reported_message_id FROM sessions WHERE session_id = $1 FOR UPDATE",
 			r.ForkSessionID).Scan(&parent, &reported)
-		if errors.Is(err, sql.ErrNoRows) || (err == nil && parent.String != r.ParentSessionID) {
-			return ErrReportParentGone
-		}
-		if err != nil {
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			return ErrReportForkGone
+		case err != nil:
 			return err
+		case parent.String != r.ParentSessionID:
+			return ErrReportParentGone
 		}
 		err = tx.QueryRowContext(ctx,
 			"SELECT id FROM messages WHERE session_id = $1 AND msg_key = $2", r.ParentSessionID, key).Scan(&id)
@@ -67,14 +74,20 @@ func (s *PostgresStore) AppendForkReport(ctx context.Context, r ForkReport) (int
 		if reported != r.From {
 			return ErrReportStale
 		}
-		var member bool
-		if err := tx.QueryRowContext(ctx,
-			"SELECT EXISTS (SELECT 1 FROM session_members WHERE session_id = $1 AND user_id = $2)",
-			r.ParentSessionID, r.ReporterID).Scan(&member); err != nil {
+		// The reporter signs what the fork says: they must still read it,
+		// and the parent's members must still count them in.
+		var inFork, inParent bool
+		if err := tx.QueryRowContext(ctx, `
+			SELECT EXISTS (SELECT 1 FROM session_members WHERE session_id = $1 AND user_id = $3),
+			       EXISTS (SELECT 1 FROM session_members WHERE session_id = $2 AND user_id = $3)`,
+			r.ForkSessionID, r.ParentSessionID, r.ReporterID).Scan(&inFork, &inParent); err != nil {
 			return err
 		}
-		if !member {
-			return ErrReportNotMember
+		switch {
+		case !inFork:
+			return ErrReportNotForkMember
+		case !inParent:
+			return ErrReportNotParentMember
 		}
 		if err := tx.QueryRowContext(ctx,
 			"INSERT INTO messages (session_id, msg_key, data) VALUES ($1, $2, $3) RETURNING id",
