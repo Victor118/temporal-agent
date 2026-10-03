@@ -415,3 +415,26 @@ func TestAgentMentionIsUnique(t *testing.T) {
 		t.Errorf("agent b %+v: want its ID as mention", got)
 	}
 }
+
+// An assistant message keeps the agent that wrote it, and its name then.
+func TestMessagesKeepTheirAgent(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	cleanup := func() { s.db.Exec("DELETE FROM messages WHERE session_id = 'zz-agents'") }
+	cleanup()
+	t.Cleanup(cleanup)
+
+	if err := s.AppendMessages(ctx, "zz-agents", "run-1", 0, []Message{
+		{Role: RoleAssistant, Content: `"résumé"`, AgentID: "jarvis", Author: "Jarvis"},
+		{Role: RoleAssistant, Kind: KindTurnError, Content: `"boom"`, AgentID: "smith"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	msgs, err := s.LoadMessages(ctx, "zz-agents")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 2 || msgs[0].AgentID != "jarvis" || msgs[0].Author != "Jarvis" || msgs[1].AgentID != "smith" {
+		t.Errorf("loaded %+v", msgs)
+	}
+}
