@@ -5,6 +5,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -73,9 +74,9 @@ func TestRelaySSE_PingsWhileIdle(t *testing.T) {
 	}
 }
 
-// A stream whose check fails ends at the next keep-alive; one that passes
-// goes on. A member_left event makes it check at once, and is not sent to
-// the one it ends.
+// A stream whose check fails ends at the next keep-alive, with a last
+// session_gone; one that passes goes on. A member_left event makes it check
+// at once, and is not sent to the one it ends.
 func TestRelaySSE_EndsWhenNoLongerAlive(t *testing.T) {
 	hub := sse.NewHub()
 	var member atomic.Bool
@@ -97,13 +98,8 @@ func TestRelaySSE_EndsWhenNoLongerAlive(t *testing.T) {
 		}
 	}
 	member.Store(false)
-	for lines.Scan() {
-		if line := lines.Text(); line != ": ping" && line != "" {
-			t.Errorf("line %q after the check failed", line)
-		}
-	}
-	if err := lines.Err(); err != nil {
-		t.Fatalf("stream did not end: %v", err)
+	if got := restOf(t, lines); !slices.Equal(got, goneLines) {
+		t.Errorf("after the check failed: %q, want %q", got, goneLines)
 	}
 
 	// With a keep-alive too far to wait for: the event ends it.
@@ -115,14 +111,67 @@ func TestRelaySSE_EndsWhenNoLongerAlive(t *testing.T) {
 	}
 	member.Store(false)
 	hub.Publish("s1", activity.SSEEvent{Type: session.EventMemberLeft, Data: []byte(`{"user_ids":["u-bob"]}`)})
+	if got := restOf(t, lines); !slices.Equal(got, goneLines) {
+		t.Errorf("sent to a member out: %q, want %q", got, goneLines)
+	}
+}
+
+// A member_left replayed to a reconnecting stream is checked as a live one:
+// removed between the request's membership check and its subscription, the
+// member is not sent what came after.
+func TestRelaySSE_AReplayedLeaveIsChecked(t *testing.T) {
+	hub := sse.NewHub()
+	var member atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		relaySSE(w, r, hub, time.Hour, member.Load, "s1")
+	}))
+	defer srv.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	from := hub.Position("s1")
+	hub.Publish("s1", activity.SSEEvent{Type: "message", Data: []byte(`"before"`)})
+	hub.Publish("s1", activity.SSEEvent{Type: session.EventMemberLeft, Data: []byte(`{"user_ids":["u-bob"]}`)})
+	hub.Publish("s1", activity.SSEEvent{Type: "message", Data: []byte(`"after"`)})
+
+	got := restOf(t, openStream(t, ctx, srv.URL+"?last_event_id="+from, ""))
+	want := []string{"event: message", `data: "before"`}
+	if want = append(want, goneLines...); !slices.Equal(withoutIDs(got), want) {
+		t.Errorf("replayed to a member out: %q, want %q", got, want)
+	}
+
+	// Still a member: the leave is another's, and the stream goes on.
+	member.Store(true)
+	lines := openStream(t, ctx, srv.URL+"?last_event_id="+from, "")
+	for _, want := range []string{"message", session.EventMemberLeft, "message"} {
+		if got := nextEvent(t, lines); !strings.HasSuffix(got, " "+want) {
+			t.Errorf("replayed to a member: %q, want %s", got, want)
+		}
+	}
+}
+
+// goneLines are the lines of the event that ends a stream for a member out:
+// no ID, so that it is never replayed nor moves the client's position.
+var goneLines = []string{"event: " + session.EventSessionGone, "data: {}"}
+
+// restOf reads a stream to its end, pings and blank lines skipped.
+func restOf(t *testing.T, lines *bufio.Scanner) []string {
+	t.Helper()
+	var out []string
 	for lines.Scan() {
-		if line := lines.Text(); line != "" {
-			t.Errorf("line %q sent to a member out", line)
+		if line := lines.Text(); line != ": ping" && line != "" {
+			out = append(out, line)
 		}
 	}
 	if err := lines.Err(); err != nil {
 		t.Fatalf("stream did not end: %v", err)
 	}
+	return out
+}
+
+// withoutIDs drops the id lines of a stream's lines.
+func withoutIDs(lines []string) []string {
+	return slices.DeleteFunc(slices.Clone(lines), func(l string) bool { return strings.HasPrefix(l, "id: ") })
 }
 
 // openStream connects to a stream at url, with a Last-Event-ID header when

@@ -116,6 +116,14 @@ func (f *routeStore) AddSessionMember(_ context.Context, _, userID, _ string) er
 	return nil
 }
 
+// DeleteSession deletes s1's members along: the rest stays readable.
+func (f *routeStore) DeleteSession(_ context.Context, id string) error {
+	if id == f.session.SessionID {
+		f.members = nil
+	}
+	return nil
+}
+
 func (f *routeStore) RemoveSessionMember(_ context.Context, _, userID string) error {
 	for i, m := range f.members {
 		if m == userID {
@@ -899,8 +907,10 @@ func TestUI_TheTreeStreamRings(t *testing.T) {
 }
 
 // A member who leaves hears no more of the session: their streams of it end
-// at once, the page's and the JSON one; the other members' go on, and are
-// told.
+// at once, the page's and the JSON one, with a last session_gone; the other
+// members' go on, and are told. A page that reconnects after is told it is
+// gone, where the JSON API answers 404. Deleting the session ends its
+// creator's stream too.
 func TestStreams_EndForAMemberWhoLeaves(t *testing.T) {
 	h, st, _ := newRouteTestHub(t, &fakeTemporal{})
 	st.session.SessionID = liveSID
@@ -926,16 +936,28 @@ func TestStreams_EndForAMemberWhoLeaves(t *testing.T) {
 		t.Fatalf("bob leaving: %d", w.Code)
 	}
 	for name, lines := range map[string]*bufio.Scanner{"page": bobPage, "JSON": bobJSON} {
-		for lines.Scan() {
-			if strings.Contains(lines.Text(), session.EventMemberLeft) || strings.HasPrefix(lines.Text(), "data:") {
-				t.Errorf("bob's %s stream after he left: %q", name, lines.Text())
-			}
-		}
-		if err := lines.Err(); err != nil {
-			t.Errorf("bob's %s stream still open: %v", name, err)
+		if got := restOf(t, lines); !slices.Equal(got, goneLines) {
+			t.Errorf("bob's %s stream after he left: %q, want %q", name, got, goneLines)
 		}
 	}
 	if got := nextEvent(t, alicePage); !strings.HasSuffix(got, " "+session.EventMemberLeft) {
 		t.Errorf("alice's stream: %q", got)
+	}
+
+	// Bob's page reconnects: it is told, and EventSource stops retrying.
+	if got := restOf(t, open("/s/"+liveSID+"/stream", bob)); !slices.Equal(got, goneLines) {
+		t.Errorf("bob's page reconnecting: %q, want %q", got, goneLines)
+	}
+	if w := call(t, h, http.MethodGet, "/sessions/"+liveSID+"/stream", "", bob); w.Code != http.StatusNotFound {
+		t.Errorf("bob's JSON stream reconnecting: %d", w.Code)
+	}
+
+	if w := call(t, h, http.MethodDelete, "/sessions/"+liveSID, "", alice); w.Code != http.StatusNoContent {
+		t.Fatalf("alice deleting: %d %s", w.Code, w.Body)
+	}
+	// Her tree rang when bob left: that event, then the end.
+	got := restOf(t, alicePage)
+	if len(got) < 2 || !slices.Equal(got[len(got)-2:], goneLines) || slices.Contains(got, "event: "+session.EventMemberLeft) {
+		t.Errorf("alice's stream after the deletion: %q, want it to end with %q", got, goneLines)
 	}
 }

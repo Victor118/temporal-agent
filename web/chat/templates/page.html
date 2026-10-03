@@ -18,7 +18,8 @@
   {{template "topbar" .}}
   {{/* One stream rings the bell, from where the page stands: the session's
        events, for the thread and the rail, and the user's tree's. */}}
-  <div class="columns" sse-connect="{{with .Node}}/s/{{.Session.SessionID}}/stream{{else}}/tree/stream{{end}}?last_event_id={{.StreamFrom}}">
+  <div class="columns" sse-connect="{{with .Node}}/s/{{.Session.SessionID}}/stream{{else}}/tree/stream{{end}}?last_event_id={{.StreamFrom}}"{{if .Node}} sse-close="{{sessionGone}}"{{end}}>
+    {{with .Node}}{{template "session-bells" .}}{{end}}
     <aside class="col-tree">{{template "tree" .}}</aside>
     <main class="col-main">
       {{if not .Node}}{{template "welcome" .}}
@@ -93,6 +94,14 @@ if (!window.chatWired) {
 </script>
 </body>
 </html>{{end}}
+
+{{/* What a session page does on its stream's events beyond its panes'
+     reloads. A member out of the session (it was deleted, or they left on
+     another tab) is told once, session_gone: the stream closes (sse-close
+     above) and the page goes home, which opens their latest session. */}}
+{{define "session-bells"}}
+<div hidden hx-get="/" hx-trigger="sse:{{sessionGone}}" hx-target="body" hx-push-url="true"></div>
+{{end}}
 
 {{define "topbar"}}
 <header class="topbar">

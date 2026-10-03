@@ -32,6 +32,11 @@ const EventUserMessage = "user_message"
 // at once that its user still is a member.
 const EventMemberLeft = "member_left"
 
+// EventSessionGone is the last event of a session's stream whose user is no
+// member of it (any more), sent to that stream alone and without an ID: it is
+// never published, nor replayed. The page leaves the session on it.
+const EventSessionGone = "session_gone"
+
 // StateEvents change what a session is doing, or a fork's state: its status,
 // its row in the trees, a question, a summary, a report. The server learns
 // from them (Observe): the cached statuses go, the members' trees ring.

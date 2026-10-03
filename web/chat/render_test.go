@@ -107,7 +107,7 @@ func TestRender_Pages(t *testing.T) {
 	}
 	// The streams ring the bell; the polls are a slow fallback.
 	for _, want := range []string{
-		`<div class="columns" sse-connect="/s/fork/stream?last_event_id=e-7">`, // one stream, from where the page stands
+		`<div class="columns" sse-connect="/s/fork/stream?last_event_id=e-7" sse-close="session_gone">`, // one stream, from where the page stands
 		`<aside class="col-tree">`,
 		`hx-trigger="sse:changed, sse:reload, every 60s"`, // the tree
 	} {
@@ -164,6 +164,31 @@ func TestRender_Pages(t *testing.T) {
 		t.Error("login page")
 	}
 	render(t, "notifications", NotificationsPage{Items: []Notification{{ID: 1, HTML: Markdown("done")}}})
+}
+
+// A session page leaves the session when its stream says it is no member
+// of it: the stream closes, the page goes home, with no script of its own.
+// A page without a session does not.
+func TestRender_SessionPageReactsToMembership(t *testing.T) {
+	for _, view := range []string{"thread", "map"} {
+		page := render(t, "page", testPage(view))
+		for _, want := range []string{
+			`sse-connect="/s/fork/stream?last_event_id=" sse-close="session_gone">`,
+			`<div hidden hx-get="/" hx-trigger="sse:session_gone" hx-target="body" hx-push-url="true"></div>`,
+		} {
+			if !strings.Contains(page, want) {
+				t.Errorf("%s page lacks %q", view, want)
+			}
+		}
+	}
+	welcome := testPage("thread")
+	welcome.Node, welcome.Crumbs = nil, nil
+	if out := render(t, "page", welcome); strings.Contains(out, "sse-close") || strings.Contains(out, "sse:session_gone") {
+		t.Error("the welcome page reacts to a session's membership")
+	}
+	if session.EventSessionGone != "session_gone" || session.EventMemberLeft != "member_left" || slices.Contains(session.StateEvents, session.EventSessionGone) {
+		t.Error("the page's events and the session's differ")
+	}
 }
 
 // Forking asks what for, in a form rather than a confirmation; the fork shows

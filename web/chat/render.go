@@ -224,6 +224,7 @@ var tmpl = template.Must(template.New("").Funcs(template.FuncMap{
 	"itemOf":      func(p *Page, it ThreadItem) ItemView { return ItemView{Page: p, Item: it} },
 	"purposeMax":  func() int { return session.MaxPurposeRunes },
 	"reloadOn":    reloadOn,
+	"sessionGone": func() string { return session.EventSessionGone },
 }).ParseFS(templateFS, "templates/*.html"))
 
 // Render writes the named template (a page or a fragment) for data. It

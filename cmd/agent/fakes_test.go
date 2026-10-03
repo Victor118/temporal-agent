@@ -13,7 +13,6 @@ import (
 func (f *routeStore) GetActiveSessionByChannel(context.Context, string, string, string) (*store.Session, error) {
 	return nil, nil
 }
-func (f *routeStore) DeleteSession(context.Context, string) error { return nil }
 func (f *routeStore) GetAgent(_ context.Context, id string) (*store.Agent, error) {
 	if id == "default" {
 		return &store.Agent{ID: "default", Name: "Default"}, nil

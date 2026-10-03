@@ -340,6 +340,9 @@ func (a *api) stream(w http.ResponseWriter, r *http.Request) {
 func stillMember(r *http.Request, sessions *session.Service, sessionID string) func() bool {
 	userID := auth.UserFrom(r.Context()).ID
 	return func() bool {
+		if r.Context().Err() != nil { // the client is gone: the stream ends anyway
+			return true
+		}
 		ok, err := sessions.IsMember(r.Context(), sessionID, userID)
 		if err != nil {
 			log.Printf("stream of session %s: membership check: %v", sessionID, err)
@@ -355,8 +358,9 @@ func stillMember(r *http.Request, sessions *session.Service, sessionID string) f
 // the events it missed, or a reload event when the hub no longer has them.
 //
 // alive, when not nil, is checked at every keep-alive and on every
-// session.EventMemberLeft: once false, the stream ends (a member removed
-// from the session hears no more of it), without that event.
+// session.EventMemberLeft, replayed or live: once false, the stream ends (a
+// member removed from the session hears no more of it), without that event
+// but with a last session.EventSessionGone.
 func relaySSE(w http.ResponseWriter, r *http.Request, hub *sse.Hub, keepAlive time.Duration, alive func() bool, topics ...string) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -373,7 +377,18 @@ func relaySSE(w http.ResponseWriter, r *http.Request, hub *sse.Hub, keepAlive ti
 	if sub.Stale {
 		writeSSE(w, sse.Event{ID: sub.At, SSEEvent: activity.SSEEvent{Type: sse.EventReload, Data: []byte("{}")}})
 	}
+	gone := func() bool {
+		if alive == nil || alive() {
+			return false
+		}
+		writeGone(w)
+		flusher.Flush()
+		return true
+	}
 	for _, event := range sub.Missed {
+		if event.Type == session.EventMemberLeft && gone() {
+			return
+		}
 		writeSSE(w, event)
 	}
 	flusher.Flush()
@@ -387,7 +402,7 @@ func relaySSE(w http.ResponseWriter, r *http.Request, hub *sse.Hub, keepAlive ti
 		case <-ctx.Done():
 			return
 		case <-ping.C:
-			if alive != nil && !alive() {
+			if gone() {
 				return
 			}
 			// A comment line: EventSource ignores it.
@@ -397,7 +412,7 @@ func relaySSE(w http.ResponseWriter, r *http.Request, hub *sse.Hub, keepAlive ti
 			if !ok { // too slow: dropped, the client reconnects and catches up
 				return
 			}
-			if event.Type == session.EventMemberLeft && alive != nil && !alive() {
+			if event.Type == session.EventMemberLeft && gone() {
 				return
 			}
 			writeSSE(w, event)
@@ -418,8 +433,18 @@ func lastEventID(r *http.Request) string {
 	return r.URL.Query().Get("last_event_id")
 }
 
+// writeSSE writes an event, with its ID when it has one: an empty "id:"
+// line would reset the client's last event ID.
 func writeSSE(w io.Writer, event sse.Event) {
-	fmt.Fprintf(w, "id: %s\nevent: %s\ndata: %s\n\n", event.ID, event.Type, event.Data)
+	if event.ID != "" {
+		fmt.Fprintf(w, "id: %s\n", event.ID)
+	}
+	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event.Type, event.Data)
+}
+
+// writeGone tells a stream's user they are no member of its session.
+func writeGone(w io.Writer) {
+	writeSSE(w, sse.Event{SSEEvent: activity.SSEEvent{Type: session.EventSessionGone, Data: []byte("{}")}})
 }
 
 type answerRequest struct {

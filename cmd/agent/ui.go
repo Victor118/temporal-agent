@@ -339,10 +339,26 @@ func (u *ui) treeStream(w http.ResponseWriter, r *http.Request) {
 }
 
 // sessionStream is a session page's stream: its session's events and the
-// user's tree's, while the user is a member.
+// user's tree's, while the user is a member. One who is not (any more) gets
+// session.EventSessionGone, not a 404: EventSource would retry a 404 for
+// ever, and the page would never learn (a page that slept through the
+// session's deletion). Not a member and no such session look the same.
 func (u *ui) sessionStream(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "id")
-	relaySSE(w, r, u.hub, sseKeepAlive, stillMember(r, u.sessions, sessionID), pageTopics(auth.UserFrom(r.Context()), sessionID)...)
+	me := auth.UserFrom(r.Context())
+	ok, err := u.sessions.IsMember(r.Context(), sessionID, me.ID)
+	if err != nil {
+		log.Printf("membership check: %v", err)
+		http.Error(w, "Internal error", http.StatusInternalServerError)
+		return
+	}
+	if !ok {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		writeGone(w)
+		return
+	}
+	relaySSE(w, r, u.hub, sseKeepAlive, stillMember(r, u.sessions, sessionID), pageTopics(me, sessionID)...)
 }
 
 // --- Actions ---
