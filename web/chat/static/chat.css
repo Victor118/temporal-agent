@@ -167,6 +167,10 @@ button, input, textarea, select { font-family: inherit; font-size: inherit; colo
 .notice .txt { font-size: 13px; line-height: 1.5; color: var(--waiting-body); white-space: pre-wrap; }
 .notice form { display: flex; gap: 8px; margin-top: 10px; }
 .notice .btn { border-color: var(--waiting-button); color: var(--waiting-text); }
+.notice.failed { border: 1px solid var(--line); border-left: 2px solid var(--danger); }
+.notice.failed .arrow, .notice.failed .ttl { color: var(--danger); }
+.notice.failed .txt { color: var(--muted); font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
+.notice.failed .when { font-weight: 400; font-size: 11px; color: var(--faint); margin-left: 6px; }
 .working-line { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--working-text); }
 .working-line .dot { background: var(--working); animation: pulse 1.2s ease-in-out infinite; }
 @keyframes pulse { 50% { opacity: .3; } }

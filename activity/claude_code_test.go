@@ -850,6 +850,68 @@ func TestInspectWorkspaceStaysOutOfSubmodules(t *testing.T) {
 	}
 }
 
+// A budget cap the workflow passes can lower the worker's, never raise it or
+// lift it; zero is no cap.
+func TestLowerCap(t *testing.T) {
+	for _, c := range []struct{ worker, asked, want float64 }{
+		{0, 0, 0}, {0, 3, 3}, {2, 0, 2}, {2, 1, 1}, {2, 5, 2}, {2, -1, 2}, {0, -1, 0},
+	} {
+		if got := lowerCap(c.worker, c.asked); got != c.want {
+			t.Errorf("lowerCap(%g, %g) = %g, want %g", c.worker, c.asked, got, c.want)
+		}
+	}
+}
+
+// The model and the budget cap of a run are the worker's: they reach the CLI
+// whatever the workflow asks.
+func TestRunClaudeCode_UsesTheWorkersModelAndCap(t *testing.T) {
+	id := subproctest.Identity(t)
+	if os.Geteuid() == 0 && id == nil {
+		t.Skip("no identity to run as")
+	}
+	bin := filepath.Join(subproctest.Dir(t, nil), "fake-claude")
+	script := `#!/bin/sh
+model=none budget=none
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --model) model=$2 ;;
+    --max-budget-usd) budget=$2 ;;
+  esac
+  shift
+done
+printf '{"type":"result","subtype":"success","is_error":false,"result":"model=%s budget=%s","session_id":"s"}\n' "$model" "$budget"
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a := &ClaudeCodeActivities{
+		AllowedRepos: testRepos, Root: subproctest.Dir(t, nil), RunAs: id, Runner: &claudecode.Runner{Binary: bin},
+		Model: "sonnet", MaxBudgetUSD: 2,
+	}
+	if id != nil {
+		a.Runs = subproc.NewRuns(id)
+	}
+	dir := filepath.Join(a.Root, "run-1")
+	os.Mkdir(dir, 0o755)
+	if id != nil {
+		if err := id.Give(dir); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, c := range []struct {
+		asked float64
+		want  string
+	}{{0, "model=sonnet budget=2"}, {5, "model=sonnet budget=2"}, {0.5, "model=sonnet budget=0.5"}} {
+		res, err := a.RunClaudeCode(context.Background(), RunClaudeCodeInput{Dir: dir, Task: "x", MaxBudgetUSD: c.asked})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Report != c.want {
+			t.Errorf("asked a cap of %g: the CLI got %q, want %q", c.asked, res.Report, c.want)
+		}
+	}
+}
+
 // Each run gets a CLI configuration of its own, seeded from the operator's:
 // a hook one run plants in its settings is never read by the next, and the
 // operator's stay as they were. A renewed login alone comes back.

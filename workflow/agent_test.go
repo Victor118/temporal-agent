@@ -638,6 +638,19 @@ func TestConvertMessages_NamesTheAuthor(t *testing.T) {
 	}
 }
 
+// Why a turn failed is for the members: the model never sees it, or it would
+// answer the error instead of the user.
+func TestConvertMessages_SkipsTurnErrors(t *testing.T) {
+	msgs := convertMessages([]store.Message{
+		{Role: store.RoleUser, Content: `"analyse the repo"`},
+		{Role: store.RoleAssistant, Kind: store.KindTurnError, Content: `"call LLM: credit balance is too low"`},
+		{Role: store.RoleUser, Content: `"try again"`},
+	})
+	if len(msgs) != 2 || string(msgs[1].Content) != `"try again"` {
+		t.Errorf("messages = %+v, want the two user messages alone", msgs)
+	}
+}
+
 // A member wrote while the agent was between a tool call and its result: the
 // model must still see the result right after the call, or the API rejects
 // the conversation. The message comes after the results, and is kept.

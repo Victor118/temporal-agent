@@ -61,6 +61,15 @@
   {{template "fork-action" itemOf $.Page .}}
 </div>
 
+{{else if eq .Kind "error"}}
+<div class="notice failed" id="m{{.ID}}">
+  <div class="arrow">!</div>
+  <div style="flex-grow:1;min-width:0">
+    <div class="ttl">L'agent s'est arrêté sur une erreur <span class="when">{{clock .Time}}</span></div>
+    <div class="txt">{{.Text}}</div>
+  </div>
+</div>
+
 {{else if eq .Kind "question"}}
 <div class="notice waiting">
   <div class="arrow">↑</div>

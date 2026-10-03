@@ -32,14 +32,21 @@ const (
 	analyzePermissionMode = "plan"
 )
 
+// analyzeSystemPrompt tells the run what it is: the CLI otherwise behaves as
+// in an interactive session, and ends a report offering to make the changes
+// or asking what to do next — which no one will answer, and which the agent
+// reading the report repeats to its user as a promise.
+const analyzeSystemPrompt = `This is a one-shot, read-only analysis. Nothing you change is kept: the clone is deleted when you finish, and nothing can be committed or pushed.
+Your final message is a report read by another agent, not by a person, and no one will reply to it. End with the report: do not offer to make changes, to start on fixes, or to continue, and do not ask questions.
+If a command you need is refused, say that it was refused, not that a tool is missing.`
+
 // AnalyzeRepoInput is what the calling agent gets to decide. Everything else —
 // permissions, timeouts, where the clone lives, that it is deleted afterwards —
 // belongs to the workflow.
 type AnalyzeRepoInput struct {
-	Repo  string `json:"repo"`
-	Task  string `json:"task"`
-	Ref   string `json:"ref,omitempty"`
-	Model string `json:"model,omitempty"`
+	Repo string `json:"repo"`
+	Task string `json:"task"`
+	Ref  string `json:"ref,omitempty"`
 }
 
 // ClaudeCodeOutput is what a coding workflow returns. Error carries a run that
@@ -151,9 +158,9 @@ func analyzeRepo(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCodeOutp
 		ccAct.RunClaudeCode,
 		activity.RunClaudeCodeInput{
 			Dir:            prepared.Dir,
-			Task:           input.Task,
-			Model:          input.Model,
-			PermissionMode: analyzePermissionMode,
+			Task:               input.Task,
+			PermissionMode:     analyzePermissionMode,
+			AppendSystemPrompt: analyzeSystemPrompt,
 		},
 	).Get(ctx, &result)
 	if err != nil {

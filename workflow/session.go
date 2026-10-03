@@ -1,13 +1,16 @@
 package workflow
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/victor/temporal-agent/activity"
+	"github.com/victor/temporal-agent/store"
 )
 
 const (
@@ -206,11 +209,17 @@ func processTurn(actCtx, ctx workflow.Context, input SessionWorkflowInput, userM
 	// its transcript. The agent already flushed these messages as it produced
 	// them; writing them again under the same keys is a no-op, and covers the
 	// case where one of its flushes failed.
-	if len(result.NewMessages) > 0 {
+	// A failure is written after them: the members see why the agent stopped,
+	// on every channel and after a reload, not only in a notification.
+	messages := result.NewMessages
+	if !cancelled && result.Error != "" {
+		messages = append(messages, store.Message{Role: store.RoleAssistant, Kind: store.KindTurnError, Content: turnErrorContent(result.Error)})
+	}
+	if len(messages) > 0 {
 		if err := workflow.ExecuteActivity(actCtx, memAct.PersistContext, activity.PersistContextInput{
 			SessionID: input.SessionID,
 			TurnKey:   turnKey,
-			Messages:  result.NewMessages,
+			Messages:  messages,
 		}).Get(ctx, nil); err != nil {
 			return fmt.Errorf("persist context: %w", err)
 		}
@@ -232,4 +241,22 @@ func processTurn(actCtx, ctx workflow.Context, input SessionWorkflowInput, userM
 	}
 
 	return nil
+}
+
+// maxTurnErrorBytes bounds the error kept in the conversation: an API error can
+// carry a whole response body.
+const maxTurnErrorBytes = 2000
+
+// turnErrorContent is the stored content of a KindTurnError message: the error
+// as a JSON string, like any message's text.
+func turnErrorContent(reason string) string {
+	if len(reason) > maxTurnErrorBytes {
+		cut := maxTurnErrorBytes
+		for cut > 0 && !utf8.RuneStart(reason[cut]) {
+			cut--
+		}
+		reason = reason[:cut] + "…"
+	}
+	b, _ := json.Marshal(reason)
+	return string(b)
 }

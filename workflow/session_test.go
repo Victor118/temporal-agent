@@ -2,15 +2,18 @@ package workflow
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	sdkactivity "go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/testsuite"
 	sdkworkflow "go.temporal.io/sdk/workflow"
 
 	"github.com/victor/temporal-agent/activity"
+	"github.com/victor/temporal-agent/store"
 )
 
 // TestSessionWorkflow_IgnoresEmptyMessage checks the backstop: a blank message
@@ -84,6 +87,54 @@ func TestSessionWorkflow_EachTurnAnswersItsAuthor(t *testing.T) {
 			t.Errorf("turn %d: user %q (%q), message %q; want %q (%q), %q",
 				i, got.UserID, got.UserName, got.UserMessage, want.id, want.name, want.text)
 		}
+	}
+}
+
+// A turn that fails is written to the conversation with why it failed, after
+// what it produced: the members see it after a reload and on every channel,
+// not only in a notification a page that reloads its thread from the store
+// never shows.
+func TestSessionWorkflow_RecordsWhyATurnFailed(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+
+	call := store.Message{Role: store.RoleAssistant, ToolCalls: []store.ToolCall{{ID: "t1", Name: "analyze_repo"}}}
+	result := store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "t1", Content: "report"}}
+	env.RegisterWorkflowWithOptions(func(ctx sdkworkflow.Context, in AgentWorkflowInput) (AgentWorkflowOutput, error) {
+		return AgentWorkflowOutput{NewMessages: []store.Message{call, result}, Error: "call LLM: " + strings.Repeat("é", 2000)}, nil
+	}, sdkworkflow.RegisterOptions{Name: "AgentWorkflow"})
+	var persisted []activity.PersistContextInput
+	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.PersistContextInput) error {
+		persisted = append(persisted, in)
+		return nil
+	}, sdkactivity.RegisterOptions{Name: "PersistContext"})
+	var notified []string
+	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.NotifyInput) error {
+		notified = append(notified, string(in.Event.Data))
+		return nil
+	}, sdkactivity.RegisterOptions{Name: "NotifyStep"})
+
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(SignalUserMessage, UserMessage{Text: "analyse", UserID: "victor", Stored: true})
+	}, time.Second)
+	env.ExecuteWorkflow(SessionWorkflow, SessionWorkflowInput{SessionID: "s1", AgentID: "default"})
+
+	if len(persisted) != 1 {
+		t.Fatalf("persisted %d times, want once", len(persisted))
+	}
+	msgs := persisted[0].Messages
+	if len(msgs) != 3 || msgs[0].ToolCalls == nil || msgs[1].ToolResult == nil || msgs[2].Kind != store.KindTurnError {
+		t.Fatalf("persisted %+v, want the call, its result, then the error", msgs)
+	}
+	var reason string
+	if err := json.Unmarshal([]byte(msgs[2].Content), &reason); err != nil || !strings.HasPrefix(reason, "call LLM: é") {
+		t.Errorf("error content %q (%v), want the reason as a JSON string", msgs[2].Content, err)
+	}
+	if len(reason) > maxTurnErrorBytes+len("…") || !utf8.ValidString(reason) {
+		t.Errorf("reason of %d bytes, valid UTF-8 %v: want it cut on a rune, under the bound", len(reason), utf8.ValidString(reason))
+	}
+	if len(notified) == 0 {
+		t.Error("the failure was not notified: the page would not reload its thread")
 	}
 }
 

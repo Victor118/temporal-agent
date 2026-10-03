@@ -89,7 +89,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 		queueMap = make(map[string]string)
 	}
 
-	// LLM calls: longer timeout, retry on transient errors (429, 529, network)
+	// LLM calls: longer timeout, retry on transient errors (408, 429, 5xx, network)
 	// No HeartbeatTimeout — CallLLM is a blocking HTTP call with no opportunity to heartbeat.
 	llmOpts := workflow.ActivityOptions{
 		StartToCloseTimeout: 180 * time.Second,
@@ -526,6 +526,9 @@ func convertMessages(messages []store.Message) []provider.ChatMessage {
 	messages = deferInterleaved(messages)
 	result := make([]provider.ChatMessage, 0, len(messages))
 	for _, msg := range messages {
+		if msg.Kind == store.KindTurnError {
+			continue // for the members: the model is not told about its failures
+		}
 		content := json.RawMessage(msg.Content)
 		if len(content) == 0 {
 			content = nil

@@ -34,7 +34,8 @@ type Message struct {
 	UserID string `json:"user_id,omitempty"`
 	Author string `json:"author,omitempty"`
 	// Kind marks a message the system wrote: KindForkSummary is the summary
-	// a fork starts from. Empty for an ordinary message.
+	// a fork starts from, KindTurnError why a turn failed. Empty for an
+	// ordinary message.
 	Kind       string      `json:"kind,omitempty"`
 	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`
 	ToolResult *ToolResult `json:"tool_result,omitempty"`
@@ -43,6 +44,10 @@ type Message struct {
 // KindForkSummary marks the first message of a fork: the summary of the
 // parent session up to the message the fork started from.
 const KindForkSummary = "fork_summary"
+
+// KindTurnError marks why a turn failed, written after what the turn produced.
+// It is for the session's members: the model never sees it.
+const KindTurnError = "turn_error"
 
 type MessageWithID struct {
 	ID        int64     `json:"id"`

@@ -59,9 +59,9 @@ type ImplementFeatureInput struct {
 	Task  string `json:"task"`
 	Base  string `json:"base,omitempty"`
 	Title string `json:"title,omitempty"`
-	Model string `json:"model,omitempty"`
-	// MaxBudgetUSD stops the run once it has spent this much. Zero means no
-	// cap, which is only reasonable while a human is watching.
+	// MaxBudgetUSD stops the run once it has spent this much. It can only
+	// lower the worker's own cap (CLAUDE_CODE_MAX_BUDGET_USD); zero = that
+	// cap alone.
 	MaxBudgetUSD float64 `json:"max_budget_usd,omitempty"`
 }
 
@@ -134,7 +134,6 @@ func implementFeature(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCod
 		activity.RunClaudeCodeInput{
 			Dir:             prepared.Dir,
 			Task:            input.Task,
-			Model:           input.Model,
 			PermissionMode:  implementPermissionMode,
 			AllowedTools:    implementGitTools,
 			DisallowedTools: implementDeniedTools,

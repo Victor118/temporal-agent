@@ -27,6 +27,14 @@ func NewAnthropicProvider(apiKey, defaultModel string) *AnthropicProvider {
 	}
 }
 
+// transientStatus tells an API error worth retrying — a timeout (408), the
+// rate limit (429), the API failing or overloaded (5xx, 529 included) — from
+// one the same request would get again: a bad request, a refused key, an
+// unknown model, no credit left (400, 401, 403, 404…).
+func transientStatus(code int) bool {
+	return code == http.StatusRequestTimeout || code == http.StatusTooManyRequests || code >= 500
+}
+
 // resolveModel returns the requested model, or the provider default.
 func (p *AnthropicProvider) resolveModel(requested string) (string, error) {
 	if requested != "" {
@@ -161,9 +169,7 @@ func (p *AnthropicProvider) Chat(ctx context.Context, request ChatRequest) (Chat
 
 	if resp.StatusCode != http.StatusOK {
 		err := fmt.Errorf("anthropic API error (status %d): %s", resp.StatusCode, string(respBody))
-		// 429 (rate limit) and 529 (overloaded) are transient — let Temporal retry.
-		// Everything else (400, 401, 402, 403, etc.) is permanent — no point retrying.
-		if resp.StatusCode != 429 && resp.StatusCode != 529 {
+		if !transientStatus(resp.StatusCode) {
 			return ChatResponse{}, &PermanentAPIError{Err: err}
 		}
 		return ChatResponse{}, err

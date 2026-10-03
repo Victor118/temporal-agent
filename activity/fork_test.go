@@ -29,6 +29,7 @@ func TestBuildTranscript(t *testing.T) {
 		{ID: 5, Message: store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{Content: "boom", IsError: true}}},
 		{ID: 6, Message: store.Message{Role: store.RoleAssistant,
 			ToolCalls: []store.ToolCall{{Name: "save_user_memory", Input: json.RawMessage(`{"content":"Alice's secret"}`)}}}},
+		{ID: 7, Message: store.Message{Role: store.RoleAssistant, Kind: store.KindTurnError, Content: text("call LLM: boom")}},
 	}, memoryIsPrivate)
 	if truncated {
 		t.Error("a short conversation reported truncated")
@@ -46,6 +47,9 @@ func TestBuildTranscript(t *testing.T) {
 	// A user's memory is private: the summary may go to another user's fork.
 	if strings.Contains(got, "Alice's secret") {
 		t.Error("the transcript carries a user's memory")
+	}
+	if strings.Contains(got, "call LLM") {
+		t.Error("the transcript carries why a turn failed")
 	}
 	// Tool inputs and results are clipped: they are most of a transcript and
 	// little of what a summary needs.

@@ -126,6 +126,8 @@ func buildTranscript(msgs []store.MessageWithID, private tool.PrivateInputs) (st
 func transcriptEntry(m store.Message, private tool.PrivateInputs) string {
 	text := decodeText(m.Content)
 	switch {
+	case m.Kind == store.KindTurnError:
+		return ""
 	case m.Kind == store.KindForkSummary:
 		// The parent was itself a fork: its starting summary is context too.
 		return "[Summary of an earlier conversation this one continued]\n" + text

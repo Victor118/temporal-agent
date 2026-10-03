@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -63,6 +65,12 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 	// Fail before polling a queue this worker could not serve to the end.
 	if err := checkGitKey(cfg.ClaudeCodeSSHKey); err != nil {
 		return nil, fmt.Errorf("git identity: %w", err)
+	}
+
+	// A cap the operator set and mistyped must not become no cap at all.
+	budget, err := parseBudget(cfg.ClaudeCodeMaxBudgetUSD)
+	if err != nil {
+		return nil, fmt.Errorf("CLAUDE_CODE_MAX_BUDGET_USD: %w", err)
 	}
 
 	runAs, err := subproc.ParseIdentity(cfg.RunAsUID, cfg.RunAsGID)
@@ -123,7 +131,7 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 		w.RegisterActivity(&activity.LLMActivities{Provider: llmProvider})
 		w.RegisterActivity(&activity.ForkActivities{Store: st, LLM: llmProvider, Private: catalog})
 		w.RegisterActivity(&activity.MemoryActivities{Store: st})
-		w.RegisterActivity(&activity.ClaudeCodeActivities{Root: cfg.ClaudeCodeWorkspace, SSHKeyPath: cfg.ClaudeCodeSSHKey, AllowedRepos: cfg.ClaudeCodeRepos, RunAs: runAs, Runs: runs, ClaudeConfigDir: cfg.ClaudeConfigDir})
+		w.RegisterActivity(&activity.ClaudeCodeActivities{Root: cfg.ClaudeCodeWorkspace, SSHKeyPath: cfg.ClaudeCodeSSHKey, AllowedRepos: cfg.ClaudeCodeRepos, RunAs: runAs, Runs: runs, ClaudeConfigDir: cfg.ClaudeConfigDir, Model: cfg.ClaudeCodeModel, MaxBudgetUSD: budget})
 		w.RegisterActivity(&activity.ToolActivities{Registry: registry, Catalog: catalog})
 		w.RegisterActivity(&activity.NotificationActivities{Notifiers: notifiers})
 		w.RegisterActivity(&activity.DeliveryActivities{Web: opts.web, Store: st})
@@ -179,6 +187,15 @@ func buildRegistry(cfg *config.Config, st store.Store, tc client.Client, wc *con
 		if cfg.ClaudeCodeSSHKey != "" {
 			log.Printf("Coding runs use the git identity at %s", cfg.ClaudeCodeSSHKey)
 		}
+		model := cfg.ClaudeCodeModel
+		if model == "" {
+			model = "the CLI's default"
+		}
+		if cfg.ClaudeCodeMaxBudgetUSD == "" {
+			log.Printf("Coding runs use %s, with no budget cap (CLAUDE_CODE_MAX_BUDGET_USD)", model)
+		} else {
+			log.Printf("Coding runs use %s, and stop at $%s each", model, cfg.ClaudeCodeMaxBudgetUSD)
+		}
 		if len(cfg.ClaudeCodeRepos) == 0 {
 			log.Println("CLAUDE_CODE_REPOS is empty: coding runs on this worker refuse every repository")
 		} else {
@@ -188,6 +205,18 @@ func buildRegistry(cfg *config.Config, st store.Store, tc client.Client, wc *con
 
 	registerMCPServers(registry, wc.MCP)
 	return registry
+}
+
+// parseBudget reads a budget cap in dollars; empty = none (0).
+func parseBudget(raw string) (float64, error) {
+	if raw == "" {
+		return 0, nil
+	}
+	v, err := strconv.ParseFloat(raw, 64)
+	if err != nil || !(v > 0) || math.IsInf(v, 0) {
+		return 0, fmt.Errorf("%q is not a positive amount of dollars", raw)
+	}
+	return v, nil
 }
 
 // prepareRunAs gets ready what the user that commands chosen by a model run

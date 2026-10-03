@@ -103,6 +103,10 @@ func TestAnalyzeRepoWorkflow_IsReadOnly(t *testing.T) {
 	if len(a.run.AllowedTools) != 0 {
 		t.Errorf("AllowedTools = %v, want none: an analysis pre-authorizes nothing", a.run.AllowedTools)
 	}
+	// And the run is told: otherwise its report ends offering to fix things.
+	if !strings.Contains(a.run.AppendSystemPrompt, "read-only") {
+		t.Errorf("AppendSystemPrompt = %q, want the run told it is read-only", a.run.AppendSystemPrompt)
+	}
 }
 
 // Whatever happens to the run, the clone must not be left behind: the

@@ -16,6 +16,7 @@ func RegisterClaudeCodeTools(registry *Registry, analyzeWorkflowFunc, implementW
 		Description: "Read a Git repository and answer a question about it, using a coding agent that explores the code on its own. " +
 			"Use it to understand an unfamiliar codebase, locate where something is implemented, review changes, or diagnose a problem. " +
 			"It never modifies the repository: the clone is read-only and is deleted afterwards. " +
+			"It cannot fix what it finds: changing the code is implement_feature's job, if you have that tool. " +
 			"Ask a precise question — the answer comes back as a written report, and the agent cannot ask you for clarification mid-run.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
@@ -31,10 +32,6 @@ func RegisterClaudeCodeTools(registry *Registry, analyzeWorkflowFunc, implementW
 				"ref": {
 					"type": "string",
 					"description": "Branch, tag or commit to analyze. Defaults to the repository's default branch."
-				},
-				"model": {
-					"type": "string",
-					"description": "Optional model override for the coding agent"
 				}
 			},
 			"required": ["repo", "task"]
@@ -71,11 +68,7 @@ func RegisterClaudeCodeTools(registry *Registry, analyzeWorkflowFunc, implementW
 				},
 				"max_budget_usd": {
 					"type": "number",
-					"description": "Stop the run once it has spent this much on API calls. Leave unset for no cap."
-				},
-				"model": {
-					"type": "string",
-					"description": "Optional model override for the coding agent"
+					"description": "Stop the run once it has spent this much on API calls. It can only lower the cap the worker sets; leave unset for that cap."
 				}
 			},
 			"required": ["repo", "task"]

@@ -193,6 +193,7 @@ const (
 	ItemAgent    = "agent"
 	ItemBrief    = "brief"
 	ItemQuestion = "question"
+	ItemError    = "error" // why a turn failed
 )
 
 // ThreadItem is one entry of a thread: a member's message, an agent's answer
@@ -206,7 +207,7 @@ type ThreadItem struct {
 
 	Author Person // human
 	Mine   bool   // human: written by the viewer
-	Text   string // human: plain text; question: the question
+	Text   string // human: plain text; question: the question; error: the reason
 
 	HTML  template.HTML // agent answer or brief, rendered from Markdown
 	Tools []string      // agent: the tools the answer used, in order, once each
@@ -237,6 +238,9 @@ func BuildThread(msgs []store.MessageWithID, viewerID string, forks map[int64][]
 		case m.Kind == store.KindForkSummary:
 			closeAgent()
 			items = append(items, ThreadItem{Kind: ItemBrief, ID: m.ID, Time: m.CreatedAt, HTML: Markdown(text(m.Content))})
+		case m.Kind == store.KindTurnError:
+			closeAgent()
+			items = append(items, ThreadItem{Kind: ItemError, ID: m.ID, Time: m.CreatedAt, Text: text(m.Content)})
 		case m.Role == store.RoleUser:
 			closeAgent()
 			items = append(items, ThreadItem{

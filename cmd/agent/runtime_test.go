@@ -74,3 +74,18 @@ func TestPrepareRunAs_KeepsTheCLIConfiguration(t *testing.T) {
 		}
 	}
 }
+
+// A cap the operator mistyped stops the worker: read as no cap, it would let
+// every run spend without limit.
+func TestParseBudget(t *testing.T) {
+	for raw, want := range map[string]float64{"": 0, "1": 1, "2.5": 2.5} {
+		if got, err := parseBudget(raw); err != nil || got != want {
+			t.Errorf("parseBudget(%q) = %g, %v; want %g", raw, got, err, want)
+		}
+	}
+	for _, raw := range []string{"1$", "abc", "0", "-3", "NaN", "Inf", "1,5"} {
+		if _, err := parseBudget(raw); err == nil {
+			t.Errorf("parseBudget(%q) accepted", raw)
+		}
+	}
+}

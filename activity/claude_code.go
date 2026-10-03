@@ -56,6 +56,11 @@ type ClaudeCodeActivities struct {
 	// repository is the model's choice, and a push goes out with this
 	// worker's identity: what it may reach is the operator's decision.
 	AllowedRepos []string
+	// Model is the model of every run on this worker; empty = the CLI's
+	// default. MaxBudgetUSD caps what one run spends; zero = no cap, and a
+	// workflow may only lower it. Both the operator's, like AllowedRepos.
+	Model        string
+	MaxBudgetUSD float64
 }
 
 // RunCounter is what the coding activities need of subproc.Runs: a run
@@ -380,8 +385,8 @@ type RunClaudeCodeInput struct {
 	Task string `json:"task"`
 
 	// The rest is set by the workflow, never by the calling agent: it is what
-	// keeps a read-only run read-only.
-	Model              string   `json:"model,omitempty"`
+	// keeps a read-only run read-only. The model and the budget cap are the
+	// worker's (ClaudeCodeActivities); MaxBudgetUSD can only lower the cap.
 	PermissionMode     string   `json:"permission_mode,omitempty"`
 	AllowedTools       []string `json:"allowed_tools,omitempty"`
 	DisallowedTools    []string `json:"disallowed_tools,omitempty"`
@@ -434,17 +439,25 @@ func (a *ClaudeCodeActivities) RunClaudeCode(ctx context.Context, in RunClaudeCo
 		ConfigDir:          configDir,
 		Cwd:                in.Dir,
 		Task:               in.Task,
-		Model:              in.Model,
+		Model:              a.Model,
 		PermissionMode:     in.PermissionMode,
 		AllowedTools:       in.AllowedTools,
 		DisallowedTools:    in.DisallowedTools,
 		AppendSystemPrompt: in.AppendSystemPrompt,
-		MaxBudgetUSD:       in.MaxBudgetUSD,
+		MaxBudgetUSD:       lowerCap(a.MaxBudgetUSD, in.MaxBudgetUSD),
 		SessionID:          in.SessionID,
 		// The workspace is deleted at the end of the run, so a transcript on
 		// disk would only outlive the tree it talks about.
 		NoSessionPersistence: true,
 	})
+}
+
+// lowerCap is the smaller of two budget caps, where zero means none.
+func lowerCap(a, b float64) float64 {
+	if a <= 0 || (b > 0 && b < a) {
+		return max(b, 0)
+	}
+	return a
 }
 
 // workspacePath resolves a run's directory and refuses anything that would

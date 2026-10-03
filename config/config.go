@@ -62,6 +62,13 @@ type Config struct {
 	// to, as globs (path.Match syntax: * stops at a slash). Empty = none: the
 	// model picks the repository, and a push uses the worker's identity.
 	ClaudeCodeRepos []string
+	// ClaudeCodeModel is the model of this worker's coding runs (CLI
+	// --model); empty = the CLI's default. ClaudeCodeMaxBudgetUSD caps what
+	// one run may spend (--max-budget-usd), a decimal number of dollars;
+	// empty = no cap. Both are the operator's: a run is paid by the worker's
+	// key, so the model asking for it does not choose its price.
+	ClaudeCodeModel        string
+	ClaudeCodeMaxBudgetUSD string
 	// RunAsUID and RunAsGID are the user commands chosen by a model (exec,
 	// a coding run) run as, in place of the worker's: subproc.Identity. A
 	// worker running as root refuses them without one. Empty GID = the UID.
@@ -154,6 +161,9 @@ func Load() *Config {
 		RunAsUID:            os.Getenv("RUN_AS_UID"),
 		RunAsGID:            os.Getenv("RUN_AS_GID"),
 		ClaudeCodeRepos:     splitList(os.Getenv("CLAUDE_CODE_REPOS")),
+
+		ClaudeCodeModel:        os.Getenv("CLAUDE_CODE_MODEL"),
+		ClaudeCodeMaxBudgetUSD: os.Getenv("CLAUDE_CODE_MAX_BUDGET_USD"),
 
 		SkillsRepo:          os.Getenv("SKILLS_REPO"),
 		SkillsBranch:        envOr("SKILLS_BRANCH", "main"),

@@ -79,6 +79,7 @@ func TestBuildThread(t *testing.T) {
 		{ID: 7, Message: store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "t2"}}},
 		{ID: 8, Message: store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "t3"}}},
 		{ID: 9, Message: store.Message{Role: store.RoleAssistant, Content: j("Done.")}},
+		{ID: 10, Message: store.Message{Role: store.RoleAssistant, Kind: store.KindTurnError, Content: j("call LLM: boom")}},
 	}
 	forks := map[int64][]ForkLink{9: {{SessionID: "f1", Title: "Fork"}}}
 	questions := []Question{{WorkflowID: "s1-tool-ask_user-1-0", Text: "Which one?"}}
@@ -88,7 +89,7 @@ func TestBuildThread(t *testing.T) {
 	for _, it := range items {
 		kinds = append(kinds, it.Kind)
 	}
-	if got := strings.Join(kinds, ","); got != "brief,human,human,agent,question" {
+	if got := strings.Join(kinds, ","); got != "brief,human,human,agent,error,question" {
 		t.Fatalf("kinds %s", got)
 	}
 	if !strings.Contains(string(items[0].HTML), "<strong>brief</strong>") {
@@ -106,8 +107,12 @@ func TestBuildThread(t *testing.T) {
 	if len(agent.Forks) != 1 || agent.Forks[0].SessionID != "f1" {
 		t.Errorf("forks %+v", agent.Forks)
 	}
-	if items[4].WorkflowID != "s1-tool-ask_user-1-0" {
-		t.Errorf("question %+v", items[4])
+	// A failure is an item of its own, not more of the agent's answer.
+	if items[4].Text != "call LLM: boom" || strings.Contains(string(agent.HTML), "boom") {
+		t.Errorf("error %+v", items[4])
+	}
+	if items[5].WorkflowID != "s1-tool-ask_user-1-0" {
+		t.Errorf("question %+v", items[5])
 	}
 }
 
