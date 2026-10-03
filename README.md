@@ -43,7 +43,8 @@ happens to answer has locally.
 - **Pluggable skills** — Skills loaded from Git repositories or local files, assigned to agents for domain-specific expertise
 - **Persistent memory** — PostgreSQL-backed storage for conversation history, key-value memory (user/project/session scoped), and task logs
 - **Real-time streaming** — SSE (Server-Sent Events) hub for live updates to connected clients
-- **Built-in tools** — File system operations, web access, shell execution, user interaction, workflow queries, scheduling, and MCP support
+- **Built-in tools** — File system operations, web access, shell execution, user interaction, workflow queries, scheduling
+- **Remote MCP servers** — A worker declares MCP servers in its `worker.yaml` (Streamable HTTP, or the older HTTP+SSE) and publishes their tools; a server that is down is retried in the background, and tools it adds or removes are picked up within 30 s
 
 ## Architecture
 
@@ -140,7 +141,7 @@ Admins manage the other accounts in the back-office, under `/admin/users`.
 | `DEFAULT_AGENT_ID` | Agent used when a session doesn't name one (default `default`) |
 | `AGENT_DEFINITIONS_FILE` | Agents seed file (default `./agents.yaml`) |
 | `WORKER_CONFIG` | Worker config: tool queue, exposed tools, MCP servers (default `./worker.yaml`, see `worker.example.yaml`) |
-| `MCP_SERVERS` | JSON array of MCP servers, used only without a worker config |
+| `MCP_SERVERS` | JSON array of MCP servers (`name`, `url`, `api_key`, `transport`), used only without a worker config |
 | `RUN_AS_UID`, `RUN_AS_GID` | User (and group, default: the uid) that `exec` and coding runs run as. Set to `10001` (`agent-run`) by both images. Empty on a worker running as root = `exec` and coding runs are refused. Must be a uid of its own: its processes are killed whenever no command runs |
 | `CLAUDE_CODE_REPOS` | Comma-separated globs of the repositories a coding worker (`analyze_repo`, `implement_feature`) may clone and push to, e.g. `git@github.com:acme/*,https://github.com/acme/*` (`*` stops at a `/`). Empty = every repository is refused |
 | `CLAUDE_CODE_MODEL` | Model of a coding worker's runs, e.g. `sonnet`. The calling model cannot choose it. Empty = the CLI's default |

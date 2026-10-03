@@ -41,6 +41,10 @@
 - Workflows (Session/Agent/LLM) sur `WORKFLOW_QUEUE`. Chaque appel d'outil part sur la queue de l'outil (`ExecuteTool` générique, queue fixée dans `ActivityOptions`)
 - Les workers gardent un catalogue en mémoire (agents + tools) rechargé toutes les 30 s ; `ListTools(agentID)` applique l'allowlist
 - Skills chargés depuis un repo Git (prod) ou `./skills` (dev)
+- Client MCP (`tool/mcp*.go`) conforme : handshake `initialize` + `notifications/initialized`, version négociée (demande 2025-11-25, accepte jusqu'à 2024-11-05), `api_key` en Bearer. `transport: http` = Streamable HTTP (réponse JSON ou flux SSE, `Mcp-Session-Id` renvoyé, `MCP-Protocol-Version`, 404 = session perdue → nouvelle session et requête renvoyée une fois, flux repris par `Last-Event-ID`) ; `sse` = l'ancien HTTP+SSE (endpoint sur la même origine). Requêtes du serveur : `ping` répondu, le reste refusé (-32601)
+- `MCPServers` (`tool/mcp_servers.go`) : au démarrage, découverte en parallèle (10 s max), enregistrement dans l'ordre de la config, filtré par les globs `tools`, puis publication de tout le registre. Ensuite `Run` (contexte du runtime, démarré après cette publication) : un serveur injoignable est réessayé (5 s doublés jusqu'à 5 min), chacun est redécouvert toutes les 30 s, une seule goroutine applique et publie les changements. Un serveur tombé garde ses outils (appels en erreur, liste stable) ; seuls les changements d'état sont journalisés
+- Outil retiré par son serveur : désenregistré et supprimé de `tools` par `DeleteTool(nom, queue)`, seulement la ligne de cette queue, jamais un nom qu'une autre source du worker détient. Une publication échouée est retentée à la découverte suivante
+- Registre (`tool.Registry`) sous `RWMutex`, chaque outil avec sa source ; un nom pris (outil intégré, serveur précédent) n'est jamais remplacé : l'outil est refusé et journalisé (`SyncSource`)
 
 ## Store (PostgreSQL)
 

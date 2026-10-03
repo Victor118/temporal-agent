@@ -15,9 +15,15 @@ tools:
   - web_*
   - github_*
 
-# MCP servers loaded by this worker; their tools are named "<name>_<tool>".
+# MCP servers loaded by this worker; their tools are named "<name>_<tool>" and
+# filtered by the globs above. A server down at startup is retried in the
+# background (5 s doubling to 5 min); every server is discovered again every
+# 30 s, so tools it adds or removes are registered or withdrawn. A tool name
+# already taken (a built-in tool, an earlier server) is refused and logged.
 mcp:
   - name: github
     url: http://mcp-github:3001
-    api_key: ""
+    api_key: ""         # sent as "Authorization: Bearer <api_key>"
+    # http (default): Streamable HTTP, MCP 2025-03-26 and later.
+    # sse: the deprecated HTTP+SSE transport (MCP 2024-11-05), url = the SSE endpoint.
     transport: http

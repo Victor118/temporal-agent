@@ -214,8 +214,9 @@ diagnostic.
   d'un worker, y compris sa queue d'outils. Les outils de type workflow
   (`ask_user`) tournent donc sur la queue de l'outil.
 - **`CallLLM` peut encore être routé par type** via `activity_queues`.
-- **Parsing silencieux** de `MCP_SERVERS` (JSON invalide = aucun serveur), pas
-  de handshake MCP `initialize`.
+- **Parsing silencieux** de `MCP_SERVERS` (JSON invalide = aucun serveur).
+- **Outil MCP retiré pendant que le worker est arrêté** : sa ligne reste dans
+  `tools` (seul un retrait vu par un worker en marche la supprime).
 - **Déplacer un outil de queue** juste après l'arrêt de l'ancien worker est
   refusé tant que Temporal voit encore ses pollers (~5 min).
 
