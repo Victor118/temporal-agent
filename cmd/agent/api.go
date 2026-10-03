@@ -441,7 +441,7 @@ func (a *api) reportToParent(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, session.ErrNotParentMember):
 		http.Error(w, err.Error(), http.StatusForbidden)
 	case errors.Is(err, session.ErrNotAFork), errors.Is(err, session.ErrNoParent),
-		errors.Is(err, session.ErrSummaryPending), errors.Is(err, session.ErrNothingToReport):
+		errors.Is(err, session.ErrSummaryPending), errors.Is(err, session.ErrAgentWorking), errors.Is(err, session.ErrNothingToReport):
 		http.Error(w, err.Error(), http.StatusConflict)
 	case err != nil:
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -490,6 +490,7 @@ type reportInfo struct {
 	// member of it).
 	Refused        string `json:"refused,omitempty"`
 	SummaryPending bool   `json:"summary_pending,omitempty"`
+	AgentWorking   bool   `json:"agent_working,omitempty"` // the fork's agent is on a turn: report once it ends
 	Pending        bool   `json:"pending,omitempty"`
 	Failed         bool   `json:"failed,omitempty"`
 	NothingNew     bool   `json:"nothing_new,omitempty"`
@@ -512,16 +513,19 @@ func (a *api) getSessionInfo(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if sess.ForkedAtMessageID != 0 {
-		if info.Summary, err = a.sessions.ForkSummaryState(ctx, sess); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		st, err := a.sessions.ReportState(ctx, sess, me)
+		msgs, err := a.store.LoadMessagesWithID(ctx, sess.SessionID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		info.Report = &reportInfo{CanReport: st.CanReport(), SummaryPending: st.SummaryPending, Pending: st.Pending, Failed: st.Failed, NothingNew: st.NothingNew}
+		info.Summary = a.sessions.ForkSummaryState(ctx, sess.SessionID, msgs)
+		st, err := a.sessions.ReportState(ctx, sess, msgs, me)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		info.Report = &reportInfo{CanReport: st.CanReport(), SummaryPending: st.SummaryPending, AgentWorking: st.AgentWorking,
+			Pending: st.Pending, Failed: st.Failed, NothingNew: st.NothingNew}
 		if st.Refused != nil {
 			info.Report.Refused = st.Refused.Error()
 		}

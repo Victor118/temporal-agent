@@ -56,7 +56,6 @@ type Store interface {
 	ListAgents(ctx context.Context) ([]store.Agent, error)
 
 	AppendMessage(ctx context.Context, sessionID, key string, msg store.Message) (int64, error)
-	LoadMessages(ctx context.Context, sessionID string) ([]store.Message, error)
 	LoadMessagesUpTo(ctx context.Context, sessionID string, lastID int64) ([]store.MessageWithID, error)
 }
 

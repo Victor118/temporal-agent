@@ -11,6 +11,7 @@ import (
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/client"
 
+	"github.com/victor/temporal-agent/activity"
 	"github.com/victor/temporal-agent/store"
 	"github.com/victor/temporal-agent/workflow"
 )
@@ -21,7 +22,12 @@ var (
 	ErrNoParent        = errors.New("the fork's parent session was deleted")
 	ErrNotParentMember = errors.New("only a member of the parent session can report to it")
 	ErrNothingToReport = errors.New("nothing new to report since the last report")
+	ErrAgentWorking    = errors.New("the fork's agent is on a turn: report once it ends")
 )
+
+// reportFailureShown is how long a failed report is shown as such. A click
+// tries it again (and clears it); without one, it does not stay forever.
+const reportFailureShown = 15 * time.Minute
 
 // ReportState is where a fork stands with its reports to its parent, for one
 // of its members.
@@ -30,11 +36,15 @@ type ReportState struct {
 	// ErrNotParentMember); nil when they can.
 	Refused error
 	// Why the report cannot be sent now: the fork's summary is still being
-	// written, a report is, or there is nothing new since the last one.
+	// written, its agent is on a turn (the report would stop before the
+	// turn's end), a report is being written, or there is nothing new since
+	// the last one.
 	SummaryPending bool
+	AgentWorking   bool
 	Pending        bool
 	NothingNew     bool
-	// Failed: the last attempt at this report failed. Another may be made.
+	// Failed: the last attempt at this report failed, less than
+	// reportFailureShown ago. Another may be made.
 	Failed bool
 
 	ParentSessionID string
@@ -45,12 +55,14 @@ type ReportState struct {
 
 // CanReport reports whether the member can send a report now.
 func (r ReportState) CanReport() bool {
-	return r.Refused == nil && !r.SummaryPending && !r.Pending && !r.NothingNew
+	return r.Refused == nil && !r.SummaryPending && !r.AgentWorking && !r.Pending && !r.NothingNew
 }
 
-// ReportState tells where a fork stands with its reports, for me. Not a fork:
-// ErrNotAFork.
-func (s *Service) ReportState(ctx context.Context, fork *store.Session, me *store.User) (ReportState, error) {
+// ReportState tells where a fork stands with its reports, for me. msgs are
+// the fork's messages, all of them, as the caller loaded them. Not a fork:
+// ErrNotAFork. The workflows' states are read as pages show them, a few
+// seconds old at most (shownWorkflow, Statuses).
+func (s *Service) ReportState(ctx context.Context, fork *store.Session, msgs []store.MessageWithID, me *store.User) (ReportState, error) {
 	st := ReportState{ParentSessionID: fork.ParentSessionID, LastReportID: fork.LastReportID, LastReportedAt: fork.LastReportedAt}
 	switch err := s.reportRefusal(ctx, fork, me); {
 	case errors.Is(err, ErrNoParent), errors.Is(err, ErrNotParentMember):
@@ -59,19 +71,17 @@ func (s *Service) ReportState(ctx context.Context, fork *store.Session, me *stor
 	case err != nil:
 		return st, err
 	}
-	msgs, err := s.store.LoadMessagesUpTo(ctx, fork.SessionID, 0)
-	if err != nil {
-		return st, err
-	}
-	st.SummaryPending = s.summaryPending(ctx, fork, msgs)
+	st.SummaryPending = s.ForkSummaryState(ctx, fork.SessionID, msgs) == SummaryPending
+	st.AgentWorking = s.agentWorking(ctx, fork.SessionID)
 	_, _, ok := reportRange(fork, msgs)
 	st.NothingNew = !ok
-	switch s.workflowStatus(ctx, workflow.ReportWorkflowID(fork.SessionID, fork.LastReportedMessageID)) {
+	w := s.shownWorkflow(ctx, workflow.ReportWorkflowID(fork.SessionID, fork.LastReportedMessageID))
+	switch w.status {
 	case enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING:
 		st.Pending = true
 	case enumspb.WORKFLOW_EXECUTION_STATUS_FAILED, enumspb.WORKFLOW_EXECUTION_STATUS_TIMED_OUT,
 		enumspb.WORKFLOW_EXECUTION_STATUS_TERMINATED, enumspb.WORKFLOW_EXECUTION_STATUS_CANCELED:
-		st.Failed = true
+		st.Failed = time.Since(w.closed) < reportFailureShown
 	}
 	return st, nil
 }
@@ -79,7 +89,8 @@ func (s *Service) ReportState(ctx context.Context, fork *store.Session, me *stor
 // ReportToParent starts the report of a fork to its parent, sent by me: a
 // summary of the fork's messages since its last report, posted into the parent
 // as my message. Only a member of both may (the routes check the fork, this
-// the parent); not while the fork's summary is written, nor with nothing new.
+// the parent); not while the fork's summary is written, nor while its agent
+// is on a turn (the report would stop before its end), nor with nothing new.
 //
 // The workflow's ID is the report's (workflow.ReportWorkflowID): while it
 // runs, a second call starts nothing; once it failed, a new call tries again.
@@ -95,8 +106,11 @@ func (s *Service) ReportToParent(ctx context.Context, forkID string, me *store.U
 	if err != nil {
 		return err
 	}
-	if s.summaryPending(ctx, fork, msgs) {
+	if s.ForkSummaryState(ctx, fork.SessionID, msgs) == SummaryPending {
 		return ErrSummaryPending
+	}
+	if s.agentWorking(ctx, fork.SessionID) {
+		return ErrAgentWorking
 	}
 	from, upTo, ok := reportRange(fork, msgs)
 	if !ok {
@@ -147,25 +161,55 @@ func (s *Service) reportRefusal(ctx context.Context, fork *store.Session, me *st
 	return nil
 }
 
-// summaryPending reports whether the fork's summary, its first message, is
-// still being written.
-func (s *Service) summaryPending(ctx context.Context, fork *store.Session, msgs []store.MessageWithID) bool {
-	if len(msgs) > 0 && msgs[0].Kind == store.KindForkSummary {
-		return false
-	}
-	return s.ForkRunning(ctx, fork.SessionID)
+// agentWorking reports whether the fork's agent is on a turn, as the pages
+// show it: the session states are a few seconds old at most, and a turn
+// started meanwhile is cut where it stands (reportRange). The workflow
+// writing the fork's summary shows as working too: it is not a turn.
+func (s *Service) agentWorking(ctx context.Context, forkID string) bool {
+	return s.Statuses(ctx)[forkID] == StatusWorking && !s.ForkRunning(ctx, forkID)
 }
 
 // reportRange is the range of the fork's next report: after its last reported
-// message, up to its last message. False when there is nothing in it to
-// report: no message, or only the summary and failed turns.
+// message, up to its last message. While a turn runs, it stops before the
+// turn's call still waiting for its results (pendingCall): ending between a
+// call and its result, a report would leave the result to the next one, which
+// reads it without its call, as private. False when nothing in the range is
+// reportable (activity.Reportable, the summary's own rule).
 func reportRange(fork *store.Session, msgs []store.MessageWithID) (from, upTo int64, ok bool) {
 	from = fork.LastReportedMessageID
-	for _, m := range msgs {
-		upTo = max(upTo, m.ID)
-		if m.ID > from && m.Kind != store.KindForkSummary && m.Kind != store.KindTurnError {
+	for _, m := range msgs[:pendingCall(msgs)] {
+		upTo = m.ID
+		if m.ID > from && activity.Reportable(m.Message) {
 			ok = true
 		}
 	}
 	return from, upTo, ok
+}
+
+// pendingCall is the index in msgs of the first assistant message of the
+// latest turn with a tool call no result answers yet: the turn is running
+// that call. len(msgs) when there is none. A call left unanswered by an
+// earlier turn is not waited for: that turn is over.
+func pendingCall(msgs []store.MessageWithID) int {
+	latest := ""
+	answered := map[string]bool{}
+	for _, m := range msgs {
+		if turn, ok := store.TurnOf(m.Key); ok {
+			latest = turn
+		}
+		if m.ToolResult != nil {
+			answered[m.ToolResult.ToolCallID] = true
+		}
+	}
+	for i, m := range msgs {
+		if turn, ok := store.TurnOf(m.Key); !ok || turn != latest {
+			continue
+		}
+		for _, tc := range m.ToolCalls {
+			if !answered[tc.ID] {
+				return i
+			}
+		}
+	}
+	return len(msgs)
 }

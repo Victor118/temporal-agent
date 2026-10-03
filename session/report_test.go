@@ -85,6 +85,14 @@ func TestReportToParent_Refusals(t *testing.T) {
 			st.messages = append(st.messages, store.MessageWithID{ID: 4, Message: store.Message{Role: store.RoleAssistant, Kind: store.KindTurnError, Content: `"boom"`}})
 		}, ErrNothingToReport},
 		"only the brief": {func(st *memStore, _ *fakeTemporal) { st.messages = st.messages[:1] }, ErrNothingToReport},
+		// The summary would find nothing in it either (activity.Reportable).
+		"only an empty answer": {func(st *memStore, _ *fakeTemporal) {
+			st.session.LastReportedMessageID = 3
+			st.messages = append(st.messages, store.MessageWithID{ID: 4, Message: store.Message{Role: store.RoleAssistant}})
+		}, ErrNothingToReport},
+		"agent on a turn": {func(_ *memStore, tc *fakeTemporal) {
+			tc.byType = map[string][]string{"AgentWorkflow": {sid + "-turn-1"}}
+		}, ErrAgentWorking},
 	} {
 		t.Run(name, func(t *testing.T) {
 			st, tc := forkStore(), &fakeTemporal{}
@@ -107,42 +115,143 @@ func TestReportState(t *testing.T) {
 
 	st, tc := forkStore(), &fakeTemporal{}
 	st.session.LastReportID, st.session.LastReportedAt = 12, &at
-	got, err := newTest(st, tc).ReportState(ctx, st.session, victor)
+	got, err := newTest(st, tc).ReportState(ctx, st.session, st.messages, victor)
 	if err != nil || !got.CanReport() || got.Pending || got.Failed || got.LastReportID != 12 || got.LastReportedAt != &at || got.ParentSessionID != parentID {
 		t.Errorf("ready: %+v, %v", got, err)
 	}
 
 	tc.running = []string{workflow.ReportWorkflowID(sid, 0)}
-	if got, _ := newTest(st, tc).ReportState(ctx, st.session, victor); !got.Pending || got.CanReport() {
+	if got, _ := newTest(st, tc).ReportState(ctx, st.session, st.messages, victor); !got.Pending || got.CanReport() {
 		t.Errorf("running: %+v", got)
 	}
 
 	tc = &fakeTemporal{closed: map[string]enumspb.WorkflowExecutionStatus{workflow.ReportWorkflowID(sid, 0): enumspb.WORKFLOW_EXECUTION_STATUS_FAILED}}
-	if got, _ := newTest(st, tc).ReportState(ctx, st.session, victor); !got.Failed || !got.CanReport() {
+	if got, _ := newTest(st, tc).ReportState(ctx, st.session, st.messages, victor); !got.Failed || !got.CanReport() {
 		t.Errorf("failed: %+v, want a retry allowed", got)
+	}
+	// A failure is shown for a while, not forever.
+	tc.closedAt = map[string]time.Time{workflow.ReportWorkflowID(sid, 0): time.Now().Add(-reportFailureShown - time.Minute)}
+	if got, _ := newTest(st, tc).ReportState(ctx, st.session, st.messages, victor); got.Failed || !got.CanReport() {
+		t.Errorf("failed long ago: %+v", got)
+	}
+	tc.closedAt = nil
+
+	// The agent on a turn: the report waits for its end. A fork's summary
+	// being written is no turn.
+	working := &fakeTemporal{byType: map[string][]string{"AgentWorkflow": {sid + "-turn-1"}}}
+	if got, _ := newTest(st, working).ReportState(ctx, st.session, st.messages, victor); !got.AgentWorking || got.CanReport() {
+		t.Errorf("agent on a turn: %+v", got)
+	}
+	summarizing := &fakeTemporal{running: []string{workflow.ForkWorkflowID(sid)}}
+	if got, _ := newTest(st, summarizing).ReportState(ctx, st.session, st.messages, victor); got.AgentWorking || !got.CanReport() {
+		t.Errorf("summary workflow finishing: %+v", got)
 	}
 	// Posted: the next report has another ID, and nothing is new yet.
 	st.session.LastReportedMessageID = 3
-	if got, _ := newTest(st, tc).ReportState(ctx, st.session, victor); got.Failed || !got.NothingNew || got.CanReport() {
+	if got, _ := newTest(st, tc).ReportState(ctx, st.session, st.messages, victor); got.Failed || !got.NothingNew || got.CanReport() {
 		t.Errorf("after a report: %+v", got)
 	}
 
 	st = forkStore()
 	st.outsiders = map[string][]string{parentID: {victor.ID}}
-	if got, err := newTest(st, &fakeTemporal{}).ReportState(ctx, st.session, victor); err != nil || !errors.Is(got.Refused, ErrNotParentMember) || got.CanReport() {
+	if got, err := newTest(st, &fakeTemporal{}).ReportState(ctx, st.session, st.messages, victor); err != nil || !errors.Is(got.Refused, ErrNotParentMember) || got.CanReport() {
 		t.Errorf("not a member of the parent: %+v, %v", got, err)
 	}
 	st.session.ParentSessionID = ""
-	if got, _ := newTest(st, &fakeTemporal{}).ReportState(ctx, st.session, victor); !errors.Is(got.Refused, ErrNoParent) {
+	if got, _ := newTest(st, &fakeTemporal{}).ReportState(ctx, st.session, st.messages, victor); !errors.Is(got.Refused, ErrNoParent) {
 		t.Errorf("parent deleted: %+v", got)
 	}
 	st.messages = st.messages[1:]
 	st.session.ParentSessionID = parentID
 	st.outsiders = nil
-	if got, _ := newTest(st, &fakeTemporal{running: []string{workflow.ForkWorkflowID(sid)}}).ReportState(ctx, st.session, victor); !got.SummaryPending || got.CanReport() {
+	if got, _ := newTest(st, &fakeTemporal{running: []string{workflow.ForkWorkflowID(sid)}}).ReportState(ctx, st.session, st.messages, victor); !got.SummaryPending || got.CanReport() {
 		t.Errorf("brief pending: %+v", got)
 	}
-	if _, err := newTest(st, &fakeTemporal{}).ReportState(ctx, &store.Session{SessionID: parentID}, victor); !errors.Is(err, ErrNotAFork) {
+	if _, err := newTest(st, &fakeTemporal{}).ReportState(ctx, &store.Session{SessionID: parentID}, nil, victor); !errors.Is(err, ErrNotAFork) {
 		t.Errorf("not a fork: %v", err)
+	}
+}
+
+// A report never ends between a tool call and its result: while the latest
+// turn waits on a call, the range stops before it, and what was written after
+// it (a member's message) waits for the next report. A call an earlier turn
+// left unanswered does not hold reports back.
+func TestReportToParent_StopsBeforeAPendingToolCall(t *testing.T) {
+	call := func(id int64, key string, calls ...string) store.MessageWithID {
+		m := store.MessageWithID{ID: id, Key: key, Message: store.Message{Role: store.RoleAssistant}}
+		for _, c := range calls {
+			m.ToolCalls = append(m.ToolCalls, store.ToolCall{ID: c, Name: "web_fetch"})
+		}
+		return m
+	}
+	result := func(id int64, key, callID string) store.MessageWithID {
+		return store.MessageWithID{ID: id, Key: key, Message: store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: callID, Content: "page"}}}
+	}
+	human := func(id int64, text string) store.MessageWithID {
+		return store.MessageWithID{ID: id, Key: store.HumanMessageKey(text), Message: store.Message{Role: store.RoleUser, Content: `"` + text + `"`}}
+	}
+	upTo := func(st *memStore) (int64, error) {
+		tc := &fakeTemporal{}
+		if err := newTest(st, tc).ReportToParent(context.Background(), sid, victor); err != nil {
+			return 0, err
+		}
+		return tc.inputs[0].(workflow.ReportToParentInput).UpTo, nil
+	}
+
+	st := forkStore()
+	st.messages = append(st.messages,
+		human(4, "fetch the spec"),
+		call(5, "t2.0:0", "c1", "c2"),
+		result(6, "t2.0:1", "c1"),
+		human(7, "and the changelog"), // a member writes during the turn
+	)
+	if got, err := upTo(st); err != nil || got != 4 {
+		t.Errorf("turn waiting on c2: up to %d, %v; want 4", got, err)
+	}
+	// Nothing before the call since the last report: nothing to report yet.
+	st.session.LastReportedMessageID = 4
+	if _, err := upTo(st); !errors.Is(err, ErrNothingToReport) {
+		t.Errorf("only the pending call since the last report: %v", err)
+	}
+	st.session.LastReportedMessageID = 0
+
+	// The result is in: the whole turn, and the message after it.
+	st.messages = append(st.messages, result(8, "t2.0:2", "c2"))
+	if got, err := upTo(st); err != nil || got != 8 {
+		t.Errorf("turn answered: up to %d, %v; want 8", got, err)
+	}
+
+	// An earlier turn left c0 unanswered: it is over, nothing waits on it.
+	st = forkStore()
+	st.messages = append(st.messages,
+		call(4, "t1.0:0", "c0"),
+		human(5, "go on"),
+		store.MessageWithID{ID: 6, Key: "t2.0:0", Message: store.Message{Role: store.RoleAssistant, Content: `"done"`}},
+	)
+	if got, err := upTo(st); err != nil || got != 6 {
+		t.Errorf("an old unanswered call: up to %d, %v; want 6", got, err)
+	}
+}
+
+// A page reads the fork's workflows once per few seconds, like the session
+// states; a report started drops them, and the next page sees it running.
+func TestReportState_WorkflowStatesShared(t *testing.T) {
+	ctx := context.Background()
+	st, tc := forkStore(), &fakeTemporal{}
+	s := newTest(st, tc)
+	if _, err := s.ReportState(ctx, st.session, st.messages, victor); err != nil {
+		t.Fatal(err)
+	}
+	read := tc.describes
+	if _, err := s.ReportState(ctx, st.session, st.messages, victor); err != nil || tc.describes != read {
+		t.Errorf("second render: %d describes, want %d; %v", tc.describes, read, err)
+	}
+
+	if err := s.ReportToParent(ctx, sid, victor); err != nil {
+		t.Fatal(err)
+	}
+	tc.running = []string{workflow.ReportWorkflowID(sid, 0)}
+	if got, _ := s.ReportState(ctx, st.session, st.messages, victor); !got.Pending {
+		t.Errorf("after the click: %+v, want the report running", got)
 	}
 }

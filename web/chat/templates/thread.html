@@ -71,7 +71,7 @@
     <div class="msg-head"><span class="who">⑂ Rapport du fork « {{.Report.Title}} »</span><span class="agent-meta">— par {{.Author.Name}}</span><span class="when">{{clock .Time}}</span></div>
     <div class="agent-card report-card">
       <div class="prose">{{.HTML}}</div>
-      <div class="tools">{{if .Report.Accessible}}<a href="/s/{{.Report.SessionID}}">Ouvrir le fork</a>{{else}}<span class="note">Fork supprimé, ou dont tu n'es pas membre</span>{{end}}</div>
+      <div class="tools">{{if .Report.Accessible}}<a href="/s/{{.Report.SessionID}}">Ouvrir le fork</a>{{else}}<span class="note">Fork inaccessible</span>{{end}}</div>
     </div>
     {{template "forks" .}}
   </div>
@@ -123,7 +123,7 @@
       <label for="fork-purpose-m{{.Item.ID}}">Pour quoi faire ?</label>
       <input class="input" id="fork-purpose-m{{.Item.ID}}" name="purpose" maxlength="{{purposeMax}}" autocomplete="off"
              placeholder="Optionnel : le but de ce fil, il oriente son brief">
-      <div class="note">Le fork part d'un résumé de la conversation jusqu'ici, centré sur ce but.</div>
+      <div class="note">Ouvre une nouvelle session dont tu seras le seul membre, partie d'un résumé de la conversation jusqu'à ce message, centré sur ce but s'il y en a un. Ce fil-ci ne change pas.</div>
       <button class="btn primary" type="submit">Forker</button>
     </form>
   </details>
@@ -150,7 +150,7 @@
             <label for="fork-purpose-last">Pour quoi faire ?</label>
             <input class="input" id="fork-purpose-last" name="purpose" form="fork-last" maxlength="{{purposeMax}}" autocomplete="off"
                    placeholder="Optionnel : le but de ce fil, il oriente son brief">
-            <div class="note">Le fork part d'un résumé de toute la conversation, centré sur ce but.</div>
+            <div class="note">Ouvre une nouvelle session dont tu seras le seul membre, partie d'un résumé de toute la conversation, centré sur ce but s'il y en a un. Ce fil-ci ne change pas.</div>
             <button class="btn primary" type="submit" form="fork-last">Forker depuis le dernier message</button>
           </div>
         </details>

@@ -93,7 +93,11 @@ func (s *Service) Deliver(ctx context.Context, sess *store.Session, author *stor
 		return false, ErrEmptyMessage
 	}
 	if sess.ForkedAtMessageID != 0 {
-		if state, err := s.ForkSummaryState(ctx, sess); err == nil && state == SummaryPending {
+		msgs, err := s.store.LoadMessagesUpTo(ctx, sess.SessionID, 0)
+		if err != nil {
+			return false, err
+		}
+		if s.ForkSummaryState(ctx, sess.SessionID, msgs) == SummaryPending {
 			return false, ErrSummaryPending
 		}
 	}

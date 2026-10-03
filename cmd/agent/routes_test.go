@@ -39,6 +39,8 @@ type routeStore struct {
 	// Other sessions than s1, with their members: a fork's parent.
 	others       map[string]store.Session
 	otherMembers map[string][]string
+	// loads counts the loads of each session's conversation.
+	loads map[string]int
 }
 
 func (f *routeStore) user(match func(store.User) bool) *store.User {
@@ -86,9 +88,13 @@ func (f *routeStore) IsSessionMember(_ context.Context, sessionID, userID string
 	return false, nil
 }
 
-func (f *routeStore) ListSessionMembers(context.Context, string) ([]store.SessionMember, error) {
+func (f *routeStore) ListSessionMembers(_ context.Context, sessionID string) ([]store.SessionMember, error) {
 	var out []store.SessionMember
-	for _, id := range f.members {
+	members := f.members
+	if sessionID != f.session.SessionID {
+		members = f.otherMembers[sessionID]
+	}
+	for _, id := range members {
 		u := f.user(func(u store.User) bool { return u.ID == id })
 		out = append(out, store.SessionMember{UserID: id, Email: u.Email})
 	}
@@ -283,6 +289,7 @@ func (f *fakeTemporal) DescribeWorkflowExecution(context.Context, string, string
 }
 
 func (f *routeStore) LoadMessagesUpTo(_ context.Context, sessionID string, lastID int64) ([]store.MessageWithID, error) {
+	f.countLoad(sessionID)
 	var out []store.MessageWithID
 	for _, m := range f.messages[sessionID] {
 		if lastID == 0 || m.ID <= lastID {
@@ -290,6 +297,13 @@ func (f *routeStore) LoadMessagesUpTo(_ context.Context, sessionID string, lastI
 		}
 	}
 	return out, nil
+}
+
+func (f *routeStore) countLoad(sessionID string) {
+	if f.loads == nil {
+		f.loads = map[string]int{}
+	}
+	f.loads[sessionID]++
 }
 
 func (f *routeStore) LoadMessages(_ context.Context, sessionID string) ([]store.Message, error) {
@@ -630,23 +644,45 @@ func TestRoutes_ReportConflicts(t *testing.T) {
 // The interface's button answers with the report section: started, or why
 // not; the rail shows it in a fork.
 func TestUI_ReportToParent(t *testing.T) {
-	h, _, tc := newReportTest(t)
+	h, st, tc := newReportTest(t)
 	bob, alice := logIn(t, h, "bob@example.com"), logIn(t, h, "alice@example.com")
 
 	w := form(t, h, "/s/s1/report", url.Values{}, bob)
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `<section id="report"`) || len(tc.started) != 1 {
 		t.Errorf("bob: %d %s, started %v", w.Code, w.Body, tc.started)
 	}
+	// The section says why alice cannot, once: the refusal is its reason.
 	w = form(t, h, "/s/s1/report", url.Values{}, alice)
-	if !strings.Contains(w.Body.String(), "Rapport impossible depuis cette session.") || strings.Contains(w.Body.String(), "<button") || len(tc.started) != 1 {
+	if body := w.Body.String(); strings.Count(body, "tu n&#39;en es pas membre") != 1 || strings.Contains(body, "Rapport impossible") ||
+		strings.Contains(body, "<button") || len(tc.started) != 1 {
 		t.Errorf("alice: %d %s", w.Code, w.Body)
 	}
 
+	// The button asks first, naming where the report goes and to how many
+	// readers; what it does is written under it, not in a tooltip.
 	req := httptest.NewRequest(http.MethodGet, "/s/s1", nil)
 	req.AddCookie(bob)
 	page := httptest.NewRecorder()
+	st.loads = nil
 	h.ServeHTTP(page, req)
-	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), "⑂ Rapporter au parent") {
-		t.Errorf("fork page: %d", page.Code)
+	body := page.Body.String()
+	if st.loads["s1"] != 1 {
+		t.Errorf("the fork page loaded its conversation %d times, want once", st.loads["s1"])
+	}
+	if page.Code != http.StatusOK || !strings.Contains(body, "⑂ Rapporter au parent") ||
+		!strings.Contains(body, `hx-confirm="Poster dans « Plan » (1 membre) un résumé de ce fork, signé de ton nom ?"`) ||
+		!strings.Contains(body, "signé de ton nom : ses membres le liront, même ceux qui ne sont pas dans ce fork.") {
+		t.Errorf("fork page: %d %s", page.Code, body)
+	}
+}
+
+// A session that is no fork has no report section; a post there gets one
+// saying why, rather than an empty answer.
+func TestUI_ReportFromANonFork(t *testing.T) {
+	h, _, tc := newForkTest(t)
+	w := form(t, h, "/s/s1/report", url.Values{}, logIn(t, h, "bob@example.com"))
+	if body := w.Body.String(); w.Code != http.StatusOK || !strings.Contains(body, `<section id="report"`) ||
+		!strings.Contains(body, "pas un fork") || strings.Contains(body, "<button") || len(tc.started) != 0 {
+		t.Errorf("%d %s, started %v", w.Code, body, tc.started)
 	}
 }

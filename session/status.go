@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/workflowservice/v1"
 )
 
@@ -69,6 +70,17 @@ type statusCache struct {
 	// gen moves on every invalidation: a load started before one must not
 	// store states that predate the action.
 	gen uint64
+	// workflows are single workflows' states, by ID, kept as long as the
+	// session states and dropped with them: the fork pages read them on
+	// every refresh (its summary's workflow, its report's).
+	workflows map[string]workflowState
+}
+
+// workflowState is where a workflow's latest run stands.
+type workflowState struct {
+	status enumspb.WorkflowExecutionStatus // unspecified: Temporal knows of none, or cannot tell
+	closed time.Time                       // when it ended; zero while it runs
+	at     time.Time                       // when it was read
 }
 
 // get returns the cached states, reloading them when they are older than
@@ -119,6 +131,38 @@ func (c *statusCache) refresh(gen uint64, done chan struct{}, load func(context.
 	close(done)
 }
 
+// workflow returns a workflow's state, read by describe at most once per
+// statusesTTL. Unlike the session states, each request reads a stale one
+// itself: one Describe, not four visibility queries.
+func (c *statusCache) workflow(ctx context.Context, id string, describe func(context.Context, string) workflowState) workflowState {
+	c.mu.Lock()
+	if w, ok := c.workflows[id]; ok && time.Since(w.at) < statusesTTL {
+		c.mu.Unlock()
+		return w
+	}
+	gen := c.gen
+	c.mu.Unlock()
+
+	at := time.Now()
+	w := describe(ctx, id)
+	w.at = at
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.gen == gen { // not read before an action that changed it
+		for k, old := range c.workflows {
+			if time.Since(old.at) >= statusesTTL {
+				delete(c.workflows, k)
+			}
+		}
+		if c.workflows == nil {
+			c.workflows = map[string]workflowState{}
+		}
+		c.workflows[id] = w
+	}
+	return w
+}
+
 // invalidate drops the cached states: after an action that changes them, the
 // page it renders must not show the state from before — neither the cached
 // one nor one a load already running read before the action.
@@ -126,6 +170,7 @@ func (c *statusCache) invalidate() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.value = nil
+	c.workflows = nil
 	c.gen++
 	// A running load now stores nothing; the next request starts its own.
 	c.loading = nil

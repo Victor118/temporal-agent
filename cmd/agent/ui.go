@@ -174,21 +174,30 @@ func (u *ui) buildPage(ctx context.Context, me *store.User, sessionID, view stri
 	}
 	directory.Session = p.Agent
 
+	// The conversation is loaded once: the thread shows it, and a fork's
+	// states (its summary, its report) are read from it.
+	var msgs []store.MessageWithID
+	if view != "map" || sess.ForkedAtMessageID != 0 {
+		if msgs, err = u.store.LoadMessagesWithID(ctx, sessionID); err != nil {
+			return nil, err
+		}
+	}
 	if sess.ParentSessionID != "" {
 		p.Parent = &chat.ParentInfo{MessageID: sess.ForkedAtMessageID}
 		if ok, _ := u.store.IsSessionMember(ctx, sess.ParentSessionID, me.ID); ok {
 			if parent, _ := u.store.GetSession(ctx, sess.ParentSessionID); parent != nil {
 				p.Parent.Accessible, p.Parent.SessionID, p.Parent.Title = true, parent.SessionID, parent.Title
+				// Who will read a report: the report button names them.
+				if members, err := u.store.ListSessionMembers(ctx, parent.SessionID); err == nil {
+					p.Parent.Members = len(members)
+				}
 			}
 		}
 	}
 	if sess.ForkedAtMessageID != 0 {
-		state, err := u.sessions.ForkSummaryState(ctx, &sess)
-		if err != nil {
-			return nil, err
-		}
+		state := u.sessions.ForkSummaryState(ctx, sessionID, msgs)
 		p.SummaryPending, p.SummaryFailed = state == session.SummaryPending, state == session.SummaryFailed
-		report, err := u.sessions.ReportState(ctx, &sess, me)
+		report, err := u.sessions.ReportState(ctx, &sess, msgs, me)
 		if err != nil {
 			return nil, err
 		}
@@ -201,10 +210,6 @@ func (u *ui) buildPage(ctx context.Context, me *store.User, sessionID, view stri
 		return p, nil
 	}
 
-	msgs, err := u.store.LoadMessagesWithID(ctx, sessionID)
-	if err != nil {
-		return nil, err
-	}
 	forks, err := u.store.ListForks(ctx, sessionID, me.ID)
 	if err != nil {
 		return nil, err
@@ -367,6 +372,10 @@ func (u *ui) reportFragment(w http.ResponseWriter, r *http.Request) {
 
 // reportForm starts the fork's report to its parent, and answers with the
 // report section: running, or why it did not start.
+//
+// A refusal the section already explains (its Reason, read again after the
+// click) is not said twice; one it does not, because the state changed in
+// between or the start failed, is.
 func (u *ui) reportForm(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "id")
 	var msg string
@@ -376,6 +385,8 @@ func (u *ui) reportForm(w http.ResponseWriter, r *http.Request) {
 		msg = "Rien de nouveau à rapporter."
 	case errors.Is(err, session.ErrSummaryPending):
 		msg = "Le brief du fork est en cours d'écriture : patiente un instant."
+	case errors.Is(err, session.ErrAgentWorking):
+		msg = "L'agent du fork travaille : rapporte à la fin de son tour."
 	case errors.Is(err, session.ErrNotParentMember), errors.Is(err, session.ErrNoParent), errors.Is(err, session.ErrNotAFork):
 		msg = "Rapport impossible depuis cette session."
 	default:
@@ -383,7 +394,10 @@ func (u *ui) reportForm(w http.ResponseWriter, r *http.Request) {
 		msg = "Le rapport n'a pas pu démarrer."
 	}
 	u.renderPage(w, r, sessionID, "thread", "report", func(p *chat.Page) {
-		if p.Report != nil {
+		if p.Report == nil { // not a fork: the section says so rather than vanish
+			p.Report = &chat.ReportView{ReportState: session.ReportState{Refused: session.ErrNotAFork}}
+		}
+		if p.Report.Reason() == "" {
 			p.Report.Error = msg
 		}
 	})

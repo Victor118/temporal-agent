@@ -45,14 +45,31 @@ func (s *Service) isWorkflowRunning(ctx context.Context, workflowID string) bool
 	return s.workflowStatus(ctx, workflowID) == enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING
 }
 
-// workflowStatus is the status of a workflow's latest run; unspecified when
-// Temporal knows of none, or cannot tell.
+// workflowStatus is the status of a workflow's latest run, as Temporal has
+// it now; unspecified when it knows of none, or cannot tell.
 func (s *Service) workflowStatus(ctx context.Context, workflowID string) enumspb.WorkflowExecutionStatus {
+	return s.describeWorkflow(ctx, workflowID).status
+}
+
+// describeWorkflow reads where a workflow's latest run stands.
+func (s *Service) describeWorkflow(ctx context.Context, workflowID string) workflowState {
 	desc, err := s.temporal.DescribeWorkflowExecution(ctx, workflowID, "")
 	if err != nil || desc.WorkflowExecutionInfo == nil {
-		return enumspb.WORKFLOW_EXECUTION_STATUS_UNSPECIFIED
+		return workflowState{status: enumspb.WORKFLOW_EXECUTION_STATUS_UNSPECIFIED}
 	}
-	return desc.WorkflowExecutionInfo.Status
+	info := desc.WorkflowExecutionInfo
+	w := workflowState{status: info.Status}
+	if info.CloseTime != nil {
+		w.closed = info.CloseTime.AsTime()
+	}
+	return w
+}
+
+// shownWorkflow is where a workflow stands, for a page: read at most once per
+// statusesTTL, like the session states, and dropped with them after an
+// action. An action that needs the state now reads workflowStatus.
+func (s *Service) shownWorkflow(ctx context.Context, workflowID string) workflowState {
+	return s.statuses.workflow(ctx, workflowID, s.describeWorkflow)
 }
 
 // activeWorkflowID returns the ID of the session's running workflow, or "":

@@ -27,6 +27,7 @@ func (f *routeStore) ListSessionStats(context.Context, string) (map[string]store
 	return map[string]store.SessionStats{}, nil
 }
 func (f *routeStore) LoadMessagesWithID(_ context.Context, sessionID string) ([]store.MessageWithID, error) {
+	f.countLoad(sessionID)
 	return f.messages[sessionID], nil
 }
 func (f *routeStore) DeleteMessage(context.Context, string, int64) error    { return nil }

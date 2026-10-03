@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
+	"time"
 
 	commonpb "go.temporal.io/api/common/v1"
 	enumspb "go.temporal.io/api/enums/v1"
@@ -11,6 +13,7 @@ import (
 	"go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/converter"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/victor/temporal-agent/activity"
 	"github.com/victor/temporal-agent/store"
@@ -72,13 +75,6 @@ func (m *memStore) AppendMessage(_ context.Context, _, _ string, msg store.Messa
 	m.appended = append(m.appended, msg)
 	return int64(len(m.appended)), nil
 }
-func (m *memStore) LoadMessages(context.Context, string) ([]store.Message, error) {
-	var out []store.Message
-	for _, msg := range m.messages {
-		out = append(out, msg.Message)
-	}
-	return out, nil
-}
 func (m *memStore) LoadMessagesUpTo(context.Context, string, int64) ([]store.MessageWithID, error) {
 	return m.messages, nil
 }
@@ -88,7 +84,10 @@ func (m *memStore) LoadMessagesUpTo(context.Context, string, int64) ([]store.Mes
 // running, and answers a query with states, if set.
 type fakeTemporal struct {
 	running      []string                                   // workflow IDs the visibility queries return
+	byType       map[string][]string                        // set: what a query naming a workflow type returns instead
 	closed       map[string]enumspb.WorkflowExecutionStatus // how the workflows not running ended
+	closedAt     map[string]time.Time                       // when; now if not set
+	describes    int                                        // DescribeWorkflowExecution calls
 	options      []client.StartWorkflowOptions              // of each workflow started
 	lists        []string                                   // the queries
 	signals      []string                                   // workflow IDs signalled
@@ -142,8 +141,15 @@ func (f *fakeTemporal) QueryWorkflow(_ context.Context, id, _, _ string, _ ...in
 	return nil, errors.New("not running")
 }
 func (f *fakeTemporal) DescribeWorkflowExecution(_ context.Context, id, _ string) (*workflowservice.DescribeWorkflowExecutionResponse, error) {
+	f.describes++
 	if status, ok := f.closed[id]; ok {
-		return &workflowservice.DescribeWorkflowExecutionResponse{WorkflowExecutionInfo: &workflowpb.WorkflowExecutionInfo{Status: status}}, nil
+		at, ok := f.closedAt[id]
+		if !ok {
+			at = time.Now()
+		}
+		return &workflowservice.DescribeWorkflowExecutionResponse{WorkflowExecutionInfo: &workflowpb.WorkflowExecutionInfo{
+			Status: status, CloseTime: timestamppb.New(at),
+		}}, nil
 	}
 	if !slices.Contains(f.running, id) {
 		return nil, errors.New("not running")
@@ -155,7 +161,16 @@ func (f *fakeTemporal) DescribeWorkflowExecution(_ context.Context, id, _ string
 func (f *fakeTemporal) ListWorkflow(_ context.Context, req *workflowservice.ListWorkflowExecutionsRequest) (*workflowservice.ListWorkflowExecutionsResponse, error) {
 	f.lists = append(f.lists, req.Query)
 	resp := &workflowservice.ListWorkflowExecutionsResponse{}
-	for _, id := range f.running {
+	ids := f.running
+	if f.byType != nil {
+		ids = nil
+		for workflowType, of := range f.byType {
+			if strings.Contains(req.Query, "'"+workflowType+"'") {
+				ids = append(ids, of...)
+			}
+		}
+	}
+	for _, id := range ids {
 		resp.Executions = append(resp.Executions, &workflowpb.WorkflowExecutionInfo{Execution: &commonpb.WorkflowExecution{WorkflowId: id}})
 	}
 	return resp, nil

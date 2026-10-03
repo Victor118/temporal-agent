@@ -73,6 +73,21 @@ type Page struct {
 // interface then tells how.
 func (p Page) SeveralAgents() bool { return len(p.Agents) > 1 }
 
+// ReportConfirm is what the report button asks before it posts: where the
+// report goes, to how many readers, under whose name. The fork's members may
+// not be the parent's.
+func (p Page) ReportConfirm() string {
+	where := "la session parente"
+	if p.Parent != nil && p.Parent.Accessible {
+		title := p.Parent.Title
+		if title == "" {
+			title = "Session sans titre"
+		}
+		where = "« " + title + " » (" + pluralize(p.Parent.Members, "membre") + ")"
+	}
+	return "Poster dans " + where + " un résumé de ce fork, signé de ton nom ?"
+}
+
 // Member is a session member, for the rail.
 type Member struct {
 	Person
@@ -92,6 +107,7 @@ type ParentInfo struct {
 	SessionID  string
 	Title      string
 	Accessible bool // the viewer is a member of the parent
+	Members    int  // how many members it has, when Accessible
 	MessageID  int64
 }
 
@@ -108,12 +124,16 @@ func (r ReportView) Reason() string {
 		return "La session parente a été supprimée : ce fork n'a plus à qui rapporter."
 	case errors.Is(r.Refused, session.ErrNotParentMember):
 		return "Seul un membre de la session parente peut y rapporter, et tu n'en es pas membre."
+	case errors.Is(r.Refused, session.ErrNotAFork):
+		return "Cette session n'est pas un fork : elle n'a pas de session parente à qui rapporter."
 	case r.Refused != nil:
 		return "Rapport impossible."
 	case r.Pending:
 		return "Le rapport s'écrit. Il arrivera dans la session parente comme ton message, sans solliciter d'agent."
 	case r.SummaryPending:
 		return "Le brief du fork est en cours d'écriture."
+	case r.AgentWorking:
+		return "L'agent du fork travaille : le rapport attend la fin de son tour, pour le couvrir en entier."
 	case r.NothingNew && r.LastReportedAt != nil:
 		return "Rien de nouveau depuis le dernier rapport."
 	case r.NothingNew:

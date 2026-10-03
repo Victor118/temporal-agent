@@ -8,6 +8,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/google/uuid"
+	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/client"
 
 	"github.com/victor/temporal-agent/store"
@@ -109,22 +110,20 @@ const (
 )
 
 // ForkSummaryState tells where a fork's summary stands: written, still being
-// written, or failed.
-func (s *Service) ForkSummaryState(ctx context.Context, sess *store.Session) (SummaryState, error) {
-	msgs, err := s.store.LoadMessages(ctx, sess.SessionID)
-	if err != nil {
-		return "", err
-	}
+// written, or failed. msgs are the fork's messages, as the caller loaded them
+// (the first one is enough): the summary is the first.
+func (s *Service) ForkSummaryState(ctx context.Context, forkID string, msgs []store.MessageWithID) SummaryState {
 	if len(msgs) > 0 && msgs[0].Kind == store.KindForkSummary {
-		return SummaryReady, nil
+		return SummaryReady
 	}
-	if s.ForkRunning(ctx, sess.SessionID) {
-		return SummaryPending, nil
+	if s.ForkRunning(ctx, forkID) {
+		return SummaryPending
 	}
-	return SummaryFailed, nil
+	return SummaryFailed
 }
 
-// ForkRunning reports whether the workflow writing a fork's summary runs.
+// ForkRunning reports whether the workflow writing a fork's summary runs, as
+// pages show it (shownWorkflow).
 func (s *Service) ForkRunning(ctx context.Context, sessionID string) bool {
-	return s.isWorkflowRunning(ctx, workflow.ForkWorkflowID(sessionID))
+	return s.shownWorkflow(ctx, workflow.ForkWorkflowID(sessionID)).status == enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING
 }

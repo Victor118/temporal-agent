@@ -188,6 +188,16 @@ func TestRender_ForkReport(t *testing.T) {
 	if strings.Contains(out, "<b>x</b>") {
 		t.Error("the report's HTML reached the page")
 	}
+
+	// A fork the viewer cannot open: deleted, or not theirs, which the
+	// thread does not tell apart.
+	p.Thread = BuildThread([]store.MessageWithID{
+		{ID: 12, Message: store.Message{Role: store.RoleUser, Kind: store.KindForkReport, Content: j("fait"), UserID: "u2", Author: "Bob",
+			Fork: &store.ForkRef{SessionID: "f2", Title: "Export", UpToMessageID: 30}}},
+	}, "u1", nil, nil, AgentDirectory{Session: p.Agent})
+	if out := render(t, "thread", p); !strings.Contains(out, `<span class="note">Fork inaccessible</span>`) || strings.Contains(out, `href="/s/f2"`) {
+		t.Error("a report from a fork the viewer cannot open")
+	}
 }
 
 // The rail's report section, by state: the button, why it is disabled, the
@@ -200,7 +210,14 @@ func TestRender_ReportButton(t *testing.T) {
 		unwant []string
 	}{
 		"ready": {session.ReportState{ParentSessionID: "root"},
-			[]string{`hx-post="/s/fork/report" hx-target="#report"`, `⑂ Rapporter au parent</button>`}, []string{"disabled", "every 3s"}},
+			[]string{`hx-post="/s/fork/report" hx-target="#report"`, `⑂ Rapporter au parent</button>`,
+				`hx-confirm="Poster dans « root » (3 membres) un résumé de ce fork, signé de ton nom ?"`,
+				`<div class="note" style="margin-top:6px">Résume ce qui s'est fait ici depuis le dernier rapport`},
+			[]string{"disabled", "every 3s", "title="}},
+		"agent working": {session.ReportState{ParentSessionID: "root", AgentWorking: true},
+			[]string{"disabled", "L&#39;agent du fork travaille : le rapport attend la fin de son tour"}, nil},
+		"not a fork": {session.ReportState{Refused: session.ErrNotAFork},
+			[]string{"Cette session n&#39;est pas un fork"}, []string{"<button"}},
 		"pending": {session.ReportState{ParentSessionID: "root", Pending: true},
 			[]string{`hx-get="/s/fork/report" hx-trigger="every 3s"`, "disabled", "Rapport en cours…", "Le rapport s&#39;écrit"}, nil},
 		"failed": {session.ReportState{ParentSessionID: "root", Failed: true},
@@ -216,6 +233,7 @@ func TestRender_ReportButton(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			p := testPage("thread")
+			p.Parent.Members = 3
 			p.Report = &ReportView{ReportState: c.state}
 			out := render(t, "report", p)
 			for _, want := range c.want {
@@ -238,6 +256,12 @@ func TestRender_ReportButton(t *testing.T) {
 	p := testPage("thread")
 	if out := render(t, "rail", p); strings.Contains(out, `id="report"`) {
 		t.Error("a report section outside a fork")
+	}
+
+	// The question names the parent as the viewer knows it, and counts.
+	p.Parent = &ParentInfo{Accessible: true, Members: 1}
+	if got := p.ReportConfirm(); got != "Poster dans « Session sans titre » (1 membre) un résumé de ce fork, signé de ton nom ?" {
+		t.Errorf("confirm %q", got)
 	}
 }
 
