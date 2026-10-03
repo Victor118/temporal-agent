@@ -134,10 +134,11 @@ func TestRelaySSE_AReplayedLeaveIsChecked(t *testing.T) {
 	hub.Publish("s1", activity.SSEEvent{Type: session.EventMemberLeft, Data: []byte(`{"user_ids":["u-bob"]}`)})
 	hub.Publish("s1", activity.SSEEvent{Type: "message", Data: []byte(`"after"`)})
 
+	// Out by the time it subscribes: nothing is replayed, not even what came
+	// before the leave, since it has no access any more.
 	got := restOf(t, openStream(t, ctx, srv.URL+"?last_event_id="+from, ""))
-	want := []string{"event: message", `data: "before"`}
-	if want = append(want, goneLines...); !slices.Equal(withoutIDs(got), want) {
-		t.Errorf("replayed to a member out: %q, want %q", got, want)
+	if !slices.Equal(withoutIDs(got), goneLines) {
+		t.Errorf("replayed to a member out: %q, want %q", got, goneLines)
 	}
 
 	// Still a member: the leave is another's, and the stream goes on.
@@ -147,6 +148,22 @@ func TestRelaySSE_AReplayedLeaveIsChecked(t *testing.T) {
 		if got := nextEvent(t, lines); !strings.HasSuffix(got, " "+want) {
 			t.Errorf("replayed to a member: %q, want %s", got, want)
 		}
+	}
+}
+
+// A removal committed between the route's check and the subscription, with
+// nothing to replay: the check made once subscribed sees it.
+func TestRelaySSE_CheckedOnceSubscribed(t *testing.T) {
+	hub := sse.NewHub()
+	var member atomic.Bool // false: removed before the subscription
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		relaySSE(w, r, hub, time.Hour, member.Load, "s1")
+	}))
+	defer srv.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if got := restOf(t, openStream(t, ctx, srv.URL, "")); !slices.Equal(got, goneLines) {
+		t.Errorf("no last ID, member out: %q, want %q", got, goneLines)
 	}
 }
 

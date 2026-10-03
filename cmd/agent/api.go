@@ -385,6 +385,13 @@ func relaySSE(w http.ResponseWriter, r *http.Request, hub *sse.Hub, keepAlive ti
 		flusher.Flush()
 		return true
 	}
+	// Checked once subscribed: a removal committed before the subscription is
+	// seen here, one after it arrives live. With nothing to replay (no last
+	// ID, a stale one), a check made before subscribing would leave a window
+	// until the next keep-alive.
+	if gone() {
+		return
+	}
 	for _, event := range sub.Missed {
 		if event.Type == session.EventMemberLeft && gone() {
 			return

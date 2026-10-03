@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/google/uuid"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -205,6 +206,12 @@ func TestRoutes_RequireLogin(t *testing.T) {
 	for _, path := range []string{"/auth/me", "/me/sessions", "/sessions/s1/history", "/api/admin/queues"} {
 		if w := call(t, h, http.MethodGet, path, "", nil); w.Code != http.StatusUnauthorized {
 			t.Errorf("%s without login: %d", path, w.Code)
+		}
+	}
+	// The pages' streams check membership themselves: logging in comes first.
+	for _, path := range []string{"/s/" + liveSID + "/stream", "/tree/stream"} {
+		if w := call(t, h, http.MethodGet, path, "", nil); w.Code != http.StatusSeeOther || !strings.HasPrefix(w.Header().Get("Location"), "/login") {
+			t.Errorf("%s without login: %d %s", path, w.Code, w.Header().Get("Location"))
 		}
 	}
 	if w := call(t, h, http.MethodPost, "/auth/login", `{"email":"alice@example.com","password":"wrong"}`, nil); w.Code != http.StatusUnauthorized {
@@ -942,6 +949,11 @@ func TestStreams_EndForAMemberWhoLeaves(t *testing.T) {
 	}
 	if got := nextEvent(t, alicePage); !strings.HasSuffix(got, " "+session.EventMemberLeft) {
 		t.Errorf("alice's stream: %q", got)
+	}
+
+	// A session that does not exist reads like one bob is not in.
+	if got := restOf(t, open("/s/"+uuid.NewString()+"/stream", bob)); !slices.Equal(got, goneLines) {
+		t.Errorf("unknown session: %q, want %q", got, goneLines)
 	}
 
 	// Bob's page reconnects: it is told, and EventSource stops retrying.
