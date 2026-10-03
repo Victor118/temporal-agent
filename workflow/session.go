@@ -9,6 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/victor/temporal-agent/activity"
@@ -403,11 +404,19 @@ func processTurn(actCtx, ctx workflow.Context, input SessionWorkflowInput, userM
 	return false, nil
 }
 
-// notifyTurn sends a turn event to the session's web members. Best effort,
-// like any event: a page that misses it falls back on the visibility
-// queries.
+// turnNotifyOptions are those of a turn event: one short attempt. The turn
+// waits for it (a turn's start must not overtake the end of the one before),
+// so a server slow or away must not hold the turn: a page that misses the
+// event falls back on the visibility queries.
+var turnNotifyOptions = workflow.ActivityOptions{
+	StartToCloseTimeout: 3 * time.Second,
+	RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 1},
+}
+
+// notifyTurn sends a turn event to the session's web members. Best effort:
+// its failure neither fails nor holds the turn.
 func notifyTurn(ctx workflow.Context, sessionID, eventType string, e TurnEvent) {
-	notifySession(ctx, sessionID, eventType, map[string]string{"agent_id": e.AgentID, "agent_name": e.AgentName, "turn": e.Turn})
+	notifySessionWith(ctx, turnNotifyOptions, sessionID, eventType, map[string]string{"agent_id": e.AgentID, "agent_name": e.AgentName, "turn": e.Turn})
 }
 
 // maxTurnErrorBytes bounds the error kept in the conversation: an API error can

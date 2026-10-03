@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -652,8 +653,9 @@ func TestSessionWorkflow_RecordsAConversationTooLong(t *testing.T) {
 
 // runTurnEvents runs a session whose AgentWorkflow is agent on msg, with a
 // stop at cancelAt when not zero, and reports the turn events and persists
-// in the order they happened.
-func runTurnEvents(t *testing.T, agent func(sdkworkflow.Context, AgentWorkflowInput) (AgentWorkflowOutput, error), cancelAt time.Duration, msg UserMessage) []string {
+// in the order they happened. Each turn event's sending fails with
+// notifyErr, when not nil.
+func runTurnEvents(t *testing.T, agent func(sdkworkflow.Context, AgentWorkflowInput) (AgentWorkflowOutput, error), cancelAt time.Duration, msg UserMessage, notifyErr error) []string {
 	t.Helper()
 	var mu sync.Mutex
 	var log []string
@@ -679,7 +681,7 @@ func runTurnEvents(t *testing.T, agent func(sdkworkflow.Context, AgentWorkflowIn
 			t.Errorf("turn event %s on channel %q (%v)", in.Event.Data, in.Channel, err)
 		}
 		record(in.Event.Type + " " + e.AgentID + " " + e.AgentName)
-		return nil
+		return notifyErr
 	}, sdkactivity.RegisterOptions{Name: "NotifyStep"})
 	env.RegisterDelayedCallback(func() { env.SignalWorkflow(SignalUserMessage, msg) }, time.Second)
 	if cancelAt > 0 {
@@ -725,9 +727,38 @@ func TestSessionWorkflow_TurnEvents(t *testing.T) {
 			"turn_started jarvis Jarvis, persisted, turn_done jarvis Jarvis"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if got := strings.Join(runTurnEvents(t, c.agent, c.cancelAt, c.msg), ", "); got != c.want {
+			if got := strings.Join(runTurnEvents(t, c.agent, c.cancelAt, c.msg, nil), ", "); got != c.want {
 				t.Errorf("events:\n%s\nwant\n%s", got, c.want)
 			}
 		})
+	}
+}
+
+// A turn event the server does not take is given up at once: the turns run,
+// persist and end as if it had gone, without a retry to wait for.
+func TestSessionWorkflow_TurnEventsFailing(t *testing.T) {
+	var mu sync.Mutex
+	var starts []time.Time
+	answered := func(ctx sdkworkflow.Context, in AgentWorkflowInput) (AgentWorkflowOutput, error) {
+		mu.Lock()
+		starts = append(starts, sdkworkflow.Now(ctx))
+		mu.Unlock()
+		content, _ := json.Marshal("ok")
+		return AgentWorkflowOutput{Response: "ok", NewMessages: []store.Message{{Role: store.RoleAssistant, Content: string(content)}}}, nil
+	}
+	got := strings.Join(runTurnEvents(t, answered, 0, addressed, errors.New("server away")), ", ")
+	want := "turn_started jarvis Jarvis, persisted, turn_done jarvis Jarvis, turn_started smith Agent Smith, persisted, turn_done smith Agent Smith"
+	if got != want {
+		t.Errorf("events:\n%s\nwant (each sent once)\n%s", got, want)
+	}
+	// Between the two turns, two events fail: retried, they would hold the
+	// second turn for seconds.
+	mu.Lock()
+	defer mu.Unlock()
+	if len(starts) != 2 {
+		t.Fatalf("%d turns ran, want 2", len(starts))
+	}
+	if gap := starts[1].Sub(starts[0]); gap >= time.Second {
+		t.Errorf("the second turn started %v after the first", gap)
 	}
 }

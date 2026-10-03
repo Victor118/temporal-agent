@@ -79,14 +79,24 @@ func ForkSessionWorkflow(ctx workflow.Context, in ForkSessionInput) error {
 	return nil
 }
 
+// sessionNotifyOptions are those of an event to a session's members.
+var sessionNotifyOptions = workflow.ActivityOptions{StartToCloseTimeout: 10 * time.Second, RetryPolicy: notifyRetry}
+
 // notifySession sends an event to the members watching a session. Best effort:
 // a member who misses it sees the result when the session reloads.
 func notifySession(ctx workflow.Context, sessionID, eventType string, payload map[string]string) {
+	notifySessionWith(ctx, sessionNotifyOptions, sessionID, eventType, payload)
+}
+
+// notifySessionWith is notifySession under the given activity options. It
+// waits for the event to be sent, or given up: the events of a session go
+// out in order.
+func notifySessionWith(ctx workflow.Context, opts workflow.ActivityOptions, sessionID, eventType string, payload map[string]string) {
 	payload["type"] = eventType
 	data, _ := json.Marshal(payload)
 	var notifAct *activity.NotificationActivities
 	_ = workflow.ExecuteActivity(
-		workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: 10 * time.Second, RetryPolicy: notifyRetry}),
+		workflow.WithActivityOptions(ctx, opts),
 		notifAct.NotifyStep,
 		activity.NotifyInput{SessionID: sessionID, Event: activity.SSEEvent{Type: eventType, Data: data}},
 	).Get(ctx, nil)
