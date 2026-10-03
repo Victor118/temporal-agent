@@ -89,6 +89,10 @@ type AgentWorkflowOutput struct {
 	// call gave up, for instance). The workflow returns no error in that case,
 	// so NewMessages survives — a failed workflow returns no result at all.
 	Error string `json:"error,omitempty"`
+	// ErrorType is the type of the ApplicationError the LLM call failed with,
+	// when the turn stopped on it (activity.ErrContextTooLong, for instance):
+	// what a caller tests, Error being the text for the members.
+	ErrorType string `json:"error_type,omitempty"`
 }
 
 // AgentWorkflow is a pure resolution workflow: ReAct loop only. It runs the
@@ -308,6 +312,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 			return AgentWorkflowOutput{
 				NewMessages: turn,
 				Error:       llmFailure(err),
+				ErrorType:   failureType(err),
 			}, nil
 		}
 
@@ -469,11 +474,17 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 	}
 
 	cancelSafeFlush()
+	return exhaustedOutput(turn), nil
+}
+
+// exhaustedOutput ends a run that used all its iterations without an answer.
+// It carries no Response, which a parent would read as the answer to its
+// task: its Error says why the run stopped.
+func exhaustedOutput(newMessages []store.Message) AgentWorkflowOutput {
 	return AgentWorkflowOutput{
-		Response:    "Maximum iterations reached.",
-		NewMessages: turn,
+		NewMessages: newMessages,
 		Error:       fmt.Sprintf("stopped after %d iterations without a final answer", maxReActIterations),
-	}, nil
+	}
 }
 
 // cancelledOutput ends a cancelled run with what it produced, newMessages: a
@@ -714,6 +725,15 @@ func llmFailure(err error) string {
 	return "call LLM: " + failureText(err)
 }
 
+// failureType is the type of the ApplicationError err carries, "" if none.
+func failureType(err error) string {
+	var appErr *temporal.ApplicationError
+	if errors.As(err, &appErr) {
+		return appErr.Type()
+	}
+	return ""
+}
+
 // subAgentTooLong is what the parent reads of a sub-agent whose conversation
 // outgrew its model: the fork advice the members read is not for it.
 const subAgentTooLong = "The agent stopped without an answer: its conversation grew too long for its model. Give it a smaller task, or fewer and shorter tool outputs to read."
@@ -728,7 +748,7 @@ func subAgentContent(result json.RawMessage) (content string, isError bool) {
 		switch {
 		case agent.Response != "":
 			return agent.Response, false
-		case agent.Error == activity.ContextTooLongMessage:
+		case agent.ErrorType == activity.ErrContextTooLong:
 			return subAgentTooLong, true
 		case agent.Error != "":
 			return "The agent stopped without an answer: " + agent.Error, true

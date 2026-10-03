@@ -328,7 +328,10 @@ func TestAgentWorkflow_DelegatesThroughAgentTool(t *testing.T) {
 // The parent reads a sub-agent's answer; with none, why it stopped, as an
 // error, never its whole output, nor the fork advice meant for the members.
 func TestSubAgentContent(t *testing.T) {
-	tooLong, _ := json.Marshal(AgentWorkflowOutput{Error: activity.ContextTooLongMessage, NewMessages: []store.Message{{Role: store.RoleUser}}})
+	tooLong, _ := json.Marshal(AgentWorkflowOutput{Error: activity.ContextTooLongMessage, ErrorType: activity.ErrContextTooLong, NewMessages: []store.Message{{Role: store.RoleUser}}})
+	// The type decides, not the members' text, which may change.
+	reworded, _ := json.Marshal(AgentWorkflowOutput{Error: "Trop long (1 234 567 octets)", ErrorType: activity.ErrContextTooLong})
+	exhausted, _ := json.Marshal(exhaustedOutput([]store.Message{{Role: store.RoleUser}}))
 	cases := []struct {
 		raw     string
 		want    string
@@ -336,6 +339,8 @@ func TestSubAgentContent(t *testing.T) {
 	}{
 		{`{"response":"CAC 40 summary","messages":[{"role":"user"}],"goal_achieved":true}`, "CAC 40 summary", false},
 		{string(tooLong), subAgentTooLong, true},
+		{string(reworded), subAgentTooLong, true},
+		{string(exhausted), fmt.Sprintf("The agent stopped without an answer: stopped after %d iterations without a final answer", maxReActIterations), true},
 		{`{"response":"","error":"call LLM: overloaded","new_messages":[{"role":"user"}]}`, "The agent stopped without an answer: call LLM: overloaded", true},
 		{`{"other":1}`, `{"other":1}`, false},
 	}
@@ -998,6 +1003,9 @@ func TestAgentWorkflow_AConversationTooLongEndsTheTurn(t *testing.T) {
 	}
 	if out.Error != activity.ContextTooLongMessage {
 		t.Errorf("error %q, want %q", out.Error, activity.ContextTooLongMessage)
+	}
+	if out.ErrorType != activity.ErrContextTooLong {
+		t.Errorf("error type %q, want %q", out.ErrorType, activity.ErrContextTooLong)
 	}
 	if n := len(f.inputSizes()); n != 1 {
 		t.Errorf("CallLLM ran %d times, want once: never retried", n)
