@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -24,6 +25,7 @@ import (
 func TestSessionWorkflow_IgnoresEmptyMessage(t *testing.T) {
 	var suite testsuite.WorkflowTestSuite
 	env := suite.NewTestWorkflowEnvironment()
+	registerSnapshot(env)
 
 	turns := 0
 	env.RegisterWorkflowWithOptions(func(ctx sdkworkflow.Context, in AgentWorkflowInput) (AgentWorkflowOutput, error) {
@@ -62,6 +64,7 @@ func TestSessionWorkflow_IgnoresEmptyMessage(t *testing.T) {
 func TestSessionWorkflow_EachTurnAnswersItsAuthor(t *testing.T) {
 	var suite testsuite.WorkflowTestSuite
 	env := suite.NewTestWorkflowEnvironment()
+	registerSnapshot(env)
 
 	var turns []AgentWorkflowInput
 	env.RegisterWorkflowWithOptions(func(ctx sdkworkflow.Context, in AgentWorkflowInput) (AgentWorkflowOutput, error) {
@@ -138,6 +141,7 @@ func TestSessionWorkflow_RecordsAFailureThatProducedNothing(t *testing.T) {
 func runFailedTurn(out AgentWorkflowOutput) (persisted []activity.PersistContextInput, notified []string) {
 	var suite testsuite.WorkflowTestSuite
 	env := suite.NewTestWorkflowEnvironment()
+	registerSnapshot(env)
 
 	env.RegisterWorkflowWithOptions(func(ctx sdkworkflow.Context, in AgentWorkflowInput) (AgentWorkflowOutput, error) {
 		return out, nil
@@ -172,6 +176,7 @@ func TestSessionWorkflow_CancelOnlyStopsTheRunningTurn(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			var suite testsuite.WorkflowTestSuite
 			env := suite.NewTestWorkflowEnvironment()
+			registerSnapshot(env)
 
 			env.RegisterWorkflowWithOptions(func(ctx sdkworkflow.Context, in AgentWorkflowInput) (AgentWorkflowOutput, error) {
 				if err := sdkworkflow.Sleep(ctx, 10*time.Second); err != nil {
@@ -204,6 +209,14 @@ func TestSessionWorkflow_CancelOnlyStopsTheRunningTurn(t *testing.T) {
 	}
 }
 
+// registerSnapshot stubs LastMessageID for a session whose agent is stubbed:
+// the conversation ends at message 7.
+func registerSnapshot(env *testsuite.TestWorkflowEnvironment) {
+	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.LastMessageIDInput) (int64, error) {
+		return 7, nil
+	}, sdkactivity.RegisterOptions{Name: "LastMessageID"})
+}
+
 // addressed is a message to @jarvis then @smith, in a session whose agent is
 // "default".
 var addressed = UserMessage{Text: "@jarvis résume, @smith juge", UserID: "u-alice", UserName: "Alice", Stored: true,
@@ -222,6 +235,7 @@ func runSession(t *testing.T, agent func(sdkworkflow.Context, AgentWorkflowInput
 	t.Helper()
 	var suite testsuite.WorkflowTestSuite
 	env := suite.NewTestWorkflowEnvironment()
+	registerSnapshot(env)
 	env.RegisterWorkflowWithOptions(func(ctx sdkworkflow.Context, in AgentWorkflowInput) (AgentWorkflowOutput, error) {
 		runs = append(runs, childRun{workflowID: sdkworkflow.GetInfo(ctx).WorkflowExecution.ID, in: in})
 		return agent(ctx, in)
@@ -290,6 +304,18 @@ func TestSessionWorkflow_RunsTheAddressedAgentsInOrder(t *testing.T) {
 	}
 	if runs[0].in.TurnKey == runs[1].in.TurnKey || runs[1].in.TurnKey == runs[2].in.TurnKey {
 		t.Errorf("turn keys %q, %q, %q: want one per turn", runs[0].in.TurnKey, runs[1].in.TurnKey, runs[2].in.TurnKey)
+	}
+	// The two turns answering one message read the same snapshot, as one
+	// group, the second one the first's answer; the next message has its own.
+	jarvis, smith, next := runs[0].in, runs[1].in, runs[2].in
+	if store.TurnGroup(jarvis.TurnKey) != store.TurnGroup(smith.TurnKey) || store.TurnGroup(smith.TurnKey) == store.TurnGroup(next.TurnKey) {
+		t.Errorf("turn keys %q, %q, %q: want the first two in one group", jarvis.TurnKey, smith.TurnKey, next.TurnKey)
+	}
+	if upTo, ok := store.TurnSnapshot(store.TurnGroup(jarvis.TurnKey)); !ok || upTo != 7 || jarvis.HistoryUpTo != 7 || smith.HistoryUpTo != 7 {
+		t.Errorf("snapshots %d (%v), %d, %d: want the conversation's end, 7", upTo, ok, jarvis.HistoryUpTo, smith.HistoryUpTo)
+	}
+	if len(jarvis.EarlierTurns) != 0 || fmt.Sprint(smith.EarlierTurns) != fmt.Sprint([]string{jarvis.TurnKey}) || len(next.EarlierTurns) != 0 {
+		t.Errorf("earlier turns %v, %v, %v: want jarvis's for smith alone", jarvis.EarlierTurns, smith.EarlierTurns, next.EarlierTurns)
 	}
 	if strings.Contains(runs[0].in.PartNote, "before you") || strings.Contains(runs[1].in.PartNote, "after you") {
 		t.Errorf("part notes %q / %q: the first has no one before it, the last no one after", runs[0].in.PartNote, runs[1].in.PartNote)
@@ -378,6 +404,7 @@ func TestSessionWorkflow_ACancelWaitsForTheTurnToEnd(t *testing.T) {
 
 	var suite testsuite.WorkflowTestSuite
 	env := suite.NewTestWorkflowEnvironment()
+	registerSnapshot(env)
 	env.RegisterWorkflowWithOptions(stopping, sdkworkflow.RegisterOptions{Name: "AgentWorkflow"})
 	var persisted []activity.PersistContextInput
 	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.PersistContextInput) error {
@@ -415,23 +442,23 @@ func TestSessionWorkflow_TheNextAgentSeesTheAnswerBefore(t *testing.T) {
 	env := suite.NewTestWorkflowEnvironment()
 	env.RegisterWorkflow(AgentWorkflow)
 
-	history := []store.Message{{Role: store.RoleUser, Content: `"@jarvis résume, @smith juge"`, UserID: "u-alice", Author: "Alice"}}
-	keys := map[string]bool{}
-	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.LoadContextInput) (activity.LoadContextOutput, error) {
-		return activity.LoadContextOutput{Messages: append([]store.Message(nil), history...)}, nil
-	}, sdkactivity.RegisterOptions{Name: "LoadContext"})
-	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.PersistContextInput) error {
-		for i, m := range in.Messages {
-			if k := store.TurnMessageKey(in.TurnKey, in.StartIndex+i); !keys[k] {
-				keys[k] = true
-				history = append(history, m)
-			}
+	var calls int
+	f := registerLLM(env, func(_ int, req provider.ChatRequest) (provider.ChatResponse, error) {
+		calls++
+		switch {
+		case !strings.HasPrefix(req.System, "I am jarvis"):
+			return provider.ChatResponse{Content: "Utile, oui.", StopReason: "end_turn"}, nil
+		case calls == 1:
+			return provider.ChatResponse{ToolCalls: []provider.ToolCallInfo{{ID: "t1", Name: "web_search", Input: json.RawMessage(`{"q":"temporal"}`)}}}, nil
 		}
-		return nil
-	}, sdkactivity.RegisterOptions{Name: "PersistContext"})
-	agents := map[string]activity.AgentLabel{"jarvis": {Name: "Jarvis", Mention: "jarvis"}, "smith": {Name: "Agent Smith", Mention: "smith"}}
+		return provider.ChatResponse{Content: "Temporal orchestre des workflows.\n", StopReason: "end_turn"}, nil
+	})
+	f.llm.Prompts = promptFunc(func(agentID string, _ []string) string { return "I am " + agentID })
+	f.catalog.SetAgents([]activity.AgentCatalogEntry{{ID: "jarvis", Name: "Jarvis", Mention: "jarvis"}, {ID: "smith", Name: "Agent Smith", Mention: "smith"}})
+	f.session.add(store.HumanMessageKey("q"), store.Message{Role: store.RoleUser, Content: `"@jarvis résume, @smith juge"`, UserID: "u-alice", Author: "Alice"})
+	names := map[string]string{"jarvis": "Jarvis", "smith": "Agent Smith"}
 	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.LoadSkillsForAgentInput) (activity.LoadSkillsForAgentOutput, error) {
-		return activity.LoadSkillsForAgentOutput{SystemPrompt: "I am " + in.AgentID, Name: agents[in.AgentID].Name, Agents: agents}, nil
+		return activity.LoadSkillsForAgentOutput{Name: names[in.AgentID]}, nil
 	}, sdkactivity.RegisterOptions{Name: "LoadSkillsForAgent"})
 	// Jarvis searches; smith has no tool at all.
 	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.ListToolsInput) (activity.ListToolsOutput, error) {
@@ -446,17 +473,6 @@ func TestSessionWorkflow_TheNextAgentSeesTheAnswerBefore(t *testing.T) {
 	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.ExecuteToolInput) (activity.ExecuteToolOutput, error) {
 		return activity.ExecuteToolOutput{Content: "Temporal: durable execution"}, nil
 	}, sdkactivity.RegisterOptions{Name: "ExecuteTool"})
-	var requests []provider.ChatRequest
-	env.RegisterActivityWithOptions(func(ctx context.Context, req provider.ChatRequest) (provider.ChatResponse, error) {
-		requests = append(requests, req)
-		switch {
-		case !strings.HasPrefix(req.System, "I am jarvis"):
-			return provider.ChatResponse{Content: "Utile, oui.", StopReason: "end_turn"}, nil
-		case len(requests) == 1:
-			return provider.ChatResponse{ToolCalls: []provider.ToolCallInfo{{ID: "t1", Name: "web_search", Input: json.RawMessage(`{"q":"temporal"}`)}}}, nil
-		}
-		return provider.ChatResponse{Content: "Temporal orchestre des workflows.\n", StopReason: "end_turn"}, nil
-	}, sdkactivity.RegisterOptions{Name: "CallLLM"})
 	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.NotifyInput) error {
 		return nil
 	}, sdkactivity.RegisterOptions{Name: "NotifyStep"})
@@ -464,6 +480,7 @@ func TestSessionWorkflow_TheNextAgentSeesTheAnswerBefore(t *testing.T) {
 	env.RegisterDelayedCallback(func() { env.SignalWorkflow(SignalUserMessage, addressed) }, time.Second)
 	env.ExecuteWorkflow(SessionWorkflow, SessionWorkflowInput{SessionID: "s1", AgentID: "default"})
 
+	requests := f.model.sent()
 	if len(requests) != 3 {
 		t.Fatalf("%d LLM calls, want 3: jarvis twice, then smith", len(requests))
 	}
@@ -496,6 +513,7 @@ func TestSessionWorkflow_TheNextAgentSeesTheAnswerBefore(t *testing.T) {
 		t.Errorf("smith read %q\nwant %q", got, want)
 	}
 
+	history := f.session.history()
 	if len(history) != 5 || history[1].AgentID != "jarvis" || history[3].AgentID != "jarvis" || history[4].AgentID != "smith" || history[4].Author != "Agent Smith" {
 		t.Errorf("history %+v, want the question, jarvis's search and answer, smith's", history)
 	}
@@ -517,5 +535,78 @@ func TestPartNote_QuotesTheMessage(t *testing.T) {
 	}
 	if partNote(agents[:1], 0, UserMessage{Text: long}) != "" {
 		t.Error("a message to one agent got a part note")
+	}
+}
+
+// registerRealTurns runs the real AgentWorkflow over fakes: the agent reads
+// a page with web_fetch.
+func registerRealTurns(env *testsuite.TestWorkflowEnvironment, answer func(int, provider.ChatRequest) (provider.ChatResponse, error)) *llmFakes {
+	env.RegisterWorkflow(AgentWorkflow)
+	registerAgentStubs(env)
+	executePage(env)
+	return registerLLM(env, answer)
+}
+
+// A member writes while a turn runs, before it wrote anything: the turn does
+// not read the message, and the next turn, which answers it, reads it last,
+// after the first turn's answer, not before it.
+func TestSessionWorkflow_AMessageWrittenMidTurnIsTheNextOne(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+	var f *llmFakes
+	f = registerRealTurns(env, func(n int, _ provider.ChatRequest) (provider.ChatResponse, error) {
+		switch n {
+		case 1: // Bob writes while the model thinks: the server stores it
+			f.session.add(store.HumanMessageKey("bob"), store.Message{Role: store.RoleUser, Content: `"and the tests?"`, UserID: "u-bob", Author: "Bob"})
+			return provider.ChatResponse{ToolCalls: []provider.ToolCallInfo{{ID: "t1", Name: "web_fetch", Input: json.RawMessage(`{}`)}}}, nil
+		case 2:
+			return provider.ChatResponse{Content: "read", StopReason: "end_turn"}, nil
+		}
+		return provider.ChatResponse{Content: "tests too", StopReason: "end_turn"}, nil
+	})
+	f.session.add(store.HumanMessageKey("alice"), store.Message{Role: store.RoleUser, Content: `"read the page"`, UserID: "u-alice", Author: "Alice"})
+
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(SignalUserMessage, UserMessage{Text: "read the page", UserID: "u-alice", UserName: "Alice", Stored: true})
+	}, time.Second)
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(SignalUserMessage, UserMessage{Text: "and the tests?", UserID: "u-bob", UserName: "Bob", Stored: true})
+	}, 2*time.Second)
+	env.ExecuteWorkflow(SessionWorkflow, SessionWorkflowInput{SessionID: "s1", AgentID: "default"})
+
+	requests := f.model.sent()
+	if len(requests) != 3 {
+		t.Fatalf("%d LLM calls, want 3: two for Alice's message, one for Bob's", len(requests))
+	}
+	for _, m := range requests[1].Messages {
+		if strings.Contains(textOf(m), "and the tests?") {
+			t.Errorf("the first turn read Bob's message, written after it started: %+v", requests[1].Messages)
+		}
+	}
+	next := requests[2].Messages
+	if n := len(next); n != 5 || next[3].Role != "assistant" || textOf(next[3]) != "read" || next[4].Role != "user" || textOf(next[4]) != "[Bob] and the tests?" {
+		t.Errorf("the next turn read %+v\nwant Alice's message, the first turn (call, result, answer), then Bob's", next)
+	}
+}
+
+// A conversation too long for the model fails its turn with what to do,
+// written to the conversation as the turn's error.
+func TestSessionWorkflow_RecordsAConversationTooLong(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+	f := registerRealTurns(env, answers(done))
+	f.llm.MaxContextBytes = 2000
+	f.session.add(store.HumanMessageKey("q"), store.Message{Role: store.RoleUser, Content: `"` + strings.Repeat("x", 3000) + `"`})
+
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(SignalUserMessage, UserMessage{Text: "x", UserID: "u-alice", Stored: true})
+	}, time.Second)
+	env.ExecuteWorkflow(SessionWorkflow, SessionWorkflowInput{SessionID: "s1", AgentID: "default"})
+
+	history := f.session.history()
+	last := history[len(history)-1]
+	want, _ := json.Marshal(activity.ContextTooLongMessage)
+	if last.Kind != store.KindTurnError || last.Content != string(want) {
+		t.Errorf("last message %+v, want the turn error %s", last, want)
 	}
 }

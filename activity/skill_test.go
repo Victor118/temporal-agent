@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/victor/temporal-agent/conversation"
 	"github.com/victor/temporal-agent/skill"
 	"github.com/victor/temporal-agent/store"
 )
@@ -82,8 +83,9 @@ func TestLoadSkillsForAgent_GivesTheName(t *testing.T) {
 		if err != nil || out.Name != want {
 			t.Errorf("%s: name %q (%v), want %q", id, out.Name, err, want)
 		}
-		if out.Agents["default"] != (AgentLabel{Name: "Jarvis", Mention: "jarvis"}) || out.Agents["smith"] != (AgentLabel{Name: "smith", Mention: "smith"}) {
-			t.Errorf("%s: agents %+v", id, out.Agents)
-		}
+	}
+	labels := c.AgentLabels()
+	if labels["default"] != (conversation.Label{Name: "Jarvis", Mention: "jarvis"}) || labels["smith"] != (conversation.Label{Name: "smith", Mention: "smith"}) {
+		t.Errorf("agents %+v", labels)
 	}
 }

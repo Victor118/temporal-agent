@@ -75,6 +75,11 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 		return nil, fmt.Errorf("CLAUDE_CODE_MAX_BUDGET_USD: %w", err)
 	}
 
+	maxContext, err := parseContextBytes(cfg.LLMMaxContextBytes)
+	if err != nil {
+		return nil, fmt.Errorf("LLM_MAX_CONTEXT_BYTES: %w", err)
+	}
+
 	// Who pays for a coding run, the API or a subscription, is settled before
 	// any run, where the CLI is installed: never left to the CLI picking
 	// whichever credential it finds.
@@ -143,7 +148,7 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 		w.RegisterWorkflow(workflow.ScheduledAgentWorkflow)
 		w.RegisterWorkflow(workflow.ForkSessionWorkflow)
 
-		w.RegisterActivity(&activity.LLMActivities{Provider: llmProvider})
+		w.RegisterActivity(&activity.LLMActivities{Provider: llmProvider, Store: st, Catalog: catalog, Prompts: skillAct.Prompts, MaxContextBytes: maxContext})
 		w.RegisterActivity(&activity.ForkActivities{Store: st, LLM: llmProvider, Private: catalog})
 		w.RegisterActivity(&activity.MemoryActivities{Store: st})
 		w.RegisterActivity(&activity.ClaudeCodeActivities{Root: cfg.ClaudeCodeWorkspace, SSHKeyPath: cfg.ClaudeCodeSSHKey, AllowedRepos: cfg.ClaudeCodeRepos, RunAs: runAs, Runs: runs, ClaudeConfigDir: cfg.ClaudeConfigDir, Model: cfg.ClaudeCodeModel, MaxBudgetUSD: budget, Auth: auth})
@@ -233,6 +238,20 @@ func parseBudget(raw string) (float64, error) {
 	v, err := strconv.ParseFloat(raw, 64)
 	if err != nil || !(v > 0) || math.IsInf(v, 0) {
 		return 0, fmt.Errorf("%q is not a positive amount of dollars", raw)
+	}
+	return v, nil
+}
+
+// parseContextBytes reads LLM_MAX_CONTEXT_BYTES: empty is the default (0), a
+// value that is no positive number stops the worker rather than lift the
+// bound.
+func parseContextBytes(raw string) (int, error) {
+	if raw == "" {
+		return 0, nil
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil || v <= 0 {
+		return 0, fmt.Errorf("%q is not a positive number of bytes", raw)
 	}
 	return v, nil
 }

@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -11,6 +12,7 @@ import (
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/victor/temporal-agent/activity"
+	"github.com/victor/temporal-agent/conversation"
 	"github.com/victor/temporal-agent/store"
 )
 
@@ -137,9 +139,9 @@ func sessionHistoryIsLarge(ctx workflow.Context) bool {
 }
 
 // processMessage runs the turns a human message calls for: one per agent it
-// addresses, in order, or the session's agent's alone. Each turn loads the
-// conversation, so an agent sees the answers of the agents before it. A turn
-// that fails or is stopped ends the message: the agents after it do not run.
+// addresses, in order, or the session's agent's alone. Each turn reads the
+// answers of the agents before it. A turn that fails or is stopped ends the
+// message: the agents after it do not run.
 func processMessage(actCtx, ctx workflow.Context, input SessionWorkflowInput, userMessage UserMessage, state *SessionState) error {
 	// Backstop for every channel that can signal a session: an empty user
 	// message is rejected by the LLM API, and once persisted it breaks every
@@ -160,6 +162,23 @@ func processMessage(actCtx, ctx workflow.Context, input SessionWorkflowInput, us
 	if len(agents) == 0 {
 		agents = []AddressedAgent{{ID: input.AgentID}}
 	}
+
+	// The turns read the conversation as it stands now, and each other's
+	// answers: a message written while they run is the next one to answer,
+	// not part of this one (activity.TurnHistory).
+	var memAct *activity.MemoryActivities
+	var upTo int64
+	if err := workflow.ExecuteActivity(actCtx, memAct.LastMessageID, activity.LastMessageIDInput{SessionID: input.SessionID}).Get(ctx, &upTo); err != nil {
+		return fmt.Errorf("conversation snapshot: %w", err)
+	}
+	// group names the turns answering the message, globally: the run ID
+	// keeps it distinct from the same number in an earlier run of this
+	// session, which a resumed session would otherwise reuse. It holds the
+	// snapshot, so that a message stored while they run is read after them.
+	// Each agent the message addresses has a turn of its own in it.
+	group := store.TurnGroupKey(fmt.Sprintf("%s-%d", workflow.GetInfo(ctx).WorkflowExecution.RunID, state.TurnCount+1), upTo)
+	var earlier []string
+
 	for i, a := range agents {
 		// A stop sent between two turns of the message is for the rest of it.
 		if i > 0 && cancelCh.ReceiveAsync(nil) {
@@ -168,6 +187,9 @@ func processMessage(actCtx, ctx workflow.Context, input SessionWorkflowInput, us
 		}
 		turn := agentTurn{
 			agentID:  a.ID,
+			key:      store.TurnKey(group, i),
+			upTo:     upTo,
+			earlier:  slices.Clone(earlier),
 			partNote: partNote(agents, i, userMessage),
 			// On the channel, an answer that could be taken for another
 			// agent's is signed.
@@ -182,6 +204,7 @@ func processMessage(actCtx, ctx workflow.Context, input SessionWorkflowInput, us
 		if err != nil || stopped {
 			return err
 		}
+		earlier = append(earlier, turn.key)
 	}
 	return nil
 }
@@ -189,8 +212,11 @@ func processMessage(actCtx, ctx workflow.Context, input SessionWorkflowInput, us
 // agentTurn is the agent one turn runs, and what it is told.
 type agentTurn struct {
 	agentID      string
-	systemPrompt string // override; empty = the agent's own
-	partNote     string // see partNote
+	key          string   // the turn's key, under which it writes
+	upTo         int64    // the last message it reads besides the turns
+	earlier      []string // the turns that answered the message before it
+	systemPrompt string   // override; empty = the agent's own
+	partNote     string   // see partNote
 	signReply    bool
 }
 
@@ -209,9 +235,9 @@ func partNote(agents []AddressedAgent, i int, msg UserMessage) string {
 	}
 	names := make([]string, len(agents))
 	for j, a := range agents {
-		names[j] = strings.TrimPrefix(agentLabel(cmp.Or(a.Name, a.ID), cmp.Or(a.Mention, a.ID)), "agent ")
+		names[j] = strings.TrimPrefix(conversation.AgentLabel(cmp.Or(a.Name, a.ID), cmp.Or(a.Mention, a.ID)), "agent ")
 	}
-	quote := clipText(strings.Join(strings.Fields(msg.Text), " "), maxQuotedMessageBytes)
+	quote := conversation.Clip(strings.Join(strings.Fields(msg.Text), " "), maxQuotedMessageBytes)
 	from := ""
 	if msg.UserName != "" {
 		from = " from " + msg.UserName
@@ -231,25 +257,20 @@ func partNote(agents []AddressedAgent, i int, msg UserMessage) string {
 }
 
 // processTurn runs one agent on a user message, then persists what the turn
-// produced. The agent loads the conversation itself. processTurn listens for
-// cancel-agent signals to interrupt the agent mid-execution, and reports
-// whether it was stopped.
+// produced. The agent's LLM calls load the conversation themselves.
+// processTurn listens for cancel-agent signals to interrupt the agent
+// mid-execution, and reports whether it was stopped.
 func processTurn(actCtx, ctx workflow.Context, input SessionWorkflowInput, userMessage UserMessage, turn agentTurn, state *SessionState, cancelCh workflow.ReceiveChannel) (bool, error) {
 	state.Status = "processing"
 	state.TurnCount++
 
 	var memAct *activity.MemoryActivities
+	turnKey := turn.key
 
-	// turnKey names this turn globally: the run ID keeps it distinct from the
-	// same turn number in an earlier workflow run for this session, which a
-	// resumed session would otherwise reuse. Each agent a message addresses
-	// has a turn, and so a number, of its own.
-	turnKey := fmt.Sprintf("%s-%d", workflow.GetInfo(ctx).WorkflowExecution.RunID, state.TurnCount)
-
-	// 1. Launch agent child workflow with a cancellable context. It loads the
-	// conversation itself: passing it here put a full copy of the history in
-	// this workflow's event history on every turn, and this workflow is
-	// long-lived.
+	// 1. Launch agent child workflow with a cancellable context. It is given
+	// the conversation by reference: passing it here put a full copy of the
+	// history in this workflow's event history on every turn, and this
+	// workflow is long-lived.
 	childCtx, cancelChild := workflow.WithCancel(ctx)
 	childCtx = workflow.WithChildOptions(childCtx, workflow.ChildWorkflowOptions{
 		WorkflowID: fmt.Sprintf("%s-turn-%d", input.SessionID, state.TurnCount),
@@ -269,6 +290,8 @@ func processTurn(actCtx, ctx workflow.Context, input SessionWorkflowInput, userM
 		UserName:          userMessage.UserName,
 		AgentID:           turn.agentID,
 		TurnKey:           turnKey,
+		HistoryUpTo:       turn.upTo,
+		EarlierTurns:      turn.earlier,
 		UserMessage:       userMessage.Text,
 		UserMessageStored: userMessage.Stored,
 		SystemPrompt:      turn.systemPrompt,

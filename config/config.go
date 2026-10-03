@@ -46,6 +46,10 @@ type Config struct {
 	// SummaryModel writes the summary a forked session starts from; empty =
 	// the workers' LLM_MODEL. A summary needs less than a conversation does.
 	SummaryModel string
+	// LLMMaxContextBytes bounds what one LLM call sends, in bytes of JSON
+	// (activity.DefaultMaxContextBytes when empty): past it, the turn fails
+	// and tells the members to fork.
+	LLMMaxContextBytes string
 
 	// Server
 	HTTPAddr     string
@@ -164,6 +168,8 @@ func Load() *Config {
 		LLMAPIKey:    os.Getenv("LLM_API_KEY"),
 		LLMModel:     envOr("LLM_MODEL", "claude-sonnet-5"),
 		SummaryModel: os.Getenv("SUMMARY_MODEL"),
+
+		LLMMaxContextBytes: os.Getenv("LLM_MAX_CONTEXT_BYTES"),
 
 		HTTPAddr:     envOr("HTTP_ADDR", ":8888"),
 		InternalAddr: envOr("INTERNAL_ADDR", ":9999"),

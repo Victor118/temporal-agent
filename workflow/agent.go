@@ -1,7 +1,6 @@
 package workflow
 
 import (
-	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -50,10 +49,16 @@ type AgentWorkflowInput struct {
 	// crash, a cancel or a failed LLM call cannot lose the transcript. Sub-agents
 	// and scheduled runs leave it empty: they own no session history.
 	TurnKey string `json:"turn_key,omitempty"`
-	// LoadUserMemory loads UserID's memory into a run that has no turn key,
-	// and so loads no context: a scheduled task answers its user directly,
-	// as a session turn does. A sub-agent leaves it unset: its context stays
-	// isolated, and its parent already had the memory.
+	// HistoryUpTo and EarlierTurns are what a session turn reads besides its
+	// own messages: the session up to that message ID, where it stood when
+	// the message this turn answers started its turns, and the turns that
+	// answered it before this one (activity.TurnHistory).
+	HistoryUpTo  int64    `json:"history_up_to,omitempty"`
+	EarlierTurns []string `json:"earlier_turns,omitempty"`
+	// LoadUserMemory gives UserID's memory to a run that has no turn key: a
+	// scheduled task answers its user directly, as a session turn does. A
+	// sub-agent leaves it unset: its context stays isolated, and its parent
+	// already had the memory.
 	LoadUserMemory bool     `json:"load_user_memory,omitempty"`
 	AgentChain     []string `json:"agent_chain,omitempty"` // Chain of parent agent IDs for context propagation
 	// Channel and ChannelID are where the session's user is reached ("web",
@@ -86,8 +91,8 @@ type AgentWorkflowOutput struct {
 	Error string `json:"error,omitempty"`
 }
 
-// AgentWorkflow is a pure resolution workflow: ReAct loop only.
-// It receives messages from the session, runs LLM + tools, and returns the updated messages.
+// AgentWorkflow is a pure resolution workflow: ReAct loop only. It runs the
+// LLM and the tools on a message, and returns the messages it produced.
 func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflowOutput, error) {
 	// Capture activity → task queue mapping via SideEffect.
 	// Reads from worker-cached config (no DB call). Recorded in history for deterministic replay.
@@ -109,7 +114,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 			BackoffCoefficient:     3.0,
 			MaximumInterval:        2 * time.Minute,
 			MaximumAttempts:        6,
-			NonRetryableErrorTypes: []string{"PermanentAPIError"},
+			NonRetryableErrorTypes: []string{"PermanentAPIError", activity.ErrContextTooLong},
 		},
 	}
 	if q, ok := queueMap["CallLLM"]; ok {
@@ -136,50 +141,23 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 	var skillAct *activity.SkillActivities
 	currentChain := append(input.AgentChain, currentAgentID)
 
-	// Load the conversation this turn continues. The session used to pass it in,
-	// which recorded a full copy of the history in the session workflow's event
-	// history on every turn; loading it here keeps that copy inside this
-	// short-lived run instead. A sub-agent has no session history: its context is
-	// isolated by design, so it loads nothing.
+	// turn is what this run produced, its own messages only. A session turn
+	// does not hold the conversation: the LLM call loads it from references
+	// in its input. Carried here, it was recorded in this workflow's history
+	// with every call, and a long session ended up refused by Temporal. A run
+	// that persists nothing (a sub-agent, a scheduled task) has no other
+	// conversation than turn, given inline.
 	var memAct *activity.MemoryActivities
-	var messages []store.Message
-	var userMemory string
-	if input.TurnKey != "" {
-		var loaded activity.LoadContextOutput
-		if err := workflow.ExecuteActivity(
-			workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-				StartToCloseTimeout: 30 * time.Second,
-			}),
-			memAct.LoadContext,
-			activity.LoadContextInput{SessionID: input.SessionID, UserID: input.UserID},
-		).Get(ctx, &loaded); err != nil {
-			return AgentWorkflowOutput{}, fmt.Errorf("load context: %w", err)
-		}
-		messages, userMemory = loaded.Messages, loaded.UserMemory
-	} else if input.LoadUserMemory && input.UserID != "" {
-		// A failed load costs the personalisation, not the run.
-		if err := workflow.ExecuteActivity(
-			workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-				StartToCloseTimeout: 30 * time.Second,
-				RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 3},
-			}),
-			memAct.LoadMemory,
-			activity.LoadMemoryInput{Scope: store.MemoryScopeUser, ScopeID: input.UserID},
-		).Get(ctx, &userMemory); err != nil {
-			workflow.GetLogger(ctx).Warn("User memory not loaded", "user_id", input.UserID, "error", err)
-		}
-	}
-
-	// Everything appended from here on is this turn's output: it is flushed to
-	// the store as it is produced and also returned to the caller, which appends
-	// it again. Both writes use the same keys, so the second one is a no-op and
-	// either one alone is enough.
-	newStart := len(messages)
+	var turn []store.Message
+	// persisted counts the messages of turn written to the store. Everything
+	// is flushed as it is produced and also returned to the caller, which
+	// appends it again. Both writes use the same keys, so the second one is a
+	// no-op and either one alone is enough.
 	persisted := 0
 
 	if !input.UserMessageStored {
 		contentJSON, _ := json.Marshal(input.UserMessage)
-		messages = append(messages, store.Message{
+		turn = append(turn, store.Message{
 			Role:    store.RoleUser,
 			Content: string(contentJSON),
 			UserID:  input.UserID,
@@ -194,10 +172,11 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 	// flush writes the messages produced since the last call. It must only be
 	// called where the transcript is valid on its own: a flushed assistant
 	// message carrying tool calls whose results never landed would make the next
-	// turn unreplayable by the LLM API. A failed flush is not fatal — the caller
+	// turn unreplayable by the LLM API. A failed flush is not fatal: the next
+	// LLM call is given what is unwritten (TurnHistory.Tail), and the caller
 	// receives NewMessages and writes them again.
 	flush := func(c workflow.Context) {
-		pending := messages[newStart+persisted:]
+		pending := turn[persisted:]
 		if input.TurnKey == "" || len(pending) == 0 {
 			return
 		}
@@ -230,7 +209,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 	}
 	cancelSafeFlush()
 
-	// Load the agent's prompt (unless overridden) and the known agents
+	// Load the agent's name
 	var skillsResult activity.LoadSkillsForAgentOutput
 	if err := workflow.ExecuteActivity(
 		workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
@@ -240,19 +219,10 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 		activity.LoadSkillsForAgentInput{AgentID: currentAgentID},
 	).Get(ctx, &skillsResult); err != nil {
 		if ctx.Err() != nil {
-			return cancelledOutput(messages[newStart:]), nil
+			return cancelledOutput(turn), nil
 		}
 		return AgentWorkflowOutput{}, fmt.Errorf("load skills: %w", err)
 	}
-	systemPrompt := input.SystemPrompt
-	if systemPrompt == "" {
-		systemPrompt = skillsResult.SystemPrompt
-	}
-	// Append user memory to system prompt if available
-	if userMemory != "" {
-		systemPrompt += userMemorySection(input.UserName, userMemory)
-	}
-	systemPrompt += input.PartNote
 	// The agent signs its messages: other agents answer in the same session,
 	// and the interface and the next turns must tell them apart.
 	agentName := skillsResult.Name
@@ -275,16 +245,38 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 		activity.ListToolsInput{AgentID: currentAgentID},
 	).Get(ctx, &toolList); err != nil {
 		if ctx.Err() != nil {
-			return cancelledOutput(messages[newStart:]), nil
+			return cancelledOutput(turn), nil
 		}
 		return AgentWorkflowOutput{}, fmt.Errorf("list tools: %w", err)
 	}
+	// The model is offered the tools this list dispatches, by name: the LLM
+	// call reads their definitions from the catalog.
+	toolNames := make([]string, len(toolList.Tools))
+	for i, t := range toolList.Tools {
+		toolNames[i] = t.Name
+	}
 
-	// The history shows the other agents' turns under their names, their
-	// calls to a private tool hidden.
-	view := historyView{self: currentAgentID, agents: skillsResult.Agents, private: tool.PrivateSet{}}
-	for _, name := range toolList.PrivateTools {
-		view.private[name] = true
+	// Each LLM call builds its prompt from these references. A session turn
+	// and a scheduled task write with their user's memory.
+	prompt := activity.PromptRef{Override: input.SystemPrompt, UserName: input.UserName, PartNote: input.PartNote}
+	if input.TurnKey != "" || input.LoadUserMemory {
+		prompt.MemoryOf = input.UserID
+	}
+	llmRequest := func() activity.LLMTurnRequest {
+		req := activity.LLMTurnRequest{Model: input.Model, AgentID: currentAgentID, Tools: toolNames, Prompt: prompt}
+		if input.TurnKey == "" {
+			req.Messages = turn
+			return req
+		}
+		req.History = &activity.TurnHistory{
+			SessionID:    input.SessionID,
+			UpTo:         input.HistoryUpTo,
+			EarlierTurns: input.EarlierTurns,
+			TurnKey:      input.TurnKey,
+			Tail:         turn[persisted:],
+			TailStart:    persisted,
+		}
+		return req
 	}
 
 	// The answer and the tool calls go to the user's channel from the
@@ -301,44 +293,21 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 		// Check for cancellation before each iteration
 		if ctx.Err() != nil {
 			cancelSafeFlush()
-			return cancelledOutput(messages[newStart:]), nil
-		}
-
-		chatMessages := convertMessages(messages, view)
-
-		// Mark cache breakpoints:
-		// 1. System prompt (stable across iterations)
-		// 2. Last tool definition (stable across iterations)
-		// 3. Second-to-last message (conversation prefix, grows but stable within a turn)
-		tools := toolList.Tools
-		if len(tools) > 0 {
-			tools[len(tools)-1].CacheBreakpoint = true
-		}
-		if len(chatMessages) >= 2 {
-			chatMessages[len(chatMessages)-2].CacheBreakpoint = true
-		}
-
-		request := provider.ChatRequest{
-			Model:       input.Model,
-			System:      systemPrompt,
-			Messages:    chatMessages,
-			Tools:       tools,
-			MaxTokens:   16384,
-			CacheSystem: true,
+			return cancelledOutput(turn), nil
 		}
 
 		var llmAct *activity.LLMActivities
 		var response provider.ChatResponse
-		if err := workflow.ExecuteActivity(llmCtx, llmAct.CallLLM, request).Get(ctx, &response); err != nil {
+		if err := workflow.ExecuteActivity(llmCtx, llmAct.CallLLM, llmRequest()).Get(ctx, &response); err != nil {
 			cancelSafeFlush()
 			if ctx.Err() != nil {
-				return cancelledOutput(messages[newStart:]), nil
+				return cancelledOutput(turn), nil
 			}
 			// Soft failure: returning an error would discard everything the turn
 			// produced, since a failed workflow carries no result.
 			return AgentWorkflowOutput{
-				NewMessages: messages[newStart:],
-				Error:       "call LLM: " + failureText(err),
+				NewMessages: turn,
+				Error:       llmFailure(err),
 			}, nil
 		}
 
@@ -346,7 +315,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 		if len(response.ToolCalls) == 0 {
 			if response.Content != "" {
 				respJSON, _ := json.Marshal(response.Content)
-				messages = append(messages, store.Message{
+				turn = append(turn, store.Message{
 					Role:    store.RoleAssistant,
 					Content: string(respJSON),
 					AgentID: currentAgentID,
@@ -359,7 +328,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 
 			return AgentWorkflowOutput{
 				Response:     response.Content,
-				NewMessages:  messages[newStart:],
+				NewMessages:  turn,
 				GoalAchieved: response.StopReason == "end_turn",
 			}, nil
 		}
@@ -383,7 +352,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 			cJSON, _ := json.Marshal(response.Content)
 			assistantMsg.Content = string(cJSON)
 		}
-		messages = append(messages, assistantMsg)
+		turn = append(turn, assistantMsg)
 
 		notifyToolCalls(ctx, input.SessionID, replyChannel, replyChannelID, response.ToolCalls, toolList.Resolutions)
 
@@ -484,7 +453,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 				}
 			}
 
-			messages = append(messages, store.Message{
+			turn = append(turn, store.Message{
 				Role: store.RoleTool,
 				ToolResult: &store.ToolResult{
 					ToolCallID: response.ToolCalls[j].ID,
@@ -502,7 +471,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 	cancelSafeFlush()
 	return AgentWorkflowOutput{
 		Response:    "Maximum iterations reached.",
-		NewMessages: messages[newStart:],
+		NewMessages: turn,
 		Error:       fmt.Sprintf("stopped after %d iterations without a final answer", maxReActIterations),
 	}, nil
 }
@@ -542,267 +511,6 @@ func runeStart(s string, i int) int {
 		i--
 	}
 	return i
-}
-
-// deferInterleaved moves a human message that landed between an assistant's
-// tool calls and their results to after the results. Humans write to a shared
-// session while the agent works, so their messages can be stored in the middle
-// of a turn; the LLM API rejects a tool call not followed by its results.
-func deferInterleaved(messages []store.Message) []store.Message {
-	out := make([]store.Message, 0, len(messages))
-	var deferred []store.Message
-	pending := map[string]bool{} // tool call IDs awaiting their result
-	for _, m := range messages {
-		switch {
-		case m.ToolResult != nil:
-			delete(pending, m.ToolResult.ToolCallID)
-			out = append(out, m)
-		case len(pending) > 0 && m.Role == store.RoleUser:
-			deferred = append(deferred, m)
-			continue
-		default:
-			out = append(out, m)
-			for _, tc := range m.ToolCalls {
-				pending[tc.ID] = true
-			}
-		}
-		if len(pending) == 0 && len(deferred) > 0 {
-			out = append(out, deferred...)
-			deferred = nil
-		}
-	}
-	return append(out, deferred...)
-}
-
-// historyView is what an agent needs to read the session's history: who it
-// is, how to name the other agents, and which tool inputs their calls hide.
-type historyView struct {
-	self    string
-	agents  map[string]activity.AgentLabel // the catalog's agents, by ID
-	private tool.PrivateSet                // tools whose input the members do not see
-}
-
-// Bounds on what another agent's tool calls bring into the history: its
-// answer carries what matters, its calls only show how it got there.
-const (
-	maxOtherToolInputBytes  = 500
-	maxOtherToolResultBytes = 1500
-)
-
-// other reports whether m is the turn of another agent than the one reading.
-// An assistant message without an agent predates agents' signatures: it is
-// read as the reader's own.
-func (v historyView) other(m store.Message) bool {
-	return m.Role == store.RoleAssistant && m.AgentID != "" && m.AgentID != v.self
-}
-
-// label names m's agent as the history shows it: "agent Jarvis (@jarvis)".
-// An agent gone from the catalog keeps the name it signed with.
-func (v historyView) label(m store.Message) string {
-	if a, ok := v.agents[m.AgentID]; ok {
-		return agentLabel(a.Name, a.Mention)
-	}
-	return agentLabel(cmp.Or(m.Author, m.AgentID), "")
-}
-
-// agentLabel is how an agent is named to another one, in the history and in
-// the part note: by its name and the mention that calls it.
-func agentLabel(name, mention string) string {
-	if mention == "" {
-		return "agent " + name
-	}
-	return "agent " + name + " (@" + mention + ")"
-}
-
-// otherCall is a tool call another agent made: its result is shown with it.
-type otherCall struct {
-	tool, agent string
-}
-
-// convertMessages turns the stored conversation into what the model of the
-// agent view.self reads.
-//
-// Another agent's turn is text the model reads, in a user message: its
-// answer, its tool calls and their results, each under that agent's name.
-// Kept as assistant messages, they would be the model's own words; their
-// tool blocks would be rejected by an API request that defines no tool (an
-// agent without any), and a conversation ending on them would have the model
-// continue the other agent's answer instead of giving its own. The agent's
-// own messages, and those signed by no agent, keep their tool blocks.
-func convertMessages(messages []store.Message, view historyView) []provider.ChatMessage {
-	// The stored order first: deferInterleaved pairs tool calls with their
-	// results, whoever made them.
-	messages = deferInterleaved(messages)
-
-	// Tool results carry no agent: the others' are found by their calls.
-	others := map[string]otherCall{}
-	for _, m := range messages {
-		if view.other(m) {
-			for _, tc := range m.ToolCalls {
-				others[tc.ID] = otherCall{tool: tc.Name, agent: view.label(m)}
-			}
-		}
-	}
-
-	result := make([]provider.ChatMessage, 0, len(messages))
-	for _, msg := range messages {
-		if msg.Kind == store.KindTurnError {
-			continue // for the members: the model is not told about its failures
-		}
-		if view.other(msg) {
-			result = appendUserText(result, view.otherTurn(msg))
-			continue
-		}
-		if msg.ToolResult != nil {
-			if call, ok := others[msg.ToolResult.ToolCallID]; ok {
-				result = appendUserText(result, otherResult(call, msg.ToolResult))
-				continue
-			}
-		}
-		content := json.RawMessage(msg.Content)
-		if len(content) == 0 {
-			content = nil
-		}
-		switch {
-		case msg.Kind == store.KindForkSummary:
-			content = asForkContext(content)
-		case msg.Role == store.RoleUser && msg.Author != "":
-			content = withAuthor(content, msg.Author)
-		}
-		cm := provider.ChatMessage{
-			Role:    string(msg.Role),
-			Content: content,
-		}
-		if len(msg.ToolCalls) > 0 {
-			for _, tc := range msg.ToolCalls {
-				cm.ToolCalls = append(cm.ToolCalls, provider.ToolCallInfo{
-					ID:    tc.ID,
-					Name:  tc.Name,
-					Input: tc.Input,
-				})
-			}
-		}
-		if msg.ToolResult != nil {
-			cm.ToolResult = &provider.ToolResultInfo{
-				ToolCallID: msg.ToolResult.ToolCallID,
-				Content:    msg.ToolResult.Content,
-				IsError:    msg.ToolResult.IsError,
-			}
-		}
-		if text, ok := plainUserText(cm); ok {
-			result = appendUserText(result, text)
-			continue
-		}
-		result = append(result, cm)
-	}
-	return result
-}
-
-// otherTurn is another agent's assistant message as text: its answer, then
-// each tool call, its input clipped, or hidden as the members see it.
-func (v historyView) otherTurn(m store.Message) string {
-	who := v.label(m)
-	var lines []string
-	if text := messageText(m.Content); text != "" {
-		lines = append(lines, "["+who+"] "+text)
-	}
-	for _, tc := range m.ToolCalls {
-		input := tool.DisplayInput(v.private.PrivateInput(tc.Name), tc.Input)
-		lines = append(lines, fmt.Sprintf("[%s called %s %s]", who, tc.Name, clipText(cmp.Or(string(input), "{}"), maxOtherToolInputBytes)))
-	}
-	return strings.Join(lines, "\n")
-}
-
-// otherResult is the result of another agent's tool call as text, clipped.
-func otherResult(call otherCall, r *store.ToolResult) string {
-	what := "result of"
-	if r.IsError {
-		what = "error from"
-	}
-	return fmt.Sprintf("[%s %s, called by %s] %s", what, call.tool, call.agent, clipText(r.Content, maxOtherToolResultBytes))
-}
-
-// plainUserText returns the text of a user message that is text alone.
-func plainUserText(cm provider.ChatMessage) (string, bool) {
-	if cm.Role != string(store.RoleUser) || cm.ToolResult != nil || len(cm.ToolCalls) > 0 {
-		return "", false
-	}
-	var text string
-	if json.Unmarshal(cm.Content, &text) != nil {
-		return "", false
-	}
-	return text, true
-}
-
-// appendUserText adds text as a user message, joined to the previous one when
-// that is user text too: messages from several people and agents follow one
-// another, and the API expects the roles to alternate.
-func appendUserText(result []provider.ChatMessage, text string) []provider.ChatMessage {
-	if text == "" {
-		return result
-	}
-	if n := len(result); n > 0 {
-		if prev, ok := plainUserText(result[n-1]); ok {
-			text = prev + "\n\n" + text
-			result = result[:n-1]
-		}
-	}
-	content, _ := json.Marshal(text)
-	return append(result, provider.ChatMessage{Role: string(store.RoleUser), Content: content})
-}
-
-// messageText returns a stored message's content as text: a JSON string, or
-// the raw content for anything else.
-func messageText(content string) string {
-	var s string
-	if json.Unmarshal([]byte(content), &s) == nil {
-		return s
-	}
-	return content
-}
-
-// clipText shortens s to at most n bytes, on a rune boundary.
-func clipText(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:runeStart(s, n)] + "…"
-}
-
-// userMemorySection is the prompt section holding the memory of the user the
-// turn answers. It names that user: in a shared session, the model must not
-// take one member's memory for everyone's, nor save the others into it.
-func userMemorySection(userName, memory string) string {
-	who := "this user"
-	if userName != "" {
-		who = userName + ", the author of the latest message"
-	}
-	return "\n## User Memory\n\nThe following is what you remember about " + who +
-		" from previous conversations. Use it to personalize your responses. It is private to them: do not reveal it to other participants.\n\n" +
-		memory + "\n\n"
-}
-
-// asForkContext presents a fork's starting summary to the model for what it
-// is: context carried over, not something a user just said.
-func asForkContext(content json.RawMessage) json.RawMessage {
-	var text string
-	if json.Unmarshal(content, &text) != nil {
-		return content
-	}
-	framed, _ := json.Marshal("[Context carried over from an earlier conversation this one was forked from. A summary, not a message from the user.]\n\n" + text)
-	return framed
-}
-
-// withAuthor prefixes a person's message with their name, so the model knows
-// who speaks when a session has several users. Only the text sent to the
-// model changes: the stored message keeps the author in its own field.
-func withAuthor(content json.RawMessage, author string) json.RawMessage {
-	var text string
-	if json.Unmarshal(content, &text) != nil || text == "" {
-		return content // not plain text, or none: leave it alone
-	}
-	prefixed, _ := json.Marshal("[" + author + "] " + text)
-	return prefixed
 }
 
 // notifyRetry bounds the attempts at a notification. Without it the default
@@ -993,6 +701,17 @@ func failureText(err error) string {
 		return appErr.Message()
 	}
 	return err.Error()
+}
+
+// llmFailure is why a turn stopped on its LLM call, for the members. A
+// conversation too long for the model says so alone: it is not a failure of
+// the call to retry, but of the session to fork.
+func llmFailure(err error) string {
+	var appErr *temporal.ApplicationError
+	if errors.As(err, &appErr) && appErr.Type() == activity.ErrContextTooLong {
+		return appErr.Message()
+	}
+	return "call LLM: " + failureText(err)
 }
 
 // subAgentContent is what the parent reads of a sub-agent's run: its final

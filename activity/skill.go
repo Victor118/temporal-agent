@@ -1,13 +1,11 @@
 package activity
 
 import (
-	"cmp"
 	"context"
 	"fmt"
 	"path"
 	"sort"
 	"strings"
-	"sync"
 
 	"github.com/victor/temporal-agent/skill"
 )
@@ -79,36 +77,24 @@ type AgentCatalogEntry struct {
 	Tools       []string `json:"tools"` // Allowed tool name globs; empty = no tool, "*" = all
 }
 
-// SkillActivities provides per-agent system prompt loading as a Temporal activity.
-// It holds the loaded skills and reads agents from the shared catalog; both can
-// change at runtime, and prompts are built on demand from the current state.
+// SkillActivities serves an agent's prompt and name to the workflows, built
+// from the shared Prompts.
 type SkillActivities struct {
-	mu      sync.RWMutex
-	skills  map[string]skill.Skill // skill name → skill
+	// Prompts builds the prompts; the LLM activity shares it, to build the
+	// prompt of each call.
+	Prompts *Prompts
 	catalog *Catalog
-}
-
-func (a *SkillActivities) setSkills(skills []skill.Skill) {
-	byName := make(map[string]skill.Skill, len(skills))
-	for _, s := range skills {
-		byName[s.Name] = s
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.skills = byName
 }
 
 // NewSkillActivities creates a SkillActivities with initial skills and the shared catalog.
 func NewSkillActivities(skills []skill.Skill, catalog *Catalog) *SkillActivities {
-	a := &SkillActivities{catalog: catalog}
-	a.setSkills(skills)
-	return a
+	return &SkillActivities{Prompts: NewPrompts(skills, catalog), catalog: catalog}
 }
 
 // SetSkills is a package-level wrapper so external packages can update skills
 // without exposing a method that Temporal would register as an activity.
 func SetSkills(a *SkillActivities, skills []skill.Skill) {
-	a.setSkills(skills)
+	a.Prompts.SetSkills(skills)
 }
 
 type LoadSkillsForAgentInput struct {
@@ -116,50 +102,28 @@ type LoadSkillsForAgentInput struct {
 }
 
 type LoadSkillsForAgentOutput struct {
+	// SystemPrompt is the agent's base prompt, as of now: the back-office
+	// shows it. A turn's calls build theirs (LLMActivities.CallLLM).
 	SystemPrompt string `json:"system_prompt"`
 	// Name is the agent's name, which signs its messages; its ID when the
 	// catalog does not know it.
 	Name string `json:"name,omitempty"`
-	// Agents names every agent of the catalog by ID: the history the agent
-	// reads holds other agents' turns, shown under their current name and
-	// mention.
-	Agents map[string]AgentLabel `json:"agents,omitempty"`
 }
 
-// AgentLabel is how an agent is named to another one: its name, and the
-// mention that calls it.
-type AgentLabel struct {
-	Name    string `json:"name"`
-	Mention string `json:"mention"`
-}
-
-// LoadSkillsForAgent returns the system prompt for the given agent: behaviors
-// for its allowed tools, then its skills. The agents it may delegate to need no
-// section of their own: each agent_<id> tool carries its agent's description.
+// LoadSkillsForAgent returns the agent's name and its prompt for the tools its
+// allowlist grants.
 func (a *SkillActivities) LoadSkillsForAgent(ctx context.Context, input LoadSkillsForAgentInput) (LoadSkillsForAgentOutput, error) {
-	catalog := a.catalog.Agents()
-	allowed := make(map[string]bool)
+	var tools []string
 	for name := range a.catalog.AllowedTools(input.AgentID).Resolutions {
-		allowed[name] = true
+		tools = append(tools, name)
 	}
-
-	var self AgentCatalogEntry
-	labels := make(map[string]AgentLabel, len(catalog))
-	for _, e := range catalog {
-		if e.ID == input.AgentID {
-			self = e
+	name := input.AgentID
+	for _, e := range a.catalog.Agents() {
+		if e.ID == input.AgentID && e.Name != "" {
+			name = e.Name
 		}
-		labels[e.ID] = AgentLabel{Name: cmp.Or(e.Name, e.ID), Mention: e.Mention}
 	}
-	a.mu.RLock()
-	prompt := identitySection(self) + buildSystemPrompt(matchSkills(a.skills, self.Skills), allowed)
-	a.mu.RUnlock()
-
-	name := self.Name
-	if name == "" {
-		name = input.AgentID
-	}
-	return LoadSkillsForAgentOutput{SystemPrompt: prompt, Name: name, Agents: labels}, nil
+	return LoadSkillsForAgentOutput{SystemPrompt: a.Prompts.AgentPrompt(input.AgentID, tools), Name: name}, nil
 }
 
 // matchSkills returns the skills named in names, in order, skipping unknown ones.
@@ -188,7 +152,7 @@ func identitySection(self AgentCatalogEntry) string {
 }
 
 // conversationNote explains the prefixes the conversation carries
-// (workflow.convertMessages).
+// (conversation.Convert).
 const conversationNote = "Several people and several AI agents may write in a conversation. " +
 	"A person's message starts with their name in brackets: [Alice]. " +
 	"Another agent's turn reaches you as text in a user message, starting with [agent Name (@mention)], its tool calls and their results included: " +

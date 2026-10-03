@@ -89,3 +89,18 @@ func TestParseBudget(t *testing.T) {
 		}
 	}
 }
+
+// A context bound the operator mistyped stops the worker: read as the
+// default, it would hide the mistake.
+func TestParseContextBytes(t *testing.T) {
+	for raw, want := range map[string]int{"": 0, "400000": 400000} {
+		if got, err := parseContextBytes(raw); err != nil || got != want {
+			t.Errorf("parseContextBytes(%q) = %d, %v; want %d", raw, got, err, want)
+		}
+	}
+	for _, raw := range []string{"2MB", "0", "-1", "1.5"} {
+		if _, err := parseContextBytes(raw); err == nil {
+			t.Errorf("parseContextBytes(%q) accepted", raw)
+		}
+	}
+}

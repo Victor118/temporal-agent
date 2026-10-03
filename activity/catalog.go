@@ -1,6 +1,7 @@
 package activity
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/victor/temporal-agent/conversation"
 	"github.com/victor/temporal-agent/provider"
 	"github.com/victor/temporal-agent/store"
 	"github.com/victor/temporal-agent/tool"
@@ -89,9 +91,6 @@ func (c *Catalog) AllowedTools(agentID string) ListToolsOutput {
 	}
 
 	for _, t := range c.tools {
-		if t.PrivateInput {
-			out.PrivateTools = append(out.PrivateTools, t.Name)
-		}
 		if strings.HasPrefix(t.Name, AgentToolPrefix) {
 			// The prefix belongs to the generated agent tools: a published tool
 			// using it would be shadowed, or would shadow an agent.
@@ -100,11 +99,7 @@ func (c *Catalog) AllowedTools(agentID string) ListToolsOutput {
 		if !tool.MatchAny(allowlist, t.Name) {
 			continue
 		}
-		out.Tools = append(out.Tools, provider.ToolDefinition{
-			Name:        t.Name,
-			Description: t.Description,
-			InputSchema: t.InputSchema,
-		})
+		out.Tools = append(out.Tools, publishedDefinition(t))
 		out.Resolutions[t.Name] = ToolResolution{
 			Kind:             t.Kind,
 			WorkflowName:     t.WorkflowName,
@@ -122,11 +117,7 @@ func (c *Catalog) AllowedTools(agentID string) ListToolsOutput {
 		if a.ID == agentID || !tool.MatchAny(allowlist, name) {
 			continue
 		}
-		out.Tools = append(out.Tools, provider.ToolDefinition{
-			Name:        name,
-			Description: AgentToolDescription(a),
-			InputSchema: json.RawMessage(AgentToolSchema),
-		})
+		out.Tools = append(out.Tools, agentDefinition(a))
 		// No task queue: a sub-agent runs where its parent runs, which only
 		// the dispatching workflow knows.
 		out.Resolutions[name] = ToolResolution{Kind: string(tool.ToolKindWorkflow), AgentID: a.ID}
@@ -134,6 +125,65 @@ func (c *Catalog) AllowedTools(agentID string) ListToolsOutput {
 
 	sort.Slice(out.Tools, func(i, j int) bool { return out.Tools[i].Name < out.Tools[j].Name })
 	return out
+}
+
+func publishedDefinition(t store.ToolRecord) provider.ToolDefinition {
+	return provider.ToolDefinition{Name: t.Name, Description: t.Description, InputSchema: t.InputSchema}
+}
+
+func agentDefinition(a AgentCatalogEntry) provider.ToolDefinition {
+	return provider.ToolDefinition{
+		Name:        AgentToolName(a.ID),
+		Description: AgentToolDescription(a),
+		InputSchema: json.RawMessage(AgentToolSchema),
+	}
+}
+
+// ToolDefinitions returns the definitions of the tools named, in their
+// order, as AllowedTools gives them, and the names the catalog no longer
+// knows. The allowlist is not applied again: the names are what a turn may
+// dispatch, decided at its start, and the model is offered exactly those.
+func (c *Catalog) ToolDefinitions(names []string) (defs []provider.ToolDefinition, missing []string) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for _, name := range names {
+		if def, ok := c.definition(name); ok {
+			defs = append(defs, def)
+		} else {
+			missing = append(missing, name)
+		}
+	}
+	return defs, missing
+}
+
+// definition finds name among the agent tools, or else the published ones.
+// The caller holds the lock.
+func (c *Catalog) definition(name string) (provider.ToolDefinition, bool) {
+	if id, ok := strings.CutPrefix(name, AgentToolPrefix); ok {
+		for _, a := range c.agents {
+			if a.ID == id {
+				return agentDefinition(a), true
+			}
+		}
+		return provider.ToolDefinition{}, false
+	}
+	i := sort.Search(len(c.tools), func(i int) bool { return c.tools[i].Name >= name })
+	if i < len(c.tools) && c.tools[i].Name == name {
+		return publishedDefinition(c.tools[i]), true
+	}
+	return provider.ToolDefinition{}, false
+}
+
+// AgentLabels names every agent of the catalog by ID, its ID when it has no
+// name: the history an agent reads holds the others' turns.
+func (c *Catalog) AgentLabels() map[string]conversation.Label {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	labels := make(map[string]conversation.Label, len(c.agents))
+	for _, a := range c.agents {
+		labels[a.ID] = conversation.Label{Name: cmp.Or(a.Name, a.ID), Mention: a.Mention}
+	}
+	return labels
 }
 
 // PrivateInput reports whether a published tool keeps its input from the

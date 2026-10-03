@@ -60,19 +60,10 @@ func TestAgentWorkflow_ToolDispatch(t *testing.T) {
 		return activity.ExecuteToolOutput{Content: "page content"}, nil
 	}, sdkactivity.RegisterOptions{Name: "ExecuteTool"})
 
-	var secondRequest provider.ChatRequest
-	calls := 0
-	env.RegisterActivityWithOptions(func(ctx context.Context, req provider.ChatRequest) (provider.ChatResponse, error) {
-		calls++
-		if calls == 1 {
-			return provider.ChatResponse{ToolCalls: []provider.ToolCallInfo{
-				{ID: "1", Name: "web_fetch", Input: json.RawMessage(`{}`)},
-				{ID: "2", Name: "exec", Input: json.RawMessage(`{}`)},
-			}}, nil
-		}
-		secondRequest = req
-		return provider.ChatResponse{Content: "done", StopReason: "end_turn"}, nil
-	}, sdkactivity.RegisterOptions{Name: "CallLLM"})
+	f := registerLLM(env, answers(provider.ChatResponse{ToolCalls: []provider.ToolCallInfo{
+		{ID: "1", Name: "web_fetch", Input: json.RawMessage(`{}`)},
+		{ID: "2", Name: "exec", Input: json.RawMessage(`{}`)},
+	}}, done))
 
 	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{
 		SessionID:   "s1",
@@ -91,7 +82,7 @@ func TestAgentWorkflow_ToolDispatch(t *testing.T) {
 	}
 
 	results := map[string]*provider.ToolResultInfo{}
-	for _, m := range secondRequest.Messages {
+	for _, m := range f.model.sent()[1].Messages {
 		if m.ToolResult != nil {
 			results[m.ToolResult.ToolCallID] = m.ToolResult
 		}
@@ -139,18 +130,11 @@ func TestAgentWorkflow_ToolTimeoutFromTheCatalog(t *testing.T) {
 		return activity.ExecuteToolOutput{Content: "ok"}, nil
 	}, sdkactivity.RegisterOptions{Name: "ExecuteTool"})
 
-	calls := 0
-	env.RegisterActivityWithOptions(func(ctx context.Context, req provider.ChatRequest) (provider.ChatResponse, error) {
-		calls++
-		if calls == 1 {
-			return provider.ChatResponse{ToolCalls: []provider.ToolCallInfo{
-				{ID: "1", Name: "exec", Input: json.RawMessage(`{"command":"make test","timeout_seconds":300}`)},
-				{ID: "2", Name: "web_search", Input: json.RawMessage(`{}`)},
-				{ID: "3", Name: "web_fetch", Input: json.RawMessage(`{}`)},
-			}}, nil
-		}
-		return provider.ChatResponse{Content: "done", StopReason: "end_turn"}, nil
-	}, sdkactivity.RegisterOptions{Name: "CallLLM"})
+	registerLLM(env, answers(provider.ChatResponse{ToolCalls: []provider.ToolCallInfo{
+		{ID: "1", Name: "exec", Input: json.RawMessage(`{"command":"make test","timeout_seconds":300}`)},
+		{ID: "2", Name: "web_search", Input: json.RawMessage(`{}`)},
+		{ID: "3", Name: "web_fetch", Input: json.RawMessage(`{}`)},
+	}}, done))
 
 	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{SessionID: "s1", AgentID: "dev", UserMessage: "test it"})
 
@@ -168,9 +152,6 @@ func TestAgentWorkflow_ToolTimeoutFromTheCatalog(t *testing.T) {
 func TestAgentWorkflow_CancelWhileLoadingReturnsTheTranscript(t *testing.T) {
 	var suite testsuite.WorkflowTestSuite
 	env := suite.NewTestWorkflowEnvironment()
-	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.LoadContextInput) (activity.LoadContextOutput, error) {
-		return activity.LoadContextOutput{}, nil
-	}, sdkactivity.RegisterOptions{Name: "LoadContext"})
 	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.PersistContextInput) error {
 		return nil
 	}, sdkactivity.RegisterOptions{Name: "PersistContext"})
@@ -305,18 +286,9 @@ func TestAgentWorkflow_DelegatesThroughAgentTool(t *testing.T) {
 		return nil
 	}, sdkactivity.RegisterOptions{Name: "NotifyStep"})
 
-	var secondRequest provider.ChatRequest
-	calls := 0
-	env.RegisterActivityWithOptions(func(ctx context.Context, req provider.ChatRequest) (provider.ChatResponse, error) {
-		calls++
-		if calls == 1 {
-			return provider.ChatResponse{ToolCalls: []provider.ToolCallInfo{
-				{ID: "1", Name: "agent_analyst", Input: json.RawMessage(`{"task":"summarize the CAC 40"}`)},
-			}}, nil
-		}
-		secondRequest = req
-		return provider.ChatResponse{Content: "done", StopReason: "end_turn"}, nil
-	}, sdkactivity.RegisterOptions{Name: "CallLLM"})
+	f := registerLLM(env, answers(provider.ChatResponse{ToolCalls: []provider.ToolCallInfo{
+		{ID: "1", Name: "agent_analyst", Input: json.RawMessage(`{"task":"summarize the CAC 40"}`)},
+	}}, done))
 
 	// Parent and child are both AgentWorkflow, and the mock catches both: the
 	// parent runs the real thing, the child is replaced.
@@ -340,7 +312,7 @@ func TestAgentWorkflow_DelegatesThroughAgentTool(t *testing.T) {
 		t.Errorf("child input = %+v", child)
 	}
 	found := false
-	for _, m := range secondRequest.Messages {
+	for _, m := range f.model.sent()[1].Messages {
 		if m.ToolResult != nil {
 			found = true
 			if m.ToolResult.IsError || m.ToolResult.Content != "CAC 40 summary" {
@@ -389,32 +361,9 @@ func TestChildWorkflowID(t *testing.T) {
 	}
 }
 
-// persistCall records one PersistContext activity call.
-type persistCall struct {
-	turnKey    string
-	startIndex int
-	roles      []string
-}
-
-// recordPersists registers a PersistContext stub collecting what the agent
-// flushed, in order.
-func recordPersists(env *testsuite.TestWorkflowEnvironment, out *[]persistCall) {
-	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.PersistContextInput) error {
-		call := persistCall{turnKey: in.TurnKey, startIndex: in.StartIndex}
-		for _, m := range in.Messages {
-			call.roles = append(call.roles, string(m.Role))
-		}
-		*out = append(*out, call)
-		return nil
-	}, sdkactivity.RegisterOptions{Name: "PersistContext"})
-}
-
-// registerAgentStubs wires the activities every AgentWorkflow run needs.
+// registerAgentStubs wires the activities every AgentWorkflow run needs
+// besides the LLM's (registerLLM).
 func registerAgentStubs(env *testsuite.TestWorkflowEnvironment) {
-	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.LoadContextInput) (activity.LoadContextOutput, error) {
-		return activity.LoadContextOutput{}, nil
-	}, sdkactivity.RegisterOptions{Name: "LoadContext"})
-
 	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.ListToolsInput) (activity.ListToolsOutput, error) {
 		return activity.ListToolsOutput{
 			Tools: []provider.ToolDefinition{{Name: "web_fetch", InputSchema: json.RawMessage(`{"type":"object"}`)}},
@@ -433,6 +382,18 @@ func registerAgentStubs(env *testsuite.TestWorkflowEnvironment) {
 	}, sdkactivity.RegisterOptions{Name: "NotifyStep"})
 }
 
+// fetchPage is a model that fetches a page, then answers.
+func fetchPage() func(int, provider.ChatRequest) (provider.ChatResponse, error) {
+	return answers(provider.ChatResponse{ToolCalls: []provider.ToolCallInfo{{ID: "1", Name: "web_fetch", Input: json.RawMessage(`{}`)}}}, done)
+}
+
+// executePage stubs ExecuteTool with a page.
+func executePage(env *testsuite.TestWorkflowEnvironment) {
+	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.ExecuteToolInput) (activity.ExecuteToolOutput, error) {
+		return activity.ExecuteToolOutput{Content: "page content"}, nil
+	}, sdkactivity.RegisterOptions{Name: "ExecuteTool"})
+}
+
 // TestAgentWorkflow_PersistsTurnIncrementally checks that a turn is written as
 // it goes, in slices that are each replayable on their own: the user message,
 // then every assistant message carrying tool calls together with their results,
@@ -442,23 +403,8 @@ func TestAgentWorkflow_PersistsTurnIncrementally(t *testing.T) {
 	env := suite.NewTestWorkflowEnvironment()
 	registerAgentStubs(env)
 
-	var persists []persistCall
-	recordPersists(env, &persists)
-
-	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.ExecuteToolInput) (activity.ExecuteToolOutput, error) {
-		return activity.ExecuteToolOutput{Content: "page content"}, nil
-	}, sdkactivity.RegisterOptions{Name: "ExecuteTool"})
-
-	calls := 0
-	env.RegisterActivityWithOptions(func(ctx context.Context, req provider.ChatRequest) (provider.ChatResponse, error) {
-		calls++
-		if calls == 1 {
-			return provider.ChatResponse{ToolCalls: []provider.ToolCallInfo{
-				{ID: "1", Name: "web_fetch", Input: json.RawMessage(`{}`)},
-			}}, nil
-		}
-		return provider.ChatResponse{Content: "done", StopReason: "end_turn"}, nil
-	}, sdkactivity.RegisterOptions{Name: "CallLLM"})
+	f := registerLLM(env, fetchPage())
+	executePage(env)
 
 	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{
 		SessionID:   "s1",
@@ -476,7 +422,7 @@ func TestAgentWorkflow_PersistsTurnIncrementally(t *testing.T) {
 		{turnKey: "run-abc-3", startIndex: 1, roles: []string{"assistant", "tool"}},
 		{turnKey: "run-abc-3", startIndex: 3, roles: []string{"assistant"}},
 	}
-	if fmt.Sprint(persists) != fmt.Sprint(want) {
+	if persists := f.session.persisted(); fmt.Sprint(persists) != fmt.Sprint(want) {
 		t.Errorf("persisted %v, want %v", persists, want)
 	}
 
@@ -496,12 +442,7 @@ func TestAgentWorkflow_NoPersistWithoutTurn(t *testing.T) {
 	env := suite.NewTestWorkflowEnvironment()
 	registerAgentStubs(env)
 
-	var persists []persistCall
-	recordPersists(env, &persists)
-
-	env.RegisterActivityWithOptions(func(ctx context.Context, req provider.ChatRequest) (provider.ChatResponse, error) {
-		return provider.ChatResponse{Content: "done", StopReason: "end_turn"}, nil
-	}, sdkactivity.RegisterOptions{Name: "CallLLM"})
+	f := registerLLM(env, answers(done))
 
 	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{
 		SessionID: "s1", AgentID: "reviewer", UserMessage: "hello",
@@ -510,7 +451,7 @@ func TestAgentWorkflow_NoPersistWithoutTurn(t *testing.T) {
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatalf("workflow error: %v", err)
 	}
-	if len(persists) != 0 {
+	if persists := f.session.persisted(); len(persists) != 0 {
 		t.Errorf("persisted %v, want nothing without a turn key", persists)
 	}
 }
@@ -523,13 +464,9 @@ func TestAgentWorkflow_LLMFailureKeepsTranscript(t *testing.T) {
 	env := suite.NewTestWorkflowEnvironment()
 	registerAgentStubs(env)
 
-	var persists []persistCall
-	recordPersists(env, &persists)
-
-	env.RegisterActivityWithOptions(func(ctx context.Context, req provider.ChatRequest) (provider.ChatResponse, error) {
-		return provider.ChatResponse{}, temporal.NewNonRetryableApplicationError(
-			"overloaded", "PermanentAPIError", nil)
-	}, sdkactivity.RegisterOptions{Name: "CallLLM"})
+	f := registerLLM(env, func(int, provider.ChatRequest) (provider.ChatResponse, error) {
+		return provider.ChatResponse{}, &provider.PermanentAPIError{Err: errors.New("overloaded")}
+	})
 
 	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{
 		SessionID:   "s1",
@@ -554,30 +491,20 @@ func TestAgentWorkflow_LLMFailureKeepsTranscript(t *testing.T) {
 		t.Errorf("NewMessages = %+v, want the user message to survive", out.NewMessages)
 	}
 	want := []persistCall{{turnKey: "run-abc-7", startIndex: 0, roles: []string{"user"}}}
-	if fmt.Sprint(persists) != fmt.Sprint(want) {
+	if persists := f.session.persisted(); fmt.Sprint(persists) != fmt.Sprint(want) {
 		t.Errorf("persisted %v, want %v", persists, want)
 	}
 }
 
 // TestAgentWorkflow_SubAgentLoadsNoHistory checks that a run without a turn key
-// never reads the session transcript: a sub-agent's context is isolated.
+// never reads the session transcript: a sub-agent's context is isolated, its
+// conversation given inline.
 func TestAgentWorkflow_SubAgentLoadsNoHistory(t *testing.T) {
 	var suite testsuite.WorkflowTestSuite
 	env := suite.NewTestWorkflowEnvironment()
 	registerAgentStubs(env)
-
-	loads := 0
-	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.LoadContextInput) (activity.LoadContextOutput, error) {
-		loads++
-		return activity.LoadContextOutput{}, nil
-	}, sdkactivity.RegisterOptions{Name: "LoadContext"})
-
-	env.RegisterActivityWithOptions(func(ctx context.Context, req provider.ChatRequest) (provider.ChatResponse, error) {
-		if len(req.Messages) != 1 {
-			t.Errorf("sub-agent saw %d messages, want only its own task", len(req.Messages))
-		}
-		return provider.ChatResponse{Content: "done", StopReason: "end_turn"}, nil
-	}, sdkactivity.RegisterOptions{Name: "CallLLM"})
+	f := registerLLM(env, answers(done))
+	f.session.add(store.HumanMessageKey("a"), store.Message{Role: store.RoleUser, Content: `"the session's"`})
 
 	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{
 		SessionID: "child-1", AgentID: "reviewer", UserMessage: "sub task",
@@ -586,8 +513,11 @@ func TestAgentWorkflow_SubAgentLoadsNoHistory(t *testing.T) {
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatalf("workflow error: %v", err)
 	}
-	if loads != 0 {
-		t.Errorf("LoadContext called %d times, want 0 for a sub-agent", loads)
+	if sent := f.model.sent(); len(sent) != 1 || len(sent[0].Messages) != 1 || textOf(sent[0].Messages[0]) != "sub task" {
+		t.Errorf("sub-agent saw %+v, want only its own task", sent)
+	}
+	if f.session.loads != 0 {
+		t.Errorf("the conversation was loaded %d times, want never for a sub-agent", f.session.loads)
 	}
 }
 
@@ -598,24 +528,8 @@ func TestAgentWorkflow_ScheduledRunLoadsOnlyTheUserMemory(t *testing.T) {
 	var suite testsuite.WorkflowTestSuite
 	env := suite.NewTestWorkflowEnvironment()
 	registerAgentStubs(env)
-
-	loads := 0
-	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.LoadContextInput) (activity.LoadContextOutput, error) {
-		loads++
-		return activity.LoadContextOutput{}, nil
-	}, sdkactivity.RegisterOptions{Name: "LoadContext"})
-	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.LoadMemoryInput) (string, error) {
-		if in.Scope != store.MemoryScopeUser || in.ScopeID != "victor" {
-			t.Errorf("LoadMemory(%+v), want victor's user memory", in)
-		}
-		return "likes concise answers", nil
-	}, sdkactivity.RegisterOptions{Name: "LoadMemory"})
-
-	var seen provider.ChatRequest
-	env.RegisterActivityWithOptions(func(ctx context.Context, req provider.ChatRequest) (provider.ChatResponse, error) {
-		seen = req
-		return provider.ChatResponse{Content: "done", StopReason: "end_turn"}, nil
-	}, sdkactivity.RegisterOptions{Name: "CallLLM"})
+	f := registerLLM(env, answers(done))
+	f.session.memory["victor"] = "likes concise answers"
 
 	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{
 		SessionID: "schedule-1", UserID: "victor", AgentID: "default",
@@ -625,52 +539,41 @@ func TestAgentWorkflow_ScheduledRunLoadsOnlyTheUserMemory(t *testing.T) {
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatalf("workflow error: %v", err)
 	}
-	if loads != 0 {
-		t.Errorf("LoadContext called %d times, want 0 without a turn key", loads)
+	if f.session.loads != 0 {
+		t.Errorf("the conversation was loaded %d times, want never without a turn key", f.session.loads)
 	}
+	seen := f.model.sent()[0]
 	if !strings.Contains(seen.System, "likes concise answers") {
 		t.Errorf("system prompt lacks the user memory: %q", seen.System)
 	}
+	if len(seen.Messages) != 1 || textOf(seen.Messages[0]) != "check my reminders" {
+		t.Errorf("model saw %+v, want the task's prompt alone", seen.Messages)
+	}
 }
 
-// TestAgentWorkflow_LoadsItsOwnHistory checks that a session turn reads the
-// transcript itself rather than receiving it in its input, and that what it
-// loaded reaches the model.
+// TestAgentWorkflow_LoadsItsOwnHistory checks that a session turn's model
+// reads the transcript, which the workflow never holds, and its user's
+// memory.
 func TestAgentWorkflow_LoadsItsOwnHistory(t *testing.T) {
 	var suite testsuite.WorkflowTestSuite
 	env := suite.NewTestWorkflowEnvironment()
 	registerAgentStubs(env)
-	recordPersists(env, new([]persistCall))
-
-	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.LoadContextInput) (activity.LoadContextOutput, error) {
-		if in.SessionID != "s1" || in.UserID != "victor" {
-			t.Errorf("LoadContext(%+v), want session s1 for victor", in)
-		}
-		return activity.LoadContextOutput{
-			Messages: []store.Message{
-				{Role: store.RoleUser, Content: `"earlier question"`},
-				{Role: store.RoleAssistant, Content: `"earlier answer"`},
-			},
-			UserMemory: "likes concise answers",
-		}, nil
-	}, sdkactivity.RegisterOptions{Name: "LoadContext"})
-
-	var seen provider.ChatRequest
-	env.RegisterActivityWithOptions(func(ctx context.Context, req provider.ChatRequest) (provider.ChatResponse, error) {
-		seen = req
-		return provider.ChatResponse{Content: "done", StopReason: "end_turn"}, nil
-	}, sdkactivity.RegisterOptions{Name: "CallLLM"})
+	f := registerLLM(env, answers(done))
+	f.session.memory["victor"] = "likes concise answers"
+	f.session.add(store.HumanMessageKey("a"), store.Message{Role: store.RoleUser, Content: `"earlier question"`})
+	upTo := f.session.add(store.TurnMessageKey("run-abc-3", 0), store.Message{Role: store.RoleAssistant, Content: `"earlier answer"`})
 
 	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{
 		SessionID: "s1", UserID: "victor", AgentID: "reviewer",
-		UserMessage: "new question", TurnKey: "run-abc-4",
+		UserMessage: "new question", TurnKey: "run-abc-4", HistoryUpTo: upTo,
 	})
 
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatalf("workflow error: %v", err)
 	}
-	if len(seen.Messages) != 3 {
-		t.Fatalf("model saw %d messages, want the 2 loaded plus the new one", len(seen.Messages))
+	seen := f.model.sent()[0]
+	if len(seen.Messages) != 3 || textOf(seen.Messages[2]) != "new question" {
+		t.Fatalf("model saw %+v, want the 2 stored plus the new one", seen.Messages)
 	}
 	if !strings.Contains(seen.System, "likes concise answers") {
 		t.Errorf("system prompt lost the user memory: %q", seen.System)
@@ -713,225 +616,28 @@ func TestTruncateToolResult(t *testing.T) {
 	}
 }
 
-// In a shared session the model must know who speaks: each user message
-// reaches it prefixed with its author, while the stored message keeps the text
-// and the author apart.
-func TestConvertMessages_NamesTheAuthor(t *testing.T) {
-	msgs := convertMessages([]store.Message{
-		{Role: store.RoleUser, Content: `"hello"`, UserID: "u-alice", Author: "Alice"},
-		{Role: store.RoleAssistant, Content: `"hi Alice"`},
-		{Role: store.RoleUser, Content: `"scheduled prompt"`}, // no author: a scheduled run
-	}, historyView{self: "default"})
-	for i, want := range []string{`"[Alice] hello"`, `"hi Alice"`, `"scheduled prompt"`} {
-		if got := string(msgs[i].Content); got != want {
-			t.Errorf("message %d = %s, want %s", i, got, want)
-		}
-	}
-}
-
-// Several agents answer in a session: the model reads another agent's turn
-// as text under its name and mention, in a user message, and its own as they
-// are. An agent gone from the catalog keeps the name it signed with, or its
-// ID; a message signed by no agent is read as the reader's own.
-func TestConvertMessages_NamesTheOtherAgents(t *testing.T) {
-	view := historyView{self: "smith", agents: map[string]activity.AgentLabel{
-		"jarvis": {Name: "Jarvis", Mention: "jarvis"},
-		"smith":  {Name: "Agent Smith", Mention: "smith"},
-	}}
-	msgs := convertMessages([]store.Message{
-		{Role: store.RoleUser, Content: `"@jarvis résume, @smith juge"`, Author: "Alice"},
-		{Role: store.RoleAssistant, Content: `"voici le résumé"`, AgentID: "jarvis", Author: "Jarvis"},
-		{Role: store.RoleAssistant, Content: `"gone"`, AgentID: "old", Author: "Old One"},
-		{Role: store.RoleAssistant, Content: `"nameless"`, AgentID: "older"},
-		{Role: store.RoleAssistant, Content: `"mine"`, AgentID: "smith", Author: "Agent Smith"},
-		{Role: store.RoleAssistant, Content: `"unsigned"`},
-	}, view)
-
-	want := []struct{ role, content string }{
-		{"user", "[Alice] @jarvis résume, @smith juge\n\n[agent Jarvis (@jarvis)] voici le résumé\n\n[agent Old One] gone\n\n[agent older] nameless"},
-		{"assistant", "mine"},
-		{"assistant", "unsigned"},
-	}
-	if len(msgs) != len(want) {
-		t.Fatalf("%d messages, want %d: %+v", len(msgs), len(want), msgs)
-	}
-	for i, w := range want {
-		if msgs[i].Role != w.role || textOf(msgs[i]) != w.content {
-			t.Errorf("message %d = %s %q, want %s %q", i, msgs[i].Role, textOf(msgs[i]), w.role, w.content)
-		}
-	}
-}
-
-// An agent without tools answers after one that used some: its request holds
-// no tool block, or the API would reject it, and ends on a user message, or
-// the model would continue the other agent's answer. A member's message
-// written between the other agent's call and its result comes after the
-// result; a private input stays hidden.
-func TestConvertMessages_OtherAgentsToolsAsText(t *testing.T) {
-	view := historyView{
-		self:    "smith",
-		agents:  map[string]activity.AgentLabel{"jarvis": {Name: "Jarvis", Mention: "jarvis"}},
-		private: tool.PrivateSet{"save_user_memory": true},
-	}
-	msgs := convertMessages([]store.Message{
-		{Role: store.RoleUser, Content: `"@jarvis cherche, @smith juge"`, Author: "Alice"},
-		{Role: store.RoleAssistant, Content: `"je cherche"`, AgentID: "jarvis", Author: "Jarvis", ToolCalls: []store.ToolCall{
-			{ID: "t1", Name: "web_search", Input: json.RawMessage(`{"q":"temporal"}`)},
-			{ID: "t2", Name: "save_user_memory", Input: json.RawMessage(`{"content":"Alice's secret"}`)},
-		}},
-		{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "t1", Content: "found " + strings.Repeat("x", 3000)}},
-		{Role: store.RoleUser, Content: `"meanwhile"`, Author: "Bob"},
-		{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "t2", Content: "denied", IsError: true}},
-		{Role: store.RoleAssistant, Content: `"voici"`, AgentID: "jarvis", Author: "Jarvis"},
-	}, view)
-
-	if len(msgs) != 1 || msgs[0].Role != "user" {
-		t.Fatalf("messages %+v, want one user message", msgs)
-	}
-	for _, m := range msgs {
-		if len(m.ToolCalls) > 0 || m.ToolResult != nil {
-			t.Errorf("a tool block reached an agent that did not make it: %+v", m)
-		}
-	}
-	text := textOf(msgs[0])
-	for _, want := range []string{
-		"[Alice] @jarvis cherche, @smith juge\n\n[agent Jarvis (@jarvis)] je cherche\n",
-		`[agent Jarvis (@jarvis) called web_search {"q":"temporal"}]`,
-		`[agent Jarvis (@jarvis) called save_user_memory {"content":"(private)"}]`,
-		"[result of web_search, called by agent Jarvis (@jarvis)] found xxx",
-		"[error from save_user_memory, called by agent Jarvis (@jarvis)] denied\n\n[Bob] meanwhile\n\n[agent Jarvis (@jarvis)] voici",
-	} {
-		if !strings.Contains(text, want) {
-			t.Errorf("model reads %q\nwant %q in it", text, want)
-		}
-	}
-	if strings.Contains(text, "secret") {
-		t.Error("a private tool input reached another agent")
-	}
-	if len(text) > 2500 {
-		t.Errorf("another agent's tool result was not clipped: %d bytes", len(text))
-	}
-}
-
-// The reader's own tool calls keep their blocks, each followed by its result,
-// with a member's message written in between after them; another agent's
-// turn later on is text.
-func TestConvertMessages_KeepsItsOwnToolPairing(t *testing.T) {
-	view := historyView{self: "smith", agents: map[string]activity.AgentLabel{"jarvis": {Name: "Jarvis", Mention: "jarvis"}}}
-	msgs := convertMessages([]store.Message{
-		{Role: store.RoleUser, Content: `"@smith lis le dépôt"`, Author: "Alice"},
-		{Role: store.RoleAssistant, AgentID: "smith", ToolCalls: []store.ToolCall{{ID: "s1", Name: "read_file"}}},
-		{Role: store.RoleUser, Content: `"meanwhile"`, Author: "Bob"},
-		{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "s1", Content: "main.go"}},
-		{Role: store.RoleAssistant, Content: `"lu"`, AgentID: "smith"},
-		{Role: store.RoleUser, Content: `"@jarvis cherche, @smith juge"`, Author: "Alice"},
-		{Role: store.RoleAssistant, AgentID: "jarvis", ToolCalls: []store.ToolCall{{ID: "j1", Name: "web_search"}}},
-		{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "j1", Content: "found"}},
-		{Role: store.RoleAssistant, Content: `"voici"`, AgentID: "jarvis"},
-	}, view)
-
-	want := []struct{ role, content, call, result string }{
-		{role: "user", content: "[Alice] @smith lis le dépôt"},
-		{role: "assistant", call: "s1"},
-		{role: "tool", result: "s1"},
-		{role: "user", content: "[Bob] meanwhile"},
-		{role: "assistant", content: "lu"},
-		{role: "user", content: "[Alice] @jarvis cherche, @smith juge\n\n[agent Jarvis (@jarvis) called web_search {}]\n\n[result of web_search, called by agent Jarvis (@jarvis)] found\n\n[agent Jarvis (@jarvis)] voici"},
-	}
-	if len(msgs) != len(want) {
-		t.Fatalf("%d messages, want %d: %+v", len(msgs), len(want), msgs)
-	}
-	for i, w := range want {
-		m := msgs[i]
-		if m.Role != w.role || (w.content != "" && textOf(m) != w.content) {
-			t.Errorf("message %d = %s %q, want %s %q", i, m.Role, textOf(m), w.role, w.content)
-		}
-		if w.call != "" && (len(m.ToolCalls) != 1 || m.ToolCalls[0].ID != w.call) {
-			t.Errorf("message %d: calls %+v, want %s", i, m.ToolCalls, w.call)
-		}
-		if w.result != "" && (m.ToolResult == nil || m.ToolResult.ToolCallID != w.result) {
-			t.Errorf("message %d: result %+v, want the result of %s", i, m.ToolResult, w.result)
-		}
-	}
-}
-
-// textOf is a converted message's text.
-func textOf(m provider.ChatMessage) string {
-	var s string
-	json.Unmarshal(m.Content, &s)
-	return s
-}
-
-// Why a turn failed is for the members: the model never sees it, or it would
-// answer the error instead of the user. The two user messages around it are
-// read as one.
-func TestConvertMessages_SkipsTurnErrors(t *testing.T) {
-	msgs := convertMessages([]store.Message{
-		{Role: store.RoleUser, Content: `"analyse the repo"`},
-		{Role: store.RoleAssistant, Kind: store.KindTurnError, Content: `"call LLM: credit balance is too low"`},
-		{Role: store.RoleUser, Content: `"try again"`},
-	}, historyView{self: "default"})
-	if len(msgs) != 1 || textOf(msgs[0]) != "analyse the repo\n\ntry again" {
-		t.Errorf("messages = %+v, want the two user messages alone", msgs)
-	}
-}
-
-// A member wrote while the agent was between a tool call and its result: the
-// model must still see the result right after the call, or the API rejects
-// the conversation. The message comes after the results, and is kept.
-func TestDeferInterleaved(t *testing.T) {
-	call := store.Message{Role: store.RoleAssistant, ToolCalls: []store.ToolCall{{ID: "t1"}, {ID: "t2"}}}
-	r1 := store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "t1"}}
-	r2 := store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "t2"}}
-	human := store.Message{Role: store.RoleUser, Content: `"meanwhile"`, Author: "Bob"}
-	start := store.Message{Role: store.RoleUser, Content: `"go"`}
-	done := store.Message{Role: store.RoleAssistant, Content: `"done"`}
-
-	got := deferInterleaved([]store.Message{start, call, r1, human, r2, done})
-	want := []store.Message{start, call, r1, r2, human, done}
-	if len(got) != len(want) {
-		t.Fatalf("%d messages, want %d", len(got), len(want))
-	}
-	for i := range want {
-		if got[i].Content != want[i].Content || (got[i].ToolResult == nil) != (want[i].ToolResult == nil) ||
-			(got[i].ToolResult != nil && got[i].ToolResult.ToolCallID != want[i].ToolResult.ToolCallID) {
-			t.Errorf("message %d = %+v, want %+v", i, got[i], want[i])
-		}
-	}
-}
-
 // A message the server stored already is loaded with the history, not added
 // by the turn a second time.
 func TestAgentWorkflow_StoredMessageIsNotAddedAgain(t *testing.T) {
 	var suite testsuite.WorkflowTestSuite
 	env := suite.NewTestWorkflowEnvironment()
 	registerAgentStubs(env)
-	var persisted []persistCall
-	recordPersists(env, &persisted)
-
-	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.LoadContextInput) (activity.LoadContextOutput, error) {
-		return activity.LoadContextOutput{Messages: []store.Message{
-			{Role: store.RoleUser, Content: `"we talked"`, Author: "Alice"},
-			{Role: store.RoleUser, Content: `"@agent sum it up"`, Author: "Bob"},
-		}}, nil
-	}, sdkactivity.RegisterOptions{Name: "LoadContext"})
-	var seen provider.ChatRequest
-	env.RegisterActivityWithOptions(func(ctx context.Context, req provider.ChatRequest) (provider.ChatResponse, error) {
-		seen = req
-		return provider.ChatResponse{Content: "summary", StopReason: "end_turn"}, nil
-	}, sdkactivity.RegisterOptions{Name: "CallLLM"})
+	f := registerLLM(env, answers(provider.ChatResponse{Content: "summary", StopReason: "end_turn"}))
+	f.session.add(store.HumanMessageKey("a"), store.Message{Role: store.RoleUser, Content: `"we talked"`, Author: "Alice"})
+	upTo := f.session.add(store.HumanMessageKey("b"), store.Message{Role: store.RoleUser, Content: `"@agent sum it up"`, Author: "Bob"})
 
 	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{
 		SessionID: "s1", UserID: "u-bob", UserName: "Bob", AgentID: "reviewer",
-		UserMessage: "@agent sum it up", UserMessageStored: true, TurnKey: "run-1",
+		UserMessage: "@agent sum it up", UserMessageStored: true, TurnKey: "run-1", HistoryUpTo: upTo,
 	})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
+	seen := f.model.sent()[0]
 	if len(seen.Messages) != 1 || textOf(seen.Messages[0]) != "[Alice] we talked\n\n[Bob] @agent sum it up" {
 		t.Errorf("model saw %+v, want the 2 stored messages, in one", seen.Messages)
 	}
-	for _, p := range persisted {
+	for _, p := range f.session.persisted() {
 		for _, role := range p.roles {
 			if role == string(store.RoleUser) {
 				t.Errorf("the turn stored a user message again: %+v", p)
@@ -951,9 +657,7 @@ func TestAgentWorkflow_SubAgentRepliesToItsParentOnly(t *testing.T) {
 	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.LoadSkillsForAgentInput) (activity.LoadSkillsForAgentOutput, error) {
 		return activity.LoadSkillsForAgentOutput{}, nil
 	}, sdkactivity.RegisterOptions{Name: "LoadSkillsForAgent"})
-	env.RegisterActivityWithOptions(func(ctx context.Context, req provider.ChatRequest) (provider.ChatResponse, error) {
-		return provider.ChatResponse{Content: "the analysis", StopReason: "end_turn"}, nil
-	}, sdkactivity.RegisterOptions{Name: "CallLLM"})
+	registerLLM(env, answers(provider.ChatResponse{Content: "the analysis", StopReason: "end_turn"}))
 	var channels []string
 	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.NotifyInput) error {
 		channels = append(channels, in.Channel)
@@ -1009,9 +713,7 @@ func TestAgentWorkflow_UndeliveredAnswerEndsTheTurn(t *testing.T) {
 	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.LoadSkillsForAgentInput) (activity.LoadSkillsForAgentOutput, error) {
 		return activity.LoadSkillsForAgentOutput{}, nil
 	}, sdkactivity.RegisterOptions{Name: "LoadSkillsForAgent"})
-	env.RegisterActivityWithOptions(func(ctx context.Context, req provider.ChatRequest) (provider.ChatResponse, error) {
-		return provider.ChatResponse{Content: "the answer", StopReason: "end_turn"}, nil
-	}, sdkactivity.RegisterOptions{Name: "CallLLM"})
+	registerLLM(env, answers(provider.ChatResponse{Content: "the answer", StopReason: "end_turn"}))
 	attempts := 0
 	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.NotifyInput) error {
 		attempts++
@@ -1074,18 +776,9 @@ func TestAgentWorkflow_RefusesADelegationLoop(t *testing.T) {
 		return nil
 	}, sdkactivity.RegisterOptions{Name: "NotifyStep"})
 
-	var second provider.ChatRequest
-	calls := 0
-	env.RegisterActivityWithOptions(func(ctx context.Context, req provider.ChatRequest) (provider.ChatResponse, error) {
-		calls++
-		if calls == 1 {
-			return provider.ChatResponse{ToolCalls: []provider.ToolCallInfo{
-				{ID: "c1", Name: "agent_root", Input: json.RawMessage(`{"task":"ask root"}`)},
-			}}, nil
-		}
-		second = req
-		return provider.ChatResponse{Content: "done", StopReason: "end_turn"}, nil
-	}, sdkactivity.RegisterOptions{Name: "CallLLM"})
+	f := registerLLM(env, answers(provider.ChatResponse{ToolCalls: []provider.ToolCallInfo{
+		{ID: "c1", Name: "agent_root", Input: json.RawMessage(`{"task":"ask root"}`)},
+	}}, done))
 
 	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{
 		SessionID: "s1-tool-agent_analyst-c0", AgentID: "analyst", AgentChain: []string{"root"}, UserMessage: "go",
@@ -1098,7 +791,7 @@ func TestAgentWorkflow_RefusesADelegationLoop(t *testing.T) {
 		t.Errorf("tools listed for %v: a child agent ran", listed)
 	}
 	var result *provider.ToolResultInfo
-	for _, m := range second.Messages {
+	for _, m := range f.model.sent()[1].Messages {
 		if m.ToolResult != nil {
 			result = m.ToolResult
 		}
@@ -1116,23 +809,13 @@ func TestAgentWorkflow_SignsItsMessages(t *testing.T) {
 		t.Run(fmt.Sprint("sign=", sign), func(t *testing.T) {
 			var suite testsuite.WorkflowTestSuite
 			env := suite.NewTestWorkflowEnvironment()
-			env.RegisterActivityWithOptions(func(ctx context.Context, in activity.LoadContextInput) (activity.LoadContextOutput, error) {
-				return activity.LoadContextOutput{}, nil
-			}, sdkactivity.RegisterOptions{Name: "LoadContext"})
 			env.RegisterActivityWithOptions(func(ctx context.Context, in activity.ListToolsInput) (activity.ListToolsOutput, error) {
 				return activity.ListToolsOutput{}, nil
 			}, sdkactivity.RegisterOptions{Name: "ListTools"})
 			env.RegisterActivityWithOptions(func(ctx context.Context, in activity.LoadSkillsForAgentInput) (activity.LoadSkillsForAgentOutput, error) {
 				return activity.LoadSkillsForAgentOutput{SystemPrompt: "prompt", Name: "Agent Smith"}, nil
 			}, sdkactivity.RegisterOptions{Name: "LoadSkillsForAgent"})
-			env.RegisterActivityWithOptions(func(ctx context.Context, in activity.PersistContextInput) error {
-				return nil
-			}, sdkactivity.RegisterOptions{Name: "PersistContext"})
-			var system string
-			env.RegisterActivityWithOptions(func(ctx context.Context, req provider.ChatRequest) (provider.ChatResponse, error) {
-				system = req.System
-				return provider.ChatResponse{Content: "it fits", StopReason: "end_turn"}, nil
-			}, sdkactivity.RegisterOptions{Name: "CallLLM"})
+			f := registerLLM(env, answers(provider.ChatResponse{Content: "it fits", StopReason: "end_turn"}))
 			var answers []string
 			env.RegisterActivityWithOptions(func(ctx context.Context, in activity.NotifyInput) error {
 				answers = append(answers, string(in.Event.Data))
@@ -1153,7 +836,7 @@ func TestAgentWorkflow_SignsItsMessages(t *testing.T) {
 			if len(out.NewMessages) != 1 || out.NewMessages[0].AgentID != "smith" || out.NewMessages[0].Author != "Agent Smith" {
 				t.Errorf("wrote %+v, want the answer signed by smith (Agent Smith)", out.NewMessages)
 			}
-			if !strings.HasSuffix(system, "\n## PART\n") {
+			if system := f.model.sent()[0].System; !strings.HasSuffix(system, "\n## PART\n") {
 				t.Errorf("system prompt %q does not end with the part note", system)
 			}
 			want := `{"content":"it fits","type":"message"}`
@@ -1164,5 +847,202 @@ func TestAgentWorkflow_SignsItsMessages(t *testing.T) {
 				t.Errorf("answer sent %v, want %s", answers, want)
 			}
 		})
+	}
+}
+
+// A turn's LLM calls carry references, never the conversation: an input does
+// not grow with the session's history, nor with the turn's iterations. Before,
+// each input was the whole request the model reads (what the fake model
+// receives here), recorded in the workflow's history on every call.
+func TestAgentWorkflow_LLMInputsStaySmall(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+	registerAgentStubs(env)
+	executePage(env)
+	fetch := provider.ChatResponse{ToolCalls: []provider.ToolCallInfo{{ID: "1", Name: "web_fetch", Input: json.RawMessage(`{}`)}}}
+	f := registerLLM(env, func(n int, _ provider.ChatRequest) (provider.ChatResponse, error) {
+		if n <= 5 {
+			fetch.ToolCalls[0].ID = fmt.Sprint(n)
+			return fetch, nil
+		}
+		return done, nil
+	})
+	var upTo int64
+	for i := range 150 { // about 1.5 MB of history
+		role := store.RoleUser
+		if i%2 == 1 {
+			role = store.RoleAssistant
+		}
+		content, _ := json.Marshal(fmt.Sprintf("message %d: %s", i, strings.Repeat("lorem ipsum ", 850)))
+		upTo = f.session.add(store.HumanMessageKey(fmt.Sprint(i)), store.Message{Role: role, Content: string(content)})
+	}
+
+	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{
+		SessionID: "s1", UserID: "victor", AgentID: "reviewer",
+		UserMessage: "go on", TurnKey: "run-1@150.0", HistoryUpTo: upTo,
+	})
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatal(err)
+	}
+
+	sizes, sent := f.inputSizes(), f.model.sent()
+	if len(sizes) != 6 {
+		t.Fatalf("%d LLM calls, want 6", len(sizes))
+	}
+	for i, size := range sizes {
+		if size > 1024 {
+			t.Errorf("call %d: input of %d bytes, want under 1 KiB whatever the history", i+1, size)
+		}
+	}
+	read, _ := json.Marshal(sent[len(sent)-1])
+	if len(read) < 1_500_000 {
+		t.Errorf("the model read %d bytes, want the whole history", len(read))
+	}
+	t.Logf("CallLLM input: %v bytes; the request the model read (the input before): %d bytes", sizes, len(read))
+}
+
+// A flush that failed leaves the turn's messages unwritten: the next call
+// still reads them, from its input, and once when the flush wrote them after
+// all. The end of the turn writes them, once.
+func TestAgentWorkflow_UnwrittenMessagesReachTheModel(t *testing.T) {
+	for _, writeThenFail := range []bool{false, true} {
+		t.Run(fmt.Sprint("written=", writeThenFail), func(t *testing.T) {
+			var suite testsuite.WorkflowTestSuite
+			env := suite.NewTestWorkflowEnvironment()
+			registerAgentStubs(env)
+			executePage(env)
+			f := registerLLM(env, fetchPage())
+			upTo := f.session.add(store.HumanMessageKey("q"), store.Message{Role: store.RoleUser, Content: `"read it"`})
+			// The flush after the tool call fails, every attempt.
+			f.session.failPersists, f.session.writeThenFail = 3, writeThenFail
+
+			env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{
+				SessionID: "s1", AgentID: "reviewer", UserMessage: "read it", UserMessageStored: true,
+				TurnKey: "run-1@1.0", HistoryUpTo: upTo,
+			})
+			if err := env.GetWorkflowError(); err != nil {
+				t.Fatal(err)
+			}
+
+			second := f.model.sent()[1].Messages
+			if len(second) != 3 || len(second[1].ToolCalls) != 1 || second[2].ToolResult == nil || second[2].ToolResult.Content != "page content" {
+				t.Errorf("second call read %+v, want the question, the call and its result, once each", second)
+			}
+			if h := f.session.history(); len(h) != 4 {
+				t.Errorf("stored %d messages, want the question and the turn's 3, once each", len(h))
+			}
+		})
+	}
+}
+
+// The model is offered the tools the workflow dispatches, defined by the
+// catalog; one gone from the catalog is not offered.
+func TestAgentWorkflow_OffersTheDispatchableTools(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+	schema := json.RawMessage(`{"type":"object"}`)
+	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.ListToolsInput) (activity.ListToolsOutput, error) {
+		return activity.ListToolsOutput{
+			Tools: []provider.ToolDefinition{{Name: "gone", InputSchema: schema}, {Name: "web_fetch", InputSchema: schema}, {Name: "web_search", InputSchema: schema}},
+			Resolutions: map[string]activity.ToolResolution{
+				"gone": {Kind: "activity"}, "web_fetch": {Kind: "activity"}, "web_search": {Kind: "activity"},
+			},
+		}, nil
+	}, sdkactivity.RegisterOptions{Name: "ListTools"})
+	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.LoadSkillsForAgentInput) (activity.LoadSkillsForAgentOutput, error) {
+		return activity.LoadSkillsForAgentOutput{}, nil
+	}, sdkactivity.RegisterOptions{Name: "LoadSkillsForAgent"})
+	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.NotifyInput) error { return nil }, sdkactivity.RegisterOptions{Name: "NotifyStep"})
+	f := registerLLM(env, answers(done))
+	var prompted []string
+	f.llm.Prompts = promptFunc(func(_ string, tools []string) string { prompted = tools; return "prompt" })
+
+	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{SessionID: "s1", AgentID: "dev", UserMessage: "go"})
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatal(err)
+	}
+	var offered []string
+	for _, tool := range f.model.sent()[0].Tools {
+		offered = append(offered, tool.Name)
+	}
+	if fmt.Sprint(offered) != "[web_fetch web_search]" || fmt.Sprint(prompted) != "[web_fetch web_search]" {
+		t.Errorf("offered %v, prompt for %v; want the dispatchable tools the catalog defines", offered, prompted)
+	}
+}
+
+// A conversation too long for the model ends the turn at once, not retried,
+// with what the members must do.
+func TestAgentWorkflow_AConversationTooLongEndsTheTurn(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+	registerAgentStubs(env)
+	f := registerLLM(env, answers(done))
+	f.llm.MaxContextBytes = 2000
+	upTo := f.session.add(store.HumanMessageKey("q"), store.Message{Role: store.RoleUser, Content: `"` + strings.Repeat("x", 3000) + `"`})
+
+	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{
+		SessionID: "s1", AgentID: "reviewer", UserMessage: "x", UserMessageStored: true, TurnKey: "run-1@1.0", HistoryUpTo: upTo,
+	})
+	var out AgentWorkflowOutput
+	if err := env.GetWorkflowResult(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Error != activity.ContextTooLongMessage {
+		t.Errorf("error %q, want %q", out.Error, activity.ContextTooLongMessage)
+	}
+	if n := len(f.inputSizes()); n != 1 {
+		t.Errorf("CallLLM ran %d times, want once: never retried", n)
+	}
+	if len(f.model.sent()) != 0 {
+		t.Error("the model was called")
+	}
+}
+
+// A sub-agent runs for real: its conversation, its task alone, goes inline,
+// and its answer reaches the parent's next call.
+func TestAgentWorkflow_SubAgentRunsInline(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.ListToolsInput) (activity.ListToolsOutput, error) {
+		if in.AgentID != "default" {
+			return activity.ListToolsOutput{}, nil
+		}
+		return activity.ListToolsOutput{
+			Tools:       []provider.ToolDefinition{{Name: "agent_analyst"}},
+			Resolutions: map[string]activity.ToolResolution{"agent_analyst": {Kind: "workflow", AgentID: "analyst"}},
+		}, nil
+	}, sdkactivity.RegisterOptions{Name: "ListTools"})
+	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.LoadSkillsForAgentInput) (activity.LoadSkillsForAgentOutput, error) {
+		return activity.LoadSkillsForAgentOutput{}, nil
+	}, sdkactivity.RegisterOptions{Name: "LoadSkillsForAgent"})
+	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.NotifyInput) error { return nil }, sdkactivity.RegisterOptions{Name: "NotifyStep"})
+	var child provider.ChatRequest
+	f := registerLLM(env, func(n int, req provider.ChatRequest) (provider.ChatResponse, error) {
+		switch {
+		case textOf(req.Messages[0]) == "summarize the CAC 40":
+			child = req
+			return provider.ChatResponse{Content: "CAC 40 summary", StopReason: "end_turn"}, nil
+		case n == 1:
+			return provider.ChatResponse{ToolCalls: []provider.ToolCallInfo{{ID: "1", Name: "agent_analyst", Input: json.RawMessage(`{"task":"summarize the CAC 40"}`)}}}, nil
+		}
+		return done, nil
+	})
+	f.catalog.SetAgents([]activity.AgentCatalogEntry{{ID: "default", Tools: []string{"agent_*"}}, {ID: "analyst", Name: "Analyst"}})
+	upTo := f.session.add(store.HumanMessageKey("q"), store.Message{Role: store.RoleUser, Content: `"CAC 40?"`})
+
+	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{SessionID: "s1", AgentID: "default", UserMessage: "CAC 40?", UserMessageStored: true, TurnKey: "run-1@1.0", HistoryUpTo: upTo})
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatal(err)
+	}
+	if len(child.Messages) != 1 || len(child.Tools) != 0 {
+		t.Errorf("the sub-agent read %+v with tools %+v, want its task alone", child.Messages, child.Tools)
+	}
+	sent := f.model.sent()
+	last := sent[len(sent)-1].Messages
+	if r := last[len(last)-1].ToolResult; r == nil || r.Content != "CAC 40 summary" {
+		t.Errorf("the parent's last call read %+v, want the sub-agent's answer last", last)
+	}
+	if f.session.loads != 2 {
+		t.Errorf("the conversation was loaded %d times, want twice: the parent's calls only", f.session.loads)
 	}
 }
