@@ -7,9 +7,13 @@ import (
 	"errors"
 )
 
-// Why a fork's report cannot be posted. None goes away on a retry.
+// ErrForkGone: the fork was deleted, and takes neither its summary nor a
+// report. It does not go away on a retry.
+var ErrForkGone = errors.New("the fork was deleted")
+
+// Why a fork's report cannot be posted, besides ErrForkGone. None goes away
+// on a retry.
 var (
-	ErrReportForkGone        = errors.New("the fork was deleted")
 	ErrReportParentGone      = errors.New("the fork no longer has this parent session")
 	ErrReportNotForkMember   = errors.New("the reporter is no longer a member of the fork")
 	ErrReportNotParentMember = errors.New("the reporter is not a member of the parent session")
@@ -29,6 +33,45 @@ type ForkReport struct {
 	Message    Message
 }
 
+// ForkSummaryKey is the idempotency key of a fork's summary, its first
+// message: a retried write is a no-op.
+var ForkSummaryKey = TurnMessageKey("fork-summary", 0)
+
+// AppendForkSummary posts a fork's summary as its message, and records it on
+// the fork (Session.SummaryMessageID), in one transaction: the fork takes
+// messages once it is recorded, and a page tells so from the fork's row
+// alone. It returns the message's ID; a retry returns the one posted. The
+// fork deleted: ErrForkGone, with nothing written.
+func (s *PostgresStore) AppendForkSummary(ctx context.Context, forkID string, msg Message) (int64, error) {
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return 0, err
+	}
+	var id int64
+	err = s.inTx(ctx, func(tx *sql.Tx) error {
+		var exists bool
+		err := tx.QueryRowContext(ctx, "SELECT true FROM sessions WHERE session_id = $1 FOR UPDATE", forkID).Scan(&exists)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			return ErrForkGone
+		case err != nil:
+			return err
+		}
+		if _, err := tx.ExecContext(ctx,
+			"INSERT INTO messages (session_id, msg_key, data) VALUES ($1, $2, $3) ON CONFLICT (session_id, msg_key) DO NOTHING",
+			forkID, ForkSummaryKey, string(data)); err != nil {
+			return err
+		}
+		if err := tx.QueryRowContext(ctx,
+			"SELECT id FROM messages WHERE session_id = $1 AND msg_key = $2", forkID, ForkSummaryKey).Scan(&id); err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, "UPDATE sessions SET summary_message_id = $2 WHERE session_id = $1", forkID, id)
+		return err
+	})
+	return id, err
+}
+
 // AppendForkReport posts r into the parent, under ForkReportKey, and records
 // it on the fork as its latest report, in one transaction; it returns the
 // report's message ID in the parent. A report already posted (a retry) is
@@ -39,7 +82,7 @@ type ForkReport struct {
 // it unlinks the fork, which waits). So are the reporter's memberships of
 // both: they cannot leave either until the report is posted.
 //
-// Refused, with nothing written: the fork is gone (ErrReportForkGone) or no
+// Refused, with nothing written: the fork is gone (ErrForkGone) or no
 // longer the parent's (ErrReportParentGone), the reporter left the fork
 // (ErrReportNotForkMember) or the parent (ErrReportNotParentMember), another
 // report moved the fork's last reported message since From (ErrReportStale):
@@ -59,7 +102,7 @@ func (s *PostgresStore) AppendForkReport(ctx context.Context, r ForkReport) (int
 			r.ForkSessionID).Scan(&parent, &reported)
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
-			return ErrReportForkGone
+			return ErrForkGone
 		case err != nil:
 			return err
 		case parent.String != r.ParentSessionID:

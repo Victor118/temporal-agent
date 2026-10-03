@@ -26,6 +26,7 @@ import (
 type readStore interface {
 	GetSession(ctx context.Context, sessionID string) (*store.Session, error)
 	IsSessionMember(ctx context.Context, sessionID, userID string) (bool, error)
+	SessionMembership(ctx context.Context, sessionID, userID string) (members int, isMember bool, err error)
 	ListSessionsByUser(ctx context.Context, userID string) ([]store.Session, error)
 	ListSessionStats(ctx context.Context, userID string) (map[string]store.SessionStats, error)
 	ListSessionMembers(ctx context.Context, sessionID string) ([]store.SessionMember, error)
@@ -518,7 +519,7 @@ func (a *api) getSessionInfo(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		info.Summary = a.sessions.ForkSummaryState(ctx, sess.SessionID, msgs)
+		info.Summary = a.sessions.ForkSummaryState(ctx, sess)
 		st, err := a.sessions.ReportState(ctx, sess, msgs, me)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)

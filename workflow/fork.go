@@ -9,7 +9,6 @@ import (
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/victor/temporal-agent/activity"
-	"github.com/victor/temporal-agent/store"
 )
 
 // SSE events a fork sends to its own session when its summary is settled.
@@ -22,10 +21,6 @@ const (
 // it up to know whether the summary is still being written.
 func ForkWorkflowID(forkSessionID string) string { return "fork-" + forkSessionID }
 
-// forkSummaryKey is the idempotency key of the summary message: a retried
-// write is a no-op.
-const forkSummaryKey = "fork-summary"
-
 type ForkSessionInput struct {
 	ForkSessionID   string `json:"fork_session_id"`
 	ParentSessionID string `json:"parent_session_id"`
@@ -35,8 +30,9 @@ type ForkSessionInput struct {
 }
 
 // ForkSessionWorkflow seeds a forked session: it summarizes the parent up to
-// the fork's message and stores the summary as the fork's first message. The
-// session record exists already; the fork can take messages once this is done.
+// the fork's message and posts the summary as the fork's first message,
+// recorded on the fork (store.AppendForkSummary). The session record exists
+// already; the fork takes messages once the summary is recorded.
 func ForkSessionWorkflow(ctx workflow.Context, in ForkSessionInput) error {
 	llmCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		StartToCloseTimeout: 3 * time.Minute,
@@ -65,17 +61,15 @@ func ForkSessionWorkflow(ctx workflow.Context, in ForkSessionInput) error {
 	if out.Truncated {
 		summary = "(The parent conversation was too long: its beginning is not covered by this summary.)\n\n" + summary
 	}
-	content, _ := json.Marshal(summary)
 
-	var memAct *activity.MemoryActivities
-	persistCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+	var postAct *activity.ForkPostActivities
+	postCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		StartToCloseTimeout: 30 * time.Second,
-		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 5},
+		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 5, NonRetryableErrorTypes: []string{activity.ErrTypeForkGone}},
 	})
-	if err := workflow.ExecuteActivity(persistCtx, memAct.PersistContext, activity.PersistContextInput{
-		SessionID: in.ForkSessionID,
-		TurnKey:   forkSummaryKey,
-		Messages:  []store.Message{{Role: store.RoleUser, Kind: store.KindForkSummary, Content: string(content)}},
+	if err := workflow.ExecuteActivity(postCtx, postAct.PostForkSummary, activity.PostForkSummaryInput{
+		ForkSessionID: in.ForkSessionID,
+		Summary:       summary,
 	}).Get(ctx, nil); err != nil {
 		notifySession(ctx, in.ForkSessionID, EventForkFailed, map[string]string{"error": err.Error()})
 		return fmt.Errorf("persist summary: %w", err)

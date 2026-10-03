@@ -92,14 +92,8 @@ func (s *Service) Deliver(ctx context.Context, sess *store.Session, author *stor
 	if strings.TrimSpace(text) == "" {
 		return false, ErrEmptyMessage
 	}
-	if sess.ForkedAtMessageID != 0 {
-		msgs, err := s.store.LoadMessagesUpTo(ctx, sess.SessionID, 0)
-		if err != nil {
-			return false, err
-		}
-		if s.ForkSummaryState(ctx, sess.SessionID, msgs) == SummaryPending {
-			return false, ErrSummaryPending
-		}
+	if sess.ForkedAtMessageID != 0 && s.ForkSummaryState(ctx, sess) == SummaryPending {
+		return false, ErrSummaryPending
 	}
 
 	content, _ := json.Marshal(text)

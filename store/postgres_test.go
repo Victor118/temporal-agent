@@ -199,6 +199,15 @@ func TestSessionMembers(t *testing.T) {
 	if list, _ := s.ListSessionsByUser(ctx, "zz-bob"); len(list) != 1 || list[0].SessionID != "zz-s1" || list[0].CreatedBy != "zz-alice" {
 		t.Errorf("bob's sessions %+v", list)
 	}
+	if n, ok, err := s.SessionMembership(ctx, "zz-s1", "zz-bob"); n != 2 || !ok || err != nil {
+		t.Errorf("bob's membership: %d members, member %v, %v", n, ok, err)
+	}
+	if n, ok, err := s.SessionMembership(ctx, "zz-s1", "zz-carol"); n != 2 || ok || err != nil {
+		t.Errorf("a stranger's membership: %d members, member %v, %v", n, ok, err)
+	}
+	if n, ok, err := s.SessionMembership(ctx, "zz-none", "zz-bob"); n != 0 || ok || err != nil {
+		t.Errorf("no session: %d members, member %v, %v", n, ok, err)
+	}
 
 	s.RemoveSessionMember(ctx, "zz-s1", "zz-bob")
 	if list, _ := s.ListSessionsByUser(ctx, "zz-bob"); len(list) != 0 {
@@ -267,6 +276,32 @@ func TestForks(t *testing.T) {
 	// Each user sees only the forks they are a member of.
 	if forks, _ := s.ListForks(ctx, "zz-parent", "zz-alice"); len(forks) != 1 || forks[0].SessionID != "zz-f-alice" {
 		t.Errorf("alice's forks %+v", forks)
+	}
+
+	// Its summary is recorded on it, once, in the same write.
+	if f, _ := s.GetSession(ctx, "zz-f-alice"); f.SummaryMessageID != 0 {
+		t.Errorf("a fork before its summary: %+v", f)
+	}
+	summary := Message{Role: RoleUser, Kind: KindForkSummary, Content: `"brief"`}
+	id, err := s.AppendForkSummary(ctx, "zz-f-alice", summary)
+	if err != nil || id == 0 {
+		t.Fatalf("summary: %d, %v", id, err)
+	}
+	if again, err := s.AppendForkSummary(ctx, "zz-f-alice", summary); again != id || err != nil {
+		t.Errorf("retry: %d, %v; want %d", again, err, id)
+	}
+	if f, _ := s.GetSession(ctx, "zz-f-alice"); f.SummaryMessageID != id {
+		t.Errorf("fork after its summary: %+v", f)
+	}
+	if msgs, _ := s.LoadMessagesWithID(ctx, "zz-f-alice"); len(msgs) != 1 || msgs[0].ID != id || msgs[0].Key != ForkSummaryKey || msgs[0].Kind != KindForkSummary {
+		t.Errorf("fork's messages %+v", msgs)
+	}
+	// A fork deleted while its summary was written gets none.
+	if _, err := s.AppendForkSummary(ctx, "zz-f-gone", summary); !errors.Is(err, ErrForkGone) {
+		t.Errorf("deleted fork: %v", err)
+	}
+	if msgs, _ := s.LoadMessagesWithID(ctx, "zz-f-gone"); len(msgs) != 0 {
+		t.Errorf("a summary written for a deleted fork: %+v", msgs)
 	}
 
 	// Deleting the parent keeps the fork, without its link.
@@ -840,7 +875,7 @@ func TestForkReports(t *testing.T) {
 	if err := s.DeleteSession(ctx, "zz-fork"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.AppendForkReport(ctx, report(50, 60, "third")); !errors.Is(err, ErrReportForkGone) {
+	if _, err := s.AppendForkReport(ctx, report(50, 60, "third")); !errors.Is(err, ErrForkGone) {
 		t.Errorf("fork deleted: %v", err)
 	}
 }

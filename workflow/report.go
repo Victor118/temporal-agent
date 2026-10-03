@@ -83,12 +83,12 @@ func ReportToParentWorkflow(ctx workflow.Context, in ReportToParentInput) error 
 		RetryPolicy: &temporal.RetryPolicy{
 			MaximumAttempts: 5,
 			NonRetryableErrorTypes: []string{
-				activity.ErrTypeReportForkGone, activity.ErrTypeReportParentGone,
+				activity.ErrTypeForkGone, activity.ErrTypeReportParentGone,
 				activity.ErrTypeReportNotForkMember, activity.ErrTypeReportNotParentMember, activity.ErrTypeReportStale,
 			},
 		},
 	})
-	var reportAct *activity.ReportActivities
+	var reportAct *activity.ForkPostActivities
 	var messageID int64
 	if err := workflow.ExecuteActivity(postCtx, reportAct.PostForkReport, activity.PostForkReportInput{
 		ForkSessionID:   in.ForkSessionID,

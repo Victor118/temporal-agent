@@ -32,6 +32,7 @@ type memStore struct {
 	appended  []store.Message
 	title     string
 	agents    []store.Agent // nil: the default agent alone
+	loads     int           // conversations loaded
 }
 
 func (m *memStore) CreateSession(_ context.Context, s store.Session) error {
@@ -76,6 +77,7 @@ func (m *memStore) AppendMessage(_ context.Context, _, _ string, msg store.Messa
 	return int64(len(m.appended)), nil
 }
 func (m *memStore) LoadMessagesUpTo(context.Context, string, int64) ([]store.MessageWithID, error) {
+	m.loads++
 	return m.messages, nil
 }
 

@@ -130,6 +130,9 @@ const schema = `
 		-- What the fork is for, as the member who opened it put it ('' = not
 		-- said): it steers the fork's summary.
 		ALTER TABLE sessions ADD COLUMN IF NOT EXISTS fork_purpose TEXT NOT NULL DEFAULT '';
+		-- A fork's summary, its first message, once posted (AppendForkSummary);
+		-- 0 until then: the fork takes no message before it.
+		ALTER TABLE sessions ADD COLUMN IF NOT EXISTS summary_message_id BIGINT NOT NULL DEFAULT 0;
 		-- A fork's latest report to its parent (AppendForkReport): the last fork
 		-- message it covers, the next report starting after it; its message in
 		-- the parent; when it was posted.

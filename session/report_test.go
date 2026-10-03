@@ -20,7 +20,7 @@ var victor = &store.User{ID: "u-victor", Email: "victor@example.com", DisplayNam
 func forkStore() *memStore {
 	return &memStore{
 		session: &store.Session{SessionID: sid, Title: "Export CSV", AgentID: "default", ParentSessionID: parentID,
-			ForkedAtMessageID: 7, ForkedBy: victor.ID, ForkPurpose: "CSV export"},
+			ForkedAtMessageID: 7, ForkedBy: victor.ID, ForkPurpose: "CSV export", SummaryMessageID: 1},
 		others: map[string]*store.Session{parentID: {SessionID: parentID, Title: "Plan"}},
 		messages: []store.MessageWithID{
 			{ID: 1, Message: store.Message{Role: store.RoleUser, Kind: store.KindForkSummary, Content: `"brief"`}},
@@ -77,7 +77,7 @@ func TestReportToParent_Refusals(t *testing.T) {
 			st.outsiders = map[string][]string{parentID: {victor.ID}}
 		}, ErrNotParentMember},
 		"brief pending": {func(st *memStore, tc *fakeTemporal) {
-			st.messages = st.messages[1:]
+			st.session.SummaryMessageID, st.messages = 0, st.messages[1:]
 			tc.running = []string{workflow.ForkWorkflowID(sid)}
 		}, ErrSummaryPending},
 		"nothing new": {func(st *memStore, _ *fakeTemporal) {
@@ -161,7 +161,7 @@ func TestReportState(t *testing.T) {
 	if got, _ := newTest(st, &fakeTemporal{}).ReportState(ctx, st.session, st.messages, victor); !errors.Is(got.Refused, ErrNoParent) {
 		t.Errorf("parent deleted: %+v", got)
 	}
-	st.messages = st.messages[1:]
+	st.session.SummaryMessageID, st.messages = 0, st.messages[1:]
 	st.session.ParentSessionID = parentID
 	st.outsiders = nil
 	if got, _ := newTest(st, &fakeTemporal{running: []string{workflow.ForkWorkflowID(sid)}}).ReportState(ctx, st.session, st.messages, victor); !got.SummaryPending || got.CanReport() {

@@ -88,6 +88,12 @@ func (f *routeStore) IsSessionMember(_ context.Context, sessionID, userID string
 	return false, nil
 }
 
+func (f *routeStore) SessionMembership(ctx context.Context, sessionID, userID string) (int, bool, error) {
+	members, _ := f.ListSessionMembers(ctx, sessionID)
+	ok, _ := f.IsSessionMember(ctx, sessionID, userID)
+	return len(members), ok, nil
+}
+
 func (f *routeStore) ListSessionMembers(_ context.Context, sessionID string) ([]store.SessionMember, error) {
 	var out []store.SessionMember
 	members := f.members
@@ -306,14 +312,6 @@ func (f *routeStore) countLoad(sessionID string) {
 	f.loads[sessionID]++
 }
 
-func (f *routeStore) LoadMessages(_ context.Context, sessionID string) ([]store.Message, error) {
-	var out []store.Message
-	for _, m := range f.messages[sessionID] {
-		out = append(out, m.Message)
-	}
-	return out, nil
-}
-
 func (f *routeStore) CreateSession(_ context.Context, s store.Session) error {
 	f.created = append(f.created, s)
 	return nil
@@ -388,7 +386,7 @@ func TestRoutes_ForkInfoHidesAnInaccessibleParent(t *testing.T) {
 	h, st, _ := newForkTest(t)
 	// s1 is now a fork of "secret", which bob is no member of.
 	st.session.ParentSessionID, st.session.ForkedAtMessageID = "secret", 1
-	st.messages["s1"][0].Kind = store.KindForkSummary
+	st.messages["s1"][0].Kind, st.session.SummaryMessageID = store.KindForkSummary, 1
 	bob := logIn(t, h, "bob@example.com")
 
 	w := call(t, h, http.MethodGet, "/sessions/s1", "", bob)
@@ -582,7 +580,7 @@ func newReportTest(t *testing.T) (http.Handler, *routeStore, *fakeTemporal) {
 	t.Helper()
 	h, st, tc := newForkTest(t)
 	st.session.ParentSessionID, st.session.ForkedAtMessageID = "p1", 1
-	st.messages["s1"][0].Kind = store.KindForkSummary
+	st.messages["s1"][0].Kind, st.session.SummaryMessageID = store.KindForkSummary, 1
 	st.others = map[string]store.Session{"p1": {SessionID: "p1", CreatedBy: "u-bob", Title: "Plan"}}
 	st.otherMembers = map[string][]string{"p1": {"u-bob"}}
 	return h, st, tc
@@ -673,6 +671,22 @@ func TestUI_ReportToParent(t *testing.T) {
 		!strings.Contains(body, `hx-confirm="Poster dans « Plan » (1 membre) un résumé de ce fork, signé de ton nom ?"`) ||
 		!strings.Contains(body, "signé de ton nom : ses membres le liront, même ceux qui ne sont pas dans ce fork.") {
 		t.Errorf("fork page: %d %s", page.Code, body)
+	}
+
+	// The report section, polled every few seconds while a report is
+	// written, loads the conversation once at most; a message to the fork
+	// loads none (its summary's state is on its row).
+	req = httptest.NewRequest(http.MethodGet, "/s/s1/report", nil)
+	req.AddCookie(bob)
+	section := httptest.NewRecorder()
+	st.loads = nil
+	h.ServeHTTP(section, req)
+	if section.Code != http.StatusOK || !strings.Contains(section.Body.String(), `<section id="report"`) || st.loads["s1"] > 1 {
+		t.Errorf("report section: %d, %d loads %s", section.Code, st.loads["s1"], section.Body)
+	}
+	st.loads = nil
+	if w := call(t, h, http.MethodPost, "/sessions/s1/messages", `{"content":"done here"}`, bob); w.Code != http.StatusAccepted || st.loads["s1"] != 0 {
+		t.Errorf("a message to the fork: %d, %d loads %s", w.Code, st.loads["s1"], w.Body)
 	}
 }
 

@@ -175,7 +175,7 @@ func (u *ui) buildPage(ctx context.Context, me *store.User, sessionID, view stri
 	directory.Session = p.Agent
 
 	// The conversation is loaded once: the thread shows it, and a fork's
-	// states (its summary, its report) are read from it.
+	// next report is read from it (its summary's state is on its row).
 	var msgs []store.MessageWithID
 	if view != "map" || sess.ForkedAtMessageID != 0 {
 		if msgs, err = u.store.LoadMessagesWithID(ctx, sessionID); err != nil {
@@ -184,18 +184,17 @@ func (u *ui) buildPage(ctx context.Context, me *store.User, sessionID, view stri
 	}
 	if sess.ParentSessionID != "" {
 		p.Parent = &chat.ParentInfo{MessageID: sess.ForkedAtMessageID}
-		if ok, _ := u.store.IsSessionMember(ctx, sess.ParentSessionID, me.ID); ok {
+		// Whether the viewer may see the parent, and how many members would
+		// read a report (the report button names them), in one query.
+		if members, ok, _ := u.store.SessionMembership(ctx, sess.ParentSessionID, me.ID); ok {
 			if parent, _ := u.store.GetSession(ctx, sess.ParentSessionID); parent != nil {
 				p.Parent.Accessible, p.Parent.SessionID, p.Parent.Title = true, parent.SessionID, parent.Title
-				// Who will read a report: the report button names them.
-				if members, err := u.store.ListSessionMembers(ctx, parent.SessionID); err == nil {
-					p.Parent.Members = len(members)
-				}
+				p.Parent.Members = members
 			}
 		}
 	}
 	if sess.ForkedAtMessageID != 0 {
-		state := u.sessions.ForkSummaryState(ctx, sessionID, msgs)
+		state := u.sessions.ForkSummaryState(ctx, &sess)
 		p.SummaryPending, p.SummaryFailed = state == session.SummaryPending, state == session.SummaryFailed
 		report, err := u.sessions.ReportState(ctx, &sess, msgs, me)
 		if err != nil {

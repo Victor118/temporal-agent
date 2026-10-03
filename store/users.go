@@ -143,7 +143,7 @@ func (s *PostgresStore) DeleteLoginSession(ctx context.Context, tokenHash string
 
 const sessionColumns = "s.session_id, s.created_by, s.title, s.agent_id, s.channel, s.channel_id, s.created_at, " +
 	"s.parent_session_id, s.forked_at_message_id, s.forked_by, s.agent_mode, s.fork_purpose, " +
-	"s.last_reported_message_id, s.last_report_id, s.last_reported_at"
+	"s.summary_message_id, s.last_reported_message_id, s.last_report_id, s.last_reported_at"
 
 func scanSession(row interface{ Scan(...any) error }) (*Session, error) {
 	var sess Session
@@ -152,7 +152,7 @@ func scanSession(row interface{ Scan(...any) error }) (*Session, error) {
 	var reportedAt sql.NullTime
 	err := row.Scan(&sess.SessionID, &sess.CreatedBy, &sess.Title, &sess.AgentID, &sess.Channel, &sess.ChannelID, &sess.CreatedAt,
 		&parent, &forkedAt, &forkedBy, &sess.AgentMode, &sess.ForkPurpose,
-		&sess.LastReportedMessageID, &sess.LastReportID, &reportedAt)
+		&sess.SummaryMessageID, &sess.LastReportedMessageID, &sess.LastReportID, &reportedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -325,6 +325,15 @@ func (s *PostgresStore) IsSessionMember(ctx context.Context, sessionID, userID s
 		"SELECT EXISTS (SELECT 1 FROM session_members WHERE session_id = $1 AND user_id = $2)",
 		sessionID, userID).Scan(&ok)
 	return ok, err
+}
+
+// SessionMembership counts a session's members, and tells whether userID is
+// one of them, in one query.
+func (s *PostgresStore) SessionMembership(ctx context.Context, sessionID, userID string) (members int, isMember bool, err error) {
+	err = s.db.QueryRowContext(ctx,
+		"SELECT count(*), coalesce(bool_or(user_id = $2), false) FROM session_members WHERE session_id = $1",
+		sessionID, userID).Scan(&members, &isMember)
+	return members, isMember, err
 }
 
 func (s *PostgresStore) ListSessionMembers(ctx context.Context, sessionID string) ([]SessionMember, error) {

@@ -59,7 +59,8 @@ func (r ReportState) CanReport() bool {
 }
 
 // ReportState tells where a fork stands with its reports, for me. msgs are
-// the fork's messages, all of them, as the caller loaded them. Not a fork:
+// the fork's messages, all of them, as the caller loaded them: the range of
+// the next report is read from them. Not a fork:
 // ErrNotAFork. The workflows' states are read as pages show them, a few
 // seconds old at most (shownWorkflow, Statuses).
 func (s *Service) ReportState(ctx context.Context, fork *store.Session, msgs []store.MessageWithID, me *store.User) (ReportState, error) {
@@ -71,7 +72,7 @@ func (s *Service) ReportState(ctx context.Context, fork *store.Session, msgs []s
 	case err != nil:
 		return st, err
 	}
-	st.SummaryPending = s.ForkSummaryState(ctx, fork.SessionID, msgs) == SummaryPending
+	st.SummaryPending = s.ForkSummaryState(ctx, fork) == SummaryPending
 	st.AgentWorking = s.agentWorking(ctx, fork.SessionID)
 	_, _, ok := reportRange(fork, msgs)
 	st.NothingNew = !ok
@@ -102,12 +103,12 @@ func (s *Service) ReportToParent(ctx context.Context, forkID string, me *store.U
 	if err := s.reportRefusal(ctx, fork, me); err != nil {
 		return err
 	}
+	if s.ForkSummaryState(ctx, fork) == SummaryPending {
+		return ErrSummaryPending
+	}
 	msgs, err := s.store.LoadMessagesUpTo(ctx, fork.SessionID, 0)
 	if err != nil {
 		return err
-	}
-	if s.ForkSummaryState(ctx, fork.SessionID, msgs) == SummaryPending {
-		return ErrSummaryPending
 	}
 	if s.agentWorking(ctx, fork.SessionID) {
 		return ErrAgentWorking

@@ -208,6 +208,21 @@ func TestDeliver_Refusals(t *testing.T) {
 	if len(st.appended) != 1 {
 		t.Errorf("%d messages stored, want 1", len(st.appended))
 	}
+	// Its workflow still writing it: refused.
+	pending := newTest(st, &fakeTemporal{running: []string{workflow.ForkWorkflowID(sid)}})
+	if _, err := pending.Deliver(context.Background(), fork, alice, "hello"); !errors.Is(err, ErrSummaryPending) || len(st.appended) != 1 {
+		t.Errorf("fork with its summary pending: %v, %d messages stored", err, len(st.appended))
+	}
+	// Recorded on the fork: in, whatever the workflow's state says.
+	fork.SummaryMessageID = 1
+	if _, err := pending.Deliver(context.Background(), fork, alice, "hello"); err != nil || len(st.appended) != 2 {
+		t.Errorf("fork with its summary: %v, %d messages stored", err, len(st.appended))
+	}
+	// Whether the summary is in is read from the fork's row: no conversation
+	// is loaded for it.
+	if st.loads != 0 {
+		t.Errorf("%d conversations loaded", st.loads)
+	}
 }
 
 // A message to a session whose run timed out starts a new run on the

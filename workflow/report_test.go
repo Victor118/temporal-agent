@@ -150,7 +150,7 @@ func TestReportToParentWorkflow_SummaryFails(t *testing.T) {
 // fork says so.
 func TestReportToParentWorkflow_RefusedMeanwhile(t *testing.T) {
 	for refusal, errType := range map[error]string{
-		store.ErrReportForkGone:        activity.ErrTypeReportForkGone,
+		store.ErrForkGone:              activity.ErrTypeForkGone,
 		store.ErrReportParentGone:      activity.ErrTypeReportParentGone,
 		store.ErrReportNotForkMember:   activity.ErrTypeReportNotForkMember,
 		store.ErrReportNotParentMember: activity.ErrTypeReportNotParentMember,

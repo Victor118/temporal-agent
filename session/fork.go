@@ -110,13 +110,14 @@ const (
 )
 
 // ForkSummaryState tells where a fork's summary stands: written, still being
-// written, or failed. msgs are the fork's messages, as the caller loaded them
-// (the first one is enough): the summary is the first.
-func (s *Service) ForkSummaryState(ctx context.Context, forkID string, msgs []store.MessageWithID) SummaryState {
-	if len(msgs) > 0 && msgs[0].Kind == store.KindForkSummary {
+// written, or failed. The fork's row says whether it is written
+// (SummaryMessageID); only while it is not is its workflow read, as pages
+// show it (ForkRunning).
+func (s *Service) ForkSummaryState(ctx context.Context, fork *store.Session) SummaryState {
+	if fork.SummaryMessageID != 0 {
 		return SummaryReady
 	}
-	if s.ForkRunning(ctx, forkID) {
+	if s.ForkRunning(ctx, fork.SessionID) {
 		return SummaryPending
 	}
 	return SummaryFailed

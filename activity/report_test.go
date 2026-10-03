@@ -100,6 +100,14 @@ func TestSummarizeForkReport_Refusals(t *testing.T) {
 type reportStore struct {
 	got store.ForkReport
 	err error
+	// The summary posted, and into which fork.
+	summaryFork string
+	summary     store.Message
+}
+
+func (r *reportStore) AppendForkSummary(_ context.Context, forkID string, msg store.Message) (int64, error) {
+	r.summaryFork, r.summary = forkID, msg
+	return 5, r.err
 }
 
 func (r *reportStore) AppendForkReport(_ context.Context, fr store.ForkReport) (int64, error) {
@@ -111,7 +119,7 @@ func (r *reportStore) AppendForkReport(_ context.Context, fr store.ForkReport) (
 // store's refusals are final.
 func TestPostForkReport(t *testing.T) {
 	st := &reportStore{}
-	a := &ReportActivities{Store: st}
+	a := &ForkPostActivities{Store: st}
 	in := PostForkReportInput{ForkSessionID: "f", ParentSessionID: "p", ForkTitle: "Export", From: 3, UpTo: 9,
 		ReporterID: "u-victor", ReporterName: "Victor", Report: "## Fait"}
 	id, err := a.PostForkReport(context.Background(), in)
@@ -126,7 +134,7 @@ func TestPostForkReport(t *testing.T) {
 	}
 
 	for refusal, errType := range map[error]string{
-		store.ErrReportForkGone:        ErrTypeReportForkGone,
+		store.ErrForkGone:              ErrTypeForkGone,
 		store.ErrReportParentGone:      ErrTypeReportParentGone,
 		store.ErrReportNotForkMember:   ErrTypeReportNotForkMember,
 		store.ErrReportNotParentMember: ErrTypeReportNotParentMember,
@@ -195,5 +203,23 @@ func TestSummarizeForkReport_ResultOfACallBeforeTheRange(t *testing.T) {
 	if !strings.Contains(sent, "Tool result: the changelog") || !strings.Contains(sent, "Tool result: (private)") ||
 		strings.Contains(sent, "secret") || strings.Contains(sent, "meanwhile") {
 		t.Errorf("request %q", sent)
+	}
+}
+
+// A fork's summary is its first message, of its own kind; a fork deleted
+// meanwhile is a final refusal.
+func TestPostForkSummary(t *testing.T) {
+	st := &reportStore{}
+	a := &ForkPostActivities{Store: st}
+	id, err := a.PostForkSummary(context.Background(), PostForkSummaryInput{ForkSessionID: "f", Summary: "brief"})
+	if err != nil || id != 5 || st.summaryFork != "f" ||
+		st.summary.Role != store.RoleUser || st.summary.Kind != store.KindForkSummary || st.summary.Content != text("brief") {
+		t.Fatalf("post: %d, %v, %+v", id, err, st.summary)
+	}
+	st.err = fmt.Errorf("append: %w", store.ErrForkGone)
+	_, err = a.PostForkSummary(context.Background(), PostForkSummaryInput{ForkSessionID: "f", Summary: "brief"})
+	var appErr *temporal.ApplicationError
+	if !errors.As(err, &appErr) || !appErr.NonRetryable() || appErr.Type() != ErrTypeForkGone {
+		t.Errorf("deleted fork: %v", err)
 	}
 }

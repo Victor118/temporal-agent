@@ -52,6 +52,7 @@ type Store interface {
 	UpdateSessionTitle(ctx context.Context, sessionID, title string) error
 	DeleteSession(ctx context.Context, sessionID string) error
 	IsSessionMember(ctx context.Context, sessionID, userID string) (bool, error)
+	SessionMembership(ctx context.Context, sessionID, userID string) (members int, isMember bool, err error)
 	ListForks(ctx context.Context, sessionID, userID string) ([]Session, error)
 	SetSessionAgentMode(ctx context.Context, sessionID, mode string) error
 	ListSessionMembers(ctx context.Context, sessionID string) ([]SessionMember, error)
@@ -74,6 +75,9 @@ type Store interface {
 	// AppendForkReport posts a fork's report into its parent and records it
 	// on the fork, in one transaction (see ForkReport).
 	AppendForkReport(ctx context.Context, r ForkReport) (int64, error)
+	// AppendForkSummary posts a fork's summary and records it on the fork,
+	// in one transaction.
+	AppendForkSummary(ctx context.Context, forkID string, msg Message) (int64, error)
 	DeleteMessage(ctx context.Context, sessionID string, id int64) error
 	DeleteMessagesBySession(ctx context.Context, sessionID string) error
 

@@ -100,14 +100,35 @@ func (a *ForkActivities) SummarizeForkReport(ctx context.Context, in SummarizeFo
 	return SummarizeConversationOutput{Summary: report, Truncated: truncated}, nil
 }
 
-// ForkReportStore posts a fork's report into its parent.
-type ForkReportStore interface {
+// ForkPoster posts what a fork's workflows write: its summary into the fork,
+// its reports into its parent.
+type ForkPoster interface {
+	AppendForkSummary(ctx context.Context, forkID string, msg store.Message) (int64, error)
 	AppendForkReport(ctx context.Context, r store.ForkReport) (int64, error)
 }
 
-// ReportActivities post the reports forks send to their parents.
-type ReportActivities struct {
-	Store ForkReportStore
+// ForkPostActivities post what a fork's workflows write: the summary a fork
+// starts from, and the reports it sends to its parent.
+type ForkPostActivities struct {
+	Store ForkPoster
+}
+
+type PostForkSummaryInput struct {
+	ForkSessionID string `json:"fork_session_id"`
+	Summary       string `json:"summary"`
+}
+
+// PostForkSummary posts a fork's summary as its first message, and records
+// it on the fork: the fork takes messages from then on. A retry posts
+// nothing more (store.ForkSummaryKey). A fork deleted meanwhile is a final
+// refusal (ErrTypeForkGone).
+func (a *ForkPostActivities) PostForkSummary(ctx context.Context, in PostForkSummaryInput) (int64, error) {
+	content, _ := json.Marshal(in.Summary)
+	id, err := a.Store.AppendForkSummary(ctx, in.ForkSessionID, store.Message{Role: store.RoleUser, Kind: store.KindForkSummary, Content: string(content)})
+	if errors.Is(err, store.ErrForkGone) {
+		return 0, temporal.NewNonRetryableApplicationError(err.Error(), ErrTypeForkGone, err)
+	}
+	return id, err
 }
 
 type PostForkReportInput struct {
@@ -128,7 +149,7 @@ type PostForkReportInput struct {
 // in the parent. A retry posts nothing more (store.ForkReportKey). Refusals
 // are final: the fork or the parent is gone, the member left either, or
 // another report was posted meanwhile.
-func (a *ReportActivities) PostForkReport(ctx context.Context, in PostForkReportInput) (int64, error) {
+func (a *ForkPostActivities) PostForkReport(ctx context.Context, in PostForkReportInput) (int64, error) {
 	content, _ := json.Marshal(in.Report)
 	id, err := a.Store.AppendForkReport(ctx, store.ForkReport{
 		ForkSessionID:   in.ForkSessionID,
@@ -154,7 +175,7 @@ func (a *ReportActivities) PostForkReport(ctx context.Context, in PostForkReport
 // Error types of the store's refusals to post a report: none goes away on a
 // retry (workflow.ReportToParentWorkflow lists them).
 const (
-	ErrTypeReportForkGone        = "ForkGone"
+	ErrTypeForkGone              = "ForkGone"
 	ErrTypeReportParentGone      = "ParentGone"
 	ErrTypeReportNotForkMember   = "NotForkMember"
 	ErrTypeReportNotParentMember = "NotParentMember"
@@ -165,8 +186,8 @@ const (
 // for any other error, retried.
 func reportRefusal(err error) string {
 	switch {
-	case errors.Is(err, store.ErrReportForkGone):
-		return ErrTypeReportForkGone
+	case errors.Is(err, store.ErrForkGone):
+		return ErrTypeForkGone
 	case errors.Is(err, store.ErrReportParentGone):
 		return ErrTypeReportParentGone
 	case errors.Is(err, store.ErrReportNotForkMember):
