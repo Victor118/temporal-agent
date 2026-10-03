@@ -30,7 +30,7 @@ type readStore interface {
 	ListSessionStats(ctx context.Context, userID string) (map[string]store.SessionStats, error)
 	ListSessionMembers(ctx context.Context, sessionID string) ([]store.SessionMember, error)
 	ListForks(ctx context.Context, sessionID, userID string) ([]store.Session, error)
-	GetAgent(ctx context.Context, agentID string) (*store.Agent, error)
+	ListAgents(ctx context.Context) ([]store.Agent, error)
 	LoadMessagesWithID(ctx context.Context, sessionID string) ([]store.MessageWithID, error)
 	ListTools(ctx context.Context) ([]store.ToolRecord, error)
 	DeleteMessage(ctx context.Context, sessionID string, id int64) error

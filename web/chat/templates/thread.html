@@ -51,7 +51,7 @@
 <div class="msg" id="m{{.ID}}">
   <div class="agent-mark"></div>
   <div class="msg-body">
-    <div class="msg-head"><span class="who">{{$.Page.Agent.Name}}</span><span class="agent-meta">@{{$.Page.Agent.Mention}}</span><span class="when">{{clock .Time}}</span></div>
+    <div class="msg-head"><span class="who">{{.Agent.Name}}</span>{{with .Agent.Mention}}<span class="agent-meta">@{{.}}</span>{{end}}<span class="when">{{clock .Time}}</span></div>
     <div class="agent-card">
       <div class="prose">{{.HTML}}</div>
       {{with .Tools}}<div class="tools">{{range .}}<span class="tool">{{.}}</span>{{end}}</div>{{end}}
@@ -65,7 +65,7 @@
 <div class="notice failed" id="m{{.ID}}">
   <div class="arrow">!</div>
   <div style="flex-grow:1;min-width:0">
-    <div class="ttl">L'agent s'est arrêté sur une erreur <span class="when">{{clock .Time}}</span></div>
+    <div class="ttl">{{.Agent.Name}} s'est arrêté sur une erreur <span class="when">{{clock .Time}}</span></div>
     <div class="txt">{{.Text}}</div>
   </div>
 </div>

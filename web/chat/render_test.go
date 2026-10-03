@@ -8,6 +8,8 @@ import (
 	"github.com/victor/temporal-agent/store"
 )
 
+var smith = AgentInfo{ID: "smith", Name: "Agent Smith", Mention: "agentSmith"}
+
 func testPage(view string) *Page {
 	roots := BuildTree([]store.Session{
 		sess("root", "", 0, t0), sess("fork", "root", 3, t0),
@@ -17,6 +19,7 @@ func testPage(view string) *Page {
 		Me: NewPerson("u1", "Victor F"), IsAdmin: true, Roots: roots, Node: node, Crumbs: Path(node), View: view,
 		Members:        []Member{{Person: NewPerson("u1", "Victor F"), Email: "v@x.fr"}, {Person: NewPerson("u2", "Bob"), Email: "b@x.fr"}},
 		Agent:          AgentInfo{ID: "default", Name: "Default Agent", Mention: "jarvis", Description: "General."},
+		Agents:         []AgentInfo{{ID: "default", Name: "Default Agent", Mention: "jarvis"}, smith},
 		AgentMode:      "auto",
 		AgentOnMention: true,
 		Parent:         &ParentInfo{SessionID: "root", Title: "root", Accessible: true, MessageID: 3},
@@ -30,7 +33,9 @@ func testPage(view string) *Page {
 		{ID: 1, Message: store.Message{Role: store.RoleUser, Kind: store.KindForkSummary, Content: j("brief")}},
 		{ID: 2, Message: store.Message{Role: store.RoleUser, Content: j("@agent <b>hi</b>"), UserID: "u2", Author: "Bob"}},
 		{ID: 9, Message: store.Message{Role: store.RoleAssistant, Content: j("**ok**"), ToolCalls: []store.ToolCall{{Name: "grep"}}}},
-	}, "u1", map[int64][]ForkLink{9: {{SessionID: "f2", Title: "F2"}}}, []Question{{WorkflowID: "fork-tool-ask_user-1", Text: "Which?", AgentChain: []string{"default"}}})
+		{ID: 10, Message: store.Message{Role: store.RoleAssistant, Content: j("useful"), AgentID: "smith", Author: "Smith"}},
+	}, "u1", map[int64][]ForkLink{9: {{SessionID: "f2", Title: "F2"}}}, []Question{{WorkflowID: "fork-tool-ask_user-1", Text: "Which?", AgentChain: []string{"default"}}},
+		AgentDirectory{ByID: map[string]AgentInfo{"smith": smith}, Session: p.Agent})
 	if view == "map" {
 		m := BuildMap(Root(node))
 		p.Map = &m
@@ -65,6 +70,9 @@ func TestRender_Pages(t *testing.T) {
 		"@jarvis pour le solliciter",
 		`class="dot waiting"`,
 		"Configuration",
+		`<span class="who">Default Agent</span><span class="agent-meta">@jarvis</span>`, // each answer signed by its agent
+		`<span class="who">Agent Smith</span><span class="agent-meta">@agentSmith</span>`,
+		`<code title="Agent Smith">@agentSmith</code>`, // the agents to call, in the rail
 	} {
 		if !strings.Contains(page, want) {
 			t.Errorf("page lacks %q", want)

@@ -211,6 +211,7 @@ type ThreadItem struct {
 
 	HTML  template.HTML // agent answer or brief, rendered from Markdown
 	Tools []string      // agent: the tools the answer used, in order, once each
+	Agent AgentInfo     // agent answer, error: the agent that wrote it
 
 	Forks []ForkLink // forks started from this item
 
@@ -218,9 +219,33 @@ type ThreadItem struct {
 	AgentChain []string // question: the agents that led to it
 }
 
+// AgentDirectory names the agents of a thread.
+type AgentDirectory struct {
+	ByID    map[string]AgentInfo // the installation's agents, as they are now
+	Session AgentInfo            // the session's agent
+}
+
+// Signer is the agent that wrote m: as it is now; under the name it had then
+// once it is gone; the session's agent for a message no agent signed.
+func (d AgentDirectory) Signer(m store.Message) AgentInfo {
+	if m.AgentID == "" {
+		return d.Session
+	}
+	if a, ok := d.ByID[m.AgentID]; ok {
+		return a
+	}
+	name := m.Author
+	if name == "" {
+		name = m.AgentID
+	}
+	return AgentInfo{ID: m.AgentID, Name: name}
+}
+
 // BuildThread turns a session's messages into thread items. An agent's turn,
-// spread over several messages (tool calls, results, text), becomes one item.
-func BuildThread(msgs []store.MessageWithID, viewerID string, forks map[int64][]ForkLink, questions []Question) []ThreadItem {
+// spread over several messages (tool calls, results, text), becomes one item,
+// signed by its agent: when several agents answer one after another, each has
+// its own.
+func BuildThread(msgs []store.MessageWithID, viewerID string, forks map[int64][]ForkLink, questions []Question, agents AgentDirectory) []ThreadItem {
 	var items []ThreadItem
 	var agent *ThreadItem // the agent item being assembled
 	var agentText []string
@@ -240,7 +265,7 @@ func BuildThread(msgs []store.MessageWithID, viewerID string, forks map[int64][]
 			items = append(items, ThreadItem{Kind: ItemBrief, ID: m.ID, Time: m.CreatedAt, HTML: Markdown(text(m.Content))})
 		case m.Kind == store.KindTurnError:
 			closeAgent()
-			items = append(items, ThreadItem{Kind: ItemError, ID: m.ID, Time: m.CreatedAt, Text: text(m.Content)})
+			items = append(items, ThreadItem{Kind: ItemError, ID: m.ID, Time: m.CreatedAt, Text: text(m.Content), Agent: agents.Signer(m.Message)})
 		case m.Role == store.RoleUser:
 			closeAgent()
 			items = append(items, ThreadItem{
@@ -249,8 +274,12 @@ func BuildThread(msgs []store.MessageWithID, viewerID string, forks map[int64][]
 				Text: text(m.Content),
 			})
 		case m.Role == store.RoleAssistant:
+			signer := agents.Signer(m.Message)
+			if agent != nil && agent.Agent.ID != signer.ID {
+				closeAgent()
+			}
 			if agent == nil {
-				agent = &ThreadItem{Kind: ItemAgent, Time: m.CreatedAt}
+				agent = &ThreadItem{Kind: ItemAgent, Time: m.CreatedAt, Agent: signer}
 			}
 			for _, tc := range m.ToolCalls {
 				if !contains(agent.Tools, tc.Name) {

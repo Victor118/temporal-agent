@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"log"
@@ -155,10 +156,23 @@ func (u *ui) buildPage(ctx context.Context, me *store.User, sessionID, view stri
 	}
 	p.AgentOnMention = p.AgentMode == store.AgentModeMention || (p.AgentMode == store.AgentModeAuto && len(members) > 1)
 
-	p.Agent = chat.AgentInfo{ID: sess.AgentID, Name: sess.AgentID, Mention: sess.AgentID}
-	if a, err := u.store.GetAgent(ctx, sess.AgentID); err == nil && a != nil {
-		p.Agent.Name, p.Agent.Mention, p.Agent.Description = a.Name, a.MentionName(), a.Description
+	// Every agent can be called in a session: the rail lists their mentions,
+	// and the thread signs each answer with its agent as it is now.
+	agents, err := u.store.ListAgents(ctx)
+	if err != nil {
+		return nil, err
 	}
+	directory := chat.AgentDirectory{ByID: make(map[string]chat.AgentInfo, len(agents))}
+	for _, a := range agents {
+		info := chat.AgentInfo{ID: a.ID, Name: cmp.Or(a.Name, a.ID), Mention: a.MentionName(), Description: a.Description}
+		directory.ByID[a.ID] = info
+		p.Agents = append(p.Agents, info)
+	}
+	p.Agent = chat.AgentInfo{ID: sess.AgentID, Name: sess.AgentID, Mention: sess.AgentID}
+	if a, ok := directory.ByID[sess.AgentID]; ok {
+		p.Agent = a
+	}
+	directory.Session = p.Agent
 
 	if sess.ParentSessionID != "" {
 		p.Parent = &chat.ParentInfo{MessageID: sess.ForkedAtMessageID}
@@ -198,7 +212,7 @@ func (u *ui) buildPage(ctx context.Context, me *store.User, sessionID, view stri
 		}
 		byMessage[f.ForkedAtMessageID] = append(byMessage[f.ForkedAtMessageID], chat.ForkLink{SessionID: f.SessionID, Title: title})
 	}
-	p.Thread = chat.BuildThread(msgs, me.ID, byMessage, u.sessions.PendingQuestions(ctx, sessionID))
+	p.Thread = chat.BuildThread(msgs, me.ID, byMessage, u.sessions.PendingQuestions(ctx, sessionID), directory)
 	for _, it := range p.Thread {
 		if it.Kind == chat.ItemHuman || it.Kind == chat.ItemAgent {
 			p.LastMessageID = it.ID

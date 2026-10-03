@@ -38,6 +38,7 @@
         </select>
       </form>
       <div class="note" style="margin-top:6px">{{if eq .AgentMode "auto"}}Auto : à chaque message quand tu es seul, sur @{{.Agent.Mention}} dès que vous êtes plusieurs.{{else if eq .AgentMode "mention"}}L'agent ne répond qu'aux messages qui le mentionnent.{{else}}L'agent répond à chaque message.{{end}}</div>
+      {{with .Agents}}<div class="note" style="margin-top:6px">Agents à appeler : {{range $i, $a := .}}{{if $i}}, {{end}}<code title="{{$a.Name}}">@{{$a.Mention}}</code>{{end}}. Plusieurs dans un message répondent l'un après l'autre.</div>{{end}}
     </div>
   </section>
 

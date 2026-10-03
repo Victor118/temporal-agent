@@ -84,7 +84,8 @@ func TestBuildThread(t *testing.T) {
 	forks := map[int64][]ForkLink{9: {{SessionID: "f1", Title: "Fork"}}}
 	questions := []Question{{WorkflowID: "s1-tool-ask_user-1-0", Text: "Which one?"}}
 
-	items := BuildThread(msgs, "u-me", forks, questions)
+	jarvis := AgentInfo{ID: "default", Name: "Jarvis", Mention: "jarvis"}
+	items := BuildThread(msgs, "u-me", forks, questions, AgentDirectory{Session: jarvis})
 	var kinds []string
 	for _, it := range items {
 		kinds = append(kinds, it.Kind)
@@ -104,6 +105,9 @@ func TestBuildThread(t *testing.T) {
 		!strings.Contains(string(agent.HTML), "Let me look.") || !strings.Contains(string(agent.HTML), "Done.") {
 		t.Errorf("agent %+v", agent)
 	}
+	if agent.Agent != jarvis || items[4].Agent != jarvis {
+		t.Errorf("signed %+v / %+v, want the session's agent for messages no agent signed", agent.Agent, items[4].Agent)
+	}
 	if len(agent.Forks) != 1 || agent.Forks[0].SessionID != "f1" {
 		t.Errorf("forks %+v", agent.Forks)
 	}
@@ -113,6 +117,48 @@ func TestBuildThread(t *testing.T) {
 	}
 	if items[5].WorkflowID != "s1-tool-ask_user-1-0" {
 		t.Errorf("question %+v", items[5])
+	}
+}
+
+// Several agents answer one after another: an item per agent, each signed by
+// its agent as it is now, or by the name it had once it is gone.
+func TestBuildThread_SignsEachAgent(t *testing.T) {
+	jarvis := AgentInfo{ID: "default", Name: "Jarvis", Mention: "jarvis"}
+	smith := AgentInfo{ID: "smith", Name: "Agent Smith", Mention: "agentSmith"}
+	msgs := []store.MessageWithID{
+		{ID: 1, Message: store.Message{Role: store.RoleUser, Content: j("@jarvis résume, @agentSmith juge"), UserID: "u-me", Author: "Victor"}},
+		{ID: 2, Message: store.Message{Role: store.RoleAssistant, AgentID: "default", Author: "Old Jarvis", ToolCalls: []store.ToolCall{{ID: "t1", Name: "web_search"}}}},
+		{ID: 3, Message: store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "t1"}}},
+		{ID: 4, Message: store.Message{Role: store.RoleAssistant, Content: j("Résumé."), AgentID: "default", Author: "Old Jarvis"}},
+		{ID: 5, Message: store.Message{Role: store.RoleAssistant, Content: j("Utile."), AgentID: "smith", Author: "Smith"}},
+		{ID: 6, Message: store.Message{Role: store.RoleAssistant, Content: j("Moi aussi."), AgentID: "gone", Author: "Ancien"}},
+		{ID: 7, Message: store.Message{Role: store.RoleAssistant, Content: j("Sans nom."), AgentID: "nameless"}},
+		{ID: 8, Message: store.Message{Role: store.RoleAssistant, Kind: store.KindTurnError, AgentID: "smith", Content: j("boom")}},
+	}
+	items := BuildThread(msgs, "u-me", nil, nil, AgentDirectory{ByID: map[string]AgentInfo{"default": jarvis, "smith": smith}, Session: jarvis})
+
+	want := []struct {
+		kind string
+		id   int64
+		who  AgentInfo
+	}{
+		{ItemHuman, 1, AgentInfo{}},
+		{ItemAgent, 4, jarvis}, // its current name, not the one stored
+		{ItemAgent, 5, smith},
+		{ItemAgent, 6, AgentInfo{ID: "gone", Name: "Ancien"}},
+		{ItemAgent, 7, AgentInfo{ID: "nameless", Name: "nameless"}},
+		{ItemError, 8, smith},
+	}
+	if len(items) != len(want) {
+		t.Fatalf("%d items, want %d: %+v", len(items), len(want), items)
+	}
+	for i, w := range want {
+		if it := items[i]; it.Kind != w.kind || it.ID != w.id || it.Agent != w.who {
+			t.Errorf("item %d: %s #%d by %+v, want %s #%d by %+v", i, it.Kind, it.ID, it.Agent, w.kind, w.id, w.who)
+		}
+	}
+	if strings.Join(items[1].Tools, ",") != "web_search" || strings.Contains(string(items[2].HTML), "Résumé") {
+		t.Errorf("jarvis's item %+v, smith's %s: each keeps its own", items[1], items[2].HTML)
 	}
 }
 

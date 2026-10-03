@@ -49,6 +49,7 @@ type Page struct {
 
 	Members        []Member
 	Agent          AgentInfo
+	Agents         []AgentInfo // the agents members can call by their mentions
 	AgentMode      string
 	AgentOnMention bool // a plain message does not call the agent
 	Parent         *ParentInfo
