@@ -168,13 +168,17 @@ func TestRender_Pages(t *testing.T) {
 
 // A session page leaves the session when its stream says it is no member
 // of it: the stream closes, the page goes home, with no script of its own.
-// A page without a session does not.
+// Another member out, it reloads the members it shows. A page without a
+// session has neither.
 func TestRender_SessionPageReactsToMembership(t *testing.T) {
 	for _, view := range []string{"thread", "map"} {
 		page := render(t, "page", testPage(view))
 		for _, want := range []string{
 			`sse-connect="/s/fork/stream?last_event_id=" sse-close="session_gone">`,
 			`<div hidden hx-get="/" hx-trigger="sse:session_gone" hx-target="body" hx-push-url="true"></div>`,
+			`<div hidden hx-get="/s/fork" hx-trigger="sse:member_left" hx-select="#avatars" hx-target="#avatars" hx-swap="morph" hx-select-oob="#people:morph"></div>`,
+			`<div class="avatars" id="avatars">`,
+			`<div class="people" id="people">`,
 		} {
 			if !strings.Contains(page, want) {
 				t.Errorf("%s page lacks %q", view, want)
@@ -183,7 +187,7 @@ func TestRender_SessionPageReactsToMembership(t *testing.T) {
 	}
 	welcome := testPage("thread")
 	welcome.Node, welcome.Crumbs = nil, nil
-	if out := render(t, "page", welcome); strings.Contains(out, "sse-close") || strings.Contains(out, "sse:session_gone") {
+	if out := render(t, "page", welcome); strings.Contains(out, "sse-close") || strings.Contains(out, "sse:session_gone") || strings.Contains(out, "sse:member_left") {
 		t.Error("the welcome page reacts to a session's membership")
 	}
 	if session.EventSessionGone != "session_gone" || session.EventMemberLeft != "member_left" || slices.Contains(session.StateEvents, session.EventSessionGone) {

@@ -98,9 +98,12 @@ if (!window.chatWired) {
 {{/* What a session page does on its stream's events beyond its panes'
      reloads. A member out of the session (it was deleted, or they left on
      another tab) is told once, session_gone: the stream closes (sse-close
-     above) and the page goes home, which opens their latest session. */}}
+     above) and the page goes home, which opens their latest session. Another
+     member out: the members shown, in the top bar and the rail, are those of
+     the page as it is now. */}}
 {{define "session-bells"}}
 <div hidden hx-get="/" hx-trigger="sse:{{sessionGone}}" hx-target="body" hx-push-url="true"></div>
+<div hidden hx-get="/s/{{.Session.SessionID}}" hx-trigger="sse:{{memberLeft}}" hx-select="#avatars" hx-target="#avatars" hx-swap="morph" hx-select-oob="#people:morph"></div>
 {{end}}
 
 {{define "topbar"}}
@@ -122,7 +125,7 @@ if (!window.chatWired) {
       <a href="/s/{{.Session.SessionID}}" class="{{if ne $.View "map"}}on{{end}}">Fil</a>
       <a href="/s/{{.Session.SessionID}}/map" class="{{if eq $.View "map"}}on{{end}}">Carte</a>
     </div>
-    <div class="avatars">{{range $.Members}}<div class="avatar" style="background:{{.Color}}" title="{{.Name}}">{{.Initials}}</div>{{end}}</div>
+    <div class="avatars" id="avatars">{{range $.Members}}<div class="avatar" style="background:{{.Color}}" title="{{.Name}}">{{.Initials}}</div>{{end}}</div>
     <button class="btn only-narrow rail-toggle" type="button" onclick="document.getElementById('app').classList.toggle('show-rail')">Détails</button>
     {{end}}
     {{if .Notifications}}<a class="btn" href="/notifications">Notifications · {{.Notifications}}</a>{{end}}
