@@ -132,3 +132,21 @@ func TestCatalog_ToolProperties(t *testing.T) {
 		t.Error("PrivateInput answers wrong")
 	}
 }
+
+// The catalog finds a tool whatever order its tools came in: the database's
+// collation can sort "a_c" after "ab", and "B" after "a", unlike bytes.
+func TestCatalog_FindsToolsInCollationOrder(t *testing.T) {
+	c := NewCatalog()
+	collated := []store.ToolRecord{{Name: "ab"}, {Name: "a_c", PrivateInput: true}, {Name: "a"}, {Name: "B", PrivateInput: true}}
+	c.SetTools(collated)
+	if collated[0].Name != "ab" {
+		t.Errorf("the caller's slice was reordered: %+v", collated)
+	}
+	defs, missing := c.ToolDefinitions([]string{"ab", "a_c", "a", "B"})
+	if len(defs) != 4 || len(missing) != 0 {
+		t.Errorf("found %+v, missing %v", defs, missing)
+	}
+	if !c.PrivateInput("a_c") || !c.PrivateInput("B") || c.PrivateInput("ab") {
+		t.Error("PrivateInput misses a tool")
+	}
+}

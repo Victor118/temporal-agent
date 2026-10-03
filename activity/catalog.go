@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -33,7 +34,13 @@ func (c *Catalog) SetAgents(agents []AgentCatalogEntry) {
 	c.agents = agents
 }
 
+// SetTools replaces the tools, sorted here by name in byte order: the lookups
+// search them so (definition, PrivateInput), and the order the caller read
+// them in follows the database's collation, which may differ ("a_c" after
+// "ab" in en_US).
 func (c *Catalog) SetTools(tools []store.ToolRecord) {
+	tools = slices.Clone(tools)
+	slices.SortFunc(tools, func(a, b store.ToolRecord) int { return strings.Compare(a.Name, b.Name) })
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.tools = tools

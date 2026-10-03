@@ -150,16 +150,12 @@ func (a *LLMActivities) buildRequest(ctx context.Context, req LLMTurnRequest) (p
 	}
 	chat := conversation.Convert(messages, conversation.View{Self: req.AgentID, Agents: a.Catalog.AgentLabels(), Private: a.Catalog})
 
-	// A tool gone from the catalog since the turn started is not offered: a
-	// definition cannot be made up. A call to it is refused by the workflow.
 	tools, missing := a.Catalog.ToolDefinitions(req.Tools)
-	if len(missing) > 0 {
-		log.Printf("LLM call: agent %s, tools %v gone from the catalog, not offered", req.AgentID, missing)
-	}
 	offered := make([]string, len(tools))
 	for i, t := range tools {
 		offered[i] = t.Name
 	}
+	tools = append(tools, withdrawnTools(req.AgentID, missing, chat)...)
 
 	// Cache breakpoints: the system prompt and the last tool definition are
 	// stable across a turn's calls; the second-to-last message ends the
@@ -178,6 +174,38 @@ func (a *LLMActivities) buildRequest(ctx context.Context, req LLMTurnRequest) (p
 		MaxTokens:   maxResponseTokens,
 		CacheSystem: true,
 	}, nil
+}
+
+// withdrawnDescription is what the model reads of a tool withdrawn while it
+// was in use.
+const withdrawnDescription = "Withdrawn: this tool is no longer available. Do not call it."
+
+// withdrawnTools keeps a definition for each tool of missing, gone from the
+// catalog since the turn started, that the conversation calls: the API
+// rejects tool blocks a request defines no tool for, which an agent whose
+// only tool was withdrawn would send. The definition is a stub that says not
+// to call it, and the tool is never in the prompt; one the conversation does
+// not call is simply not offered.
+func withdrawnTools(agentID string, missing []string, chat []provider.ChatMessage) []provider.ToolDefinition {
+	if len(missing) == 0 {
+		return nil
+	}
+	called := map[string]bool{}
+	for _, m := range chat {
+		for _, tc := range m.ToolCalls {
+			called[tc.Name] = true
+		}
+	}
+	var stubs []provider.ToolDefinition
+	var kept []string
+	for _, name := range missing {
+		if called[name] {
+			stubs = append(stubs, provider.ToolDefinition{Name: name, Description: withdrawnDescription, InputSchema: json.RawMessage(`{"type":"object"}`)})
+			kept = append(kept, name)
+		}
+	}
+	log.Printf("LLM call: agent %s, tools %v gone from the catalog, not offered; %v already called, kept as withdrawn", agentID, missing, kept)
+	return stubs
 }
 
 // conversation returns the messages the call reads, in order.

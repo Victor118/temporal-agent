@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -223,6 +224,53 @@ func TestCallLLM_OffersTheToolsByName(t *testing.T) {
 	}
 	if req.System != "I am default, with [agent_analyst web_fetch]." {
 		t.Errorf("prompt %q, want the tools offered only", req.System)
+	}
+}
+
+// A tool withdrawn from the catalog while the turn uses it keeps a stub
+// definition, which tells the model not to call it: the conversation holds
+// its tool blocks, which the API refuses in a request that defines no tool.
+// A withdrawn tool the conversation never called is not offered, and neither
+// is in the prompt.
+func TestCallLLM_KeepsAWithdrawnToolItCalled(t *testing.T) {
+	calls := []store.Message{
+		{Role: store.RoleUser, Content: text("go")},
+		{Role: store.RoleAssistant, ToolCalls: []store.ToolCall{{ID: "t1", Name: "gone", Input: json.RawMessage(`{}`)}}},
+		{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "t1", Content: "ok"}},
+	}
+	for name, catalog := range map[string][]store.ToolRecord{
+		"other tools left": {{Name: "web_fetch", InputSchema: json.RawMessage(`{"type":"object"}`)}},
+		"its only tool":    nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := NewCatalog()
+			c.SetTools(catalog)
+			model := &recordingModel{}
+			a := &LLMActivities{Provider: model, Catalog: c, Prompts: promptOf{}}
+			if _, err := a.CallLLM(context.Background(), LLMTurnRequest{AgentID: "default", Tools: []string{"gone", "unused", "web_fetch"}, Messages: calls}); err != nil {
+				t.Fatal(err)
+			}
+			req := model.requests[0]
+			var offered []string
+			for _, d := range req.Tools {
+				offered = append(offered, d.Name)
+				if d.Name == "gone" && (d.Description != withdrawnDescription || string(d.InputSchema) != `{"type":"object"}`) {
+					t.Errorf("withdrawn tool defined as %+v", d)
+				}
+			}
+			want := []string{"gone"}
+			prompt := "I am default, with []."
+			if catalog != nil {
+				want = []string{"web_fetch", "gone"}
+				prompt = "I am default, with [web_fetch]."
+			}
+			if !reflect.DeepEqual(offered, want) {
+				t.Errorf("offered %v, want %v", offered, want)
+			}
+			if req.System != prompt {
+				t.Errorf("prompt %q, want %q", req.System, prompt)
+			}
+		})
 	}
 }
 
