@@ -48,6 +48,7 @@ func TestAnthropicProvider_ContextTooLong(t *testing.T) {
 		tooLong bool
 	}{
 		{"prompt too long", 400, `{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 215123 tokens > 200000 maximum"}}`, true},
+		{"prompt and max_tokens over the window", 400, `{"type":"error","error":{"type":"invalid_request_error","message":"input length and ` + "`max_tokens`" + ` exceed context limit: 185000 + 16384 > 200000, decrease input length or ` + "`max_tokens`" + ` and try again"}}`, true},
 		{"request too large", 413, `{"type":"error","error":{"type":"request_too_large","message":"Request exceeds the maximum allowed number of bytes."}}`, true},
 		{"413 without a body", 413, `<html>Too large</html>`, true},
 		{"another bad request", 400, `{"type":"error","error":{"type":"invalid_request_error","message":"messages: roles must alternate"}}`, false},

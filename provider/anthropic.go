@@ -49,8 +49,10 @@ type anthropicError struct {
 
 // contextOverflow tells an API error that refuses the request for its size:
 // a prompt longer than the model's window ("prompt is too long: … tokens >
-// … maximum", an invalid_request_error), or a request over the API's size
-// limit (413, request_too_large).
+// … maximum"), a prompt that leaves no room for max_tokens ("input length
+// and `max_tokens` exceed context limit: … + … > …", the one a growing
+// conversation meets first) — both invalid_request_error — or a request over
+// the API's size limit (413, request_too_large).
 func contextOverflow(status int, body []byte) bool {
 	var e anthropicError
 	if json.Unmarshal(body, &e) != nil {
@@ -60,7 +62,8 @@ func contextOverflow(status int, body []byte) bool {
 	case status == http.StatusRequestEntityTooLarge || e.Error.Type == "request_too_large":
 		return true
 	case e.Error.Type == "invalid_request_error":
-		return strings.Contains(strings.ToLower(e.Error.Message), "prompt is too long")
+		msg := strings.ToLower(e.Error.Message)
+		return strings.Contains(msg, "prompt is too long") || strings.Contains(msg, "exceed context limit")
 	}
 	return false
 }
