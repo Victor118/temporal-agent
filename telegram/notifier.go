@@ -24,11 +24,18 @@ func (n *Notifier) Notify(ctx context.Context, note activity.Notification) error
 	case "message":
 		var data struct {
 			Content string `json:"content"`
+			// Agent signs an answer that could be taken for another agent's:
+			// several agents answer in the session.
+			Agent string `json:"agent"`
 		}
 		if err := json.Unmarshal(note.Event.Data, &data); err != nil || data.Content == "" {
 			return nil
 		}
-		return n.Client.SendMessage(ctx, note.ChannelID, data.Content)
+		text := data.Content
+		if data.Agent != "" {
+			text = data.Agent + " :\n" + text
+		}
+		return n.Client.SendMessage(ctx, note.ChannelID, text)
 
 	case "ask_user":
 		var data struct {

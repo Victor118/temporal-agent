@@ -33,3 +33,17 @@ func TestNotifier_AnswersAndQuestionsOnly(t *testing.T) {
 		t.Errorf("sent %+v", s.sent)
 	}
 }
+
+// Several agents answer in the session: a signed answer starts with its
+// agent's name, so the reader knows who speaks.
+func TestNotifier_SignsTheAnswer(t *testing.T) {
+	s := &fakeSender{}
+	n := &Notifier{Client: s}
+	ev := activity.SSEEvent{Type: "message", Data: []byte(`{"type":"message","content":"Utile, oui.","agent":"Agent Smith"}`)}
+	if err := n.Notify(context.Background(), activity.Notification{SessionID: "s1", ChannelID: "42", Event: ev}); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.sent) != 1 || s.sent[0] != (sent{"42", "Agent Smith :\nUtile, oui."}) {
+		t.Errorf("sent %+v", s.sent)
+	}
+}
