@@ -121,6 +121,8 @@ docker compose exec -it agent ./tmp/main user create --email you@example.com --n
 
 Admins manage the other accounts in the back-office, under `/admin/users`.
 
+Every worker of a coding queue (the queue `analyze_repo` and `implement_feature` are published on) must have the `claude` CLI installed. A worker without it on that queue still answers a run's first check, and the run fails at once saying so: with N workers there of which one lacks the CLI, about one run in N fails that way.
+
 A worker that stops ends its coding runs first, then gives the tasks under way 30 seconds to answer before it exits: each run's answer, that its worker stopped, is recorded by Temporal before the process ends, and read by the next worker of the queue (another replica, or this one once restarted). A stop takes 30 to 50 seconds in all. Give a worker's container a `stop_grace_period` of 60 seconds: Docker's default, 10 seconds, kills it before the answer goes out, and the workflow then waits a minute or two for the missed heartbeats.
 
 ### Environment Variables

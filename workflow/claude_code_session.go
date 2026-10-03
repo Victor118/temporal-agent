@@ -148,7 +148,13 @@ func openRun(ctx workflow.Context, execution time.Duration, call tool.CallContex
 	// final here, set before the notice was scheduled or never. The clear
 	// follows the notice it replaces. A run that goes on does meanwhile; one
 	// that ends here waits for it, or the workflow would end first and the
-	// clear never go out.
+	// clear never go out. That wait delays the run's "all busy" answer by as
+	// long as the notices take: next to nothing when they go out; when the
+	// turn queue's notifier fails, the retry budget of the notice still on
+	// its way and of the clear (notifyRetry: 3 tries of channelNotifyTimeout
+	// each, about 3 min apiece). Accepted: the turn waiting for this answer
+	// lives on that same queue, so a notifier failing there fails its own
+	// reply as well, and a wait left on show would mislead the user.
 	if notified && ctx.Err() == nil {
 		clear := func(ctx workflow.Context) {
 			_ = noticeSent.Get(ctx, nil)

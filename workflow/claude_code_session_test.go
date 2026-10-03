@@ -304,6 +304,48 @@ func TestCodingRuns_NoNoticeWhenASlotIsFree(t *testing.T) {
 	}
 }
 
+// A slot that frees just as the notice is due: the session's answer and the
+// notice's timer reach the workflow in one workflow task. The wait is over:
+// no notice, and so nothing to clear.
+//
+// The worker's answer is delivered without a workflow task of its own
+// (SignalWorkflowSkippingWorkflowTask), before the timer fires: the task the
+// timer starts sees both. The session's worker keeps its creation activity
+// running, as a real one does for the session's length.
+func TestCodingRuns_NoNoticeWhenTheSlotFreesAsItIsDue(t *testing.T) {
+	e := newImplementEnv(t, claudeCodeResult{Report: "Done.", Subtype: "success"}, nil, oneCommit(), nil)
+	e.env.OnActivity(sessionCreation, mock.Anything, mock.Anything).After(time.Hour).Return(nil)
+	q := e.queues
+	e.env.SetOnActivityStartedListener(func(info *sdkactivity.Info, _ context.Context, args converter.EncodedValues) {
+		q.mu.Lock()
+		q.runs = append(q.runs, activityRun{info.ActivityType.Name, info.TaskQueue})
+		q.mu.Unlock()
+		if info.ActivityType.Name != sessionCreation {
+			return
+		}
+		var sessionID string
+		if err := args.Get(&sessionID); err != nil {
+			t.Error(err)
+			return
+		}
+		e.env.RegisterDelayedCallback(func() {
+			e.env.SignalWorkflowSkippingWorkflowTask(sessionID, map[string]string{
+				"Taskqueue": "resource@host-a", "HostName": "host-a", "ResourceID": "resource",
+			})
+		}, runWaitNotice/2)
+	})
+	out := e.run_(t, ImplementFeatureInput{
+		Repo: "/src/repo", Task: "do it",
+		CallContext: tool.CallContext{Channel: "telegram", ChannelID: "42", NotifyQueue: "agent"},
+	})
+	if !out.Pushed {
+		t.Fatalf("not pushed: %s", out.Error)
+	}
+	if notices := e.queues.sent(); len(notices) != 0 {
+		t.Errorf("sent %+v, want no notice", notices)
+	}
+}
+
 func TestToolCallSession(t *testing.T) {
 	for id, want := range map[string]string{
 		"s1-tool-implement_feature-c1":                  "s1",
