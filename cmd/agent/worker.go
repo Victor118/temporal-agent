@@ -35,9 +35,6 @@ func runWorker(cmd *cobra.Command, args []string) {
 
 	// Notification bridge: POST to server's internal endpoint (SSE requires HTTP)
 	notifier := activity.NewHTTPNotifier(cfg.NotifyURL, cfg.InternalAPIKey)
-	// Reported in the log: the worker still serves its tools and its other
-	// channels.
-	_ = checkNotifier(notifier, cfg.InternalAPIKey)
 
 	opts := workerOptions{web: notifier}
 	if cfg.SkillsRepo != "" {
@@ -55,6 +52,9 @@ func runWorker(cmd *cobra.Command, args []string) {
 	if err != nil {
 		log.Fatalf("Worker: %v", err)
 	}
+	// Reported in the log: the worker still serves its tools and its other
+	// channels.
+	_ = checkNotifier(notifier, cfg.InternalAPIKey, rt.workflows)
 	if err := rt.start(); err != nil {
 		log.Fatalf("Worker failed: %v", err)
 	}
@@ -74,7 +74,16 @@ type notifyChecker interface {
 // otherwise the web channel's notifications fail one by one, seen only in
 // activity failures. A server not reachable yet is only a warning: it may
 // start after the worker.
-func checkNotifier(n notifyChecker, apiKey string) error {
+//
+// Only a worker that serves workflows is checked: the notifications are
+// activities of the session and agent workflows, run on their queue. A
+// tools worker (workflows: false, the Claude Code ones) sends none, and
+// needs no key. One that exposed ask_user would: it runs on the tool's
+// queue.
+func checkNotifier(n notifyChecker, apiKey string, servesWorkflows bool) error {
+	if !servesWorkflows {
+		return nil
+	}
 	if apiKey == "" {
 		log.Println("ERROR: INTERNAL_API_KEY is not set: the server refuses every notification from this worker, web users will not see its answers live")
 		return activity.ErrNotifyKeyRefused

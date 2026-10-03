@@ -49,8 +49,10 @@ type workerOptions struct {
 type workerRuntime struct {
 	workers []worker.Worker
 	queues  []string
-	skills  []skill.Skill      // as loaded at startup
-	stop    context.CancelFunc // ends the polling
+	// workflows: the worker serves the workflow queue (worker.yaml).
+	workflows bool
+	skills    []skill.Skill      // as loaded at startup
+	stop      context.CancelFunc // ends the polling
 }
 
 // newWorkerRuntime builds the workers of a process, the same way for `agent
@@ -123,7 +125,7 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 		log.Println("Telegram bot client configured")
 	}
 
-	rt := &workerRuntime{queues: queues, skills: skills}
+	rt := &workerRuntime{queues: queues, workflows: workerConf.Workflows, skills: skills}
 	for _, queue := range queues {
 		// Sessions pin stateful tool calls to one worker of the tool queue
 		w := worker.New(tc, queue, worker.Options{

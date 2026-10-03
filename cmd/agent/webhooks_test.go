@@ -191,14 +191,27 @@ func (f checkFunc) Check(ctx context.Context) error { return f(ctx) }
 
 func TestCheckNotifier(t *testing.T) {
 	ok := checkFunc(func(context.Context) error { return nil })
-	if err := checkNotifier(ok, ""); !errors.Is(err, activity.ErrNotifyKeyRefused) {
+	if err := checkNotifier(ok, "", true); !errors.Is(err, activity.ErrNotifyKeyRefused) {
 		t.Errorf("no key: %v", err)
 	}
-	if err := checkNotifier(ok, "k3y"); err != nil {
+	if err := checkNotifier(ok, "k3y", true); err != nil {
 		t.Errorf("accepted key: %v", err)
 	}
 	refused := checkFunc(func(context.Context) error { return activity.ErrNotifyKeyRefused })
-	if err := checkNotifier(refused, "k3y"); !errors.Is(err, activity.ErrNotifyKeyRefused) {
+	if err := checkNotifier(refused, "k3y", true); !errors.Is(err, activity.ErrNotifyKeyRefused) {
 		t.Errorf("refused key: %v", err)
+	}
+}
+
+// A worker that serves no workflow sends no notification: no key is no
+// error, and the server is not asked.
+func TestCheckNotifier_SkipsAWorkerWithoutWorkflows(t *testing.T) {
+	asked := false
+	n := checkFunc(func(context.Context) error { asked = true; return activity.ErrNotifyKeyRefused })
+	if err := checkNotifier(n, "", false); err != nil {
+		t.Errorf("no key: %v", err)
+	}
+	if err := checkNotifier(n, "k3y", false); err != nil || asked {
+		t.Errorf("key: %v, server asked %v", err, asked)
 	}
 }
