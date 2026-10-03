@@ -911,3 +911,91 @@ func TestForkReportRacesParentDeletion(t *testing.T) {
 	}
 	t.Logf("%d reports posted then deleted, %d refused", posted, refused)
 }
+
+// A reporter who leaves the fork while its report is posted waits for it:
+// the membership rows the report checked are held until it commits, and the
+// report is signed by a member.
+func TestForkReportHoldsItsReporterRows(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	cleanup := func() {
+		s.db.Exec("DELETE FROM messages WHERE session_id LIKE 'zz-hold-%'")
+		s.db.Exec("DELETE FROM sessions WHERE session_id = 'zz-hold-fork'")
+		s.db.Exec("DELETE FROM sessions WHERE session_id LIKE 'zz-hold-%'")
+		s.db.Exec("DELETE FROM users WHERE id = 'zz-hold-bob'")
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+	if err := s.CreateUser(ctx, User{ID: "zz-hold-bob", Email: "zz-hold-bob@example.com", Role: UserRoleStandard, PasswordHash: "h"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateSession(ctx, Session{SessionID: "zz-hold-parent", CreatedBy: "zz-hold-bob", Channel: "web"}); err != nil {
+		t.Fatal(err)
+	}
+	at, _ := s.AppendMessage(ctx, "zz-hold-parent", "k0", Message{Role: RoleUser, Content: `"plan"`})
+	if err := s.CreateSession(ctx, Session{SessionID: "zz-hold-fork", CreatedBy: "zz-hold-bob", Channel: "web",
+		ParentSessionID: "zz-hold-parent", ForkedAtMessageID: at, ForkedBy: "zz-hold-bob"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// waiting is how many statements of this database wait on a lock.
+	waiting := func(n int) bool {
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			var got int
+			s.db.QueryRow("SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'").Scan(&got)
+			if got == n {
+				return true
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		return false
+	}
+
+	// The report is held after its checks: its message's key is being
+	// written by another transaction, which the insert waits for.
+	blocker, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Rollback()
+	if _, err := blocker.Exec("INSERT INTO messages (session_id, msg_key, data) VALUES ($1, $2, '{}')",
+		"zz-hold-parent", ForkReportKey("zz-hold-fork", 0, 10)); err != nil {
+		t.Fatal(err)
+	}
+	type result struct {
+		id  int64
+		err error
+	}
+	reported := make(chan result, 1)
+	go func() {
+		id, err := s.AppendForkReport(ctx, ForkReport{ForkSessionID: "zz-hold-fork", ParentSessionID: "zz-hold-parent", ReporterID: "zz-hold-bob", UpTo: 10,
+			Message: Message{Role: RoleUser, Kind: KindForkReport, Content: `"report"`, UserID: "zz-hold-bob"}})
+		reported <- result{id, err}
+	}()
+	if !waiting(1) {
+		t.Fatal("the report never waited on its message's key")
+	}
+	left := make(chan error, 1)
+	go func() { left <- s.RemoveSessionMember(ctx, "zz-hold-fork", "zz-hold-bob") }()
+	if !waiting(2) {
+		t.Fatal("leaving the fork did not wait for the report")
+	}
+	select {
+	case err := <-left:
+		t.Fatalf("the reporter left during the report: %v", err)
+	default:
+	}
+
+	blocker.Rollback()
+	r := <-reported
+	if r.err != nil || r.id == 0 {
+		t.Fatalf("report: %d, %v", r.id, r.err)
+	}
+	if err := <-left; err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := s.IsSessionMember(ctx, "zz-hold-fork", "zz-hold-bob"); ok {
+		t.Error("the reporter is still a member of the fork after leaving")
+	}
+}

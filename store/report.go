@@ -36,12 +36,14 @@ type ForkReport struct {
 //
 // The fork's row is held while it runs: two reports of one fork are posted
 // one after the other, and the parent cannot be deleted in between (deleting
-// it unlinks the fork, which waits). Refused, with nothing written: the fork
-// is gone (ErrReportForkGone) or no longer the parent's
-// (ErrReportParentGone), the reporter left the fork (ErrReportNotForkMember)
-// or the parent (ErrReportNotParentMember), another report moved the fork's
-// last reported message since From (ErrReportStale): this one would cover it
-// again.
+// it unlinks the fork, which waits). So are the reporter's memberships of
+// both: they cannot leave either until the report is posted.
+//
+// Refused, with nothing written: the fork is gone (ErrReportForkGone) or no
+// longer the parent's (ErrReportParentGone), the reporter left the fork
+// (ErrReportNotForkMember) or the parent (ErrReportNotParentMember), another
+// report moved the fork's last reported message since From (ErrReportStale):
+// this one would cover it again.
 func (s *PostgresStore) AppendForkReport(ctx context.Context, r ForkReport) (int64, error) {
 	key := ForkReportKey(r.ForkSessionID, r.From, r.UpTo)
 	data, err := json.Marshal(r.Message)
@@ -75,12 +77,10 @@ func (s *PostgresStore) AppendForkReport(ctx context.Context, r ForkReport) (int
 			return ErrReportStale
 		}
 		// The reporter signs what the fork says: they must still read it,
-		// and the parent's members must still count them in.
-		var inFork, inParent bool
-		if err := tx.QueryRowContext(ctx, `
-			SELECT EXISTS (SELECT 1 FROM session_members WHERE session_id = $1 AND user_id = $3),
-			       EXISTS (SELECT 1 FROM session_members WHERE session_id = $2 AND user_id = $3)`,
-			r.ForkSessionID, r.ParentSessionID, r.ReporterID).Scan(&inFork, &inParent); err != nil {
+		// and the parent's members must still count them in. Their rows are
+		// held until the report is posted: leaving either session waits.
+		inFork, inParent, err := reporterRows(ctx, tx, r)
+		if err != nil {
 			return err
 		}
 		switch {
@@ -100,4 +100,26 @@ func (s *PostgresStore) AppendForkReport(ctx context.Context, r ForkReport) (int
 		return err
 	})
 	return id, err
+}
+
+// reporterRows tells whether r's reporter is a member of the fork and of the
+// parent, and locks the rows that say so (FOR SHARE) until tx ends.
+func reporterRows(ctx context.Context, tx *sql.Tx, r ForkReport) (inFork, inParent bool, err error) {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT session_id FROM session_members
+		WHERE (session_id, user_id) IN (($1, $3), ($2, $3))
+		FOR SHARE`, r.ForkSessionID, r.ParentSessionID, r.ReporterID)
+	if err != nil {
+		return false, false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var sessionID string
+		if err := rows.Scan(&sessionID); err != nil {
+			return false, false, err
+		}
+		inFork = inFork || sessionID == r.ForkSessionID
+		inParent = inParent || sessionID == r.ParentSessionID
+	}
+	return inFork, inParent, rows.Err()
 }
