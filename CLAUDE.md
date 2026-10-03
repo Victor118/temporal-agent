@@ -25,11 +25,11 @@
 ## Workflows
 
 - **SessionWorkflow** : orchestration long-lived, gère la persistance (LoadContext/PersistContext via PostgreSQL)
-- ID fixe `session-<id>` pour tous les runs d'une session (ouverture, reprise après 30 min d'inactivité, continue-as-new) : un message part par `SignalWithStartWorkflow`, qui démarre un run seulement si aucun ne tourne. Repli transitoire : un run `session-<id>-<unix>` (ancien schéma de reprise) encore actif reçoit le signal
+- ID fixe `session-<id>` pour tous les runs d'une session (ouverture, reprise après 30 min d'inactivité, continue-as-new) : un message part par `SignalWithStartWorkflow`, qui démarre un run seulement si aucun ne tourne.
 - **AgentWorkflow** : boucle ReAct (LLM + tools), `agent_id` obligatoire (prompt, skills, allowlist)
 - **Les sous-agents** : chaque agent est un tool `agent_<id>(task)` généré par le catalogue (pas publié par un worker), soumis à l'allowlist comme les autres (`agent_*` = tous). L'appeler lance un AgentWorkflow one-shot, sans persistance, contexte isolé du parent, avec l'allowlist de son propre agent
 - Le parent ne voit que la réponse finale du sous-agent (string)
-- Délégation refusée (erreur d'outil rendue au modèle) vers un agent déjà dans la chaîne d'appel (`AgentChain`, A → B → A) ou au-delà de `maxDelegationDepth` (3) niveaux de sous-agents ; versionné (`delegation-limit`)
+- Délégation refusée (erreur d'outil rendue au modèle) vers un agent déjà dans la chaîne d'appel (`AgentChain`, A → B → A) ou au-delà de `maxDelegationDepth` (3) niveaux de sous-agents
 
 ## Agents, Tools & Task Queues
 
@@ -59,12 +59,14 @@
 - `memory` : key-value scope (user/project/session)
 - `task_logs` : suivi des taches schedulees, chacune a son `user_id` : `list_schedules` et `cancel_schedule` ne voient que celles de l'utilisateur du tour (aucun outil sans utilisateur identifie). `query_workflow` n'interroge que les workflows de la session appelante
 - AgentWorkflow ecrit ses messages au fil du tour quand `TurnKey` est fourni ; SessionWorkflow reecrit le meme delta en fin de tour (les memes cles, donc sans effet si deja ecrit). Un sous-agent n'a pas de `TurnKey` et ne persiste rien
-- Un tour qui echoue ne doit pas perdre son transcript : `AgentWorkflow` renvoie `Error` dans sa sortie plutot qu'une erreur de workflow (un workflow en echec ne rend aucun resultat). SessionWorkflow ecrit alors la raison apres le transcript (`kind = turn_error`) : le fil l'affiche, le modele et les resumes de fork ne la voient jamais. Pour un tour qui n'a rien produit, c'est un `PersistContext` de plus : versionne (`workflow.GetVersion`, `turn-error-message`) pour que les SessionWorkflow ouverts rejouent leur historique. Tout changement des commandes de SessionWorkflow doit l'etre aussi (test de replay : `workflow/session_replay_test.go`)
+- Un tour qui echoue ne doit pas perdre son transcript : `AgentWorkflow` renvoie `Error` dans sa sortie plutot qu'une erreur de workflow (un workflow en echec ne rend aucun resultat). SessionWorkflow ecrit alors la raison apres le transcript (`kind = turn_error`) : le fil l'affiche, le modele et les resumes de fork ne la voient jamais.
 - Ne jamais persister un message assistant portant des tool calls sans ses tool results : le tour suivant serait rejete par l'API LLM
 - Config via `DATABASE_URL` env var
 - Migration automatique au demarrage (CREATE TABLE IF NOT EXISTS)
 
 ## Conventions
+
+- Pas de prod pour l'instant : aucun code de compatibilité (repli vers un ancien schéma d'ID, `workflow.GetVersion`, entrée d'un ancien worker). Un changement des commandes d'un workflow casse le rejeu des runs ouverts : on les termine (ou on remet tout à zéro) au déploiement. À la première prod, tout changement de commandes d'un workflow devra être versionné (`GetVersion`) et couvert par un test de replay
 
 - `SystemPrompt` dans les workflow inputs = override manuel ; si vide, prompt construit depuis l'agent (`agent_id`)
 - Les tool results remontent comme string au parent. Un workflow-tool renvoie un `tool.Result` (`content`, `is_error`) ou un type qui en porte les champs (`ClaudeCodeOutput.Content`) ; seul un sous-agent (`agent_<id>`) est décodé par type (`AgentWorkflowOutput.Response`)

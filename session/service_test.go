@@ -9,8 +9,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"go.temporal.io/api/serviceerror"
-
 	"github.com/victor/temporal-agent/store"
 	"github.com/victor/temporal-agent/workflow"
 )
@@ -35,14 +33,8 @@ func TestSetTitleFrom_CutsOnCharacters(t *testing.T) {
 // canonical UUID is refused, whatever the route checked before.
 func TestVisibilityQueriesTakeOnlyUUIDs(t *testing.T) {
 	for _, id := range []string{"", "s1", "x' OR WorkflowId STARTS_WITH '", "{" + sid + "}", "urn:uuid:" + sid, strings.ToUpper(sid)} {
-		if q, err := runningSessionQuery(id); err == nil {
-			t.Errorf("runningSessionQuery(%q) = %q", id, q)
-		}
 		if q, err := pendingQuestionsQuery(id); err == nil {
 			t.Errorf("pendingQuestionsQuery(%q) = %q", id, q)
-		}
-		if q, err := legacyRunQuery(id); err == nil {
-			t.Errorf("legacyRunQuery(%q) = %q", id, q)
 		}
 	}
 	if _, err := pendingQuestionsQuery(sid); err != nil {
@@ -254,76 +246,16 @@ func TestDeliver_SignalsWithStartOnTheFixedID(t *testing.T) {
 	}
 }
 
-// A run resumed under the former scheme ("session-<id>-<unix time>") that
-// still runs gets the message: starting on the fixed ID would make a second
-// run. If it ended since it was listed, the message starts a run instead.
-func TestDeliver_SignalsALegacyRun(t *testing.T) {
-	legacy := "session-" + sid + "-1759400000"
-	// A store per delivery: each one titles the session in the background.
-	st := func() *memStore { return &memStore{members: []store.SessionMember{{UserID: "u-alice"}}} }
-	alice := &store.User{ID: "u-alice", Email: "alice@example.com"}
-	sess := &store.Session{SessionID: sid, AgentID: "default"}
-
-	tc := &fakeTemporal{running: []string{legacy}}
-	if _, err := newTest(st(), tc).Deliver(context.Background(), sess, alice, "bonjour"); err != nil {
-		t.Fatal(err)
-	}
-	if len(tc.signals) != 1 || tc.signals[0] != legacy || len(tc.signalStarts) != 0 {
-		t.Errorf("signalled %v, signal-with-start %d: want the legacy run only", tc.signals, len(tc.signalStarts))
-	}
-	if len(tc.lists) != 1 || !strings.Contains(tc.lists[0], "STARTS_WITH 'session-"+sid+"-'") || !strings.Contains(tc.lists[0], "WorkflowType = 'SessionWorkflow'") {
-		t.Errorf("query %v", tc.lists)
-	}
-
-	tc = &fakeTemporal{running: []string{legacy}, signalErr: serviceerror.NewNotFound("workflow execution already completed")}
-	if _, err := newTest(st(), tc).Deliver(context.Background(), sess, alice, "bonjour"); err != nil {
-		t.Fatal(err)
-	}
-	if len(tc.signalStarts) != 1 || tc.signalStarts[0].id != "session-"+sid {
-		t.Errorf("signal-with-start %+v after the legacy run ended", tc.signalStarts)
-	}
-
-	// Any other failure is reported: starting a run could make a second one.
-	tc = &fakeTemporal{running: []string{legacy}, signalErr: errors.New("unavailable")}
-	if _, err := newTest(st(), tc).Deliver(context.Background(), sess, alice, "bonjour"); err == nil || len(tc.signalStarts) != 0 {
-		t.Errorf("Deliver = %v with %d signal-with-start calls", err, len(tc.signalStarts))
-	}
-}
-
-// Visibility down, a legacy run may still be there: the message stays stored
-// and the delivery fails, rather than starting a second run on the fixed ID.
-func TestDeliver_FailsWhenTheLegacyRunsCannotBeListed(t *testing.T) {
-	st := &memStore{members: []store.SessionMember{{UserID: "u-alice"}}}
-	tc := &fakeTemporal{listErr: errors.New("visibility unavailable")}
-	alice := &store.User{ID: "u-alice", Email: "alice@example.com"}
-	sess := &store.Session{SessionID: sid, AgentID: "default"}
-
-	called, err := newTest(st, tc).Deliver(context.Background(), sess, alice, "bonjour")
-	if err == nil || called {
-		t.Errorf("Deliver = %v, %v; want an error", called, err)
-	}
-	if len(tc.signals) != 0 || len(tc.signalStarts) != 0 {
-		t.Errorf("signalled %v, signal-with-start %d: want neither", tc.signals, len(tc.signalStarts))
-	}
-	if n := len(st.appended); n != 1 {
-		t.Errorf("%d messages stored, want the user's", n)
-	}
-}
-
-// The state is the running run's, a resumed session's included, on the fixed
-// ID or the former scheme; with none running, the last run's.
+// The state is the running run's, a resumed session's included; with none
+// running, the last run's: every run has the session's fixed ID.
 func TestState_FindsTheSession(t *testing.T) {
-	base, legacy := "session-"+sid, "session-"+sid+"-1759400000"
+	base := "session-" + sid
 	for name, tc := range map[string]*fakeTemporal{
-		"resumed on the fixed ID":         {running: []string{base}},
-		"resumed under the former scheme": {running: []string{legacy}},
-		"none running":                    {},
+		"resumed":      {running: []string{base}},
+		"none running": {},
 	} {
 		t.Run(name, func(t *testing.T) {
 			want := base
-			if len(tc.running) == 1 {
-				want = tc.running[0]
-			}
 			tc.states = map[string]workflow.SessionState{want: {SessionID: sid, Status: "idle", TurnCount: 3}}
 			got, err := newTest(&memStore{}, tc).State(context.Background(), sid)
 			if err != nil || got.TurnCount != 3 {

@@ -2,14 +2,12 @@ package session
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log"
 	"strings"
 
 	"github.com/google/uuid"
 	enumspb "go.temporal.io/api/enums/v1"
-	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/api/workflowservice/v1"
 
 	"github.com/victor/temporal-agent/workflow"
@@ -33,24 +31,6 @@ func checkSessionID(sessionID string) error {
 // resumed after it timed out, or continued as new.
 func sessionWorkflowID(sessionID string) string { return "session-" + sessionID }
 
-// runningSessionQuery finds the session's own workflow, on its fixed ID or
-// resumed under the former scheme ("session-<id>-<unix time>").
-func runningSessionQuery(sessionID string) (string, error) {
-	if err := checkSessionID(sessionID); err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("WorkflowId STARTS_WITH 'session-%s' AND ExecutionStatus = 'Running'", sessionID), nil
-}
-
-// legacyRunQuery finds a run of the session resumed under the former scheme,
-// "session-<id>-<unix time>", which ends after 30 minutes idle.
-func legacyRunQuery(sessionID string) (string, error) {
-	if err := checkSessionID(sessionID); err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("WorkflowType = 'SessionWorkflow' AND ExecutionStatus = 'Running' AND WorkflowId STARTS_WITH 'session-%s-'", sessionID), nil
-}
-
 // pendingQuestionsQuery finds the questions waiting in a session, its agent's
 // and its sub-agents' alike: their IDs all start with the session's.
 func pendingQuestionsQuery(sessionID string) (string, error) {
@@ -69,69 +49,14 @@ func (s *Service) isWorkflowRunning(ctx context.Context, workflowID string) bool
 	return desc.WorkflowExecutionInfo.Status == enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING
 }
 
-// activeWorkflowID returns the ID of the session's running workflow, or "".
-// Handles both "session-{id}" and "session-{id}-{timestamp}" workflow IDs.
+// activeWorkflowID returns the ID of the session's running workflow, or "":
+// every run of a session has the same ID.
 func (s *Service) activeWorkflowID(ctx context.Context, sessionID string) string {
-	base := sessionWorkflowID(sessionID)
-	if s.isWorkflowRunning(ctx, base) {
-		return base
+	id := sessionWorkflowID(sessionID)
+	if s.isWorkflowRunning(ctx, id) {
+		return id
 	}
-	query, err := runningSessionQuery(sessionID)
-	if err != nil {
-		return ""
-	}
-	resp, err := s.temporal.ListWorkflow(ctx, &workflowservice.ListWorkflowExecutionsRequest{
-		Namespace: s.cfg.Namespace,
-		Query:     query,
-		PageSize:  1,
-	})
-	if err != nil || len(resp.Executions) == 0 {
-		return ""
-	}
-	return resp.Executions[0].Execution.WorkflowId
-}
-
-// legacyRunID returns the session's run resumed under the former scheme if it
-// still runs, or "": until it times out, a message goes to it rather than
-// starting a second run on the fixed ID. Only the runs started before the
-// fixed ID was adopted have such an ID. A visibility error is returned, not
-// taken for "none": a run may be there, and starting on the fixed ID would
-// make a second one.
-//
-// The fallback (legacyRunQuery, legacyRunID, its branch in signalSession) can
-// go once no "session-<id>-<unix>" run can still be running: 30 minutes idle
-// after the fixed ID was deployed.
-func (s *Service) legacyRunID(ctx context.Context, sessionID string) (string, error) {
-	query, err := legacyRunQuery(sessionID)
-	if err != nil {
-		// Not a UUID: no run was ever resumed under it, every session
-		// created had a UUID, before the fixed ID as after.
-		return "", nil
-	}
-	resp, err := s.temporal.ListWorkflow(ctx, &workflowservice.ListWorkflowExecutionsRequest{
-		Namespace: s.cfg.Namespace,
-		Query:     query,
-		PageSize:  1,
-	})
-	if err != nil {
-		return "", fmt.Errorf("list legacy runs: %w", err)
-	}
-	if len(resp.Executions) == 0 {
-		return "", nil
-	}
-	return resp.Executions[0].Execution.WorkflowId, nil
-}
-
-// signalIfRunning signals a workflow and reports whether it took the signal:
-// one that has ended is no error, only not there. Any other failure is
-// returned, the signal possibly not sent.
-func (s *Service) signalIfRunning(ctx context.Context, workflowID, signal string, arg any) (bool, error) {
-	err := s.temporal.SignalWorkflow(ctx, workflowID, "", signal, arg)
-	var gone *serviceerror.NotFound
-	if errors.As(err, &gone) {
-		return false, nil
-	}
-	return err == nil, err
+	return ""
 }
 
 // IsActive reports whether the session's workflow runs.

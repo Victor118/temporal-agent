@@ -211,13 +211,8 @@ func processTurn(actCtx, ctx workflow.Context, input SessionWorkflowInput, userM
 	// case where one of its flushes failed.
 	// A failure is written after them: the members see why the agent stopped,
 	// on every channel and after a reload, not only in a notification.
-	// When the turn produced nothing, writing it adds a PersistContext that a
-	// history recorded before this change lacks: only that case is versioned.
-	// Otherwise it only changes the input of a PersistContext the history
-	// has, which a replay does not compare.
 	messages := result.NewMessages
-	if !cancelled && result.Error != "" &&
-		(len(messages) > 0 || workflow.GetVersion(ctx, turnErrorChangeID, workflow.DefaultVersion, 1) >= 1) {
+	if !cancelled && result.Error != "" {
 		messages = append(messages, store.Message{Role: store.RoleAssistant, Kind: store.KindTurnError, Content: turnErrorContent(result.Error)})
 	}
 	if len(messages) > 0 {
@@ -247,11 +242,6 @@ func processTurn(actCtx, ctx workflow.Context, input SessionWorkflowInput, userM
 
 	return nil
 }
-
-// turnErrorChangeID versions writing the error of a turn that produced no
-// message. A run that replays a history without its marker keeps the old
-// behaviour for its remaining turns; the next run (continue-as-new) has it.
-const turnErrorChangeID = "turn-error-message"
 
 // maxTurnErrorBytes bounds the error kept in the conversation: an API error can
 // carry a whole response body.
