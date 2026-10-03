@@ -536,3 +536,52 @@ func TestAgentNamesClashUnderConcurrency(t *testing.T) {
 		}
 	}
 }
+
+// A turn reads its session as it was when it started, plus what it wrote
+// since: a person's message written meanwhile is not in it, nor another
+// turn's whose key merely starts like its own.
+func TestLoadConversation(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	const sid = "zz-conversation"
+	cleanup := func() { s.DeleteMessagesBySession(ctx, sid) }
+	cleanup()
+	t.Cleanup(cleanup)
+
+	if last, err := s.LastMessageID(ctx, sid); err != nil || last != 0 {
+		t.Fatalf("empty session: last %d, %v", last, err)
+	}
+	text := func(s string) Message { return Message{Role: RoleUser, Content: `"` + s + `"`} }
+	s.AppendMessage(ctx, sid, HumanMessageKey("q"), text("question"))
+	snapshot, err := s.LastMessageID(ctx, sid)
+	if err != nil || snapshot == 0 {
+		t.Fatalf("last %d, %v", snapshot, err)
+	}
+	turn := TurnKey("run-1", 0)
+	s.AppendMessages(ctx, sid, turn, 0, []Message{{Role: RoleAssistant, Content: `"searching"`}})
+	s.AppendMessage(ctx, sid, HumanMessageKey("m"), text("meanwhile"))
+	s.AppendMessages(ctx, sid, turn, 1, []Message{{Role: RoleAssistant, Content: `"found"`}})
+	s.AppendMessages(ctx, sid, turn+"1", 0, []Message{{Role: RoleAssistant, Content: `"another turn"`}})
+
+	got, err := s.LoadConversation(ctx, sid, snapshot, []string{turn})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var seen []string
+	for _, m := range got {
+		seen = append(seen, m.Key+" "+m.Content)
+	}
+	want := []string{`msg:q "question"`, `run-1.0:0 "searching"`, `run-1.0:1 "found"`}
+	if !reflect.DeepEqual(seen, want) {
+		t.Errorf("loaded %q\nwant %q", seen, want)
+	}
+
+	// No turn: the snapshot alone. Everything once the bound covers it.
+	if got, _ := s.LoadConversation(ctx, sid, snapshot, nil); len(got) != 1 {
+		t.Errorf("without turns: %d messages, want the question", len(got))
+	}
+	last, _ := s.LastMessageID(ctx, sid)
+	if got, _ := s.LoadConversation(ctx, sid, last, nil); len(got) != 5 || got[2].Key != "msg:m" {
+		t.Errorf("up to the last: %+v", got)
+	}
+}

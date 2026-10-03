@@ -277,18 +277,50 @@ func (s *PostgresStore) LoadMessagesWithID(ctx context.Context, sessionID string
 // all of them when lastID is 0.
 func (s *PostgresStore) LoadMessagesUpTo(ctx context.Context, sessionID string, lastID int64) ([]MessageWithID, error) {
 	rows, err := s.db.QueryContext(ctx,
-		"SELECT id, created_at, data FROM messages WHERE session_id = $1 AND ($2 = 0 OR id <= $2) ORDER BY id", sessionID, lastID)
+		"SELECT id, created_at, msg_key, data FROM messages WHERE session_id = $1 AND ($2 = 0 OR id <= $2) ORDER BY id", sessionID, lastID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	return scanMessages(rows)
+}
 
+// LastMessageID is the ID of a session's latest message, 0 when it has none.
+func (s *PostgresStore) LastMessageID(ctx context.Context, sessionID string) (int64, error) {
+	var id int64
+	err := s.db.QueryRowContext(ctx,
+		"SELECT COALESCE(MAX(id), 0) FROM messages WHERE session_id = $1", sessionID).Scan(&id)
+	return id, err
+}
+
+// LoadConversation returns what a turn reads of its session: the messages up
+// to upTo, the snapshot it started from, and those the turns named wrote,
+// whenever they did. A message written meanwhile by someone else is left out:
+// it gets a turn of its own. No index on msg_key: the snapshot holds nearly
+// all of the session's rows, which the (session_id, id) index already finds.
+func (s *PostgresStore) LoadConversation(ctx context.Context, sessionID string, upTo int64, turnKeys []string) ([]MessageWithID, error) {
+	if turnKeys == nil {
+		turnKeys = []string{}
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, created_at, msg_key, data FROM messages
+		WHERE session_id = $1 AND (id <= $2 OR EXISTS (
+			SELECT 1 FROM unnest($3::text[]) AS t(turn) WHERE starts_with(msg_key, t.turn || ':')))
+		ORDER BY id`, sessionID, upTo, turnKeys)
+	if err != nil {
+		return nil, err
+	}
+	return scanMessages(rows)
+}
+
+// scanMessages reads rows of id, created_at, msg_key and data, and closes them.
+func scanMessages(rows *sql.Rows) ([]MessageWithID, error) {
+	defer rows.Close()
 	var messages []MessageWithID
 	for rows.Next() {
 		var m MessageWithID
 		var data string
 		var createdAt sql.NullTime
-		if err := rows.Scan(&m.ID, &createdAt, &data); err != nil {
+		if err := rows.Scan(&m.ID, &createdAt, &m.Key, &data); err != nil {
 			return nil, err
 		}
 		m.CreatedAt = createdAt.Time

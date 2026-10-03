@@ -3,6 +3,7 @@ package store
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -56,7 +57,51 @@ const KindTurnError = "turn_error"
 type MessageWithID struct {
 	ID        int64     `json:"id"`
 	CreatedAt time.Time `json:"created_at"`
+	// Key is the message's idempotency key (msg_key): it tells which turn
+	// wrote it (TurnOf). Never shown.
+	Key string `json:"-"`
 	Message
+}
+
+// The keys of a session's messages, by writer: a person ("msg:"), a
+// scheduled task's result ("sched:"), and a turn ("{turn key}:{index}").
+
+const (
+	humanKeyPrefix     = "msg:"
+	scheduledKeyPrefix = "sched:"
+)
+
+// HumanMessageKey is the idempotency key of a message a person wrote, id
+// being unique.
+func HumanMessageKey(id string) string { return humanKeyPrefix + id }
+
+// TurnKey names the turn of the agent-th agent answering a message, under
+// messageKey, the key the session gives that message: the turns answering
+// one message share it (TurnGroup), and are read as one block.
+func TurnKey(messageKey string, agent int) string {
+	return fmt.Sprintf("%s.%d", messageKey, agent)
+}
+
+// TurnOf returns the key of the turn that wrote the message stored under
+// msgKey; false for a message no turn wrote, a person's or a task result.
+func TurnOf(msgKey string) (string, bool) {
+	if strings.HasPrefix(msgKey, humanKeyPrefix) || strings.HasPrefix(msgKey, scheduledKeyPrefix) {
+		return "", false
+	}
+	i := strings.LastIndexByte(msgKey, ':')
+	if i <= 0 {
+		return "", false
+	}
+	return msgKey[:i], true
+}
+
+// TurnGroup returns the message a turn answers (see TurnKey): a turn key
+// made otherwise is its own group.
+func TurnGroup(turnKey string) string {
+	if i := strings.LastIndexByte(turnKey, '.'); i > 0 {
+		return turnKey[:i]
+	}
+	return turnKey
 }
 
 // TurnMessageKey is the idempotency key of the index-th message produced by a

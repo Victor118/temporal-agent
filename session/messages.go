@@ -100,7 +100,7 @@ func (s *Service) Deliver(ctx context.Context, sess *store.Session, author *stor
 
 	content, _ := json.Marshal(text)
 	stored := store.Message{Role: store.RoleUser, Content: string(content), UserID: author.ID, Author: author.Name()}
-	if err := s.store.AppendMessage(ctx, sess.SessionID, "msg:"+uuid.New().String(), stored); err != nil {
+	if err := s.store.AppendMessage(ctx, sess.SessionID, store.HumanMessageKey(uuid.New().String()), stored); err != nil {
 		return false, fmt.Errorf("store message: %w", err)
 	}
 	go s.setTitleFrom(sess.SessionID, text)
