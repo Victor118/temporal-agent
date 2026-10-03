@@ -142,9 +142,11 @@ type ToolRecord struct {
 	FireAndForget bool            `json:"fire_and_forget,omitempty"`
 	// What the tool is (see tool.Tool): readable from here by the processes
 	// that run no tool, the server first.
-	Sensitive        bool      `json:"sensitive,omitempty"`
-	PrivateInput     bool      `json:"private_input,omitempty"`
-	NeedsCallContext bool      `json:"needs_call_context,omitempty"`
-	SchemaHash       string    `json:"schema_hash"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	Sensitive        bool `json:"sensitive,omitempty"`
+	PrivateInput     bool `json:"private_input,omitempty"`
+	NeedsCallContext bool `json:"needs_call_context,omitempty"`
+	// Timeout bounds one call (tool.Tool.Timeout); zero = the default.
+	Timeout    time.Duration `json:"timeout,omitempty"`
+	SchemaHash string        `json:"schema_hash"`
+	UpdatedAt  time.Time     `json:"updated_at"`
 }

@@ -18,6 +18,14 @@ import (
 // process group is killed.
 const execKillGrace = 2 * time.Second
 
+// The time a command may take: what the model asks for, within the bounds.
+// The tool's Timeout derives from the maximum: a command that runs to it
+// returns its own timeout error, not Temporal's.
+const (
+	execDefaultTimeout = 30 * time.Second
+	execMaxTimeout     = 300 * time.Second
+)
+
 // Holder counts a command while it runs, and once none runs, ends every
 // process of the user it ran as (subproc.Runs).
 type Holder interface {
@@ -45,12 +53,13 @@ func RegisterExecTool(r *Registry, workspacePath string, runAs *subproc.Identity
 			"type": "object",
 			"properties": {
 				"command": {"type": "string", "description": "Shell command to execute"},
-				"timeout_seconds": {"type": "integer", "description": "Timeout in seconds (default: 30, max: 300)"}
+				"timeout_seconds": {"type": "integer", "description": "Timeout in seconds (default: ` + fmt.Sprint(execDefaultTimeout.Seconds()) + `, max: ` + fmt.Sprint(execMaxTimeout.Seconds()) + `)"}
 			},
 			"required": ["command"]
 		}`),
 		Kind:      ToolKindActivity,
 		Sensitive: true,
+		Timeout:   execMaxTimeout + TimeoutMargin,
 		Execute: func(ctx context.Context, input json.RawMessage) (string, error) {
 			var params struct {
 				Command        string `json:"command"`
@@ -68,8 +77,8 @@ func RegisterExecTool(r *Registry, workspacePath string, runAs *subproc.Identity
 			}
 
 			timeout := time.Duration(params.TimeoutSeconds) * time.Second
-			if timeout <= 0 || timeout > 300*time.Second {
-				timeout = 30 * time.Second
+			if timeout <= 0 || timeout > execMaxTimeout {
+				timeout = execDefaultTimeout
 			}
 
 			ctx, cancel := context.WithTimeout(ctx, timeout)

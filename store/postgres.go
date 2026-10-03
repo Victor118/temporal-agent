@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
@@ -224,6 +225,9 @@ const schema = `
 				UPDATE tools SET needs_call_context = TRUE WHERE name = 'ask_user';
 			END IF;
 		END $$;
+		-- How long one call may run (tool.Tool.Timeout), in seconds; 0 = the
+		-- default.
+		ALTER TABLE tools ADD COLUMN IF NOT EXISTS timeout_seconds INTEGER NOT NULL DEFAULT 0;
 		-- The spawn_session row the workers published: nothing else deletes from
 		-- tools, and no worker publishes it any more.
 		DELETE FROM tools WHERE name = 'spawn_session';
@@ -645,8 +649,8 @@ func scanAgent(row interface{ Scan(...any) error }) (*Agent, error) {
 func (s *PostgresStore) UpsertTool(ctx context.Context, t ToolRecord) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO tools (name, task_queue, description, input_schema, kind, workflow_name, fire_and_forget,
-		                   sensitive, private_input, needs_call_context, schema_hash)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		                   sensitive, private_input, needs_call_context, timeout_seconds, schema_hash)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		ON CONFLICT (name) DO UPDATE SET
 			task_queue = EXCLUDED.task_queue,
 			description = EXCLUDED.description,
@@ -657,10 +661,11 @@ func (s *PostgresStore) UpsertTool(ctx context.Context, t ToolRecord) error {
 			sensitive = EXCLUDED.sensitive,
 			private_input = EXCLUDED.private_input,
 			needs_call_context = EXCLUDED.needs_call_context,
+			timeout_seconds = EXCLUDED.timeout_seconds,
 			schema_hash = EXCLUDED.schema_hash,
 			updated_at = NOW()`,
 		t.Name, t.TaskQueue, t.Description, string(t.InputSchema), t.Kind, t.WorkflowName,
-		t.FireAndForget, t.Sensitive, t.PrivateInput, t.NeedsCallContext, t.SchemaHash)
+		t.FireAndForget, t.Sensitive, t.PrivateInput, t.NeedsCallContext, int(t.Timeout/time.Second), t.SchemaHash)
 	return err
 }
 
@@ -679,7 +684,7 @@ func (s *PostgresStore) DeleteTool(ctx context.Context, name, taskQueue string) 
 func (s *PostgresStore) ListTools(ctx context.Context) ([]ToolRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT name, task_queue, description, input_schema, kind, workflow_name,
-		       fire_and_forget, sensitive, private_input, needs_call_context, schema_hash, updated_at
+		       fire_and_forget, sensitive, private_input, needs_call_context, timeout_seconds, schema_hash, updated_at
 		FROM tools ORDER BY name`)
 	if err != nil {
 		return nil, err
@@ -690,11 +695,13 @@ func (s *PostgresStore) ListTools(ctx context.Context) ([]ToolRecord, error) {
 	for rows.Next() {
 		var t ToolRecord
 		var schema string
+		var timeoutSeconds int
 		if err := rows.Scan(&t.Name, &t.TaskQueue, &t.Description, &schema, &t.Kind, &t.WorkflowName,
-			&t.FireAndForget, &t.Sensitive, &t.PrivateInput, &t.NeedsCallContext, &t.SchemaHash, &t.UpdatedAt); err != nil {
+			&t.FireAndForget, &t.Sensitive, &t.PrivateInput, &t.NeedsCallContext, &timeoutSeconds, &t.SchemaHash, &t.UpdatedAt); err != nil {
 			return nil, err
 		}
 		t.InputSchema = json.RawMessage(schema)
+		t.Timeout = time.Duration(timeoutSeconds) * time.Second
 		tools = append(tools, t)
 	}
 	return tools, rows.Err()

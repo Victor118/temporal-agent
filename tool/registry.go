@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/victor/temporal-agent/provider"
 )
@@ -50,7 +51,21 @@ type Tool struct {
 	// NeedsCallContext: a workflow tool that receives the caller's context
 	// (CallContext) in its input, alongside what the model wrote.
 	NeedsCallContext bool `json:"-"`
+	// Timeout bounds one call of an activity or MCP tool: the activity's
+	// start-to-close timeout. Zero = DefaultTimeout. A tool with a limit of
+	// its own declares that limit plus TimeoutMargin, so that it stops first
+	// and returns what it has: stopped by Temporal, it returns nothing.
+	// A workflow tool runs as a child workflow, with no timeout: unused.
+	Timeout time.Duration `json:"-"`
 }
+
+const (
+	// DefaultTimeout bounds a call to a tool that declares no Timeout.
+	DefaultTimeout = 120 * time.Second
+	// TimeoutMargin is what a tool's Timeout leaves beyond its own limit:
+	// time to stop the work, end what it started and return.
+	TimeoutMargin = 30 * time.Second
+)
 
 // WorkflowName returns the function name used by Temporal to identify the workflow.
 func (t *Tool) WorkflowName() string {
@@ -75,7 +90,7 @@ func (t *Tool) SchemaHash() string {
 		string(t.Kind),
 		t.WorkflowName(),
 		fmt.Sprint(t.FireAndForget),
-		fmt.Sprint(t.Sensitive, t.PrivateInput, t.NeedsCallContext),
+		fmt.Sprint(t.Sensitive, t.PrivateInput, t.NeedsCallContext, t.Timeout),
 	} {
 		h.Write([]byte(part))
 		h.Write([]byte{0})

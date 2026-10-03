@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/stretchr/testify/mock"
@@ -99,6 +101,61 @@ func TestAgentWorkflow_ToolDispatch(t *testing.T) {
 	}
 	if r := results["2"]; r == nil || !r.IsError || r.Content != `Tool "exec" is not available to this agent.` {
 		t.Errorf("exec result = %+v", r)
+	}
+}
+
+// Each tool call is bounded by its tool's timeout, from the catalog: exec
+// waits for its longest command, a tool that declares none gets the default.
+func TestAgentWorkflow_ToolTimeoutFromTheCatalog(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+
+	schema := json.RawMessage(`{"type":"object"}`)
+	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.ListToolsInput) (activity.ListToolsOutput, error) {
+		return activity.ListToolsOutput{
+			Tools: []provider.ToolDefinition{{Name: "exec", InputSchema: schema}, {Name: "web_search", InputSchema: schema}},
+			Resolutions: map[string]activity.ToolResolution{
+				"exec":       {Kind: "activity", TaskQueue: "tools", Timeout: 330 * time.Second},
+				"web_search": {Kind: "activity", TaskQueue: "tools"},
+			},
+		}, nil
+	}, sdkactivity.RegisterOptions{Name: "ListTools"})
+	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.LoadSkillsForAgentInput) (activity.LoadSkillsForAgentOutput, error) {
+		return activity.LoadSkillsForAgentOutput{SystemPrompt: "prompt"}, nil
+	}, sdkactivity.RegisterOptions{Name: "LoadSkillsForAgent"})
+	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.NotifyInput) error {
+		return nil
+	}, sdkactivity.RegisterOptions{Name: "NotifyStep"})
+
+	var mu sync.Mutex // the calls run in parallel
+	timeouts := map[string]time.Duration{}
+	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.ExecuteToolInput) (activity.ExecuteToolOutput, error) {
+		info := sdkactivity.GetInfo(ctx)
+		mu.Lock()
+		defer mu.Unlock()
+		timeouts[in.Name] = info.Deadline.Sub(info.StartedTime)
+		return activity.ExecuteToolOutput{Content: "ok"}, nil
+	}, sdkactivity.RegisterOptions{Name: "ExecuteTool"})
+
+	calls := 0
+	env.RegisterActivityWithOptions(func(ctx context.Context, req provider.ChatRequest) (provider.ChatResponse, error) {
+		calls++
+		if calls == 1 {
+			return provider.ChatResponse{ToolCalls: []provider.ToolCallInfo{
+				{ID: "1", Name: "exec", Input: json.RawMessage(`{"command":"make test","timeout_seconds":300}`)},
+				{ID: "2", Name: "web_search", Input: json.RawMessage(`{}`)},
+			}}, nil
+		}
+		return provider.ChatResponse{Content: "done", StopReason: "end_turn"}, nil
+	}, sdkactivity.RegisterOptions{Name: "CallLLM"})
+
+	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{SessionID: "s1", AgentID: "dev", UserMessage: "test it"})
+
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatalf("workflow error: %v", err)
+	}
+	if timeouts["exec"] != 330*time.Second || timeouts["web_search"] != tool.DefaultTimeout {
+		t.Errorf("timeouts = %v, want exec 5m30s and web_search the default %s", timeouts, tool.DefaultTimeout)
 	}
 }
 

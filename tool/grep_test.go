@@ -294,3 +294,14 @@ func TestGrep_SkipsLinksOutOfTheWorkspace(t *testing.T) {
 		t.Errorf("grep read through a link: %q", out)
 	}
 }
+
+// A search stopped by its deadline says so: "no matches" would be a lie.
+func TestGrep_StoppedSearchSaysSo(t *testing.T) {
+	_, r := setupGrepWorkspace(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := r.Execute(ctx, "grep", json.RawMessage(`{"pattern":"func"}`))
+	if err == nil || !strings.Contains(err.Error(), "search stopped") {
+		t.Errorf("err = %v, want the search reported as stopped", err)
+	}
+}

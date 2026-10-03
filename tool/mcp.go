@@ -31,8 +31,9 @@ var mcpVersions = []string{"2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05
 const (
 	// mcpRequestTimeout bounds a handshake and a tools/list.
 	mcpRequestTimeout = 30 * time.Second
-	// mcpCallTimeout bounds a tools/call whose context has no deadline (an
-	// activity's has one).
+	// mcpCallTimeout bounds a tools/call, the handshake it may need
+	// included. The tools' Timeout derives from it: a server that does not
+	// answer in time is reported by the client, not by Temporal.
 	mcpCallTimeout = 2 * time.Minute
 	// mcpMaxPages bounds a paginated tools/list.
 	mcpMaxPages = 100
@@ -119,6 +120,7 @@ func (c *MCPClient) Discover(ctx context.Context) ([]*Tool, error) {
 			Description: fmt.Sprintf("[MCP:%s] %s", c.config.Name, info.Description),
 			InputSchema: info.InputSchema,
 			Kind:        ToolKindMCP,
+			Timeout:     mcpCallTimeout + TimeoutMargin,
 			Execute: func(ctx context.Context, input json.RawMessage) (string, error) {
 				return c.callTool(ctx, info.Name, input) // the server's own name
 			},
@@ -265,11 +267,10 @@ type mcpContentBlock struct {
 }
 
 func (c *MCPClient) callTool(ctx context.Context, name string, arguments json.RawMessage) (string, error) {
-	if _, ok := ctx.Deadline(); !ok {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, mcpCallTimeout)
-		defer cancel()
-	}
+	// Bounded even under an activity's deadline, which is later: the call
+	// must end before the activity does, with an error the model can read.
+	ctx, cancel := context.WithTimeout(ctx, mcpCallTimeout)
+	defer cancel()
 	if len(arguments) == 0 || string(arguments) == "null" {
 		arguments = json.RawMessage(`{}`)
 	}

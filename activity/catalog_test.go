@@ -3,6 +3,7 @@ package activity
 import (
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/victor/temporal-agent/store"
 )
@@ -115,8 +116,12 @@ func TestCatalog_ToolProperties(t *testing.T) {
 		{Name: "ask_user", Kind: "workflow", WorkflowName: "AskUserWorkflow", NeedsCallContext: true},
 		{Name: "save_user_memory", Kind: "activity", PrivateInput: true},
 		{Name: "web_fetch", Kind: "activity"},
+		{Name: "exec", Kind: "activity", Timeout: 330 * time.Second},
 	})
 	res := c.AllowedTools("open").Resolutions
+	if res["exec"].Timeout != 330*time.Second || res["web_fetch"].Timeout != 0 {
+		t.Errorf("timeout: %+v", res)
+	}
 	if !res["ask_user"].NeedsCallContext || res["web_fetch"].NeedsCallContext {
 		t.Errorf("call context: %+v", res)
 	}

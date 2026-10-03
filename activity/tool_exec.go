@@ -3,6 +3,7 @@ package activity
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	"github.com/victor/temporal-agent/provider"
 	"github.com/victor/temporal-agent/tool"
@@ -38,6 +39,9 @@ type ToolResolution struct {
 	PrivateInput bool `json:"private_input,omitempty"`
 	// NeedsCallContext: the workflow tool gets tool.CallContext in its input.
 	NeedsCallContext bool `json:"needs_call_context,omitempty"`
+	// Timeout bounds one call of an activity or MCP tool; zero =
+	// tool.DefaultTimeout.
+	Timeout time.Duration `json:"timeout,omitempty"`
 }
 
 type ListToolsInput struct {

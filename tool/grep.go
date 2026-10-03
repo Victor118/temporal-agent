@@ -11,7 +11,13 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
+
+// grepTimeout bounds a search: a large workspace can take longer than the
+// model should wait. A search stopped by it returns the matches found so
+// far. The tool's Timeout derives from it.
+const grepTimeout = 60 * time.Second
 
 func RegisterGrepTool(r *Registry, workspacePath string) {
 	ws := newWorkspace(workspacePath, nil)
@@ -37,7 +43,8 @@ Context lines: use "before", "after", or "context" to show surrounding lines.`,
 			},
 			"required": ["pattern"]
 		}`),
-		Kind: ToolKindActivity,
+		Kind:    ToolKindActivity,
+		Timeout: grepTimeout + TimeoutMargin,
 		Execute: func(ctx context.Context, input json.RawMessage) (string, error) {
 			var params struct {
 				Pattern    string `json:"pattern"`
@@ -90,10 +97,18 @@ Context lines: use "before", "after", or "context" to show surrounding lines.`,
 			}
 			defer root.Close()
 
+			ctx, cancel := context.WithTimeout(ctx, grepTimeout)
+			defer cancel()
+			stopped := false
+
 			var out strings.Builder
 			totalMatches := 0
 
 			walkErr := fs.WalkDir(walkFS{root}, start, func(rel string, d fs.DirEntry, err error) error {
+				if ctx.Err() != nil {
+					stopped = true
+					return fs.SkipAll
+				}
 				if err != nil || d.IsDir() {
 					return err
 				}
@@ -217,6 +232,12 @@ Context lines: use "before", "after", or "context" to show surrounding lines.`,
 				return "", fmt.Errorf("grep: %w", walkErr)
 			}
 
+			if stopped {
+				if totalMatches == 0 {
+					return "", fmt.Errorf("grep: no match found before the search stopped after %s: narrow it with path or include", grepTimeout)
+				}
+				fmt.Fprintf(&out, "\n... (search stopped after %s: narrow it with path or include)\n", grepTimeout)
+			}
 			if totalMatches == 0 {
 				return "No matches found.", nil
 			}

@@ -15,6 +15,10 @@ import (
 	"time"
 )
 
+// fetchTimeout bounds a whole fetch, redirects and body included. The
+// tool's Timeout derives from it: a slow page returns the client's error.
+const fetchTimeout = 30 * time.Second
+
 func RegisterWebTools(r *Registry) {
 	client := newFetchClient(isPublicAddr)
 
@@ -28,7 +32,8 @@ func RegisterWebTools(r *Registry) {
 			},
 			"required": ["url"]
 		}`),
-		Kind: ToolKindActivity,
+		Kind:    ToolKindActivity,
+		Timeout: fetchTimeout + TimeoutMargin,
 		Execute: func(ctx context.Context, input json.RawMessage) (string, error) {
 			var params struct {
 				URL string `json:"url"`
@@ -109,7 +114,7 @@ func newFetchClient(allow func(netip.Addr) bool) *http.Client {
 		},
 	}
 	return &http.Client{
-		Timeout: 30 * time.Second,
+		Timeout: fetchTimeout,
 		Transport: &http.Transport{
 			// No proxy: the dialer would check the proxy's address, not the
 			// target's.

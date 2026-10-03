@@ -134,6 +134,7 @@ func publishTools(ctx context.Context, st toolPublisher, tc taskqueue.Describer,
 			Sensitive:        t.Sensitive,
 			PrivateInput:     t.PrivateInput,
 			NeedsCallContext: t.NeedsCallContext,
+			Timeout:          t.Timeout,
 			SchemaHash:       t.SchemaHash(),
 		}
 		if len(rec.InputSchema) == 0 {

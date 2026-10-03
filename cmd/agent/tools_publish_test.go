@@ -45,6 +45,9 @@ func TestPublishTools_CarriesTheProperties(t *testing.T) {
 	if !p.records["save_user_memory"].PrivateInput || !p.records["exec"].Sensitive || !p.records["ask_user"].NeedsCallContext {
 		t.Errorf("published %+v", p.records)
 	}
+	if p.records["exec"].Timeout <= tool.DefaultTimeout || p.records["save_user_memory"].Timeout != 0 {
+		t.Errorf("timeouts: exec %s, save_user_memory %s", p.records["exec"].Timeout, p.records["save_user_memory"].Timeout)
+	}
 	if p.records["exec"].PrivateInput || p.records["save_user_memory"].Sensitive {
 		t.Errorf("properties leaked between tools: %+v", p.records)
 	}

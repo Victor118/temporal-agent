@@ -112,6 +112,7 @@ func (c *Catalog) AllowedTools(agentID string) ListToolsOutput {
 			FireAndForget:    t.FireAndForget,
 			PrivateInput:     t.PrivateInput,
 			NeedsCallContext: t.NeedsCallContext,
+			Timeout:          t.Timeout,
 		}
 	}
 

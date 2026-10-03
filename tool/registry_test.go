@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestRegistry_RegisterAndGet(t *testing.T) {
@@ -268,5 +269,37 @@ func TestClaudeCodeToolsSayWhatARunCosts(t *testing.T) {
 	RegisterClaudeCodeTools(r, func() {}, func() {}, "")
 	if tl, _ := r.Get("analyze_repo"); strings.HasSuffix(tl.Description, " ") {
 		t.Errorf("no note, trailing space: %q", tl.Description)
+	}
+}
+
+// A tool with a limit of its own outlasts it: stopped by Temporal first, a
+// call would return nothing of what it did.
+func TestTool_TimeoutCoversItsOwnLimit(t *testing.T) {
+	r := NewRegistry()
+	RegisterExecTool(r, t.TempDir(), nil, nil)
+	RegisterWebTools(r)
+	RegisterGrepTool(r, t.TempDir())
+	f := newFakeMCP(t, nil)
+	mcpTools := discover(t, NewMCPClient(f.config("srv")))
+	get := func(name string) *Tool {
+		tl, ok := r.Get(name)
+		if !ok {
+			t.Fatalf("%s not registered", name)
+		}
+		return tl
+	}
+
+	for _, c := range []struct {
+		tool  *Tool
+		limit time.Duration
+	}{
+		{get("exec"), execMaxTimeout},
+		{get("web_fetch"), fetchTimeout},
+		{get("grep"), grepTimeout},
+		{mcpTools[0], mcpCallTimeout},
+	} {
+		if c.tool.Timeout != c.limit+TimeoutMargin {
+			t.Errorf("%s: timeout %s, want its limit %s and the margin", c.tool.Name, c.tool.Timeout, c.limit)
+		}
 	}
 }

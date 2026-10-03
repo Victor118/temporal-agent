@@ -117,16 +117,16 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 	}
 	llmCtx := workflow.WithActivityOptions(ctx, llmOpts)
 
-	// Tool execution: no retry on application errors — let the LLM decide
+	// Tool execution: no retry on application errors — let the LLM decide.
+	// Each call is routed to its tool's task queue, and bounded by its
+	// tool's timeout (see dispatch below).
 	toolOpts := workflow.ActivityOptions{
-		StartToCloseTimeout: 120 * time.Second,
+		ScheduleToStartTimeout: toolScheduleToStartTimeout,
 		RetryPolicy: &temporal.RetryPolicy{
 			MaximumAttempts:        1,
 			NonRetryableErrorTypes: []string{"ApplicationError"},
 		},
 	}
-	// Each call is routed to its tool's task queue (see dispatch below).
-	toolOpts.ScheduleToStartTimeout = toolScheduleToStartTimeout
 
 	// The agent identity selects the prompt, skills and allowed tools.
 	currentAgentID := input.AgentID
@@ -428,6 +428,10 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 			} else {
 				opts := toolOpts
 				opts.TaskQueue = res.TaskQueue
+				// The tool knows how long it may run: exec waits for a
+				// command up to its own limit, which a single default would
+				// cut short.
+				opts.StartToCloseTimeout = cmp.Or(res.Timeout, tool.DefaultTimeout)
 				execCtx := workflow.WithActivityOptions(ctx, opts)
 				d.future = workflow.ExecuteActivity(execCtx, toolAct.ExecuteTool, activity.ExecuteToolInput{
 					Name:      tc.Name,
