@@ -89,6 +89,9 @@ func (c *Catalog) AllowedTools(agentID string) ListToolsOutput {
 	}
 
 	for _, t := range c.tools {
+		if t.PrivateInput {
+			out.PrivateTools = append(out.PrivateTools, t.Name)
+		}
 		if strings.HasPrefix(t.Name, AgentToolPrefix) {
 			// The prefix belongs to the generated agent tools: a published tool
 			// using it would be shadowed, or would shadow an agent.

@@ -47,6 +47,10 @@ type ListToolsInput struct {
 type ListToolsOutput struct {
 	Tools       []provider.ToolDefinition `json:"tools"`       // Definitions sent to the LLM, sorted by name
 	Resolutions map[string]ToolResolution `json:"resolutions"` // Tool name → dispatch info; absent = not allowed
+	// PrivateTools lists every published tool whose input is private, allowed
+	// to this agent or not: the history holds other agents' calls, which
+	// the agent reads as the session's members see them.
+	PrivateTools []string `json:"private_tools,omitempty"`
 }
 
 // ListTools returns the tools the agent may use, from the worker's catalog.

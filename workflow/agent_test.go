@@ -19,6 +19,7 @@ import (
 	"github.com/victor/temporal-agent/activity"
 	"github.com/victor/temporal-agent/provider"
 	"github.com/victor/temporal-agent/store"
+	"github.com/victor/temporal-agent/tool"
 )
 
 // TestAgentWorkflow_ToolDispatch checks that an allowed tool runs on its own
@@ -631,7 +632,7 @@ func TestConvertMessages_NamesTheAuthor(t *testing.T) {
 		{Role: store.RoleUser, Content: `"hello"`, UserID: "u-alice", Author: "Alice"},
 		{Role: store.RoleAssistant, Content: `"hi Alice"`},
 		{Role: store.RoleUser, Content: `"scheduled prompt"`}, // no author: a scheduled run
-	}, "default")
+	}, historyView{self: "default"})
 	for i, want := range []string{`"[Alice] hello"`, `"hi Alice"`, `"scheduled prompt"`} {
 		if got := string(msgs[i].Content); got != want {
 			t.Errorf("message %d = %s, want %s", i, got, want)
@@ -639,56 +640,149 @@ func TestConvertMessages_NamesTheAuthor(t *testing.T) {
 	}
 }
 
-// Several agents answer in a session: the model reads another agent's words
-// under its name, so as not to take them for its own, and its own as they
-// are. A tool call keeps its result right after it, whoever made it.
+// Several agents answer in a session: the model reads another agent's turn
+// as text under its name and mention, in a user message, and its own as they
+// are. An agent gone from the catalog keeps the name it signed with, or its
+// ID; a message signed by no agent is read as the reader's own.
 func TestConvertMessages_NamesTheOtherAgents(t *testing.T) {
+	view := historyView{self: "smith", agents: map[string]activity.AgentLabel{
+		"jarvis": {Name: "Jarvis", Mention: "jarvis"},
+		"smith":  {Name: "Agent Smith", Mention: "smith"},
+	}}
 	msgs := convertMessages([]store.Message{
 		{Role: store.RoleUser, Content: `"@jarvis résume, @smith juge"`, Author: "Alice"},
-		{Role: store.RoleAssistant, Content: `"je cherche"`, AgentID: "jarvis", Author: "Jarvis",
-			ToolCalls: []store.ToolCall{{ID: "t1", Name: "web_search"}}},
-		{Role: store.RoleUser, Content: `"meanwhile"`, Author: "Bob"},
-		{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "t1", Content: "found"}},
 		{Role: store.RoleAssistant, Content: `"voici le résumé"`, AgentID: "jarvis", Author: "Jarvis"},
-		{Role: store.RoleAssistant, Content: `"gone"`, AgentID: "old"}, // no name kept: its ID
+		{Role: store.RoleAssistant, Content: `"gone"`, AgentID: "old", Author: "Old One"},
+		{Role: store.RoleAssistant, Content: `"nameless"`, AgentID: "older"},
 		{Role: store.RoleAssistant, Content: `"mine"`, AgentID: "smith", Author: "Agent Smith"},
-	}, "smith")
+		{Role: store.RoleAssistant, Content: `"unsigned"`},
+	}, view)
 
-	want := []struct{ role, content, toolResult string }{
-		{"user", `"[Alice] @jarvis résume, @smith juge"`, ""},
-		{"assistant", `"[Jarvis] je cherche"`, ""},
-		{"tool", "", "t1"},
-		{"user", `"[Bob] meanwhile"`, ""},
-		{"assistant", `"[Jarvis] voici le résumé"`, ""},
-		{"assistant", `"[old] gone"`, ""},
-		{"assistant", `"mine"`, ""},
+	want := []struct{ role, content string }{
+		{"user", "[Alice] @jarvis résume, @smith juge\n\n[agent Jarvis (@jarvis)] voici le résumé\n\n[agent Old One] gone\n\n[agent older] nameless"},
+		{"assistant", "mine"},
+		{"assistant", "unsigned"},
 	}
 	if len(msgs) != len(want) {
-		t.Fatalf("%d messages, want %d", len(msgs), len(want))
+		t.Fatalf("%d messages, want %d: %+v", len(msgs), len(want), msgs)
 	}
 	for i, w := range want {
-		m := msgs[i]
-		if m.Role != w.role || string(m.Content) != w.content {
-			t.Errorf("message %d = %s %s, want %s %s", i, m.Role, m.Content, w.role, w.content)
+		if msgs[i].Role != w.role || textOf(msgs[i]) != w.content {
+			t.Errorf("message %d = %s %q, want %s %q", i, msgs[i].Role, textOf(msgs[i]), w.role, w.content)
 		}
-		if w.toolResult != "" && (m.ToolResult == nil || m.ToolResult.ToolCallID != w.toolResult) {
-			t.Errorf("message %d: result %+v, want the result of %s", i, m.ToolResult, w.toolResult)
-		}
-	}
-	if len(msgs[1].ToolCalls) != 1 || msgs[1].ToolCalls[0].ID != "t1" {
-		t.Errorf("the other agent's tool call was lost: %+v", msgs[1].ToolCalls)
 	}
 }
 
+// An agent without tools answers after one that used some: its request holds
+// no tool block, or the API would reject it, and ends on a user message, or
+// the model would continue the other agent's answer. A member's message
+// written between the other agent's call and its result comes after the
+// result; a private input stays hidden.
+func TestConvertMessages_OtherAgentsToolsAsText(t *testing.T) {
+	view := historyView{
+		self:    "smith",
+		agents:  map[string]activity.AgentLabel{"jarvis": {Name: "Jarvis", Mention: "jarvis"}},
+		private: tool.PrivateSet{"save_user_memory": true},
+	}
+	msgs := convertMessages([]store.Message{
+		{Role: store.RoleUser, Content: `"@jarvis cherche, @smith juge"`, Author: "Alice"},
+		{Role: store.RoleAssistant, Content: `"je cherche"`, AgentID: "jarvis", Author: "Jarvis", ToolCalls: []store.ToolCall{
+			{ID: "t1", Name: "web_search", Input: json.RawMessage(`{"q":"temporal"}`)},
+			{ID: "t2", Name: "save_user_memory", Input: json.RawMessage(`{"content":"Alice's secret"}`)},
+		}},
+		{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "t1", Content: "found " + strings.Repeat("x", 3000)}},
+		{Role: store.RoleUser, Content: `"meanwhile"`, Author: "Bob"},
+		{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "t2", Content: "denied", IsError: true}},
+		{Role: store.RoleAssistant, Content: `"voici"`, AgentID: "jarvis", Author: "Jarvis"},
+	}, view)
+
+	if len(msgs) != 1 || msgs[0].Role != "user" {
+		t.Fatalf("messages %+v, want one user message", msgs)
+	}
+	for _, m := range msgs {
+		if len(m.ToolCalls) > 0 || m.ToolResult != nil {
+			t.Errorf("a tool block reached an agent that did not make it: %+v", m)
+		}
+	}
+	text := textOf(msgs[0])
+	for _, want := range []string{
+		"[Alice] @jarvis cherche, @smith juge\n\n[agent Jarvis (@jarvis)] je cherche\n",
+		`[agent Jarvis (@jarvis) called web_search {"q":"temporal"}]`,
+		`[agent Jarvis (@jarvis) called save_user_memory {"content":"(private)"}]`,
+		"[result of web_search, called by agent Jarvis (@jarvis)] found xxx",
+		"[error from save_user_memory, called by agent Jarvis (@jarvis)] denied\n\n[Bob] meanwhile\n\n[agent Jarvis (@jarvis)] voici",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("model reads %q\nwant %q in it", text, want)
+		}
+	}
+	if strings.Contains(text, "secret") {
+		t.Error("a private tool input reached another agent")
+	}
+	if len(text) > 2500 {
+		t.Errorf("another agent's tool result was not clipped: %d bytes", len(text))
+	}
+}
+
+// The reader's own tool calls keep their blocks, each followed by its result,
+// with a member's message written in between after them; another agent's
+// turn later on is text.
+func TestConvertMessages_KeepsItsOwnToolPairing(t *testing.T) {
+	view := historyView{self: "smith", agents: map[string]activity.AgentLabel{"jarvis": {Name: "Jarvis", Mention: "jarvis"}}}
+	msgs := convertMessages([]store.Message{
+		{Role: store.RoleUser, Content: `"@smith lis le dépôt"`, Author: "Alice"},
+		{Role: store.RoleAssistant, AgentID: "smith", ToolCalls: []store.ToolCall{{ID: "s1", Name: "read_file"}}},
+		{Role: store.RoleUser, Content: `"meanwhile"`, Author: "Bob"},
+		{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "s1", Content: "main.go"}},
+		{Role: store.RoleAssistant, Content: `"lu"`, AgentID: "smith"},
+		{Role: store.RoleUser, Content: `"@jarvis cherche, @smith juge"`, Author: "Alice"},
+		{Role: store.RoleAssistant, AgentID: "jarvis", ToolCalls: []store.ToolCall{{ID: "j1", Name: "web_search"}}},
+		{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "j1", Content: "found"}},
+		{Role: store.RoleAssistant, Content: `"voici"`, AgentID: "jarvis"},
+	}, view)
+
+	want := []struct{ role, content, call, result string }{
+		{role: "user", content: "[Alice] @smith lis le dépôt"},
+		{role: "assistant", call: "s1"},
+		{role: "tool", result: "s1"},
+		{role: "user", content: "[Bob] meanwhile"},
+		{role: "assistant", content: "lu"},
+		{role: "user", content: "[Alice] @jarvis cherche, @smith juge\n\n[agent Jarvis (@jarvis) called web_search {}]\n\n[result of web_search, called by agent Jarvis (@jarvis)] found\n\n[agent Jarvis (@jarvis)] voici"},
+	}
+	if len(msgs) != len(want) {
+		t.Fatalf("%d messages, want %d: %+v", len(msgs), len(want), msgs)
+	}
+	for i, w := range want {
+		m := msgs[i]
+		if m.Role != w.role || (w.content != "" && textOf(m) != w.content) {
+			t.Errorf("message %d = %s %q, want %s %q", i, m.Role, textOf(m), w.role, w.content)
+		}
+		if w.call != "" && (len(m.ToolCalls) != 1 || m.ToolCalls[0].ID != w.call) {
+			t.Errorf("message %d: calls %+v, want %s", i, m.ToolCalls, w.call)
+		}
+		if w.result != "" && (m.ToolResult == nil || m.ToolResult.ToolCallID != w.result) {
+			t.Errorf("message %d: result %+v, want the result of %s", i, m.ToolResult, w.result)
+		}
+	}
+}
+
+// textOf is a converted message's text.
+func textOf(m provider.ChatMessage) string {
+	var s string
+	json.Unmarshal(m.Content, &s)
+	return s
+}
+
 // Why a turn failed is for the members: the model never sees it, or it would
-// answer the error instead of the user.
+// answer the error instead of the user. The two user messages around it are
+// read as one.
 func TestConvertMessages_SkipsTurnErrors(t *testing.T) {
 	msgs := convertMessages([]store.Message{
 		{Role: store.RoleUser, Content: `"analyse the repo"`},
 		{Role: store.RoleAssistant, Kind: store.KindTurnError, Content: `"call LLM: credit balance is too low"`},
 		{Role: store.RoleUser, Content: `"try again"`},
-	}, "default")
-	if len(msgs) != 2 || string(msgs[1].Content) != `"try again"` {
+	}, historyView{self: "default"})
+	if len(msgs) != 1 || textOf(msgs[0]) != "analyse the repo\n\ntry again" {
 		t.Errorf("messages = %+v, want the two user messages alone", msgs)
 	}
 }
@@ -745,8 +839,8 @@ func TestAgentWorkflow_StoredMessageIsNotAddedAgain(t *testing.T) {
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
-	if len(seen.Messages) != 2 {
-		t.Errorf("model saw %d messages, want the 2 stored ones", len(seen.Messages))
+	if len(seen.Messages) != 1 || textOf(seen.Messages[0]) != "[Alice] we talked\n\n[Bob] @agent sum it up" {
+		t.Errorf("model saw %+v, want the 2 stored messages, in one", seen.Messages)
 	}
 	for _, p := range persisted {
 		for _, role := range p.roles {

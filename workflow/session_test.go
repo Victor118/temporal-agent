@@ -368,20 +368,33 @@ func TestSessionWorkflow_TheNextAgentSeesTheAnswerBefore(t *testing.T) {
 		}
 		return nil
 	}, sdkactivity.RegisterOptions{Name: "PersistContext"})
-	names := map[string]string{"jarvis": "Jarvis", "smith": "Agent Smith"}
+	agents := map[string]activity.AgentLabel{"jarvis": {Name: "Jarvis", Mention: "jarvis"}, "smith": {Name: "Agent Smith", Mention: "smith"}}
 	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.LoadSkillsForAgentInput) (activity.LoadSkillsForAgentOutput, error) {
-		return activity.LoadSkillsForAgentOutput{SystemPrompt: "I am " + in.AgentID, Name: names[in.AgentID]}, nil
+		return activity.LoadSkillsForAgentOutput{SystemPrompt: "I am " + in.AgentID, Name: agents[in.AgentID].Name, Agents: agents}, nil
 	}, sdkactivity.RegisterOptions{Name: "LoadSkillsForAgent"})
+	// Jarvis searches; smith has no tool at all.
 	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.ListToolsInput) (activity.ListToolsOutput, error) {
-		return activity.ListToolsOutput{}, nil
+		if in.AgentID != "jarvis" {
+			return activity.ListToolsOutput{}, nil
+		}
+		return activity.ListToolsOutput{
+			Tools:       []provider.ToolDefinition{{Name: "web_search", InputSchema: json.RawMessage(`{"type":"object"}`)}},
+			Resolutions: map[string]activity.ToolResolution{"web_search": {Kind: "activity", TaskQueue: "tools-web"}},
+		}, nil
 	}, sdkactivity.RegisterOptions{Name: "ListTools"})
+	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.ExecuteToolInput) (activity.ExecuteToolOutput, error) {
+		return activity.ExecuteToolOutput{Content: "Temporal: durable execution"}, nil
+	}, sdkactivity.RegisterOptions{Name: "ExecuteTool"})
 	var requests []provider.ChatRequest
 	env.RegisterActivityWithOptions(func(ctx context.Context, req provider.ChatRequest) (provider.ChatResponse, error) {
 		requests = append(requests, req)
-		if strings.HasPrefix(req.System, "I am jarvis") {
-			return provider.ChatResponse{Content: "Temporal orchestre des workflows.", StopReason: "end_turn"}, nil
+		switch {
+		case !strings.HasPrefix(req.System, "I am jarvis"):
+			return provider.ChatResponse{Content: "Utile, oui.", StopReason: "end_turn"}, nil
+		case len(requests) == 1:
+			return provider.ChatResponse{ToolCalls: []provider.ToolCallInfo{{ID: "t1", Name: "web_search", Input: json.RawMessage(`{"q":"temporal"}`)}}}, nil
 		}
-		return provider.ChatResponse{Content: "Utile, oui.", StopReason: "end_turn"}, nil
+		return provider.ChatResponse{Content: "Temporal orchestre des workflows.\n", StopReason: "end_turn"}, nil
 	}, sdkactivity.RegisterOptions{Name: "CallLLM"})
 	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.NotifyInput) error {
 		return nil
@@ -390,20 +403,39 @@ func TestSessionWorkflow_TheNextAgentSeesTheAnswerBefore(t *testing.T) {
 	env.RegisterDelayedCallback(func() { env.SignalWorkflow(SignalUserMessage, addressed) }, time.Second)
 	env.ExecuteWorkflow(SessionWorkflow, SessionWorkflowInput{SessionID: "s1", AgentID: "default"})
 
-	if len(requests) != 2 {
-		t.Fatalf("%d LLM calls, want 2", len(requests))
+	if len(requests) != 3 {
+		t.Fatalf("%d LLM calls, want 3: jarvis twice, then smith", len(requests))
 	}
-	if !strings.HasPrefix(requests[0].System, "I am jarvis") || !strings.HasPrefix(requests[1].System, "I am smith") {
-		t.Fatalf("calls in order %q, %q: want jarvis then smith", requests[0].System, requests[1].System)
+	if !strings.HasPrefix(requests[0].System, "I am jarvis") || !strings.HasPrefix(requests[2].System, "I am smith") {
+		t.Fatalf("calls in order %q, %q: want jarvis then smith", requests[0].System, requests[2].System)
 	}
 	if n := len(requests[0].Messages); n != 1 {
 		t.Errorf("jarvis read %d messages, want the question alone", n)
 	}
-	seen := requests[1].Messages
-	if len(seen) != 2 || string(seen[1].Content) != `"[Jarvis] Temporal orchestre des workflows."` {
-		t.Errorf("smith read %+v, want the question then Jarvis's answer under his name", seen)
+
+	// Smith defines no tool: no tool block may reach it, and its request ends
+	// on a user message, not on Jarvis's answer to continue.
+	smith := requests[2]
+	if len(smith.Tools) != 0 {
+		t.Errorf("smith was offered %+v", smith.Tools)
 	}
-	if len(history) != 3 || history[1].AgentID != "jarvis" || history[2].AgentID != "smith" || history[2].Author != "Agent Smith" {
-		t.Errorf("history %+v, want the question, jarvis's answer, smith's", history)
+	for i, m := range smith.Messages {
+		if m.Role != "user" || len(m.ToolCalls) > 0 || m.ToolResult != nil {
+			t.Errorf("smith read message %d as %s %+v, want user text", i, m.Role, m)
+		}
+	}
+	if len(smith.Messages) != 1 {
+		t.Fatalf("smith read %d messages, want one", len(smith.Messages))
+	}
+	want := "[Alice] @jarvis résume, @smith juge\n\n" +
+		`[agent Jarvis (@jarvis) called web_search {"q":"temporal"}]` + "\n\n" +
+		"[result of web_search, called by agent Jarvis (@jarvis)] Temporal: durable execution\n\n" +
+		"[agent Jarvis (@jarvis)] Temporal orchestre des workflows.\n"
+	if got := textOf(smith.Messages[0]); got != want {
+		t.Errorf("smith read %q\nwant %q", got, want)
+	}
+
+	if len(history) != 5 || history[1].AgentID != "jarvis" || history[3].AgentID != "jarvis" || history[4].AgentID != "smith" || history[4].Author != "Agent Smith" {
+		t.Errorf("history %+v, want the question, jarvis's search and answer, smith's", history)
 	}
 }

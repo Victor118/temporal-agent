@@ -126,4 +126,10 @@ func TestCatalog_ToolProperties(t *testing.T) {
 	if !c.PrivateInput("save_user_memory") || c.PrivateInput("web_fetch") || c.PrivateInput("unknown") {
 		t.Error("PrivateInput answers wrong")
 	}
+	// The private tools are listed even to an agent that may not use them:
+	// other agents' calls to them are in its history.
+	c.SetAgents([]AgentCatalogEntry{{ID: "closed"}})
+	if got := c.AllowedTools("closed").PrivateTools; !reflect.DeepEqual(got, []string{"save_user_memory"}) {
+		t.Errorf("private tools %v, want save_user_memory", got)
+	}
 }

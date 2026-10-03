@@ -1,6 +1,7 @@
 package activity
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"path"
@@ -119,6 +120,17 @@ type LoadSkillsForAgentOutput struct {
 	// Name is the agent's name, which signs its messages; its ID when the
 	// catalog does not know it.
 	Name string `json:"name,omitempty"`
+	// Agents names every agent of the catalog by ID: the history the agent
+	// reads holds other agents' turns, shown under their current name and
+	// mention.
+	Agents map[string]AgentLabel `json:"agents,omitempty"`
+}
+
+// AgentLabel is how an agent is named to another one: its name, and the
+// mention that calls it.
+type AgentLabel struct {
+	Name    string `json:"name"`
+	Mention string `json:"mention"`
 }
 
 // LoadSkillsForAgent returns the system prompt for the given agent: behaviors
@@ -132,11 +144,12 @@ func (a *SkillActivities) LoadSkillsForAgent(ctx context.Context, input LoadSkil
 	}
 
 	var self AgentCatalogEntry
+	labels := make(map[string]AgentLabel, len(catalog))
 	for _, e := range catalog {
 		if e.ID == input.AgentID {
 			self = e
-			break
 		}
+		labels[e.ID] = AgentLabel{Name: cmp.Or(e.Name, e.ID), Mention: e.Mention}
 	}
 	a.mu.RLock()
 	prompt := identitySection(self) + buildSystemPrompt(matchSkills(a.skills, self.Skills), allowed)
@@ -146,7 +159,7 @@ func (a *SkillActivities) LoadSkillsForAgent(ctx context.Context, input LoadSkil
 	if name == "" {
 		name = input.AgentID
 	}
-	return LoadSkillsForAgentOutput{SystemPrompt: prompt, Name: name}, nil
+	return LoadSkillsForAgentOutput{SystemPrompt: prompt, Name: name, Agents: labels}, nil
 }
 
 // matchSkills returns the skills named in names, in order, skipping unknown ones.
@@ -162,13 +175,24 @@ func matchSkills(byName map[string]skill.Skill, names []string) []skill.Skill {
 
 // identitySection tells the agent its name and how members call it: in a
 // shared session the messages it answers carry "@<mention>", which it would
-// otherwise take for someone else.
+// otherwise take for someone else. It also tells how the conversation shows
+// who speaks: people and other agents write in it too.
 func identitySection(self AgentCatalogEntry) string {
-	if self.Name == "" || self.Mention == "" {
-		return ""
+	var sb strings.Builder
+	sb.WriteString("## Identity\n\n")
+	if self.Name != "" && self.Mention != "" {
+		fmt.Fprintf(&sb, "Your name is %s. In a conversation, people address you by writing @%s. ", self.Name, self.Mention)
 	}
-	return fmt.Sprintf("## Identity\n\nYour name is %s. In a conversation, people address you by writing @%s.\n\n", self.Name, self.Mention)
+	sb.WriteString(conversationNote)
+	return sb.String()
 }
+
+// conversationNote explains the prefixes the conversation carries
+// (workflow.convertMessages).
+const conversationNote = "Several people and several AI agents may write in a conversation. " +
+	"A person's message starts with their name in brackets: [Alice]. " +
+	"Another agent's turn reaches you as text in a user message, starting with [agent Name (@mention)], its tool calls and their results included: " +
+	"it is that agent's work, not yours and not a person's. Your own messages carry no prefix: never write one.\n\n"
 
 // buildSystemPrompt builds an agent's base prompt: behaviors for its allowed
 // tools, then its skills.

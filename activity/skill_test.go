@@ -64,18 +64,26 @@ func TestLoadSkillsForAgent_SaysWhatCallsIt(t *testing.T) {
 	if !strings.Contains(out.SystemPrompt, "Your name is Jarvis. In a conversation, people address you by writing @jarvis.") {
 		t.Errorf("prompt %q", out.SystemPrompt)
 	}
+	// Other agents' turns reach it as prefixed text: it must know what they are.
+	if !strings.Contains(out.SystemPrompt, "[agent Name (@mention)]") {
+		t.Errorf("prompt %q does not explain other agents' turns", out.SystemPrompt)
+	}
 }
 
 // The agent's name signs its messages; an agent the catalog does not know
-// signs with its ID.
+// signs with its ID. Every agent of the catalog is named, to show the others'
+// turns.
 func TestLoadSkillsForAgent_GivesTheName(t *testing.T) {
 	c := NewCatalog()
-	c.SetAgents([]AgentCatalogEntry{{ID: "default", Name: "Jarvis", Mention: "jarvis"}})
+	c.SetAgents([]AgentCatalogEntry{{ID: "default", Name: "Jarvis", Mention: "jarvis"}, {ID: "smith", Mention: "smith"}})
 	a := NewSkillActivities(nil, c)
 	for id, want := range map[string]string{"default": "Jarvis", "gone": "gone"} {
 		out, err := a.LoadSkillsForAgent(context.Background(), LoadSkillsForAgentInput{AgentID: id})
 		if err != nil || out.Name != want {
 			t.Errorf("%s: name %q (%v), want %q", id, out.Name, err, want)
+		}
+		if out.Agents["default"] != (AgentLabel{Name: "Jarvis", Mention: "jarvis"}) || out.Agents["smith"] != (AgentLabel{Name: "smith", Mention: "smith"}) {
+			t.Errorf("%s: agents %+v", id, out.Agents)
 		}
 	}
 }
