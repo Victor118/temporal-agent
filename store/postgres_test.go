@@ -357,3 +357,29 @@ func TestToolProperties(t *testing.T) {
 		t.Errorf("backfilled %+v", got)
 	}
 }
+
+// A queue withdraws only the tools it published.
+func TestDeleteTool_OnlyOnItsQueue(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	cleanup := func() { s.db.ExecContext(ctx, "DELETE FROM tools WHERE name = 'zz-gone'") }
+	cleanup()
+	t.Cleanup(cleanup)
+
+	rec := ToolRecord{Name: "zz-gone", TaskQueue: "q1", InputSchema: []byte(`{}`), Kind: "mcp", SchemaHash: "h"}
+	if err := s.UpsertTool(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	if deleted, err := s.DeleteTool(ctx, "zz-gone", "q2"); err != nil || deleted {
+		t.Errorf("another queue's delete: %v, %v", deleted, err)
+	}
+	if deleted, err := s.DeleteTool(ctx, "zz-gone", "q1"); err != nil || !deleted {
+		t.Errorf("its queue's delete: %v, %v", deleted, err)
+	}
+	tools, _ := s.ListTools(ctx)
+	for _, r := range tools {
+		if r.Name == "zz-gone" {
+			t.Error("still published")
+		}
+	}
+}

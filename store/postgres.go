@@ -607,6 +607,18 @@ func (s *PostgresStore) UpsertTool(ctx context.Context, t ToolRecord) error {
 	return err
 }
 
+// DeleteTool withdraws a tool published on taskQueue, and reports whether
+// there was one. A row another queue holds is left alone: only the queue
+// that published a tool may withdraw it.
+func (s *PostgresStore) DeleteTool(ctx context.Context, name, taskQueue string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM tools WHERE name = $1 AND task_queue = $2`, name, taskQueue)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
 func (s *PostgresStore) ListTools(ctx context.Context) ([]ToolRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT name, task_queue, description, input_schema, kind, workflow_name,

@@ -203,6 +203,9 @@ func (r Refusal) String() string {
 // So no tool silently replaces another, and since startup syncs the
 // servers in config order, the earlier server wins there.
 func (r *Registry) SyncSource(source string, tools []*Tool) SourceChange {
+	if source == "" {
+		panic("tool: SyncSource without a source would take built-in tools") // config requires MCP names
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	var change SourceChange
@@ -231,6 +234,22 @@ func (r *Registry) SyncSource(source string, tools []*Tool) SourceChange {
 	sort.Slice(change.Changed, func(i, j int) bool { return change.Changed[i].Name < change.Changed[j].Name })
 	sort.Slice(change.Refused, func(i, j int) bool { return change.Refused[i].Name < change.Refused[j].Name })
 	return change
+}
+
+func (r *Registry) has(name string) bool {
+	_, ok := r.Get(name)
+	return ok
+}
+
+// heldBy returns the tool under name if source holds it.
+func (r *Registry) heldBy(name, source string) (*Tool, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	e, ok := r.tools[name]
+	if !ok || e.source != source {
+		return nil, false
+	}
+	return e.tool, true
 }
 
 // sortedNames: the caller holds the lock.

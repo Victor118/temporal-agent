@@ -332,7 +332,7 @@ func TestSSEReader(t *testing.T) {
 // Servers answering together register all their tools without writing the
 // registry from two goroutines (go test -race reports it otherwise, and a
 // concurrent map write is a fatal error, not a panic).
-func TestRegisterMCPServers_RegistersEveryServer(t *testing.T) {
+func TestMCPServers_DiscoverRegistersEveryServer(t *testing.T) {
 	const servers, perServer = 4, 200
 	gate := newBarrier(servers)
 	var names []string
@@ -347,40 +347,36 @@ func TestRegisterMCPServers_RegistersEveryServer(t *testing.T) {
 	}
 
 	r := NewRegistry()
-	if errs := RegisterMCPServers(context.Background(), r, configs); len(errs) != 0 {
-		t.Fatalf("errors: %v", errs)
-	}
+	NewMCPServers(r, configs, exposeAll).Discover(context.Background())
 	if got := len(r.List()); got != servers*perServer {
 		t.Errorf("registered %d tools, want %d", got, servers*perServer)
 	}
 }
 
 // Tools are registered in the configuration's order, whichever server answers
-// first: of two servers giving the same name, the earlier keeps it and the
-// later's tool is reported. Errors come in that order too.
-func TestRegisterMCPServers_RegistersInConfigOrder(t *testing.T) {
+// first: of two servers giving the same name, the earlier keeps it.
+func TestMCPServers_DiscoverRegistersInConfigOrder(t *testing.T) {
 	gate := newBarrier(2)
 	first := newFakeMCP(t, func(f *fakeMCP) { f.gate = gate })
 	first.setTools("b_c")
 	second := newFakeMCP(t, func(f *fakeMCP) { f.gate = gate })
-	second.setTools("c")
+	second.setTools("c", "d")
 	down := httptest.NewServer(http.NotFoundHandler())
 	down.Close()
 
 	r := NewRegistry()
-	errs := RegisterMCPServers(context.Background(), r, []MCPServerConfig{
+	NewMCPServers(r, []MCPServerConfig{
 		first.config("a"),
 		{Name: "off1", URL: down.URL},
 		second.config("a_b"),
 		{Name: "off2", URL: down.URL},
-	})
+	}, exposeAll).Discover(context.Background())
 
 	got, ok := r.Get("a_b_c")
 	if !ok || !strings.HasPrefix(got.Description, "[MCP:a]") {
 		t.Fatalf("a_b_c = %+v, want the earlier server's", got)
 	}
-	if len(errs) != 3 || !strings.Contains(errs[0].Error(), "off1") ||
-		!strings.Contains(errs[1].Error(), "a_b_c (held by MCP server a)") || !strings.Contains(errs[2].Error(), "off2") {
-		t.Errorf("errors = %v, want off1, a_b_c refused, off2", errs)
+	if names(r.All()) != "[a_b_c a_b_d]" {
+		t.Errorf("registry = %s", names(r.All()))
 	}
 }

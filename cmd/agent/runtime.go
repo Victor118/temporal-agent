@@ -86,7 +86,7 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 	runs := subproc.NewRuns(runAs)
 
 	workerConf := loadWorkerConfig(cfg)
-	registry := buildRegistry(cfg, st, tc, workerConf, runAs, runs)
+	registry := buildRegistry(cfg, st, tc, runAs, runs)
 
 	skills := loadSkills(opts.skills)
 	catalog := initCatalog(st)
@@ -97,10 +97,12 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 	workerCfg.SetActivityQueues(loadActivityQueuesFromDB(st))
 	activity.SetGlobalWorkerConfig(workerCfg)
 
-	// Expose only the configured tools and publish them to the DB catalog
+	// Expose only the configured tools, add the MCP servers' that answer,
+	// and publish them to the DB catalog
 	exposeTools(registry, workerConf)
+	mcpServers := discoverMCPServers(registry, workerConf)
 	queues := workerQueues(cfg, workerConf)
-	publishTools(st, tc, registry, workerConf.Queue)
+	publishTools(context.Background(), st, tc, registry.All(), workerConf.Queue)
 	refreshCatalog(st, catalog) // include the tools just published
 
 	// Notifiers, one per channel a session can reach its user on
@@ -147,6 +149,9 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 	rt.stop = stop
 	go pollActivityQueues(ctx, st, workerCfg, catalogRefresh)
 	go pollCatalog(ctx, st, catalog, catalogRefresh)
+	// Started after the startup publish: from here on, this goroutine alone
+	// changes and publishes the MCP servers' tools.
+	go mcpServers.Run(ctx, catalogPublisher{st: st, tc: tc, queue: workerConf.Queue})
 	if opts.watchSkills && opts.skills != nil {
 		go watchSkillsVersionDB(ctx, st, catalogRefresh, func() {
 			if skills, ok := reloadSkills(opts.skills); ok {
@@ -158,9 +163,10 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 	return rt, nil
 }
 
-// buildRegistry registers the tools this process can run. Which of them it
-// exposes is the worker config's decision (exposeTools).
-func buildRegistry(cfg *config.Config, st store.Store, tc client.Client, wc *config.WorkerConfig, runAs *subproc.Identity, runs *subproc.Runs) *tool.Registry {
+// buildRegistry registers the built-in tools this process can run. Which of
+// them it exposes is the worker config's decision (exposeTools); the MCP
+// servers' come after (discoverMCPServers).
+func buildRegistry(cfg *config.Config, st store.Store, tc client.Client, runAs *subproc.Identity, runs *subproc.Runs) *tool.Registry {
 	registry := tool.NewRegistry()
 	tool.RegisterFilesystemTools(registry, cfg.WorkspacePath, runAs)
 	tool.RegisterGrepTool(registry, cfg.WorkspacePath)
@@ -203,7 +209,6 @@ func buildRegistry(cfg *config.Config, st store.Store, tc client.Client, wc *con
 		}
 	}
 
-	registerMCPServers(registry, wc.MCP)
 	return registry
 }
 

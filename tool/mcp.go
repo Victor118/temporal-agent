@@ -346,38 +346,3 @@ func (c *MCPClient) initialize(ctx context.Context) (mcpConn, error) {
 	}
 	return conn, nil
 }
-
-// RegisterMCPServers discovers and registers tools from all configured MCP
-// servers. The servers are asked in parallel, but their tools are registered
-// here, after every answer, in the configuration's order: of two servers
-// giving one name, the earlier keeps it (SyncSource), whichever answers
-// first. A tool refused that way comes back as an error.
-func RegisterMCPServers(ctx context.Context, registry *Registry, servers []MCPServerConfig) []error {
-	type discovery struct {
-		tools []*Tool
-		err   error
-	}
-	found := make([]discovery, len(servers))
-	var wg sync.WaitGroup
-	for i, srv := range servers {
-		wg.Add(1)
-		go func(i int, s MCPServerConfig) {
-			defer wg.Done()
-			tools, err := NewMCPClient(s).Discover(ctx)
-			found[i] = discovery{tools, err}
-		}(i, srv)
-	}
-	wg.Wait()
-
-	var errs []error
-	for i, d := range found {
-		if d.err != nil {
-			errs = append(errs, d.err)
-			continue
-		}
-		for _, r := range registry.SyncSource(servers[i].Name, d.tools).Refused {
-			errs = append(errs, fmt.Errorf("mcp %s: tool not registered, its name is taken: %s", servers[i].Name, r))
-		}
-	}
-	return errs
-}

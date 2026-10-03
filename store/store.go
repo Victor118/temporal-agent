@@ -81,6 +81,7 @@ type Store interface {
 	// Tool catalog (published by workers)
 	UpsertTool(ctx context.Context, tool ToolRecord) error
 	ListTools(ctx context.Context) ([]ToolRecord, error)
+	DeleteTool(ctx context.Context, name, taskQueue string) (bool, error)
 
 	// Skills version
 	GetSkillsVersion(ctx context.Context) (int64, error)

@@ -30,7 +30,15 @@ func loadWorkerConfig(cfg *config.Config) *config.WorkerConfig {
 
 	log.Printf("No worker config at %s: serving workflows and all tools on queue %q", cfg.WorkerFile, cfg.WorkflowQueue)
 	wc = &config.WorkerConfig{Queue: cfg.WorkflowQueue, Workflows: true, Tools: []string{"*"}}
+	seen := make(map[string]bool)
 	for _, s := range cfg.MCPServers {
+		// The tools of a server are registered under its name: without one,
+		// or with another's, it would claim names it must not.
+		if s.Name == "" || s.URL == "" || seen[s.Name] {
+			log.Printf("Warning: MCP_SERVERS entry %q (%s) skipped: it needs a name of its own and a url", s.Name, s.URL)
+			continue
+		}
+		seen[s.Name] = true
 		wc.MCP = append(wc.MCP, config.WorkerMCPServer{
 			Name:      s.Name,
 			URL:       s.URL,
@@ -41,28 +49,36 @@ func loadWorkerConfig(cfg *config.Config) *config.WorkerConfig {
 	return wc
 }
 
-// registerMCPServers discovers and registers the tools of the worker's MCP servers.
-func registerMCPServers(registry *tool.Registry, servers []config.WorkerMCPServer) {
-	if len(servers) == 0 {
-		return
-	}
-	mcpConfigs := make([]tool.MCPServerConfig, len(servers))
-	for i, s := range servers {
-		mcpConfigs[i] = tool.MCPServerConfig{
+// mcpStartupWait bounds the discovery of the MCP servers at startup. A
+// server slower than that is not waited for: the background discovery
+// registers and publishes its tools when it answers.
+const mcpStartupWait = 10 * time.Second
+
+// discoverMCPServers registers the tools of the worker's MCP servers that
+// answer now, among those the worker exposes. The others are retried in the
+// background by Run.
+func discoverMCPServers(registry *tool.Registry, wc *config.WorkerConfig) *tool.MCPServers {
+	configs := make([]tool.MCPServerConfig, len(wc.MCP))
+	for i, s := range wc.MCP {
+		configs[i] = tool.MCPServerConfig{
 			Name:      s.Name,
 			URL:       s.URL,
 			APIKey:    s.APIKey,
 			Transport: s.Transport,
 		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	for _, err := range tool.RegisterMCPServers(ctx, registry, mcpConfigs) {
-		log.Printf("Warning: MCP server error: %v", err)
+	servers := tool.NewMCPServers(registry, configs, func(name string) bool { return tool.MatchAny(wc.Tools, name) })
+	servers.Refresh = catalogRefresh
+	if len(configs) > 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), mcpStartupWait)
+		defer cancel()
+		servers.Discover(ctx)
 	}
+	return servers
 }
 
-// exposeTools keeps only the tools listed in the worker config.
+// exposeTools keeps only the tools listed in the worker config. Run before
+// the MCP servers' tools are registered, which are filtered as they come.
 func exposeTools(registry *tool.Registry, wc *config.WorkerConfig) {
 	if removed := registry.Retain(wc.Tools); len(removed) > 0 {
 		log.Printf("Tools not exposed by this worker: %v", removed)
@@ -88,11 +104,11 @@ type toolPublisher interface {
 	UpsertTool(ctx context.Context, tool store.ToolRecord) error
 }
 
-// publishTools writes the registry's tools to the DB catalog under queue.
-// A tool already published by another queue that Temporal still sees served
-// is skipped with an error log.
-func publishTools(st toolPublisher, tc taskqueue.Describer, registry *tool.Registry, queue string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+// publishTools writes tools to the DB catalog under queue, and returns the
+// names it failed to write. A tool already published by another queue that
+// Temporal still sees served is skipped with an error log.
+func publishTools(ctx context.Context, st toolPublisher, tc taskqueue.Describer, tools []*tool.Tool, queue string) (failed []string) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	existing := make(map[string]store.ToolRecord)
@@ -106,7 +122,7 @@ func publishTools(st toolPublisher, tc taskqueue.Describer, registry *tool.Regis
 
 	served := make(map[string]bool) // other queues already checked
 	published := 0
-	for _, t := range registry.All() {
+	for _, t := range tools {
 		rec := store.ToolRecord{
 			Name:             t.Name,
 			TaskQueue:        queue,
@@ -143,11 +159,48 @@ func publishTools(st toolPublisher, tc taskqueue.Describer, registry *tool.Regis
 
 		if err := st.UpsertTool(ctx, rec); err != nil {
 			log.Printf("Error: failed to publish tool %q: %v", t.Name, err)
+			failed = append(failed, t.Name)
 			continue
 		}
 		published++
 	}
 	log.Printf("Published %d tools on queue %q", published, queue)
+	return failed
+}
+
+// toolCatalog is the tools table, as the background MCP discovery sees it.
+type toolCatalog interface {
+	toolPublisher
+	DeleteTool(ctx context.Context, name, taskQueue string) (bool, error)
+}
+
+// catalogPublisher publishes what changes in the worker's MCP servers after
+// startup. Other workers see it at their next catalog refresh.
+type catalogPublisher struct {
+	st    toolCatalog
+	tc    taskqueue.Describer
+	queue string
+}
+
+// Publish writes the new and changed tools, and withdraws the ones their
+// server no longer gives — on this queue only: the row of a tool another
+// queue serves is not this worker's to remove. Left in the table, a removed
+// tool would stay in every agent's list and fail each call as unknown.
+func (p catalogPublisher) Publish(ctx context.Context, put []*tool.Tool, drop []string) (retry []string) {
+	if len(put) > 0 {
+		retry = publishTools(ctx, p.st, p.tc, put, p.queue)
+	}
+	for _, name := range drop {
+		deleted, err := p.st.DeleteTool(ctx, name, p.queue)
+		switch {
+		case err != nil:
+			log.Printf("Error: failed to withdraw tool %q from queue %q: %v", name, p.queue, err)
+			retry = append(retry, name)
+		case deleted:
+			log.Printf("Withdrew tool %q from queue %q: its MCP server no longer gives it", name, p.queue)
+		}
+	}
+	return retry
 }
 
 // queueServed reports whether Temporal has seen a recent poller on the queue.
