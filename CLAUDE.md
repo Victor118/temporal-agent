@@ -37,6 +37,7 @@
 - Agent = persona logique identifiée par `agent_id` (prompt, skills, allowlist d'outils). Table `agents` = source de vérité, éditée via `/admin` ; `agents.yaml` = seed, appliqué seulement si la table est vide
 - Queue = capacité, jamais un agent ni une machine. Chaque worker lit `worker.yaml` (`WORKER_CONFIG`) : `queue`, `tools` (globs), `mcp`, `workflows`, et publie ses tools dans la table `tools`
 - Sans `worker.yaml` : le worker sert workflows + tous les tools sur `WORKFLOW_QUEUE` (défaut `agent`)
+- Connexion à Temporal (`dialTemporal`) : en clair par défaut ; TLS avec `TEMPORAL_TLS_CERT` + `TEMPORAL_TLS_KEY` (mTLS, les deux ou aucun, sinon le processus s'arrête) et/ou `TEMPORAL_TLS_CA` (CA privée), `TEMPORAL_TLS_SERVER_NAME` en option (`temporalTLS`)
 - Workflows (Session/Agent/LLM) sur `WORKFLOW_QUEUE`. Chaque appel d'outil part sur la queue de l'outil (`ExecuteTool` générique, queue fixée dans `ActivityOptions`)
 - Les workers gardent un catalogue en mémoire (agents + tools) rechargé toutes les 30 s ; `ListTools(agentID)` applique l'allowlist
 - Skills chargés depuis un repo Git (prod) ou `./skills` (dev)

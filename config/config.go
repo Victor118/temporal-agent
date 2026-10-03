@@ -15,9 +15,13 @@ type Config struct {
 	// Temporal
 	TemporalHost      string
 	TemporalNamespace string
-	TemporalTLSCert   string
+	TemporalTLSCert   string // client certificate (PEM), with TemporalTLSKey; both or neither
 	TemporalTLSKey    string
-	WorkflowQueue     string // Task queue running SessionWorkflow, AgentWorkflow and LLM calls
+	TemporalTLSCA     string // CA (PEM) the server's certificate is checked against; empty = the system's
+	// TemporalTLSServerName is the name the server's certificate is checked
+	// for; empty = the host of TemporalHost.
+	TemporalTLSServerName string
+	WorkflowQueue         string // Task queue running SessionWorkflow, AgentWorkflow and LLM calls
 
 	// Agent started when a session doesn't name one
 	DefaultAgentID string
@@ -129,11 +133,13 @@ type AgentDefinition struct {
 
 func Load() *Config {
 	return &Config{
-		TemporalHost:      envOr("TEMPORAL_HOST", "localhost:7233"),
-		TemporalNamespace: envOr("TEMPORAL_NAMESPACE", "default"),
-		TemporalTLSCert:   os.Getenv("TEMPORAL_TLS_CERT"),
-		TemporalTLSKey:    os.Getenv("TEMPORAL_TLS_KEY"),
-		WorkflowQueue:     envOr("WORKFLOW_QUEUE", "agent"),
+		TemporalHost:          envOr("TEMPORAL_HOST", "localhost:7233"),
+		TemporalNamespace:     envOr("TEMPORAL_NAMESPACE", "default"),
+		TemporalTLSCert:       os.Getenv("TEMPORAL_TLS_CERT"),
+		TemporalTLSKey:        os.Getenv("TEMPORAL_TLS_KEY"),
+		TemporalTLSCA:         os.Getenv("TEMPORAL_TLS_CA"),
+		TemporalTLSServerName: os.Getenv("TEMPORAL_TLS_SERVER_NAME"),
+		WorkflowQueue:         envOr("WORKFLOW_QUEUE", "agent"),
 
 		DefaultAgentID: envOr("DEFAULT_AGENT_ID", "default"),
 

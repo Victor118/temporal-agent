@@ -126,6 +126,9 @@ Admins manage the other accounts in the back-office, under `/admin/users`.
 |----------|-------------|
 | `TEMPORAL_HOST` | Temporal server address |
 | `TEMPORAL_NAMESPACE` | Temporal namespace |
+| `TEMPORAL_TLS_CERT`, `TEMPORAL_TLS_KEY` | Client certificate and key (PEM files) for mTLS to Temporal. Both or neither; neither (and no `TEMPORAL_TLS_CA`) = plaintext |
+| `TEMPORAL_TLS_CA` | CA (PEM file) that signs the Temporal server's certificate, for a private CA; turns TLS on even without a client certificate. Empty = the system's CAs |
+| `TEMPORAL_TLS_SERVER_NAME` | Name the Temporal server's certificate is checked for, when it differs from the host of `TEMPORAL_HOST` (needs TLS on) |
 | `DATABASE_URL` | PostgreSQL connection string |
 | `LLM_PROVIDER` | LLM provider (`anthropic`) |
 | `LLM_API_KEY` | LLM API key |

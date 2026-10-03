@@ -335,9 +335,14 @@ func newHTTPHandler(cfg *config.Config, st store.Store, tc client.Client, hub *s
 
 // dialTemporal connects to Temporal or ends the process.
 func dialTemporal(cfg *config.Config) client.Client {
+	tlsCfg, err := temporalTLS(cfg)
+	if err != nil {
+		log.Fatalf("Temporal TLS: %v", err)
+	}
 	tc, err := client.Dial(client.Options{
-		HostPort:  cfg.TemporalHost,
-		Namespace: cfg.TemporalNamespace,
+		HostPort:          cfg.TemporalHost,
+		Namespace:         cfg.TemporalNamespace,
+		ConnectionOptions: client.ConnectionOptions{TLS: tlsCfg},
 	})
 	if err != nil {
 		log.Fatalf("Failed to connect to Temporal: %v", err)
