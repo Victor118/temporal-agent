@@ -68,6 +68,9 @@ func AskUserWorkflow(ctx workflow.Context, rawInput json.RawMessage) (tool.Resul
 	if len(input.AgentChain) > 0 {
 		payload["agent_chain"] = input.AgentChain
 	}
+	if input.Agent != "" {
+		payload["agent"] = input.Agent
+	}
 	data, _ := json.Marshal(payload)
 	var notifAct *activity.NotificationActivities
 	if err := workflow.ExecuteActivity(

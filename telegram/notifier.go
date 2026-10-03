@@ -31,22 +31,27 @@ func (n *Notifier) Notify(ctx context.Context, note activity.Notification) error
 		if err := json.Unmarshal(note.Event.Data, &data); err != nil || data.Content == "" {
 			return nil
 		}
-		text := data.Content
-		if data.Agent != "" {
-			text = data.Agent + " :\n" + text
-		}
-		return n.Client.SendMessage(ctx, note.ChannelID, text)
+		return n.Client.SendMessage(ctx, note.ChannelID, signed(data.Agent, data.Content))
 
 	case "ask_user":
 		var data struct {
 			Question string `json:"question"`
+			Agent    string `json:"agent"` // signed as the answer is
 		}
 		if err := json.Unmarshal(note.Event.Data, &data); err != nil || data.Question == "" {
 			return nil
 		}
-		return n.Client.SendMessage(ctx, note.ChannelID, "❓ "+data.Question)
+		return n.Client.SendMessage(ctx, note.ChannelID, signed(data.Agent, "❓ "+data.Question))
 
 	default:
 		return nil
 	}
+}
+
+// signed starts text with the agent's name, when there is one.
+func signed(agent, text string) string {
+	if agent == "" {
+		return text
+	}
+	return agent + " :\n" + text
 }

@@ -138,7 +138,7 @@ func TestBuildChildInput_AgentTool(t *testing.T) {
 	t.Run("the target comes from the resolution and runs on the current queue", func(t *testing.T) {
 		res := analyst()
 		_, in, err := buildChildInput(json.RawMessage(`{"task":"t"}`),
-			parent, "child", &res, []string{"default"}, "default", "agent")
+			parent, "child", &res, []string{"default"}, "default", "agent", "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -150,10 +150,10 @@ func TestBuildChildInput_AgentTool(t *testing.T) {
 
 	t.Run("a sub-agent reaches the user on the parent's channel", func(t *testing.T) {
 		res := analyst()
-		tg := AgentWorkflowInput{Model: "m", UserID: "u-alice", Channel: "telegram", ChannelID: "42"}
+		tg := AgentWorkflowInput{Model: "m", UserID: "u-alice", Channel: "telegram", ChannelID: "42", SignReply: true}
 		_, in, _ := buildChildInput(json.RawMessage(`{"task":"t"}`),
-			tg, "child", &res, nil, "default", "agent")
-		if child := in.(AgentWorkflowInput); child.Channel != "telegram" || child.ChannelID != "42" || child.UserID != "u-alice" {
+			tg, "child", &res, nil, "default", "agent", "")
+		if child := in.(AgentWorkflowInput); child.Channel != "telegram" || child.ChannelID != "42" || child.UserID != "u-alice" || !child.SignReply {
 			t.Errorf("child = %+v", child)
 		}
 	})
@@ -161,7 +161,7 @@ func TestBuildChildInput_AgentTool(t *testing.T) {
 	t.Run("the call may pick its own model", func(t *testing.T) {
 		res := analyst()
 		_, in, _ := buildChildInput(json.RawMessage(`{"task":"t","model":"other"}`),
-			parent, "child", &res, nil, "default", "agent")
+			parent, "child", &res, nil, "default", "agent", "")
 		if child := in.(AgentWorkflowInput); child.Model != "other" {
 			t.Errorf("model = %q, want other", child.Model)
 		}
@@ -170,7 +170,7 @@ func TestBuildChildInput_AgentTool(t *testing.T) {
 	t.Run("an agent_id in the input is ignored", func(t *testing.T) {
 		res := analyst()
 		_, in, _ := buildChildInput(json.RawMessage(`{"task":"t","agent_id":"root"}`),
-			parent, "child", &res, nil, "default", "agent")
+			parent, "child", &res, nil, "default", "agent", "")
 		if child := in.(AgentWorkflowInput); child.AgentID != "market-analyst" {
 			t.Errorf("agent = %q, want market-analyst", child.AgentID)
 		}
@@ -179,7 +179,7 @@ func TestBuildChildInput_AgentTool(t *testing.T) {
 	t.Run("an empty task is refused", func(t *testing.T) {
 		res := analyst()
 		_, _, err := buildChildInput(json.RawMessage(`{"task":"  "}`),
-			parent, "child", &res, nil, "default", "agent")
+			parent, "child", &res, nil, "default", "agent", "")
 		if err == nil || !strings.Contains(err.Error(), "task is required") {
 			t.Errorf("got error %v", err)
 		}
@@ -188,7 +188,7 @@ func TestBuildChildInput_AgentTool(t *testing.T) {
 	t.Run("delegating to itself is refused", func(t *testing.T) {
 		res := analyst()
 		_, _, err := buildChildInput(json.RawMessage(`{"task":"t"}`),
-			parent, "child", &res, nil, "market-analyst", "agent")
+			parent, "child", &res, nil, "market-analyst", "agent", "")
 		if err == nil || !strings.Contains(err.Error(), "cannot delegate to itself") {
 			t.Errorf("got error %v", err)
 		}
@@ -281,12 +281,12 @@ func TestSubAgentContent(t *testing.T) {
 func TestBuildChildInput_CallContextOnlyWhenPublished(t *testing.T) {
 	parent := AgentWorkflowInput{Channel: "telegram", ChannelID: "42"}
 	plain := activity.ToolResolution{Kind: "workflow", WorkflowName: "AnalyzeRepoWorkflow"}
-	_, in, err := buildChildInput(json.RawMessage(`{"repo":"r"}`), parent, "child", &plain, []string{"default"}, "default", "agent")
+	_, in, err := buildChildInput(json.RawMessage(`{"repo":"r"}`), parent, "child", &plain, []string{"default"}, "default", "agent", "")
 	if err != nil || string(in.(json.RawMessage)) != `{"repo":"r"}` {
 		t.Errorf("plain tool input %s, %v", in, err)
 	}
 	flagged := activity.ToolResolution{Kind: "workflow", WorkflowName: "AskUserWorkflow", NeedsCallContext: true}
-	if _, _, err := buildChildInput(json.RawMessage(`"just text"`), parent, "child", &flagged, nil, "default", "agent"); err == nil {
+	if _, _, err := buildChildInput(json.RawMessage(`"just text"`), parent, "child", &flagged, nil, "default", "agent", ""); err == nil {
 		t.Error("a non-object input was enriched")
 	}
 }
@@ -889,7 +889,7 @@ func TestAgentWorkflow_SubAgentRepliesToItsParentOnly(t *testing.T) {
 func TestBuildChildInput_AskUserGetsTheChannel(t *testing.T) {
 	sub := AgentWorkflowInput{SessionID: "s1-tool-agent_analyst-1", Channel: "telegram", ChannelID: "42"}
 	res := activity.ToolResolution{Kind: "workflow", WorkflowName: "AskUserWorkflow", NeedsCallContext: true}
-	_, in, err := buildChildInput(json.RawMessage(`{"question":"ok?"}`), sub, "child", &res, []string{"default", "analyst"}, "analyst", "agent")
+	_, in, err := buildChildInput(json.RawMessage(`{"question":"ok?","agent":"forged"}`), sub, "child", &res, []string{"default", "analyst"}, "analyst", "agent", "Analyst")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -897,10 +897,15 @@ func TestBuildChildInput_AskUserGetsTheChannel(t *testing.T) {
 		Channel    string   `json:"channel"`
 		ChannelID  string   `json:"channel_id"`
 		AgentChain []string `json:"agent_chain"`
+		Agent      string   `json:"agent"`
 	}
 	json.Unmarshal(in.(json.RawMessage), &got)
 	if got.Channel != "telegram" || got.ChannelID != "42" || len(got.AgentChain) != 2 {
 		t.Errorf("ask_user input %s", in)
+	}
+	// The question is signed as the answer would be, never as the model says.
+	if got.Agent != "Analyst" {
+		t.Errorf("ask_user signed %q, want Analyst", got.Agent)
 	}
 }
 

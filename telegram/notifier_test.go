@@ -47,3 +47,16 @@ func TestNotifier_SignsTheAnswer(t *testing.T) {
 		t.Errorf("sent %+v", s.sent)
 	}
 }
+
+// A question is signed as the answer would be.
+func TestNotifier_SignsTheQuestion(t *testing.T) {
+	s := &fakeSender{}
+	n := &Notifier{Client: s}
+	ev := activity.SSEEvent{Type: "ask_user", Data: []byte(`{"type":"ask_user","question":"Quelle branche ?","agent":"Agent Smith"}`)}
+	if err := n.Notify(context.Background(), activity.Notification{SessionID: "s1", ChannelID: "42", Event: ev}); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.sent) != 1 || s.sent[0] != (sent{"42", "Agent Smith :\n❓ Quelle branche ?"}) {
+		t.Errorf("sent %+v", s.sent)
+	}
+}

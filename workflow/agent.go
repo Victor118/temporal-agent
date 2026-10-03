@@ -65,8 +65,10 @@ type AgentWorkflowInput struct {
 	// addressed to several agents: which part is its own (see partNote).
 	PartNote string `json:"part_note,omitempty"`
 	// SignReply signs the answer sent to the user's channel with the agent's
-	// name: when several agents answer in a session, a reader there must
-	// know which one speaks.
+	// name, and its ask_user questions: when several agents answer in a
+	// session, a reader there must know which one speaks. A sub-agent
+	// inherits it: its answer goes to its parent only, but its questions to
+	// the user.
 	SignReply bool `json:"sign_reply,omitempty"`
 }
 
@@ -409,7 +411,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 				d.workflowID = childWorkflowID(input.SessionID, tc.Name, tc.ID, i, j)
 
 				// Build input first — a sub-agent runs on the current workflow queue
-				childWorkflow, childInput, err := buildChildInput(tc.Input, input, d.workflowID, &res, currentChain, currentAgentID, workflow.GetInfo(ctx).TaskQueueName)
+				childWorkflow, childInput, err := buildChildInput(tc.Input, input, d.workflowID, &res, currentChain, currentAgentID, workflow.GetInfo(ctx).TaskQueueName, signed)
 				if err == nil && d.agent {
 					err = delegationRefusal(currentChain, res.AgentID)
 				}
@@ -840,9 +842,10 @@ func notifyResponse(ctx workflow.Context, sessionID, channel, channelID, agent, 
 // keeps the child on the current workflow queue. The target comes from the
 // tool's resolution, never from the model's input: the catalog only offers the
 // agents the allowlist grants, so there is no target left to validate.
-// A tool published as needing the call context (ask_user) gets the agent chain
-// and the user's channel added to its input. Any other gets the raw input.
-func buildChildInput(rawInput json.RawMessage, parent AgentWorkflowInput, childID string, res *activity.ToolResolution, agentChain []string, currentAgentID string, currentQueue string) (childWorkflow interface{}, input interface{}, err error) {
+// A tool published as needing the call context (ask_user) gets the agent chain,
+// the user's channel and signer, the name that signs on that channel (empty:
+// unsigned), added to its input. Any other gets the raw input.
+func buildChildInput(rawInput json.RawMessage, parent AgentWorkflowInput, childID string, res *activity.ToolResolution, agentChain []string, currentAgentID string, currentQueue string, signer string) (childWorkflow interface{}, input interface{}, err error) {
 	if res.AgentID != "" {
 		return subAgentInput(rawInput, parent, childID, res, agentChain, currentAgentID, currentQueue)
 	}
@@ -851,6 +854,7 @@ func buildChildInput(rawInput json.RawMessage, parent AgentWorkflowInput, childI
 			AgentChain: agentChain,
 			Channel:    parent.Channel,
 			ChannelID:  parent.ChannelID,
+			Agent:      signer,
 		})
 		if err != nil {
 			return nil, nil, err
@@ -898,9 +902,11 @@ func subAgentInput(rawInput json.RawMessage, parent AgentWorkflowInput, childID 
 		// memory, deliver to that user.
 		UserID: parent.UserID,
 		// And asks that user, where they are: an ask_user from a sub-agent of
-		// a Telegram session goes to Telegram.
+		// a Telegram session goes to Telegram, signed when its parent's
+		// answer is.
 		Channel:   parent.Channel,
 		ChannelID: parent.ChannelID,
+		SignReply: parent.SignReply,
 	}, nil
 }
 

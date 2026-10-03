@@ -47,6 +47,9 @@ type CallContext struct {
 	AgentChain []string `json:"agent_chain,omitempty"`
 	Channel    string   `json:"channel,omitempty"`
 	ChannelID  string   `json:"channel_id,omitempty"`
+	// Agent signs what the tool sends to the channel, as the agent's answer
+	// is (AgentWorkflowInput.SignReply). Empty: unsigned.
+	Agent string `json:"agent,omitempty"`
 }
 
 // WithCallContext adds cc's fields to a tool's input object. They are the
@@ -63,6 +66,7 @@ func WithCallContext(input json.RawMessage, cc CallContext) (json.RawMessage, er
 	delete(fields, "agent_chain")
 	delete(fields, "channel")
 	delete(fields, "channel_id")
+	delete(fields, "agent")
 	extra, _ := json.Marshal(cc)
 	var ccFields map[string]json.RawMessage
 	json.Unmarshal(extra, &ccFields)

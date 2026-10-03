@@ -29,7 +29,7 @@ func TestDisplayInput_HidesMemory(t *testing.T) {
 
 func TestWithCallContext(t *testing.T) {
 	cc := CallContext{AgentChain: []string{"default", "analyst"}, Channel: "telegram", ChannelID: "42"}
-	got, err := WithCallContext(json.RawMessage(`{"question":"ok?","channel":"forged"}`), cc)
+	got, err := WithCallContext(json.RawMessage(`{"question":"ok?","channel":"forged","agent":"forged"}`), cc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +38,7 @@ func TestWithCallContext(t *testing.T) {
 		CallContext
 	}
 	json.Unmarshal(got, &in)
-	if in.Question != "ok?" || in.Channel != "telegram" || in.ChannelID != "42" || len(in.AgentChain) != 2 {
+	if in.Question != "ok?" || in.Channel != "telegram" || in.ChannelID != "42" || len(in.AgentChain) != 2 || in.Agent != "" {
 		t.Errorf("input %s", got)
 	}
 	if _, err := WithCallContext(json.RawMessage(`null`), cc); err != nil {
