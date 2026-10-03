@@ -469,6 +469,7 @@ func TestMCPClient_RefusesAToolList(t *testing.T) {
 		{name: "too many bytes", tools: heavy(80), want: "more than 4194304 bytes"},
 		{name: "too many bytes in a stream", configure: func(f *fakeMCP) { f.sse = true }, tools: heavy(80), want: "more than 4194304 bytes"},
 		{name: "too many bytes across pages", configure: func(f *fakeMCP) { f.pages = 10 }, tools: heavy(80), want: "more than 4194304 bytes"},
+		{name: "too many bytes on the legacy stream", configure: func(f *fakeMCP) { f.legacy = true }, tools: heavy(80), want: "more than 4194304 bytes"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -478,7 +479,9 @@ func TestMCPClient_RefusesAToolList(t *testing.T) {
 			if server == "" {
 				server = "srv"
 			}
-			tools, err := NewMCPClient(f.config(server)).Discover(context.Background())
+			c := NewMCPClient(f.config(server))
+			defer c.Close() // a legacy stream stays open until then
+			tools, err := c.Discover(context.Background())
 			if !errors.Is(err, errToolsRefused) || !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("err = %.300v, want a refusal saying %q", err, tc.want)
 			}
@@ -605,5 +608,91 @@ func TestMCPClient_WrongTransportHint(t *testing.T) {
 
 	if _, err := NewMCPClient(MCPServerConfig{Name: "srv", URL: "http://unused", Transport: "ws"}).Discover(context.Background()); err == nil || !strings.Contains(err.Error(), `unknown transport "ws" (one of [http sse])`) {
 		t.Errorf("unknown transport: %v", err)
+	}
+}
+
+// The server forgot the session while the client resumed a request's
+// stream: the request was accepted, maybe run, so it is not sent again in
+// a new session.
+func TestMCPClient_ExpiryDuringAResumeIsNotReplayed(t *testing.T) {
+	f := newFakeMCP(t, func(f *fakeMCP) { f.sse, f.early = true, true })
+	tools := discover(t, NewMCPClient(f.config("srv")))
+	f.expireOnResume.Store(true)
+
+	if _, err := call(t, tools, "srv_echo", `{}`); err == nil || !strings.Contains(err.Error(), "resume stream: session expired") {
+		t.Errorf("err = %v", err)
+	}
+	if n := f.count("tools/call"); n != 1 {
+		t.Errorf("tools/call sent %d times, want 1", n)
+	}
+	if n := f.count("initialize"); n != 1 {
+		t.Errorf("%d handshakes, want 1: no new session to send it again", n)
+	}
+}
+
+// A response larger than mcpMaxMessage is refused, as a JSON body or as an
+// event, without being read whole.
+func TestMCPClient_MessageSizeLimit(t *testing.T) {
+	for _, sse := range []bool{false, true} {
+		f := newFakeMCP(t, func(f *fakeMCP) { f.sse = sse })
+		f.setTools("echo", "big")
+		tools := discover(t, NewMCPClient(f.config("srv")))
+		if _, err := call(t, tools, "srv_big", `{}`); !errors.Is(err, errTooLarge) {
+			t.Errorf("sse %v: err = %.200v, want errTooLarge", sse, err)
+		}
+		if got, err := call(t, tools, "srv_echo", `{}`); err != nil || got != "echo {}" {
+			t.Errorf("sse %v: the next call = %q, %v", sse, got, err)
+		}
+	}
+}
+
+// The event stream reader holds an event's data, and each line, to its
+// limit.
+func TestSSEReader_Limit(t *testing.T) {
+	for name, stream := range map[string]string{
+		"one long line":    "data: " + strings.Repeat("x", 20) + "\n\n",
+		"data over lines":  "data: 123456789\ndata: 123456789\n\n",
+		"a long other one": ": " + strings.Repeat("x", 20) + "\n\ndata: ok\n\n",
+	} {
+		if _, err := newSSEReader(strings.NewReader(stream), 16).next(); !errors.Is(err, errTooLarge) {
+			t.Errorf("%s: err = %v, want errTooLarge", name, err)
+		}
+	}
+	// 16 bytes of line, 10 of data.
+	if ev, err := newSSEReader(strings.NewReader("data: 1234567890\n\n"), 16).next(); err != nil || ev.data != "1234567890" {
+		t.Errorf("at the limit: %+v, %v", ev, err)
+	}
+}
+
+// The endpoint a legacy server names is resolved against the stream's URL,
+// and must keep its scheme, host and port.
+func TestSameOriginEndpoint(t *testing.T) {
+	const base = "https://mcp.example.net:8443/sse?x=1"
+	for endpoint, want := range map[string]string{
+		"/messages?sid=1":                         "https://mcp.example.net:8443/messages?sid=1",
+		"messages":                                "https://mcp.example.net:8443/messages",
+		"https://mcp.example.net:8443/m":          "https://mcp.example.net:8443/m",
+		"?sid=2":                                  "https://mcp.example.net:8443/sse?sid=2",
+		"http://mcp.example.net:8443/m":           "", // downgraded
+		"https://mcp.example.net/m":               "", // another port
+		"https://mcp.example.net:9443/m":          "",
+		"https://evil.example.net:8443/m":         "",
+		"https://x.mcp.example.net:8443/m":        "", // a subdomain
+		"//evil.example.net/m":                    "", // scheme-relative
+		"https://mcp.example.net:8443@evil.net/m": "", // userinfo, then another host
+		"https://MCP.example.net:8443/m":          "", // spelled otherwise: refused, not guessed
+		"ftp://mcp.example.net:8443/m":            "",
+		"https://mcp.example.net:8443/%zz":        "", // not a URL
+	} {
+		got, err := sameOriginEndpoint(base, endpoint)
+		if want == "" {
+			if err == nil {
+				t.Errorf("%q: accepted as %q", endpoint, got)
+			}
+			continue
+		}
+		if err != nil || got != want {
+			t.Errorf("%q: %q, %v; want %q", endpoint, got, err, want)
+		}
 	}
 }

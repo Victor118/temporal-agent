@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -35,7 +36,10 @@ type fakeMCP struct {
 	stringIDs bool          // responses echo the request's ID as a string
 	replyGate chan struct{} // non-nil: the client's replies wait for it
 
-	down atomic.Bool // the connection is cut before any answer
+	down    atomic.Bool  // the connection is cut before any answer
+	refused atomic.Int32 // requests cut so
+	// A resume finds the session gone: 404, as the spec says.
+	expireOnResume atomic.Bool
 
 	mu        sync.Mutex
 	tools     []mcpToolInfo
@@ -47,6 +51,9 @@ type fakeMCP struct {
 	block     chan struct{} // non-nil: tools/call waits for it
 	callError *jsonRPCError
 }
+
+// bigText is what the tool "big" answers: more than a message may hold.
+var bigText = strings.Repeat("y", mcpMaxMessage)
 
 type fakeSession struct {
 	version     string
@@ -138,6 +145,7 @@ type fakeMessage struct {
 
 func (f *fakeMCP) serve(w http.ResponseWriter, r *http.Request) {
 	if f.down.Load() {
+		f.refused.Add(1)
 		panic(http.ErrAbortHandler)
 	}
 	if f.apiKey != "" && r.Header.Get("Authorization") != "Bearer "+f.apiKey {
@@ -299,6 +307,9 @@ func (f *fakeMCP) answer(m fakeMessage) (any, *jsonRPCError) {
 		if callErr != nil {
 			return nil, callErr
 		}
+		if p.Name == "big" {
+			return mcpCallToolResult{Content: []mcpContentBlock{{Type: "text", Text: bigText}}}, nil
+		}
 		if p.Name == "fail" {
 			return mcpCallToolResult{IsError: true, Content: []mcpContentBlock{{Type: "text", Text: "it failed"}}}, nil
 		}
@@ -353,6 +364,11 @@ func (f *fakeMCP) respond(w http.ResponseWriter, r *http.Request, id json.RawMes
 
 // serveResume answers a GET resuming a stream after its last event.
 func (f *fakeMCP) serveResume(w http.ResponseWriter, r *http.Request) {
+	if f.expireOnResume.Load() {
+		f.expire()
+		http.Error(w, "unknown session", http.StatusNotFound)
+		return
+	}
 	f.mu.Lock()
 	s := f.sessions[r.Header.Get("Mcp-Session-Id")]
 	resp, ok := f.parked[r.Header.Get("Last-Event-ID")]

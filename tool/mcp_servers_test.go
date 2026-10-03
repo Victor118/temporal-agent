@@ -64,14 +64,27 @@ func run(t *testing.T, m *MCPServers, pub MCPPublisher) {
 	t.Cleanup(func() { cancel(); <-done })
 }
 
-// discovered waits until Run has applied a discovery of f that started
-// after the call. A watcher asks again only once Run took its last result,
-// and Run takes a result only once it applied the one before: the third
-// tools/list from now means the first one is applied.
+// applied waits until Run has applied a discovery that started after the
+// call, attempts counting the discoveries the server saw. A watcher asks
+// again only once Run took its last result, and Run takes a result only
+// once it applied the one before: the third attempt from now means the
+// first one is applied.
+func applied(t *testing.T, attempts func() int) {
+	t.Helper()
+	n := attempts()
+	eventually(t, "a discovery is applied", func() bool { return attempts() >= n+3 })
+}
+
+// discovered: applied, for a server that answers (one tools/list each).
 func discovered(t *testing.T, f *fakeMCP) {
 	t.Helper()
-	n := f.count("tools/list")
-	eventually(t, "a discovery is applied", func() bool { return f.count("tools/list") >= n+3 })
+	applied(t, func() int { return f.count("tools/list") })
+}
+
+// failed: applied, for a server that is down (one request cut each).
+func failed(t *testing.T, f *fakeMCP) {
+	t.Helper()
+	applied(t, func() int { return int(f.refused.Load()) })
 }
 
 func eventually(t *testing.T, what string, cond func() bool) {
@@ -101,7 +114,7 @@ func TestMCPServers_RetriesUntilTheServerComesUp(t *testing.T) {
 
 	pub := &fakePublisher{}
 	run(t, m, pub)
-	time.Sleep(30 * time.Millisecond) // a few failed attempts
+	failed(t, f) // a few failed attempts
 	f.down.Store(false)
 
 	eventually(t, "the tools are published", func() bool { return len(pub.published()) > 0 })
@@ -127,7 +140,7 @@ func TestMCPServers_FollowsTheServersTools(t *testing.T) {
 
 	pub := &fakePublisher{}
 	run(t, m, pub)
-	time.Sleep(50 * time.Millisecond)
+	discovered(t, f)
 	if got := pub.published(); len(got) != 0 {
 		t.Errorf("published %v with nothing changed", got)
 	}
@@ -152,7 +165,7 @@ func TestMCPServers_KeepsTheToolsOfAServerThatGoesDown(t *testing.T) {
 	run(t, m, pub)
 
 	f.down.Store(true)
-	time.Sleep(80 * time.Millisecond) // several failed discoveries
+	failed(t, f)
 	if got := names(r.All()); got != "[srv_echo]" {
 		t.Fatalf("registry = %s", got)
 	}
