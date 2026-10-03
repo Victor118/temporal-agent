@@ -82,8 +82,8 @@ type Config struct {
 	ClaudeCodeModel        string
 	ClaudeCodeMaxBudgetUSD string
 	// ClaudeCodeMaxConcurrentRuns is how many coding runs one worker takes at
-	// a time (Temporal sessions); empty = 2. Each is a CLI with its builds
-	// and tests: the machine, not the queue, is what runs out.
+	// a time (Temporal sessions); empty = 1, and more than 1 is refused until
+	// each run slot has a RunAs uid of its own (parseMaxRuns).
 	ClaudeCodeMaxConcurrentRuns string
 	// ClaudeCodeAuth is how this worker's coding runs authenticate: "api"
 	// (ANTHROPIC_API_KEY) or "subscription" (CLAUDE_CODE_OAUTH_TOKEN, or the

@@ -140,25 +140,29 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 	}
 
 	// A coding run is a Temporal session on its tool's queue: all of its
-	// steps on the worker that took it. Where runs can happen, how many at
-	// once is the machine's limit; elsewhere, the SDK's default.
-	var sessions int
+	// steps on the worker that took it.
 	if coding {
-		sessions = maxRuns
 		log.Printf("Coding runs: at most %d at a time on this worker (CLAUDE_CODE_MAX_CONCURRENT_RUNS)", maxRuns)
 	}
 	codeAct := &activity.ClaudeCodeActivities{Root: cfg.ClaudeCodeWorkspace, SSHKeyPath: cfg.ClaudeCodeSSHKey, AllowedRepos: cfg.ClaudeCodeRepos, RunAs: runAs, Runs: runs, ClaudeConfigDir: cfg.ClaudeConfigDir, Model: cfg.ClaudeCodeModel, MaxBudgetUSD: budget, Auth: auth}
 
 	rt := &workerRuntime{queues: queues, workflows: workerConf.Workflows, skills: skills, releaseRuns: func() {}}
 	for _, queue := range queues {
-		// Sessions pin a coding run's steps to one worker of the tool queue
-		w := worker.New(tc, queue, worker.Options{
-			EnableSessionWorker:               queue == workerConf.Queue,
-			MaxConcurrentSessionExecutionSize: sessions,
+		wopts := worker.Options{
 			// A worker that stops polling for good takes the process with
 			// it, so that whatever runs it starts a new one.
 			OnFatalError: func(err error) { log.Fatalf("Worker on %q failed: %v", queue, err) },
-		})
+		}
+		// Sessions pin a coding run's steps to one worker of the tool queue.
+		// Where runs can happen, how many at once is the machine's limit;
+		// elsewhere, the SDK's default.
+		if queue == workerConf.Queue {
+			wopts.EnableSessionWorker = true
+			if coding {
+				wopts.MaxConcurrentSessionExecutionSize = maxRuns
+			}
+		}
+		w := worker.New(tc, queue, wopts)
 
 		w.RegisterWorkflow(workflow.SessionWorkflow)
 		w.RegisterWorkflow(workflow.AgentWorkflow)
@@ -272,11 +276,19 @@ func parseBudget(raw string) (float64, error) {
 
 // defaultMaxRuns is how many coding runs a worker takes at a time when
 // CLAUDE_CODE_MAX_CONCURRENT_RUNS is empty.
-const defaultMaxRuns = 2
+const defaultMaxRuns = 1
+
+// maxRunsPerUID is how many coding runs may share one RunAs identity: one.
+// Runs under a single uid reach each other's clone and credentials, and a
+// process one leaves behind outlives it, since subproc.Runs only kills strays
+// once no command of that uid is running. Running several needs one uid per
+// run slot; until then, a higher limit is refused rather than weaken the
+// isolation between runs.
+const maxRunsPerUID = 1
 
 // parseMaxRuns reads CLAUDE_CODE_MAX_CONCURRENT_RUNS: empty is the default, a
 // value that is no positive number stops the worker rather than lift the
-// limit (the SDK reads 0 as 1000).
+// limit (the SDK reads 0 as 1000), and so does one past maxRunsPerUID.
 func parseMaxRuns(raw string) (int, error) {
 	if raw == "" {
 		return defaultMaxRuns, nil
@@ -284,6 +296,11 @@ func parseMaxRuns(raw string) (int, error) {
 	v, err := strconv.Atoi(raw)
 	if err != nil || v <= 0 {
 		return 0, fmt.Errorf("%q is not a positive number of runs", raw)
+	}
+	if v > maxRunsPerUID {
+		return 0, fmt.Errorf("%d runs at a time is not supported yet: runs sharing the one RUN_AS_UID could reach "+
+			"each other's clone and credentials, and a process one left behind would outlive it; "+
+			"that takes one uid per run slot first (set %d)", v, maxRunsPerUID)
 	}
 	return v, nil
 }

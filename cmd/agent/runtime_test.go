@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -108,7 +109,7 @@ func TestParseContextBytes(t *testing.T) {
 // A limit the operator mistyped stops the worker: read as zero, the SDK
 // would take a thousand runs at once.
 func TestParseMaxRuns(t *testing.T) {
-	for raw, want := range map[string]int{"": defaultMaxRuns, "1": 1, "4": 4} {
+	for raw, want := range map[string]int{"": 1, "1": 1} {
 		if got, err := parseMaxRuns(raw); err != nil || got != want {
 			t.Errorf("parseMaxRuns(%q) = %d, %v; want %d", raw, got, err, want)
 		}
@@ -116,6 +117,14 @@ func TestParseMaxRuns(t *testing.T) {
 	for _, raw := range []string{"0", "-1", "two", "1.5", " 2"} {
 		if _, err := parseMaxRuns(raw); err == nil {
 			t.Errorf("parseMaxRuns(%q) accepted", raw)
+		}
+	}
+	// More than one run at a time shares the one RunAs uid: refused, and
+	// the worker says why.
+	for _, raw := range []string{"2", "4"} {
+		_, err := parseMaxRuns(raw)
+		if err == nil || !strings.Contains(err.Error(), "one uid per run slot") {
+			t.Errorf("parseMaxRuns(%q) = %v, want a refusal that names the uid per run", raw, err)
 		}
 	}
 }
