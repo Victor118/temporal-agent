@@ -122,7 +122,7 @@ func (s *memSession) SaveMemory(_ context.Context, _ store.MemoryScope, userID, 
 	defer s.mu.Unlock()
 	current := s.memory[userID]
 	if current.Version != expected {
-		return 0, &store.MemoryConflict{Current: current}
+		return 0, store.ErrMemoryConflict
 	}
 	s.memory[userID] = store.Memory{Content: content, Version: expected + 1}
 	return expected + 1, nil

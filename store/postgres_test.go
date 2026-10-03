@@ -648,7 +648,7 @@ func clearMemory(t *testing.T, s *PostgresStore, ids ...string) {
 
 // A save names the version it replaces: the first from 0, each next from the
 // one before. A save from a version another save replaced writes nothing and
-// says what the memory is now.
+// is refused with ErrMemoryConflict.
 func TestSaveMemory_Versions(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
@@ -670,20 +670,16 @@ func TestSaveMemory_Versions(t *testing.T) {
 	}
 
 	for _, expected := range []int64{0, 1, 3} {
-		_, err := s.SaveMemory(ctx, MemoryScopeUser, id, "stale", expected)
-		var conflict *MemoryConflict
-		if !errors.As(err, &conflict) || conflict.Current != (Memory{Content: "likes tea and coffee", Version: 2}) {
+		if _, err := s.SaveMemory(ctx, MemoryScopeUser, id, "stale", expected); !errors.Is(err, ErrMemoryConflict) {
 			t.Errorf("save from version %d: %v", expected, err)
 		}
-	}
-	if m, _ := s.LoadMemory(ctx, MemoryScopeUser, id); m.Content != "likes tea and coffee" || m.Version != 2 {
-		t.Errorf("a refused save wrote: %+v", m)
+		if m, _ := s.LoadMemory(ctx, MemoryScopeUser, id); m != (Memory{Content: "likes tea and coffee", Version: 2}) {
+			t.Errorf("a save from version %d wrote: %+v", expected, m)
+		}
 	}
 
 	// A version for a memory never saved: nothing to replace, nothing written.
-	_, err := s.SaveMemory(ctx, MemoryScopeUser, other, "blind", 4)
-	var conflict *MemoryConflict
-	if !errors.As(err, &conflict) || conflict.Current != (Memory{}) {
+	if _, err := s.SaveMemory(ctx, MemoryScopeUser, other, "blind", 4); !errors.Is(err, ErrMemoryConflict) {
 		t.Errorf("save over a missing memory: %v", err)
 	}
 	if m, _ := s.LoadMemory(ctx, MemoryScopeUser, other); m != (Memory{}) {
@@ -692,7 +688,7 @@ func TestSaveMemory_Versions(t *testing.T) {
 }
 
 // Saves from the same version at once, first save or not: exactly one wins,
-// the others are told of it.
+// the others are refused, and the memory is the winner's.
 func TestSaveMemory_ConcurrentSavesOneWins(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
@@ -717,17 +713,19 @@ func TestSaveMemory_ConcurrentSavesOneWins(t *testing.T) {
 		won := 0
 		for range writers {
 			r := <-results
-			var conflict *MemoryConflict
 			switch {
 			case r.err == nil && r.version == expected+1:
 				won++
-			case errors.As(r.err, &conflict) && conflict.Current.Version == expected+1:
+			case errors.Is(r.err, ErrMemoryConflict):
 			default:
 				t.Fatalf("round %d: version %d, %v", round, r.version, r.err)
 			}
 		}
 		if won != 1 {
 			t.Fatalf("round %d: %d saves won, want exactly one", round, won)
+		}
+		if m, err := s.LoadMemory(ctx, MemoryScopeUser, id); err != nil || m.Version != expected+1 {
+			t.Fatalf("round %d: memory %+v, %v; want version %d", round, m, err, expected+1)
 		}
 	}
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"time"
 )
 
@@ -23,15 +22,10 @@ type Memory struct {
 	Version int64  `json:"version"`
 }
 
-// MemoryConflict is the error of a memory save made from a version another
-// save replaced since: nothing was written. Current is the memory now.
-type MemoryConflict struct {
-	Current Memory
-}
-
-func (e *MemoryConflict) Error() string {
-	return fmt.Sprintf("memory changed since it was read: now at version %d", e.Current.Version)
-}
+// ErrMemoryConflict is the error of a memory save made from a version another
+// save replaced since: nothing was written. It does not carry the memory: a
+// user's memory stays out of errors, which are logged and returned.
+var ErrMemoryConflict = errors.New("memory changed since it was read")
 
 type Store interface {
 	// Users

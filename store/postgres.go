@@ -414,7 +414,7 @@ func (s *PostgresStore) LoadMemory(ctx context.Context, scope MemoryScope, scope
 // SaveMemory replaces a scope's memory if it is still at version expected,
 // and returns the new version. Expected 0 is a memory never saved: the save
 // inserts it. When another save came first, nothing is written and the error
-// is a *MemoryConflict holding the memory as it is now. Concurrent saves from
+// is ErrMemoryConflict: the caller reads the memory again. Concurrent saves from
 // one version: the row lock makes the others see the bumped version, so
 // exactly one wins.
 func (s *PostgresStore) SaveMemory(ctx context.Context, scope MemoryScope, scopeID string, content string, expected int64) (int64, error) {
@@ -436,18 +436,10 @@ func (s *PostgresStore) SaveMemory(ctx context.Context, scope MemoryScope, scope
 			RETURNING version`,
 			string(scope), scopeID, content, expected).Scan(&version)
 	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return version, err
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrMemoryConflict
 	}
-	// Read after the refused write, outside its statement: another save may
-	// have come in between, so Current can be newer than the version that
-	// refused this one. No matter: the caller has to read the memory again
-	// anyway, and the newest is what it must merge into.
-	current, err := s.LoadMemory(ctx, scope, scopeID)
-	if err != nil {
-		return 0, err
-	}
-	return 0, &MemoryConflict{Current: current}
+	return version, err
 }
 
 func (s *PostgresStore) SaveTaskLog(ctx context.Context, log TaskLog) error {

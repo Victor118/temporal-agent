@@ -61,7 +61,7 @@ func TestExecuteTool_MemoryVersionComesFromTheCallNotTheModel(t *testing.T) {
 	}
 
 	out, _ = a.ExecuteTool(context.Background(), ExecuteToolInput{Name: "save_user_memory", Input: forged, UserID: "u-alice"})
-	if !out.IsError || !strings.Contains(out.Content, "not in your prompt") || len(saver.expected) != 1 {
+	if !out.IsError || !strings.Contains(out.Content, "does not say which version") || len(saver.expected) != 1 {
 		t.Errorf("without one: %+v; saves %v, want the forged version refused", out, saver.expected)
 	}
 }

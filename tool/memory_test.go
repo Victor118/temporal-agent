@@ -90,7 +90,7 @@ type fakeSaver struct {
 func (s *fakeSaver) SaveMemory(_ context.Context, _ store.MemoryScope, _ string, content string, expected int64) (int64, error) {
 	s.saves++
 	if s.memory.Version != expected {
-		return 0, &store.MemoryConflict{Current: s.memory}
+		return 0, store.ErrMemoryConflict
 	}
 	s.memory = store.Memory{Content: content, Version: expected + 1}
 	return s.memory.Version, nil
@@ -125,18 +125,29 @@ func TestSaveUserMemory(t *testing.T) {
 	}
 
 	// No version: the prompt held no memory (a sub-agent, no LLM call), or
-	// could not read it. Refused before the store, each with its advice.
+	// could not read it, or the call does not say. Refused before the store,
+	// each with its advice; only a run given no memory is told it is a
+	// sub-agent.
 	saves := saver.saves
 	for name, tc := range map[string]struct {
 		ctx  context.Context
 		want string
 	}{
-		"no call context": {alice, "a sub-agent is given none"},
+		"no call context": {alice, "does not say which version"},
 		"no version":      {WithCall(alice, CallContext{Channel: "web"}), "a sub-agent is given none"},
 		"memory unread":   {WithCall(alice, CallContext{MemoryUnread: true}), "Try again at your next step"},
 	} {
 		if _, err := save(tc.ctx); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: %v", name, err)
+		}
+	}
+	if _, err := save(alice); err == nil || strings.Contains(err.Error(), "sub-agent") {
+		t.Errorf("no call context, blamed on a sub-agent: %v", err)
+	}
+	// An empty memory is no memory: refused, whatever version was read.
+	for _, input := range []string{`{"content":""}`, `{"content":"  \n"}`, `{}`} {
+		if _, err := memory.Execute(read(4), json.RawMessage(input)); err == nil || !strings.Contains(err.Error(), "content is empty") {
+			t.Errorf("save of %s: %v", input, err)
 		}
 	}
 	if _, err := save(WithCall(context.Background(), CallContext{MemoryVersion: new(int64)})); err == nil || !strings.Contains(err.Error(), "user not identified") {

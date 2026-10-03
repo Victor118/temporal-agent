@@ -5,12 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/victor/temporal-agent/store"
 )
 
 // MemorySaver writes a scope's memory if it is still at the version expected
-// (store.PostgresStore.SaveMemory), or fails with a *store.MemoryConflict.
+// (store.PostgresStore.SaveMemory), or fails with store.ErrMemoryConflict.
 type MemorySaver interface {
 	SaveMemory(ctx context.Context, scope store.MemoryScope, scopeID string, content string, expected int64) (int64, error)
 }
@@ -18,10 +19,14 @@ type MemorySaver interface {
 // A save replaces the memory whole: it is refused from a call whose prompt
 // held no memory, the model would replace what it never read. Either the
 // memory could not be read for this step (the next LLM call reads it again),
-// or the run is given none (a sub-agent: its parent has the memory).
+// or the run is given none (a sub-agent: its parent has the memory). A call
+// without its context does not say which version the model read: refused
+// too, without blaming the run.
 const (
-	memoryUnread = "Cannot save memory: the user's memory could not be read for this step, and a save replaces it whole. Nothing was saved. Try again at your next step."
-	memoryAbsent = "Cannot save memory: the user's memory is not in your prompt (a sub-agent is given none), and a save replaces it whole. Nothing was saved. If you are working for another agent, put what is worth remembering in your answer instead."
+	memoryUnread    = "Cannot save memory: the user's memory could not be read for this step, and a save replaces it whole. Nothing was saved. Try again at your next step."
+	memoryAbsent    = "Cannot save memory: the user's memory is not in your prompt (a sub-agent is given none), and a save replaces it whole. Nothing was saved. If you are working for another agent, put what is worth remembering in your answer instead."
+	memoryNoContext = "Cannot save memory: this call does not say which version of the user's memory you read, and a save replaces it whole. Nothing was saved."
+	memoryEmpty     = "Cannot save memory: content is empty. A save replaces the whole memory: give everything worth keeping about the user."
 )
 
 // memoryConflict tells the model its save came after another one. It does
@@ -64,6 +69,9 @@ Only works when the user's memory is in your system prompt; a sub-agent has none
 			if err := json.Unmarshal(input, &params); err != nil {
 				return "", fmt.Errorf("parse input: %w", err)
 			}
+			if strings.TrimSpace(params.Content) == "" {
+				return "", errors.New(memoryEmpty)
+			}
 
 			// The author of the message being answered: in a shared session,
 			// what the agent learns about one member is not saved for another.
@@ -71,7 +79,10 @@ Only works when the user's memory is in your system prompt; a sub-agent has none
 			if userID == "" {
 				return "", errors.New("Cannot save memory: user not identified")
 			}
-			call, _ := CallFromContext(ctx)
+			call, ok := CallFromContext(ctx)
+			if !ok {
+				return "", errors.New(memoryNoContext)
+			}
 			if call.MemoryVersion == nil {
 				if call.MemoryUnread {
 					return "", errors.New(memoryUnread)
@@ -80,8 +91,7 @@ Only works when the user's memory is in your system prompt; a sub-agent has none
 			}
 
 			_, err := st.SaveMemory(ctx, store.MemoryScopeUser, userID, params.Content, *call.MemoryVersion)
-			var conflict *store.MemoryConflict
-			if errors.As(err, &conflict) {
+			if errors.Is(err, store.ErrMemoryConflict) {
 				return "", errors.New(memoryConflict)
 			}
 			if err != nil {
