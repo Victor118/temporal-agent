@@ -103,7 +103,7 @@ func Convert(messages []store.Message, view View) []provider.ChatMessage {
 		}
 		if msg.ToolResult != nil {
 			if call, ok := others[msg.ToolResult.ToolCallID]; ok {
-				result = appendUserText(result, otherResult(call, msg.ToolResult))
+				result = appendUserText(result, otherResult(call, msg.ToolResult, view.privateInput(call.tool)))
 				continue
 			}
 		}
@@ -159,13 +159,14 @@ func (v View) otherTurn(m store.Message) string {
 	return strings.Join(lines, "\n")
 }
 
-// otherResult is the result of another agent's tool call as text, clipped.
-func otherResult(call otherCall, r *store.ToolResult) string {
+// otherResult is the result of another agent's tool call as text, clipped,
+// or hidden as the members see it (private).
+func otherResult(call otherCall, r *store.ToolResult, private bool) string {
 	what := "result of"
 	if r.IsError {
 		what = "error from"
 	}
-	return fmt.Sprintf("[%s %s, called by %s] %s", what, call.tool, call.agent, Clip(r.Content, maxOtherToolResultBytes))
+	return fmt.Sprintf("[%s %s, called by %s] %s", what, call.tool, call.agent, Clip(tool.DisplayResult(private, r.Content), maxOtherToolResultBytes))
 }
 
 // plainUserText returns the text of a user message that is text alone.

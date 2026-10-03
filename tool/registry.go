@@ -47,6 +47,7 @@ type Tool struct {
 	Sensitive bool `json:"-"`
 	// PrivateInput: its input is the user's alone, and is not shown to the
 	// session's other members, nor put in a summary for someone else's fork.
+	// Nor is its result, which may repeat it (DisplayResult).
 	PrivateInput bool `json:"-"`
 	// NeedsCallContext: a workflow tool that receives the caller's context
 	// (CallContext) in its input, alongside what the model wrote.

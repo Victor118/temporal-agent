@@ -46,8 +46,8 @@ type TranscriptReader interface {
 type ForkActivities struct {
 	Store TranscriptReader
 	LLM   provider.LLMProvider
-	// Private tells which tool inputs stay out of the summary: it may go to
-	// another user's fork. Without it, every tool input does.
+	// Private tells which tool inputs, and their results, stay out of the
+	// summary: it may go to another user's fork. Without it, every one does.
 	Private tool.PrivateInputs
 }
 
@@ -103,9 +103,18 @@ func (a *ForkActivities) SummarizeConversation(ctx context.Context, in Summarize
 // the end when the whole does not fit: the latest turns are what the fork
 // continues from.
 func buildTranscript(msgs []store.MessageWithID, private tool.PrivateInputs) (string, bool) {
+	// Shown as the session's members see them: a user's memory stays out of
+	// the summary, which may go to someone else's fork. Unknown, every tool
+	// is private. A result is the call's: found by its ID, the call before it.
+	isPrivate := func(name string) bool { return private == nil || private.PrivateInput(name) }
+	callTools := map[string]string{}
 	var entries []string
 	for _, m := range msgs {
-		if e := transcriptEntry(m.Message, private); e != "" {
+		for _, tc := range m.ToolCalls {
+			callTools[tc.ID] = tc.Name
+		}
+		privateResult := m.ToolResult != nil && isPrivate(callTools[m.ToolResult.ToolCallID])
+		if e := transcriptEntry(m.Message, isPrivate, privateResult); e != "" {
 			entries = append(entries, e)
 		}
 	}
@@ -123,7 +132,9 @@ func buildTranscript(msgs []store.MessageWithID, private tool.PrivateInputs) (st
 	return strings.Join(entries, sep), truncated
 }
 
-func transcriptEntry(m store.Message, private tool.PrivateInputs) string {
+// transcriptEntry is m as the summarizer reads it. isPrivate tells which
+// tools' inputs are hidden; privateResult, whether m's result is.
+func transcriptEntry(m store.Message, isPrivate func(tool string) bool, privateResult bool) string {
 	text := decodeText(m.Content)
 	switch {
 	case m.Kind == store.KindTurnError:
@@ -146,9 +157,7 @@ func transcriptEntry(m store.Message, private tool.PrivateInputs) string {
 			parts = append(parts, who+": "+text)
 		}
 		for _, tc := range m.ToolCalls {
-			// Shown as the session's members see it: a user's memory stays out
-			// of the summary, which may go to someone else's fork.
-			input := tool.DisplayInput(private == nil || private.PrivateInput(tc.Name), tc.Input)
+			input := tool.DisplayInput(isPrivate(tc.Name), tc.Input)
 			parts = append(parts, who+" called "+tc.Name+" "+clip(string(input), maxSummaryToolInputBytes))
 		}
 		return strings.Join(parts, "\n")
@@ -157,7 +166,7 @@ func transcriptEntry(m store.Message, private tool.PrivateInputs) string {
 		if m.ToolResult.IsError {
 			label = "Tool error"
 		}
-		return label + ": " + clip(m.ToolResult.Content, maxSummaryToolResultBytes)
+		return label + ": " + clip(tool.DisplayResult(privateResult, m.ToolResult.Content), maxSummaryToolResultBytes)
 	}
 	return ""
 }

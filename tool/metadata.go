@@ -7,8 +7,8 @@ import (
 	"github.com/victor/temporal-agent/store"
 )
 
-// PrivateInputs tells which tools keep their input from the session's members
-// (Tool.PrivateInput).
+// PrivateInputs tells which tools keep their input, and their result, from the
+// session's members (Tool.PrivateInput).
 type PrivateInputs interface {
 	PrivateInput(toolName string) bool
 }
@@ -39,6 +39,20 @@ func DisplayInput(private bool, input json.RawMessage) json.RawMessage {
 		return hiddenInput
 	}
 	return input
+}
+
+// hiddenResult stands for the result of a call to a private tool: it may
+// carry what the input did (save_user_memory answers a conflict with the
+// memory).
+const hiddenResult = "(private)"
+
+// DisplayResult is the result of a tool call as the session's members see it:
+// hidden when the tool's input is private.
+func DisplayResult(private bool, content string) string {
+	if private {
+		return hiddenResult
+	}
+	return content
 }
 
 // CallContext is what a workflow tool flagged NeedsCallContext receives

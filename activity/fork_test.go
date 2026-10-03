@@ -28,7 +28,9 @@ func TestBuildTranscript(t *testing.T) {
 		{ID: 4, Message: store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{Content: long}}},
 		{ID: 5, Message: store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{Content: "boom", IsError: true}}},
 		{ID: 6, Message: store.Message{Role: store.RoleAssistant,
-			ToolCalls: []store.ToolCall{{Name: "save_user_memory", Input: json.RawMessage(`{"content":"Alice's secret"}`)}}}},
+			ToolCalls: []store.ToolCall{{ID: "m1", Name: "save_user_memory", Input: json.RawMessage(`{"content":"Alice's secret"}`)}}}},
+		// A conflict answers with the memory: the result is as private as the input.
+		{ID: 61, Message: store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "m1", Content: "Current version: Alice's other secret", IsError: true}}},
 		{ID: 7, Message: store.Message{Role: store.RoleAssistant, Kind: store.KindTurnError, Content: text("call LLM: boom")}},
 		// Several agents answer in a session: each is named.
 		{ID: 8, Message: store.Message{Role: store.RoleAssistant, Content: text("it fits"), AgentID: "smith", Author: "Agent Smith",
@@ -42,6 +44,7 @@ func TestBuildTranscript(t *testing.T) {
 		"User (Alice): hello",
 		"Assistant: let me look\nAssistant called read_file {\"path\":\"xxx",
 		"Tool error: boom",
+		"Tool error: (private)",
 		"Assistant (Agent Smith): it fits\nAssistant (Agent Smith) called web_search",
 	} {
 		if !strings.Contains(got, want) {
@@ -49,7 +52,7 @@ func TestBuildTranscript(t *testing.T) {
 		}
 	}
 	// A user's memory is private: the summary may go to another user's fork.
-	if strings.Contains(got, "Alice's secret") {
+	if strings.Contains(got, "secret") {
 		t.Error("the transcript carries a user's memory")
 	}
 	if strings.Contains(got, "call LLM") {

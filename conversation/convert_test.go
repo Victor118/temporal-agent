@@ -100,7 +100,7 @@ func TestConvert_NamesTheOtherAgents(t *testing.T) {
 // no tool block, or the API would reject it, and ends on a user message, or
 // the model would continue the other agent's answer. A member's message
 // written while the other agent worked comes after that agent's turn; a
-// private input stays hidden.
+// private input and its result stay hidden.
 func TestConvert_OtherAgentsToolsAsText(t *testing.T) {
 	view := View{
 		Self:    "smith",
@@ -115,7 +115,7 @@ func TestConvert_OtherAgentsToolsAsText(t *testing.T) {
 		}}).
 		add("r-1.0", store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "t1", Content: "found " + strings.Repeat("x", 3000)}}).
 		add("", store.Message{Role: store.RoleUser, Content: `"meanwhile"`, Author: "Bob"}).
-		add("r-1.0", store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "t2", Content: "denied", IsError: true}}).
+		add("r-1.0", store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "t2", Content: "Current version: Alice's other secret", IsError: true}}).
 		add("r-1.0", store.Message{Role: store.RoleAssistant, Content: `"voici"`, AgentID: "jarvis", Author: "Jarvis"})
 	msgs := s.read(view)
 
@@ -133,14 +133,14 @@ func TestConvert_OtherAgentsToolsAsText(t *testing.T) {
 		`[agent Jarvis (@jarvis) called web_search {"q":"temporal"}]`,
 		`[agent Jarvis (@jarvis) called save_user_memory {"content":"(private)"}]`,
 		"[result of web_search, called by agent Jarvis (@jarvis)] found xxx",
-		"[error from save_user_memory, called by agent Jarvis (@jarvis)] denied\n\n[agent Jarvis (@jarvis)] voici\n\n[Bob] meanwhile",
+		"[error from save_user_memory, called by agent Jarvis (@jarvis)] (private)\n\n[agent Jarvis (@jarvis)] voici\n\n[Bob] meanwhile",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("model reads %q\nwant %q in it", text, want)
 		}
 	}
 	if strings.Contains(text, "secret") {
-		t.Error("a private tool input reached another agent")
+		t.Error("a private tool input or result reached another agent")
 	}
 	if len(text) > 2500 {
 		t.Errorf("another agent's tool result was not clipped: %d bytes", len(text))
