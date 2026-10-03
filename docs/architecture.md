@@ -249,6 +249,11 @@ diagnostic.
 - **Comptes** : connexion par email et mot de passe (argon2id), sessions de
   connexion en base. Pas encore d'envoi d'emails (réinitialisation du mot de
   passe par un admin seulement).
+- **Claude Code** : `analyze_repo` et `implement_feature` ouvrent une session
+  Temporal sur la queue de l'outil, toutes leurs étapes (nettoyage compris) sur
+  le worker qui l'a prise. Un worker perdu en cours de run termine le run (rien
+  n'est poussé), sans reprise ailleurs ; son clone est supprimé à son
+  redémarrage. Pas encore de queue de repli.
 - **Tous les workflows et activities sont enregistrés sur toutes les queues**
   d'un worker, y compris sa queue d'outils. Les outils de type workflow
   (`ask_user`) tournent donc sur la queue de l'outil.
