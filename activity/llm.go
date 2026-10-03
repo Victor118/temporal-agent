@@ -212,7 +212,11 @@ func withdrawnTools(agentID string, missing []string, chat []provider.ChatMessag
 			kept = append(kept, name)
 		}
 	}
-	log.Printf("LLM call: agent %s, tools %v gone from the catalog, not offered; %v already called, kept as withdrawn", agentID, missing, kept)
+	// Only a stub is worth a line: a tool merely gone is common, and this
+	// runs on every call of the turn.
+	if len(kept) > 0 {
+		log.Printf("LLM call: agent %s, tools %v gone from the catalog but already called, kept as withdrawn", agentID, kept)
+	}
 	return stubs
 }
 

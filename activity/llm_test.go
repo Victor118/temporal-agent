@@ -248,11 +248,15 @@ func TestCallLLM_KeepsAWithdrawnToolItCalled(t *testing.T) {
 		{Role: store.RoleAssistant, ToolCalls: []store.ToolCall{{ID: "t1", Name: "gone", Input: json.RawMessage(`{}`)}}},
 		{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "t1", Content: "ok"}},
 	}
-	for name, catalog := range map[string][]store.ToolRecord{
-		"other tools left": {{Name: "web_fetch", InputSchema: json.RawMessage(`{"type":"object"}`)}},
-		"its only tool":    nil,
+	for _, tc := range []struct {
+		name    string
+		catalog []store.ToolRecord
+	}{
+		{"other tools left", []store.ToolRecord{{Name: "web_fetch", InputSchema: json.RawMessage(`{"type":"object"}`)}}},
+		{"its only tool", nil},
 	} {
-		t.Run(name, func(t *testing.T) {
+		catalog := tc.catalog
+		t.Run(tc.name, func(t *testing.T) {
 			c := NewCatalog()
 			c.SetTools(catalog)
 			model := &recordingModel{}
