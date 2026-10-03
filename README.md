@@ -136,7 +136,7 @@ Admins manage the other accounts in the back-office, under `/admin/users`.
 | `LLM_API_KEY` | LLM API key |
 | `LLM_MODEL` | Model to use |
 | `SUMMARY_MODEL` | Model that summarizes a session for a fork (default: `LLM_MODEL`) |
-| `LLM_MAX_CONTEXT_BYTES` | Worker: largest request one LLM call may send (system prompt, tools and conversation, as JSON bytes; default `2000000`, about 600K tokens or less, under the 1M-token window of `claude-sonnet-5`; about `400000` for a 200K-token model). Past it, the turn fails without retrying and tells the members to fork the session. Not a positive number = the worker does not start |
+| `LLM_MAX_CONTEXT_BYTES` | Worker: largest request one LLM call may send (system prompt, tools and conversation, as JSON bytes; default `2000000`, about 600K tokens or less, under the 1M-token window of `claude-sonnet-5`; about `400000` for a 200K-token model). Past it, the turn fails without retrying and tells the members to fork the session; the model's own "prompt is too long" is reported the same way. Not a positive number = the worker does not start |
 | `HTTP_ADDR` | Public HTTP server address |
 | `WORKFLOW_QUEUE` | Task queue for sessions, agents and LLM calls (default `agent`) |
 | `DEFAULT_AGENT_ID` | Agent used when a session doesn't name one (default `default`) |

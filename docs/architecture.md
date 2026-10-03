@@ -146,7 +146,7 @@ tools: [github_*]
 
 1. L'utilisateur envoie un message → le serveur le stocke et signale
    `SessionWorkflow`.
-2. `SessionWorkflow` prend l'instantané de la conversation (`LastMessageID`)
+2. `SessionWorkflow` prend pour instantané l'ID du message (dans le signal)
    et lance `AgentWorkflow(agentID)` avec une clé de tour. L'historique ne
    passe jamais par les workflows.
 3. `AgentWorkflow` charge le nom de l'agent et la liste des outils
