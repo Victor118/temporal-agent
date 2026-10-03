@@ -86,19 +86,19 @@ func NewMCPClient(config MCPServerConfig) *MCPClient {
 	}
 }
 
-// DiscoverAndRegister connects to the MCP server, discovers tools, and registers them in the registry.
-func (c *MCPClient) DiscoverAndRegister(ctx context.Context, registry *Registry) error {
-	tools, err := c.listTools(ctx)
+// Discover connects to the MCP server and returns its tools, named after the
+// server. It registers nothing: a registry is written by one goroutine only.
+func (c *MCPClient) Discover(ctx context.Context) ([]*Tool, error) {
+	infos, err := c.listTools(ctx)
 	if err != nil {
-		return fmt.Errorf("mcp %s: discover tools: %w", c.config.Name, err)
+		return nil, fmt.Errorf("mcp %s: discover tools: %w", c.config.Name, err)
 	}
 
-	for _, t := range tools {
-		mcpTool := t // capture
-		prefixedName := c.config.Name + "_" + mcpTool.Name
-
-		registry.Register(&Tool{
-			Name:        prefixedName,
+	tools := make([]*Tool, 0, len(infos))
+	for _, info := range infos {
+		mcpTool := info // capture
+		tools = append(tools, &Tool{
+			Name:        c.config.Name + "_" + mcpTool.Name,
 			Description: fmt.Sprintf("[MCP:%s] %s", c.config.Name, mcpTool.Description),
 			InputSchema: mcpTool.InputSchema,
 			Kind:        ToolKindMCP,
@@ -107,8 +107,7 @@ func (c *MCPClient) DiscoverAndRegister(ctx context.Context, registry *Registry)
 			},
 		})
 	}
-
-	return nil
+	return tools, nil
 }
 
 func (c *MCPClient) listTools(ctx context.Context) ([]mcpToolInfo, error) {
@@ -271,27 +270,37 @@ func (c *MCPClient) rpcCallSSE(ctx context.Context, method string, params interf
 	return nil, fmt.Errorf("mcp sse: no valid response received")
 }
 
-// RegisterMCPServers discovers and registers tools from all configured MCP servers.
+// RegisterMCPServers discovers and registers tools from all configured MCP
+// servers. The servers are asked in parallel, but their tools are registered
+// here, after every answer, in the configuration's order: the registry has no
+// lock (built at startup, read-only after), and two servers' tools under one
+// name always resolve the same way.
 func RegisterMCPServers(ctx context.Context, registry *Registry, servers []MCPServerConfig) []error {
-	var (
-		mu   sync.Mutex
-		errs []error
-		wg   sync.WaitGroup
-	)
-
-	for _, srv := range servers {
-		wg.Add(1)
-		go func(s MCPServerConfig) {
-			defer wg.Done()
-			client := NewMCPClient(s)
-			if err := client.DiscoverAndRegister(ctx, registry); err != nil {
-				mu.Lock()
-				errs = append(errs, err)
-				mu.Unlock()
-			}
-		}(srv)
+	type discovery struct {
+		tools []*Tool
+		err   error
 	}
-
+	found := make([]discovery, len(servers))
+	var wg sync.WaitGroup
+	for i, srv := range servers {
+		wg.Add(1)
+		go func(i int, s MCPServerConfig) {
+			defer wg.Done()
+			tools, err := NewMCPClient(s).Discover(ctx)
+			found[i] = discovery{tools, err}
+		}(i, srv)
+	}
 	wg.Wait()
+
+	var errs []error
+	for _, d := range found {
+		if d.err != nil {
+			errs = append(errs, d.err)
+			continue
+		}
+		for _, t := range d.tools {
+			registry.Register(t)
+		}
+	}
 	return errs
 }
