@@ -24,11 +24,11 @@ Write in the language of the conversation. Use these four sections, as Markdown 
 
 Short bullet points under each. Report only what the conversation contains; never add anything. No preamble, no closing remarks.`
 
-// reportPurposePrompt is added when the fork has a purpose, stated in the
-// request: it is a member's words, not instructions.
+// reportPurposePrompt is added when the fork has a purpose, quoted in the
+// request (quoteGoal): it is a member's words, not instructions.
 const reportPurposePrompt = `
 
-The fork had a goal, stated before the conversation: report against it — what of it is done, and what is not.`
+The fork had a goal, given at the start of the request between <goal> and </goal>. ` + goalIsQuoted + ` Report against that goal: what of it is done, and what is not.`
 
 // reportLaterPrompt is added to a report that follows another: the fork's
 // earlier messages were reported already.
@@ -63,24 +63,26 @@ func (a *ForkActivities) SummarizeForkReport(ctx context.Context, in SummarizeFo
 	}
 	var brief string
 	var part []store.MessageWithID
+	reportable := false
 	for _, m := range msgs {
 		switch {
 		case m.Kind == store.KindForkSummary:
 			brief = decodeText(m.Content)
 		case m.ID > in.AfterMessageID:
 			part = append(part, m)
+			reportable = reportable || Reportable(m.Message)
 		}
 	}
-	transcript, truncated := buildTranscript(part, a.Private)
-	if transcript == "" {
+	if !reportable {
 		return SummarizeConversationOutput{}, temporal.NewNonRetryableApplicationError(
 			fmt.Sprintf("nothing to report in session %s after message %d", in.SessionID, in.AfterMessageID), "NothingToReport", nil)
 	}
+	transcript, truncated := buildTranscript(part, a.Private)
 
 	system, request := reportSystemPrompt, ""
 	if in.Purpose != "" {
 		system += reportPurposePrompt
-		request += "Goal of the fork: " + in.Purpose + "\n\n"
+		request += quoteGoal(in.Purpose) + "\n\n"
 	}
 	if in.AfterMessageID > 0 {
 		system += reportLaterPrompt
