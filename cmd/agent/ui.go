@@ -384,8 +384,6 @@ func (u *ui) reportForm(w http.ResponseWriter, r *http.Request) {
 		msg = "Rien de nouveau à rapporter."
 	case errors.Is(err, session.ErrSummaryPending):
 		msg = "Le brief du fork est en cours d'écriture : patiente un instant."
-	case errors.Is(err, session.ErrAgentWorking):
-		msg = "L'agent du fork travaille : rapporte à la fin de son tour."
 	case errors.Is(err, session.ErrNotParentMember), errors.Is(err, session.ErrNoParent), errors.Is(err, session.ErrNotAFork):
 		msg = "Rapport impossible depuis cette session."
 	default:

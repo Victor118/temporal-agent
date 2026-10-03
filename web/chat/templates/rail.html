@@ -83,6 +83,7 @@
   <div class="note" style="margin-top:6px">Résume ce qui s'est fait ici depuis le dernier rapport et le poste dans la session parente, signé de ton nom : ses membres le liront, même ceux qui ne sont pas dans ce fork.</div>
   {{end}}
   {{with .Reason}}<div class="note" style="margin-top:6px">{{.}}</div>{{end}}
+  {{with .Partial}}<div class="note" style="margin-top:6px">{{.}}</div>{{end}}
   {{if and .Failed (not .Pending)}}<div class="error">Le dernier rapport n'a pas pu être écrit. Tu peux réessayer.</div>{{end}}
   {{if and .LastReportID (not .Refused)}}<div class="note" style="margin-top:6px">Dernier rapport : <a href="/s/{{.ParentSessionID}}#m{{.LastReportID}}">{{.LastReported}}</a></div>{{end}}
   {{with .Error}}<div class="error">{{.}}</div>{{end}}

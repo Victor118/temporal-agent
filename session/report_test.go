@@ -90,9 +90,6 @@ func TestReportToParent_Refusals(t *testing.T) {
 			st.session.LastReportedMessageID = 3
 			st.messages = append(st.messages, store.MessageWithID{ID: 4, Message: store.Message{Role: store.RoleAssistant}})
 		}, ErrNothingToReport},
-		"agent on a turn": {func(_ *memStore, tc *fakeTemporal) {
-			tc.byType = map[string][]string{"AgentWorkflow": {sid + "-turn-1"}}
-		}, ErrAgentWorking},
 	} {
 		t.Run(name, func(t *testing.T) {
 			st, tc := forkStore(), &fakeTemporal{}
@@ -136,11 +133,17 @@ func TestReportState(t *testing.T) {
 	}
 	tc.closedAt = nil
 
-	// The agent on a turn: the report waits for its end. A fork's summary
-	// being written is no turn.
-	working := &fakeTemporal{byType: map[string][]string{"AgentWorkflow": {sid + "-turn-1"}}}
-	if got, _ := newTest(st, working).ReportState(ctx, st.session, st.messages, victor); !got.AgentWorking || got.CanReport() {
-		t.Errorf("agent on a turn: %+v", got)
+	// The agent on a turn, or waiting on a member's answer: a report may go,
+	// covering what is written so far, and the page says so. A fork's
+	// summary being written is no turn.
+	for name, byType := range map[string]map[string][]string{
+		"on a turn":         {"AgentWorkflow": {sid + "-turn-1"}},
+		"asking a question": {"AgentWorkflow": {sid + "-turn-1"}, "AskUserWorkflow": {sid + "-tool-ask_user-1"}},
+	} {
+		working := &fakeTemporal{byType: byType}
+		if got, _ := newTest(st, working).ReportState(ctx, st.session, st.messages, victor); !got.CanReport() || !got.AgentWorking {
+			t.Errorf("agent %s: %+v", name, got)
+		}
 	}
 	summarizing := &fakeTemporal{running: []string{workflow.ForkWorkflowID(sid)}}
 	if got, _ := newTest(st, summarizing).ReportState(ctx, st.session, st.messages, victor); got.AgentWorking || !got.CanReport() {
@@ -172,10 +175,12 @@ func TestReportState(t *testing.T) {
 	}
 }
 
-// A report never ends between a tool call and its result: while the latest
-// turn waits on a call, the range stops before it, and what was written after
-// it (a member's message) waits for the next report. A call an earlier turn
-// left unanswered does not hold reports back.
+// A report never ends between a tool call and its result. The turns store a
+// call with its results, in one write, so a stored call without its result
+// does not happen today: the cut guards that invariant. Were one stored by
+// the latest turn, the range would stop before it, and what was written after
+// it (a member's message) would wait for the next report. A call an earlier
+// turn left unanswered does not hold reports back.
 func TestReportToParent_StopsBeforeAPendingToolCall(t *testing.T) {
 	call := func(id int64, key string, calls ...string) store.MessageWithID {
 		m := store.MessageWithID{ID: id, Key: key, Message: store.Message{Role: store.RoleAssistant}}
@@ -235,10 +240,14 @@ func TestReportToParent_StopsBeforeAPendingToolCall(t *testing.T) {
 
 // A page reads the fork's workflows once per few seconds, like the session
 // states; a report started drops them, and the next page sees it running.
+// The cache's clock stands still: two renders are within its TTL however
+// slow the machine.
 func TestReportState_WorkflowStatesShared(t *testing.T) {
 	ctx := context.Background()
 	st, tc := forkStore(), &fakeTemporal{}
 	s := newTest(st, tc)
+	at := time.Now()
+	s.statuses.now = func() time.Time { return at }
 	if _, err := s.ReportState(ctx, st.session, st.messages, victor); err != nil {
 		t.Fatal(err)
 	}
@@ -253,5 +262,44 @@ func TestReportState_WorkflowStatesShared(t *testing.T) {
 	tc.running = []string{workflow.ReportWorkflowID(sid, 0)}
 	if got, _ := s.ReportState(ctx, st.session, st.messages, victor); !got.Pending {
 		t.Errorf("after the click: %+v, want the report running", got)
+	}
+
+	// Past the TTL, a render reads them again.
+	read = tc.describes
+	at = at.Add(statusesTTL)
+	if _, err := s.ReportState(ctx, st.session, st.messages, victor); err != nil || tc.describes == read {
+		t.Errorf("render past the TTL: %d describes, want more than %d; %v", tc.describes, read, err)
+	}
+}
+
+// While the fork's agent is on a turn, a report covers what the turn wrote so
+// far; the next one starts after it, with the rest of the turn.
+func TestReportToParent_DuringATurn(t *testing.T) {
+	st := forkStore()
+	st.messages = append(st.messages,
+		store.MessageWithID{ID: 4, Key: store.HumanMessageKey("h4"), Message: store.Message{Role: store.RoleUser, Content: `"fetch the spec"`}},
+		store.MessageWithID{ID: 5, Key: "t2.0:0", Message: store.Message{Role: store.RoleAssistant, ToolCalls: []store.ToolCall{{ID: "c1", Name: "web_fetch"}}}},
+		store.MessageWithID{ID: 6, Key: "t2.0:1", Message: store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "c1", Content: "spec"}}},
+	)
+	working := func() *fakeTemporal {
+		return &fakeTemporal{byType: map[string][]string{"AgentWorkflow": {sid + "-turn-2"}}}
+	}
+	tc := working()
+	if err := newTest(st, tc).ReportToParent(context.Background(), sid, victor); err != nil {
+		t.Fatalf("report during a turn: %v", err)
+	}
+	if in := tc.inputs[0].(workflow.ReportToParentInput); in.From != 0 || in.UpTo != 6 {
+		t.Errorf("first report %+v, want up to 6", in)
+	}
+
+	// Posted; the turn goes on, and ends.
+	st.session.LastReportedMessageID = 6
+	st.messages = append(st.messages, store.MessageWithID{ID: 7, Key: "t2.0:2", Message: store.Message{Role: store.RoleAssistant, Content: `"the spec says CSV"`}})
+	tc = working()
+	if err := newTest(st, tc).ReportToParent(context.Background(), sid, victor); err != nil {
+		t.Fatalf("next report: %v", err)
+	}
+	if in := tc.inputs[0].(workflow.ReportToParentInput); in.From != 6 || in.UpTo != 7 {
+		t.Errorf("next report %+v, want 6 to 7", in)
 	}
 }

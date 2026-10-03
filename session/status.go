@@ -74,6 +74,16 @@ type statusCache struct {
 	// session states and dropped with them: the fork pages read them on
 	// every refresh (its summary's workflow, its report's).
 	workflows map[string]workflowState
+	// now is the clock the states age by; nil = time.Now. Tests set it.
+	now func() time.Time
+}
+
+// clock is the time now, as the cache tells it.
+func (c *statusCache) clock() time.Time {
+	if c.now != nil {
+		return c.now()
+	}
+	return time.Now()
 }
 
 // workflowState is where a workflow's latest run stands.
@@ -89,7 +99,7 @@ type workflowState struct {
 func (c *statusCache) get(ctx context.Context, load func(context.Context) map[string]Status) map[string]Status {
 	for {
 		c.mu.Lock()
-		if c.value != nil && time.Since(c.at) < statusesTTL {
+		if c.value != nil && c.clock().Sub(c.at) < statusesTTL {
 			v := c.value
 			c.mu.Unlock()
 			return v
@@ -123,7 +133,7 @@ func (c *statusCache) refresh(gen uint64, done chan struct{}, load func(context.
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.gen == gen {
-		c.value, c.at = v, time.Now()
+		c.value, c.at = v, c.clock()
 	}
 	if c.loading == done { // not replaced by a load started after an invalidation
 		c.loading = nil
@@ -136,22 +146,23 @@ func (c *statusCache) refresh(gen uint64, done chan struct{}, load func(context.
 // itself: one Describe, not four visibility queries.
 func (c *statusCache) workflow(ctx context.Context, id string, describe func(context.Context, string) workflowState) workflowState {
 	c.mu.Lock()
-	if w, ok := c.workflows[id]; ok && time.Since(w.at) < statusesTTL {
+	if w, ok := c.workflows[id]; ok && c.clock().Sub(w.at) < statusesTTL {
 		c.mu.Unlock()
 		return w
 	}
 	gen := c.gen
 	c.mu.Unlock()
 
-	at := time.Now()
+	at := c.clock()
 	w := describe(ctx, id)
 	w.at = at
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.gen == gen { // not read before an action that changed it
+		now := c.clock()
 		for k, old := range c.workflows {
-			if time.Since(old.at) >= statusesTTL {
+			if now.Sub(old.at) >= statusesTTL {
 				delete(c.workflows, k)
 			}
 		}

@@ -442,7 +442,7 @@ func (a *api) reportToParent(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, session.ErrNotParentMember):
 		http.Error(w, err.Error(), http.StatusForbidden)
 	case errors.Is(err, session.ErrNotAFork), errors.Is(err, session.ErrNoParent),
-		errors.Is(err, session.ErrSummaryPending), errors.Is(err, session.ErrAgentWorking), errors.Is(err, session.ErrNothingToReport):
+		errors.Is(err, session.ErrSummaryPending), errors.Is(err, session.ErrNothingToReport):
 		http.Error(w, err.Error(), http.StatusConflict)
 	case err != nil:
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -491,10 +491,12 @@ type reportInfo struct {
 	// member of it).
 	Refused        string `json:"refused,omitempty"`
 	SummaryPending bool   `json:"summary_pending,omitempty"`
-	AgentWorking   bool   `json:"agent_working,omitempty"` // the fork's agent is on a turn: report once it ends
-	Pending        bool   `json:"pending,omitempty"`
-	Failed         bool   `json:"failed,omitempty"`
-	NothingNew     bool   `json:"nothing_new,omitempty"`
+	// AgentWorking: the fork's agent is on a turn. A report covers what is
+	// written so far; the rest goes into the next one.
+	AgentWorking bool `json:"agent_working,omitempty"`
+	Pending      bool `json:"pending,omitempty"`
+	Failed       bool `json:"failed,omitempty"`
+	NothingNew   bool `json:"nothing_new,omitempty"`
 }
 
 // getSessionInfo describes a session and its place in a fork tree, as far as

@@ -75,7 +75,8 @@ func (p Page) SeveralAgents() bool { return len(p.Agents) > 1 }
 
 // ReportConfirm is what the report button asks before it posts: where the
 // report goes, to how many readers, under whose name. The fork's members may
-// not be the parent's.
+// not be the parent's. During an agent's turn, it says first that the report
+// stops where the turn stands.
 func (p Page) ReportConfirm() string {
 	where := "la session parente"
 	if p.Parent != nil && p.Parent.Accessible {
@@ -85,7 +86,11 @@ func (p Page) ReportConfirm() string {
 		}
 		where = "« " + title + " » (" + pluralize(p.Parent.Members, "membre") + ")"
 	}
-	return "Poster dans " + where + " un résumé de ce fork, signé de ton nom ?"
+	confirm := "Poster dans " + where + " un résumé de ce fork, signé de ton nom ?"
+	if p.Report != nil && p.Report.AgentWorking {
+		confirm = reportPartial + " " + confirm
+	}
+	return confirm
 }
 
 // Member is a session member, for the rail.
@@ -132,8 +137,6 @@ func (r ReportView) Reason() string {
 		return "Le rapport s'écrit. Il arrivera dans la session parente comme ton message, sans solliciter d'agent."
 	case r.SummaryPending:
 		return "Le brief du fork est en cours d'écriture."
-	case r.AgentWorking:
-		return "L'agent du fork travaille : le rapport attend la fin de son tour, pour le couvrir en entier."
 	case r.NothingNew && r.LastReportedAt != nil:
 		return "Rien de nouveau depuis le dernier rapport."
 	case r.NothingNew:
@@ -141,6 +144,18 @@ func (r ReportView) Reason() string {
 	}
 	return ""
 }
+
+// Partial says that a report sent now covers only part of the agent's turn,
+// in words; empty when the agent is not on one, or no report can be sent.
+func (r ReportView) Partial() string {
+	if !r.AgentWorking || !r.CanReport() {
+		return ""
+	}
+	return reportPartial
+}
+
+// reportPartial is what a report sent during an agent's turn covers.
+const reportPartial = "L'agent travaille : le rapport couvrira ce qui est écrit jusqu'ici, la suite ira dans le rapport suivant."
 
 // LastReported is when the latest report was posted, as the thread shows
 // times; empty for none.

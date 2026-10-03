@@ -213,9 +213,17 @@ func TestRender_ReportButton(t *testing.T) {
 			[]string{`hx-post="/s/fork/report" hx-target="#report"`, `⑂ Rapporter au parent</button>`,
 				`hx-confirm="Poster dans « root » (3 membres) un résumé de ce fork, signé de ton nom ?"`,
 				`<div class="note" style="margin-top:6px">Résume ce qui s'est fait ici depuis le dernier rapport`},
-			[]string{"disabled", "every 3s", "title="}},
+			[]string{"disabled", "every 3s", "title=", "L&#39;agent travaille"}},
+		// The agent on a turn: a report may go, and says it stops there.
 		"agent working": {session.ReportState{ParentSessionID: "root", AgentWorking: true},
-			[]string{"disabled", "L&#39;agent du fork travaille : le rapport attend la fin de son tour"}, nil},
+			[]string{`⑂ Rapporter au parent</button>`,
+				`hx-confirm="L&#39;agent travaille : le rapport couvrira ce qui est écrit jusqu&#39;ici, la suite ira dans le rapport suivant. Poster dans « root » (3 membres)`,
+				`<div class="note" style="margin-top:6px">L&#39;agent travaille : le rapport couvrira ce qui est écrit jusqu&#39;ici, la suite ira dans le rapport suivant.</div>`},
+			[]string{"disabled", "en entier", "attend la fin"}},
+		// Nothing to report while the agent works: the reason, not the
+		// partial report's note.
+		"agent working, nothing new": {session.ReportState{ParentSessionID: "root", AgentWorking: true, NothingNew: true},
+			[]string{"disabled", "Rien à rapporter pour l&#39;instant."}, []string{"la suite ira dans le rapport suivant.</div>"}},
 		"not a fork": {session.ReportState{Refused: session.ErrNotAFork},
 			[]string{"Cette session n&#39;est pas un fork"}, []string{"<button"}},
 		"pending": {session.ReportState{ParentSessionID: "root", Pending: true},
