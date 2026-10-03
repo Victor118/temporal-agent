@@ -228,4 +228,11 @@ agent/
 
 ## License
 
-MIT
+[PolyForm Noncommercial 1.0.0](LICENSE.md): free for personal use and any
+other noncommercial purpose, for individuals and for noncommercial
+organizations (charities, schools, public research, government). Any
+commercial use, a company's included, needs a commercial license: contact
+the author.
+
+Versions up to commit `0b97727` were published under the MIT license and
+remain available under it.
