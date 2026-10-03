@@ -14,6 +14,7 @@ import (
 
 	"github.com/victor/temporal-agent/auth"
 	"github.com/victor/temporal-agent/session"
+	"github.com/victor/temporal-agent/sse"
 	"github.com/victor/temporal-agent/store"
 	"github.com/victor/temporal-agent/web/chat"
 )
@@ -26,6 +27,9 @@ type ui struct {
 	auth     *auth.Service
 	sessions *session.Service
 	store    readStore
+	// hub tells where a page stands in its streams: the page connects from
+	// there, and is sent what was published while it loaded.
+	hub *sse.Hub
 }
 
 // --- Access ---
@@ -113,6 +117,12 @@ func goTo(w http.ResponseWriter, r *http.Request, path string) {
 // buildPage gathers what the interface shows for a session (or for none: the
 // welcome page), as the user may see it.
 func (u *ui) buildPage(ctx context.Context, me *store.User, sessionID, view string) (*chat.Page, error) {
+	// Before anything is read: an event published while the page loads is
+	// sent again when its stream connects, never lost.
+	var streamFrom string
+	if sessionID != "" {
+		streamFrom = u.hub.Position(sessionID)
+	}
 	sessions, err := u.store.ListSessionsByUser(ctx, me.ID)
 	if err != nil {
 		return nil, err
@@ -136,6 +146,7 @@ func (u *ui) buildPage(ctx context.Context, me *store.User, sessionID, view stri
 		return nil, session.ErrNotFound
 	}
 	p.Crumbs = chat.Path(p.Node)
+	p.StreamFrom = streamFrom
 	sess := p.Node.Session
 	p.IsCreator = sess.CreatedBy == me.ID
 	p.AgentMode = sess.AgentMode

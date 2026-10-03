@@ -148,14 +148,14 @@ func TestInternalNotify_RequiresTheKey(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			hub := sse.NewHub()
-			ch := hub.Subscribe("s1")
-			defer hub.Unsubscribe("s1", ch)
+			sub := hub.Subscribe("s1", "")
+			defer hub.Unsubscribe("s1", sub)
 			code := post(handleInternalNotify(hub, c.key), "/internal/notify", event, map[string]string{"Authorization": c.given})
 			if code != c.want {
 				t.Fatalf("%d, want %d", code, c.want)
 			}
 			select {
-			case <-ch:
+			case <-sub.C:
 				if c.want != http.StatusNoContent {
 					t.Error("a refused notification reached the session")
 				}
@@ -172,14 +172,14 @@ func TestInternalNotify_RequiresTheKey(t *testing.T) {
 // published nowhere.
 func TestInternalNotify_AnEmptySessionIsAKeyCheck(t *testing.T) {
 	hub := sse.NewHub()
-	ch := hub.Subscribe("")
-	defer hub.Unsubscribe("", ch)
+	sub := hub.Subscribe("", "")
+	defer hub.Unsubscribe("", sub)
 	code := post(handleInternalNotify(hub, "k3y"), "/internal/notify", `{}`, map[string]string{"Authorization": "Bearer k3y"})
 	if code != http.StatusNoContent {
 		t.Fatalf("%d, want 204", code)
 	}
 	select {
-	case <-ch:
+	case <-sub.C:
 		t.Error("the check was published")
 	case <-time.After(20 * time.Millisecond):
 	}

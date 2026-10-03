@@ -56,13 +56,15 @@ func render(t *testing.T, name string, data any) string {
 }
 
 func TestRender_Pages(t *testing.T) {
-	page := render(t, "page", testPage("thread"))
+	p := testPage("thread")
+	p.StreamFrom = "e-7"
+	page := render(t, "page", p)
 	for _, want := range []string{
-		`sse-connect="/sessions/fork/stream"`, // live updates wired
-		`hx-post="/s/fork/messages"`,          // composer
-		`<span class="mention">@agent</span>`, // mention highlighted
-		`&lt;b&gt;hi&lt;/b&gt;`,               // a member's HTML escaped
-		`<strong>ok</strong>`,                 // the agent's Markdown rendered
+		`sse-connect="/sessions/fork/stream?last_event_id=e-7"`, // live updates wired, from where the page stands
+		`hx-post="/s/fork/messages"`,                            // composer
+		`<span class="mention">@agent</span>`,                   // mention highlighted
+		`&lt;b&gt;hi&lt;/b&gt;`,                                 // a member's HTML escaped
+		`<strong>ok</strong>`,                                   // the agent's Markdown rendered
 		`<span class="tool">grep</span>`,
 		`name="message_id" value="9"`, // fork from a message
 		`href="/s/f2"`,                // a fork of a message

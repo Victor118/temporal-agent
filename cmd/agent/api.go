@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/victor/temporal-agent/activity"
 	"github.com/victor/temporal-agent/auth"
 	"github.com/victor/temporal-agent/session"
 	"github.com/victor/temporal-agent/sse"
@@ -337,7 +339,9 @@ func (a *api) streamTopic(w http.ResponseWriter, r *http.Request, topic string) 
 }
 
 // relaySSE relays hub's events for topic over SSE until the client goes away,
-// with a comment every keepAlive while nothing else is sent.
+// with a comment every keepAlive while nothing else is sent. Each event goes
+// with its ID: a client that reconnects is first sent the events it missed,
+// or a reload event when the hub no longer has them.
 func relaySSE(w http.ResponseWriter, r *http.Request, hub *sse.Hub, topic string, keepAlive time.Duration) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -349,8 +353,15 @@ func relaySSE(w http.ResponseWriter, r *http.Request, hub *sse.Hub, topic string
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	ch := hub.Subscribe(topic)
-	defer hub.Unsubscribe(topic, ch)
+	sub := hub.Subscribe(topic, lastEventID(r))
+	defer hub.Unsubscribe(topic, sub)
+	if sub.Stale {
+		writeSSE(w, sse.Event{ID: sub.At, SSEEvent: activity.SSEEvent{Type: sseReload, Data: []byte("{}")}})
+	}
+	for _, event := range sub.Missed {
+		writeSSE(w, event)
+	}
+	flusher.Flush()
 
 	ping := time.NewTicker(keepAlive)
 	defer ping.Stop()
@@ -364,14 +375,34 @@ func relaySSE(w http.ResponseWriter, r *http.Request, hub *sse.Hub, topic string
 			// A comment line: EventSource ignores it.
 			fmt.Fprint(w, ": ping\n\n")
 			flusher.Flush()
-		case event, ok := <-ch:
-			if !ok {
+		case event, ok := <-sub.C:
+			if !ok { // too slow: dropped, the client reconnects and catches up
 				return
 			}
-			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event.Type, string(event.Data))
+			writeSSE(w, event)
 			flusher.Flush()
 		}
 	}
+}
+
+// sseReload tells a client its stream lost events it cannot be sent: what it
+// shows must be reloaded.
+const sseReload = "reload"
+
+// lastEventID is the ID of the last event a reconnecting client got:
+// EventSource sends it in a header when it reconnects on its own; the page
+// passes it in the URL, where it starts from the position it was rendered
+// at, and where the htmx extension's reconnection (a new EventSource, which
+// sends no header) finds it. The header, when there is one, is the latest.
+func lastEventID(r *http.Request) string {
+	if id := r.Header.Get("Last-Event-ID"); id != "" {
+		return id
+	}
+	return r.URL.Query().Get("last_event_id")
+}
+
+func writeSSE(w io.Writer, event sse.Event) {
+	fmt.Fprintf(w, "id: %s\nevent: %s\ndata: %s\n\n", event.ID, event.Type, event.Data)
 }
 
 type answerRequest struct {

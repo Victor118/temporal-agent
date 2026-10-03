@@ -22,7 +22,7 @@
       {{if not .Node}}{{template "welcome" .}}
       {{else if eq .View "map"}}{{template "map" .}}
       {{else}}
-      <div style="display:contents" hx-ext="sse" sse-connect="/sessions/{{.Node.Session.SessionID}}/stream">
+      <div style="display:contents" hx-ext="sse" sse-connect="/sessions/{{.Node.Session.SessionID}}/stream?last_event_id={{.StreamFrom}}">
         {{template "thread-pane" .}}
         {{template "composer" .}}
       </div>
@@ -47,6 +47,13 @@ if (!window.chatWired) {
   document.body.addEventListener('htmx:configRequest', function (e) {
     var t = e.detail.target, held = e.detail.verb === 'get' && t && t.querySelector(':scope > [data-version]');
     if (held) e.detail.headers['X-Fragment-Version'] = held.dataset.version;
+  });
+  // EventSource sends the ID of its last event when it reconnects, but the
+  // htmx extension recreates it after an error, and the new one sends none:
+  // the stream's URL keeps it, so the server replays what was missed.
+  document.body.addEventListener('htmx:sseMessage', function (e) {
+    var source = e.target.closest('[sse-connect]'), id = e.detail && e.detail.lastEventId;
+    if (source && id) source.setAttribute('sse-connect', source.getAttribute('sse-connect').split('?')[0] + '?last_event_id=' + encodeURIComponent(id));
   });
   // The thread opens at its end, or on the message a link points to (#m<id>).
   function toHash() {

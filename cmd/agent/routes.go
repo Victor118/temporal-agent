@@ -59,7 +59,7 @@ func newServer(cfg *config.Config, st serverStore, tc session.Temporal, hub *sse
 		auth:     authSvc,
 		sessions: sessions,
 		api:      &api{auth: authSvc, sessions: sessions, store: st, hub: hub},
-		ui:       &ui{auth: authSvc, sessions: sessions, store: st},
+		ui:       &ui{auth: authSvc, sessions: sessions, store: st, hub: hub},
 		queues:   &activityQueuesAPI{store: st, workflowQueue: cfg.WorkflowQueue},
 		admin:    adminUI,
 	}

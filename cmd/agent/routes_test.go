@@ -772,3 +772,15 @@ func TestUI_UnchangedFragmentsAreNoContent(t *testing.T) {
 		t.Errorf("report after everything was reported: %d %s", w.Code, w.Body)
 	}
 }
+
+// A page's stream starts where the page was rendered: what is published
+// while it loads is sent again when the stream connects.
+func TestUI_TheStreamStartsWhereThePageStands(t *testing.T) {
+	h, _ := newRouteTestWith(t, &fakeTemporal{})
+	bob := logIn(t, h, "bob@example.com")
+	body := get(t, h, "/s/s1", "", bob).Body.String()
+	m := regexp.MustCompile(`sse-connect="/sessions/s1/stream\?last_event_id=([0-9a-z]+-[0-9]+)"`).FindStringSubmatch(body)
+	if m == nil {
+		t.Fatalf("no stream position on the page: %s", body)
+	}
+}
