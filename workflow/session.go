@@ -253,8 +253,11 @@ func processTurn(actCtx, ctx workflow.Context, input SessionWorkflowInput, userM
 	childCtx, cancelChild := workflow.WithCancel(ctx)
 	childCtx = workflow.WithChildOptions(childCtx, workflow.ChildWorkflowOptions{
 		WorkflowID: fmt.Sprintf("%s-turn-%d", input.SessionID, state.TurnCount),
-		// A cancelled turn still writes what it produced, then returns it:
-		// the session waits for that, not only for the request to be sent.
+		// A cancelled turn still writes what it produced, then returns it,
+		// and the session waits for that: a child's future settles only on
+		// the child's close, cancelled or not (the SDK's child-workflow
+		// semantics). This option says the intent; the SDK (v1.33) does not
+		// read it for a child.
 		WaitForCancellation: true,
 	})
 
