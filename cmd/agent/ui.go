@@ -119,11 +119,7 @@ func goTo(w http.ResponseWriter, r *http.Request, path string) {
 func (u *ui) buildPage(ctx context.Context, me *store.User, sessionID, view string) (*chat.Page, error) {
 	// Before anything is read: an event published while the page loads is
 	// sent again when its stream connects, never lost.
-	var streamFrom string
-	if sessionID != "" {
-		streamFrom = u.hub.Position(sessionID)
-	}
-	treeFrom := u.hub.Position(session.TreeTopic(me.ID))
+	streamFrom := u.hub.Position(pageTopics(me, sessionID)...)
 	sessions, err := u.store.ListSessionsByUser(ctx, me.ID)
 	if err != nil {
 		return nil, err
@@ -133,7 +129,7 @@ func (u *ui) buildPage(ctx context.Context, me *store.User, sessionID, view stri
 		return nil, err
 	}
 	statuses := u.sessions.Statuses(ctx)
-	p := &chat.Page{Me: chat.UserPerson(me), IsAdmin: me.IsAdmin(), View: view, TreeStreamFrom: treeFrom}
+	p := &chat.Page{Me: chat.UserPerson(me), IsAdmin: me.IsAdmin(), View: view, StreamFrom: streamFrom}
 	p.Roots = chat.BuildTree(sessions, stats, statuses, sessionID)
 	if notes, err := u.store.LoadMessagesWithID(ctx, notificationsOf(me.ID)); err == nil {
 		p.Notifications = len(notes)
@@ -147,7 +143,6 @@ func (u *ui) buildPage(ctx context.Context, me *store.User, sessionID, view stri
 		return nil, session.ErrNotFound
 	}
 	p.Crumbs = chat.Path(p.Node)
-	p.StreamFrom = streamFrom
 	sess := p.Node.Session
 	p.IsCreator = sess.CreatedBy == me.ID
 	p.AgentMode = sess.AgentMode
@@ -327,10 +322,26 @@ func (u *ui) treeFragment(w http.ResponseWriter, r *http.Request) {
 	chat.RenderFragment(w, "tree-items", &chat.Page{Roots: chat.BuildTree(sessions, stats, u.sessions.Statuses(r.Context()), current)}, r.Header.Get(chat.VersionHeader))
 }
 
-// treeStream rings the user's tree when one of their sessions changes: a
-// turn, a question, a message, a fork, a member.
+// pageTopics are what a page's stream carries: the session's events, for the
+// thread and the rail, and the user's tree's (session.TreeTopic). One stream
+// per page: a browser holds few connections to a server (six over HTTP/1.1),
+// and every tab keeps its stream open.
+func pageTopics(me *store.User, sessionID string) []string {
+	if sessionID == "" {
+		return []string{session.TreeTopic(me.ID)}
+	}
+	return []string{sessionID, session.TreeTopic(me.ID)}
+}
+
+// treeStream is the stream of a page with no session: the tree's alone.
 func (u *ui) treeStream(w http.ResponseWriter, r *http.Request) {
-	relaySSE(w, r, u.hub, session.TreeTopic(auth.UserFrom(r.Context()).ID), sseKeepAlive)
+	relaySSE(w, r, u.hub, sseKeepAlive, pageTopics(auth.UserFrom(r.Context()), "")...)
+}
+
+// sessionStream is a session page's stream: its session's events and the
+// user's tree's.
+func (u *ui) sessionStream(w http.ResponseWriter, r *http.Request) {
+	relaySSE(w, r, u.hub, sseKeepAlive, pageTopics(auth.UserFrom(r.Context()), chi.URLParam(r, "id"))...)
 }
 
 // --- Actions ---

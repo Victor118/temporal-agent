@@ -43,11 +43,10 @@ type Page struct {
 	Node    *TreeNode   // the current session; nil on the welcome page
 	Crumbs  []*TreeNode // root down to Node
 	View    string      // "thread" or "map"
-	// StreamFrom and TreeStreamFrom are the IDs of the last events of the
-	// session's stream and of the user's tree's the page has seen: the
-	// streams connect from there.
-	StreamFrom     string
-	TreeStreamFrom string
+	// StreamFrom is the ID of the last event of the page's stream (the
+	// session's and the user's tree's) the page has seen: it connects from
+	// there.
+	StreamFrom string
 
 	Thread  []ThreadItem
 	Working bool // the agent is on a turn

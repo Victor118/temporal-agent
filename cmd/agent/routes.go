@@ -118,6 +118,7 @@ func (s *server) routes() http.Handler {
 				r.Get("/", u.sessionPage)
 				r.Get("/map", u.mapPage)
 				r.Get("/thread", u.threadFragment)
+				r.Get("/stream", u.sessionStream)
 				r.Post("/messages", u.sendForm)
 				r.Post("/fork", u.forkForm)
 				r.Get("/report", u.reportFragment)

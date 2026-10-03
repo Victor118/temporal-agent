@@ -30,7 +30,7 @@ func TestNewHTTPServer_Timeouts(t *testing.T) {
 func TestRelaySSE_PingsWhileIdle(t *testing.T) {
 	hub := sse.NewHub()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		relaySSE(w, r, hub, "s1", 10*time.Millisecond)
+		relaySSE(w, r, hub, 10*time.Millisecond, "s1")
 	}))
 	defer srv.Close()
 
@@ -111,7 +111,7 @@ func nextEvent(t *testing.T, lines *bufio.Scanner) string {
 func TestRelaySSE_ReplaysWhatAReconnectionMissed(t *testing.T) {
 	hub := sse.NewHub()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		relaySSE(w, r, hub, "s1", time.Hour)
+		relaySSE(w, r, hub, time.Hour, "s1")
 	}))
 	defer srv.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

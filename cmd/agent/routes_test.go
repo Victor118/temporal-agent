@@ -790,7 +790,7 @@ func TestUI_TheStreamStartsWhereThePageStands(t *testing.T) {
 	h, _ := newRouteTestWith(t, &fakeTemporal{})
 	bob := logIn(t, h, "bob@example.com")
 	body := get(t, h, "/s/s1", "", bob).Body.String()
-	m := regexp.MustCompile(`sse-connect="/sessions/s1/stream\?last_event_id=([0-9a-z]+-[0-9]+)"`).FindStringSubmatch(body)
+	m := regexp.MustCompile(`sse-connect="/s/s1/stream\?last_event_id=([0-9a-z]+-[0-9]+)"`).FindStringSubmatch(body)
 	if m == nil {
 		t.Fatalf("no stream position on the page: %s", body)
 	}
@@ -847,7 +847,7 @@ func TestUI_TheTreeStreamRings(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	open := func(email string) *bufio.Scanner {
-		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/tree/stream?last_event_id="+hub.Position(""), nil)
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/tree/stream?last_event_id="+hub.Position(), nil)
 		req.AddCookie(logIn(t, h, email))
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil || resp.StatusCode != http.StatusOK {
@@ -856,6 +856,7 @@ func TestUI_TheTreeStreamRings(t *testing.T) {
 		t.Cleanup(func() { resp.Body.Close() })
 		return bufio.NewScanner(resp.Body)
 	}
+	from := hub.Position()
 	bob, carol := open("bob@example.com"), open("carol@example.com")
 
 	data, _ := json.Marshal(workflow.TurnEvent{AgentID: "default", Turn: "k"})
@@ -863,6 +864,19 @@ func TestUI_TheTreeStreamRings(t *testing.T) {
 	if got := nextEvent(t, bob); !strings.HasSuffix(got, " "+session.EventTreeChanged) {
 		t.Errorf("bob's tree: %q", got)
 	}
+	// A session page has one stream: the session's events, and the tree's.
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/s/s1/stream?last_event_id="+from, nil)
+	req.AddCookie(logIn(t, h, "bob@example.com"))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("session stream: %v %v", err, resp)
+	}
+	defer resp.Body.Close()
+	page := bufio.NewScanner(resp.Body)
+	if a, b := nextEvent(t, page), nextEvent(t, page); !strings.HasSuffix(a, " "+session.EventTreeChanged) || !strings.HasSuffix(b, " "+workflow.EventTurnStarted) {
+		t.Errorf("session page stream: %q, %q", a, b)
+	}
+
 	// Carol is no member of s1: the next thing her stream says is what came
 	// to her tree after, not s1's change.
 	hub.Publish(session.TreeTopic("u-carol"), activity.SSEEvent{Type: "marker", Data: []byte(`{}`)})

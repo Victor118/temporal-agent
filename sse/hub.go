@@ -8,6 +8,8 @@ package sse
 
 import (
 	"fmt"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -46,16 +48,19 @@ type Hub struct {
 	idle  time.Duration
 	now   func() time.Time
 
-	mu        sync.Mutex
-	seq       uint64
-	topics    map[string]*topic
-	swept     time.Time
+	mu     sync.Mutex
+	seq    uint64
+	topics map[string]*topic
+	swept  time.Time
+	// dropped is the last seq of the topics swept: a topic created anew may
+	// have had events up to it.
+	dropped   uint64
 	observers []func(topic string, ev activity.SSEEvent)
 }
 
 // topic is what a hub holds for one topic.
 type topic struct {
-	subs []chan Event
+	subs []*subscriber
 	// recent are its latest events, oldest first, at most keep.
 	recent []Event
 	seqs   []uint64 // the seq of each of recent
@@ -64,6 +69,22 @@ type topic struct {
 	floor uint64
 	// used is when it last published or lost a subscriber.
 	used time.Time
+}
+
+// subscriber is a client's channel, on one or more topics. Its fields are
+// guarded by the hub's lock.
+type subscriber struct {
+	ch     chan Event
+	closed bool
+	topics []string
+}
+
+// end closes the subscriber's channel, once.
+func (s *subscriber) end() {
+	if !s.closed {
+		s.closed = true
+		close(s.ch)
+	}
 }
 
 // NewHub returns a hub keeping DefaultKeep events per topic.
@@ -106,7 +127,7 @@ func (h *Hub) Publish(name string, event activity.SSEEvent) {
 	t := h.topic(name)
 	h.seq++
 	ev := Event{ID: h.id(h.seq), SSEEvent: event}
-	if len(t.recent) == h.keep {
+	for len(t.recent) >= h.keep {
 		t.floor = t.seqs[0]
 		t.recent, t.seqs = t.recent[1:], t.seqs[1:]
 	}
@@ -114,12 +135,15 @@ func (h *Hub) Publish(name string, event activity.SSEEvent) {
 	t.used = h.now()
 
 	kept := t.subs[:0]
-	for _, ch := range t.subs {
+	for _, sub := range t.subs {
+		if sub.closed { // dropped from another of its topics
+			continue
+		}
 		select {
-		case ch <- ev:
-			kept = append(kept, ch)
+		case sub.ch <- ev:
+			kept = append(kept, sub)
 		default:
-			close(ch)
+			sub.end()
 		}
 	}
 	clear(t.subs[len(kept):])
@@ -130,80 +154,96 @@ func (h *Hub) Publish(name string, event activity.SSEEvent) {
 type Subscription struct {
 	C <-chan Event
 	// Missed are the events published after the client's last one, which it
-	// did not get: they come before anything on C.
+	// did not get, in order: they come before anything on C.
 	Missed []Event
 	// Stale: the client's last event is unknown here (another epoch, or
-	// older than what the topic keeps). It must reload what it shows.
+	// older than what a topic keeps). It must reload what it shows.
 	Stale bool
 	// At is the ID of the last event published before the subscription:
 	// where the client stands once it has reloaded.
 	At string
 
-	ch chan Event
+	sub *subscriber
 }
 
-// Subscribe starts a subscriber of the topic. lastID is the ID of the last
-// event the client got, or the position its page was rendered at (Position);
-// empty for a client that missed nothing. The caller must Unsubscribe.
-func (h *Hub) Subscribe(name, lastID string) *Subscription {
+// Subscribe starts a subscriber of one or more topics, on one channel: a
+// page has one stream, whatever it shows. lastID is the ID of the last event
+// the client got, or the position its page was rendered at (Position); empty
+// for a client that missed nothing. Event IDs count the events of all
+// topics, so one ID tells where the client stands in each. The caller must
+// Unsubscribe.
+func (h *Hub) Subscribe(lastID string, names ...string) *Subscription {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.sweep()
-	t := h.topic(name)
-	ch := make(chan Event, subscriberBuffer)
-	t.subs = append(t.subs, ch)
-	sub := &Subscription{C: ch, ch: ch, At: h.id(h.seq)}
-	if lastID == "" {
-		return sub
+	sub := &subscriber{ch: make(chan Event, subscriberBuffer), topics: names}
+	last, known := h.parse(lastID)
+	type missed struct {
+		seq uint64
+		ev  Event
 	}
-	last, ok := h.parse(lastID)
-	if !ok || last < t.floor {
-		sub.Stale = true
-		return sub
-	}
-	for i, seq := range t.seqs {
-		if seq > last {
-			sub.Missed = append(sub.Missed, t.recent[i:]...)
-			break
+	var all []missed
+	stale := false
+	for _, name := range names {
+		t := h.topic(name)
+		t.subs = append(t.subs, sub)
+		if lastID == "" {
+			continue
+		}
+		if !known || last < t.floor {
+			stale = true
+			continue
+		}
+		for i, seq := range t.seqs {
+			if seq > last {
+				all = append(all, missed{seq, t.recent[i]})
+			}
 		}
 	}
-	return sub
+	s := &Subscription{C: sub.ch, At: h.id(h.seq), Stale: stale, sub: sub}
+	if !stale {
+		sort.Slice(all, func(i, j int) bool { return all[i].seq < all[j].seq })
+		for _, m := range all {
+			s.Missed = append(s.Missed, m.ev)
+		}
+	}
+	return s
 }
 
 // Unsubscribe ends a subscriber and closes its channel, unless a Publish it
 // lagged behind has closed it already.
-func (h *Hub) Unsubscribe(name string, sub *Subscription) {
+func (h *Hub) Unsubscribe(s *Subscription) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	t, ok := h.topics[name]
-	if !ok {
-		return
-	}
-	for i, ch := range t.subs {
-		if ch == sub.ch {
-			t.subs = append(t.subs[:i], t.subs[i+1:]...)
-			close(ch)
-			break
+	for _, name := range s.sub.topics {
+		t, ok := h.topics[name]
+		if !ok {
+			continue
 		}
+		t.subs = slices.DeleteFunc(t.subs, func(sub *subscriber) bool { return sub == s.sub })
+		t.used = h.now()
 	}
-	t.used = h.now()
+	s.sub.end()
 }
 
 // Position is the ID of the last event published: a page rendered now has
-// seen every event up to it, and its stream starts from there.
-func (h *Hub) Position(name string) string {
+// seen every event of its topics up to it, and its stream starts from there.
+func (h *Hub) Position(names ...string) string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.sweep()
-	h.topic(name).used = h.now()
+	for _, name := range names {
+		h.topic(name).used = h.now()
+	}
 	return h.id(h.seq)
 }
 
-// topic returns the topic, created knowing every event from now on.
+// topic returns the topic. One created anew had no events, unless it was
+// swept: it knows every event after the swept ones.
 func (h *Hub) topic(name string) *topic {
 	t, ok := h.topics[name]
 	if !ok {
-		t = &topic{floor: h.seq, used: h.now()}
+		t = &topic{floor: h.dropped, used: h.now()}
 		h.topics[name] = t
 	}
 	return t
@@ -219,6 +259,10 @@ func (h *Hub) sweep() {
 	h.swept = now
 	for name, t := range h.topics {
 		if len(t.subs) == 0 && now.Sub(t.used) >= h.idle {
+			h.dropped = max(h.dropped, t.floor)
+			if n := len(t.seqs); n > 0 {
+				h.dropped = max(h.dropped, t.seqs[n-1])
+			}
 			delete(h.topics, name)
 		}
 	}

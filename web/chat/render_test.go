@@ -57,7 +57,7 @@ func render(t *testing.T, name string, data any) string {
 
 func TestRender_Pages(t *testing.T) {
 	p := testPage("thread")
-	p.StreamFrom, p.TreeStreamFrom = "e-7", "t-3"
+	p.StreamFrom = "e-7"
 	page := render(t, "page", p)
 	for _, want := range []string{
 		`hx-post="/s/fork/messages"`,          // composer
@@ -106,8 +106,8 @@ func TestRender_Pages(t *testing.T) {
 	}
 	// The streams ring the bell; the polls are a slow fallback.
 	for _, want := range []string{
-		`<div class="columns" sse-connect="/sessions/fork/stream?last_event_id=e-7">`,
-		`<aside class="col-tree" sse-connect="/tree/stream?last_event_id=t-3">`,
+		`<div class="columns" sse-connect="/s/fork/stream?last_event_id=e-7">`, // one stream, from where the page stands
+		`<aside class="col-tree">`,
 		`hx-trigger="sse:changed, sse:reload, every 60s"`,
 		`sse:turn_done, sse:reload, every 60s"`,
 	} {
@@ -140,8 +140,8 @@ func TestRender_Pages(t *testing.T) {
 
 	welcome := testPage("thread")
 	welcome.Node, welcome.Crumbs = nil, nil
-	if !strings.Contains(render(t, "page", welcome), "Nouvelle session") {
-		t.Error("welcome page")
+	if out := render(t, "page", welcome); !strings.Contains(out, "Nouvelle session") || !strings.Contains(out, `sse-connect="/tree/stream?last_event_id=`) {
+		t.Error("welcome page, its tree's stream")
 	}
 
 	frag := testPage("thread")

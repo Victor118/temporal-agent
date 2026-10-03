@@ -22,8 +22,8 @@ func types(events []Event) []string {
 
 func TestHub_DeliversToSubscribers(t *testing.T) {
 	h := NewHub()
-	a, b := h.Subscribe("s1", ""), h.Subscribe("s1", "")
-	other := h.Subscribe("s2", "")
+	a, b := h.Subscribe("", "s1"), h.Subscribe("", "s1")
+	other := h.Subscribe("", "s2")
 	h.Publish("s1", ev("message"))
 
 	for _, sub := range []*Subscription{a, b} {
@@ -37,7 +37,7 @@ func TestHub_DeliversToSubscribers(t *testing.T) {
 	default:
 	}
 
-	h.Unsubscribe("s1", a)
+	h.Unsubscribe(a)
 	if _, open := <-a.C; open {
 		t.Error("an unsubscribed channel stays open")
 	}
@@ -53,28 +53,28 @@ func TestHub_DeliversToSubscribers(t *testing.T) {
 func TestHub_ReplaysWhatAClientMissed(t *testing.T) {
 	h := NewHub()
 	from := h.Position("s1")
-	sub := h.Subscribe("s1", "")
+	sub := h.Subscribe("", "s1")
 	h.Publish("s1", ev("user_message"))
 	h.Publish("s2", ev("elsewhere"))
 	h.Publish("s1", ev("turn_started"))
 	first := <-sub.C
 	<-sub.C
-	h.Unsubscribe("s1", sub)
+	h.Unsubscribe(sub)
 	h.Publish("s1", ev("message"))
 	h.Publish("s1", ev("turn_done"))
 
-	again := h.Subscribe("s1", first.ID)
-	defer h.Unsubscribe("s1", again)
+	again := h.Subscribe(first.ID, "s1")
+	defer h.Unsubscribe(again)
 	if got := fmt.Sprint(types(again.Missed)); again.Stale || got != "[turn_started message turn_done]" {
 		t.Errorf("missed %s (stale %v)", got, again.Stale)
 	}
-	if page := h.Subscribe("s1", from); fmt.Sprint(types(page.Missed)) != "[user_message turn_started message turn_done]" {
+	if page := h.Subscribe(from, "s1"); fmt.Sprint(types(page.Missed)) != "[user_message turn_started message turn_done]" {
 		t.Errorf("from the page's position: %v", types(page.Missed))
 	}
-	if now := h.Subscribe("s1", h.Position("s1")); now.Stale || len(now.Missed) != 0 {
+	if now := h.Subscribe(h.Position("s1"), "s1"); now.Stale || len(now.Missed) != 0 {
 		t.Errorf("a client up to date: %+v", now)
 	}
-	if plain := h.Subscribe("s1", ""); plain.Stale || len(plain.Missed) != 0 {
+	if plain := h.Subscribe("", "s1"); plain.Stale || len(plain.Missed) != 0 {
 		t.Errorf("a plain subscriber: %+v", plain)
 	}
 }
@@ -84,7 +84,7 @@ func TestHub_ReplaysWhatAClientMissed(t *testing.T) {
 func TestHub_AGapLeftTheBufferIsStale(t *testing.T) {
 	h := NewHub()
 	h.keep = 3
-	sub := h.Subscribe("s1", "")
+	sub := h.Subscribe("", "s1")
 	h.Publish("s1", ev("a"))
 	last := (<-sub.C).ID
 	for i := 0; i < 10; i++ {
@@ -92,12 +92,12 @@ func TestHub_AGapLeftTheBufferIsStale(t *testing.T) {
 	}
 	h.Publish("s1", ev("b"))
 	h.Publish("s1", ev("c"))
-	if s := h.Subscribe("s1", last); s.Stale || fmt.Sprint(types(s.Missed)) != "[b c]" {
+	if s := h.Subscribe(last, "s1"); s.Stale || fmt.Sprint(types(s.Missed)) != "[b c]" {
 		t.Errorf("within the buffer: %v (stale %v)", types(s.Missed), s.Stale)
 	}
 	h.Publish("s1", ev("d"))
 	h.Publish("s1", ev("e")) // a is gone: b c d e do not fit in 3
-	s := h.Subscribe("s1", last)
+	s := h.Subscribe(last, "s1")
 	if !s.Stale || len(s.Missed) != 0 {
 		t.Errorf("past the buffer: %v (stale %v)", types(s.Missed), s.Stale)
 	}
@@ -114,7 +114,7 @@ func TestHub_AnotherEpochIsStale(t *testing.T) {
 	id := old.Position("s1")
 	h.Publish("s1", ev("message"))
 	for _, last := range []string{id, h.epoch + "-99", "garbage", h.epoch + "-x"} {
-		if s := h.Subscribe("s1", last); !s.Stale {
+		if s := h.Subscribe(last, "s1"); !s.Stale {
 			t.Errorf("%q is not stale", last)
 		}
 	}
@@ -134,7 +134,7 @@ func TestHub_IdleTopicsGo(t *testing.T) {
 	if _, ok := h.topics["s1"]; ok {
 		t.Fatal("an idle topic stayed")
 	}
-	if s := h.Subscribe("s1", last); !s.Stale {
+	if s := h.Subscribe(last, "s1"); !s.Stale {
 		t.Error("a client of a dropped topic does not reload")
 	}
 }
@@ -143,7 +143,7 @@ func TestHub_IdleTopicsGo(t *testing.T) {
 // stream ends, and its client reconnects and catches up.
 func TestHub_ASlowSubscriberIsDropped(t *testing.T) {
 	h := NewHub()
-	slow := h.Subscribe("s1", "")
+	slow := h.Subscribe("", "s1")
 	var last string
 	for i := 0; i <= subscriberBuffer; i++ {
 		h.Publish("s1", ev("tool_calls"))
@@ -151,8 +151,8 @@ func TestHub_ASlowSubscriberIsDropped(t *testing.T) {
 	for e := range slow.C {
 		last = e.ID
 	}
-	h.Unsubscribe("s1", slow) // closed already: no panic
-	if s := h.Subscribe("s1", last); s.Stale || len(s.Missed) != 1 {
+	h.Unsubscribe(slow) // closed already: no panic
+	if s := h.Subscribe(last, "s1"); s.Stale || len(s.Missed) != 1 {
 		t.Errorf("after the drop: %d missed (stale %v)", len(s.Missed), s.Stale)
 	}
 }
@@ -161,8 +161,8 @@ func TestHub_ASlowSubscriberIsDropped(t *testing.T) {
 // an observer may publish.
 func TestHub_ObserversSeeEventsFirst(t *testing.T) {
 	h := NewHub()
-	sub := h.Subscribe("s1", "")
-	tree := h.Subscribe("tree:u1", "")
+	sub := h.Subscribe("", "s1")
+	tree := h.Subscribe("", "tree:u1")
 	var seen []string
 	h.Observe(func(topic string, e activity.SSEEvent) {
 		seen = append(seen, topic+" "+e.Type)
@@ -193,7 +193,7 @@ func TestHub_ConcurrentUse(t *testing.T) {
 			defer wg.Done()
 			last := ""
 			for j := 0; j < 200; j++ {
-				sub := h.Subscribe("s1", last)
+				sub := h.Subscribe(last, "s1")
 				for _, e := range sub.Missed {
 					last = e.ID
 				}
@@ -204,7 +204,7 @@ func TestHub_ConcurrentUse(t *testing.T) {
 					}
 				default:
 				}
-				h.Unsubscribe("s1", sub)
+				h.Unsubscribe(sub)
 			}
 		}()
 		go func() {
@@ -221,5 +221,58 @@ func TestHub_ConcurrentUse(t *testing.T) {
 	}
 	if n := len(h.topics["s1"].recent); n != DefaultKeep {
 		t.Errorf("%d events kept, want %d", n, DefaultKeep)
+	}
+}
+
+// A page has one stream for its topics: their events come on one channel, in
+// order, and one ID places the client in each when it reconnects.
+func TestHub_OneStreamForSeveralTopics(t *testing.T) {
+	h := NewHub()
+	from := h.Position("s1", "tree:u1")
+	h.Publish("tree:u1", ev("changed"))
+	h.Publish("s2", ev("elsewhere"))
+	h.Publish("s1", ev("turn_started"))
+	page := h.Subscribe(from, "s1", "tree:u1")
+	if got := fmt.Sprint(types(page.Missed)); page.Stale || got != "[changed turn_started]" {
+		t.Errorf("missed %s (stale %v)", got, page.Stale)
+	}
+	h.Publish("s1", ev("message"))
+	h.Publish("tree:u1", ev("changed"))
+	if a, b := <-page.C, <-page.C; a.Type != "message" || b.Type != "changed" {
+		t.Errorf("live %s, %s", a.Type, b.Type)
+	}
+	h.Unsubscribe(page)
+	if _, open := <-page.C; open || len(h.topics["s1"].subs)+len(h.topics["tree:u1"].subs) != 0 {
+		t.Error("the subscriber stays on a topic")
+	}
+
+	// Stale as soon as one of the topics lost the client's events.
+	h.keep = 1
+	last := h.Position()
+	h.Publish("tree:u1", ev("changed"))
+	h.Publish("tree:u1", ev("changed"))
+	if s := h.Subscribe(last, "s1", "tree:u1"); !s.Stale || len(s.Missed) != 0 {
+		t.Errorf("one topic past its buffer: %v (stale %v)", types(s.Missed), s.Stale)
+	}
+
+	// Dropped as too slow on one topic, it is not sent to on the other.
+	slow := h.Subscribe("", "s1", "tree:u1")
+	for i := 0; i <= subscriberBuffer; i++ {
+		h.Publish("s1", ev("tool_calls"))
+	}
+	h.Publish("tree:u1", ev("changed")) // no send on the closed channel
+	h.Unsubscribe(slow)
+}
+
+// A topic created after the client's last event (its first event is the one
+// the client missed) replays it: a topic that never had events missed none.
+func TestHub_ANewTopicReplaysFromItsStart(t *testing.T) {
+	h := NewHub()
+	h.Publish("s2", ev("elsewhere"))
+	from := h.Position()
+	h.Publish("s2", ev("elsewhere"))
+	h.Publish("s1", ev("turn_started")) // s1 is created here
+	if s := h.Subscribe(from, "s1"); s.Stale || fmt.Sprint(types(s.Missed)) != "[turn_started]" {
+		t.Errorf("missed %v (stale %v)", types(s.Missed), s.Stale)
 	}
 }

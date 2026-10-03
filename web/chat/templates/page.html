@@ -16,11 +16,10 @@
 <body hx-boost="true" hx-ext="morph, sse">
 <div class="app" id="app">
   {{template "topbar" .}}
-  {{/* Two streams ring the bell, each from where the page stands: the
-       session's, for the thread and the rail; the user's tree's, nearer to
-       the tree. */}}
-  <div class="columns"{{with .Node}} sse-connect="/sessions/{{.Session.SessionID}}/stream?last_event_id={{$.StreamFrom}}"{{end}}>
-    <aside class="col-tree" sse-connect="/tree/stream?last_event_id={{.TreeStreamFrom}}">{{template "tree" .}}</aside>
+  {{/* One stream rings the bell, from where the page stands: the session's
+       events, for the thread and the rail, and the user's tree's. */}}
+  <div class="columns" sse-connect="{{with .Node}}/s/{{.Session.SessionID}}/stream{{else}}/tree/stream{{end}}?last_event_id={{.StreamFrom}}">
+    <aside class="col-tree">{{template "tree" .}}</aside>
     <main class="col-main">
       {{if not .Node}}{{template "welcome" .}}
       {{else if eq .View "map"}}{{template "map" .}}

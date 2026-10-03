@@ -148,8 +148,8 @@ func TestInternalNotify_RequiresTheKey(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			hub := sse.NewHub()
-			sub := hub.Subscribe("s1", "")
-			defer hub.Unsubscribe("s1", sub)
+			sub := hub.Subscribe("", "s1")
+			defer hub.Unsubscribe(sub)
 			code := post(handleInternalNotify(hub, c.key), "/internal/notify", event, map[string]string{"Authorization": c.given})
 			if code != c.want {
 				t.Fatalf("%d, want %d", code, c.want)
@@ -173,7 +173,7 @@ func TestInternalNotify_RequiresTheKey(t *testing.T) {
 func TestInternalNotify_AnEmptySessionIsAKeyCheck(t *testing.T) {
 	hub := sse.NewHub()
 	sub := hub.Subscribe("", "")
-	defer hub.Unsubscribe("", sub)
+	defer hub.Unsubscribe(sub)
 	code := post(handleInternalNotify(hub, "k3y"), "/internal/notify", `{}`, map[string]string{"Authorization": "Bearer k3y"})
 	if code != http.StatusNoContent {
 		t.Fatalf("%d, want 204", code)

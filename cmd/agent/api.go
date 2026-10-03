@@ -335,14 +335,14 @@ func (a *api) stream(w http.ResponseWriter, r *http.Request) {
 // streamTopic relays the hub's events for topic over SSE until the client
 // goes away.
 func (a *api) streamTopic(w http.ResponseWriter, r *http.Request, topic string) {
-	relaySSE(w, r, a.hub, topic, sseKeepAlive)
+	relaySSE(w, r, a.hub, sseKeepAlive, topic)
 }
 
-// relaySSE relays hub's events for topic over SSE until the client goes away,
-// with a comment every keepAlive while nothing else is sent. Each event goes
-// with its ID: a client that reconnects is first sent the events it missed,
-// or a reload event when the hub no longer has them.
-func relaySSE(w http.ResponseWriter, r *http.Request, hub *sse.Hub, topic string, keepAlive time.Duration) {
+// relaySSE relays hub's events for topics over SSE, on one stream, until the
+// client goes away, with a comment every keepAlive while nothing else is
+// sent. Each event goes with its ID: a client that reconnects is first sent
+// the events it missed, or a reload event when the hub no longer has them.
+func relaySSE(w http.ResponseWriter, r *http.Request, hub *sse.Hub, keepAlive time.Duration, topics ...string) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "Streaming not supported", http.StatusInternalServerError)
@@ -353,8 +353,8 @@ func relaySSE(w http.ResponseWriter, r *http.Request, hub *sse.Hub, topic string
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	sub := hub.Subscribe(topic, lastEventID(r))
-	defer hub.Unsubscribe(topic, sub)
+	sub := hub.Subscribe(lastEventID(r), topics...)
+	defer hub.Unsubscribe(sub)
 	if sub.Stale {
 		writeSSE(w, sse.Event{ID: sub.At, SSEEvent: activity.SSEEvent{Type: sseReload, Data: []byte("{}")}})
 	}
