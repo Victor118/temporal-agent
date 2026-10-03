@@ -104,8 +104,13 @@ func (h *replayHistory) payloads(v interface{}) *commonpb.Payloads {
 // started opens the history with the workflow's start and first task, and
 // returns that task's completion.
 func (h *replayHistory) started(input SessionWorkflowInput) int64 {
+	return h.startedAs("SessionWorkflow", input)
+}
+
+// startedAs opens the history of a workflow of type workflowType.
+func (h *replayHistory) startedAs(workflowType string, input interface{}) int64 {
 	h.add(enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_STARTED, &historypb.HistoryEvent_WorkflowExecutionStartedEventAttributes{WorkflowExecutionStartedEventAttributes: &historypb.WorkflowExecutionStartedEventAttributes{
-		WorkflowType: &commonpb.WorkflowType{Name: "SessionWorkflow"},
+		WorkflowType: &commonpb.WorkflowType{Name: workflowType},
 		TaskQueue:    &taskqueuepb.TaskQueue{Name: "agent"},
 		Input:        h.payloads(input),
 		Attempt:      1,
@@ -130,15 +135,57 @@ func (h *replayHistory) workflowTask() int64 {
 // activity adds an activity scheduled by task, run and completed, then the
 // workflow task that receives its result, whose completion it returns.
 func (h *replayHistory) activity(task int64, name string) int64 {
-	scheduled := h.add(enumspb.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED, &historypb.HistoryEvent_ActivityTaskScheduledEventAttributes{ActivityTaskScheduledEventAttributes: &historypb.ActivityTaskScheduledEventAttributes{
-		ActivityId: strconv.Itoa(len(h.events) + 1), ActivityType: &commonpb.ActivityType{Name: name},
-		TaskQueue: &taskqueuepb.TaskQueue{Name: "agent"}, WorkflowTaskCompletedEventId: task,
-	}})
+	return h.activityReturning(task, name, nil)
+}
+
+// activityReturning is activity with the activity's result; nil = none.
+func (h *replayHistory) activityReturning(task int64, name string, result interface{}) int64 {
+	scheduled := h.scheduled(task, name)
 	started := h.add(enumspb.EVENT_TYPE_ACTIVITY_TASK_STARTED, &historypb.HistoryEvent_ActivityTaskStartedEventAttributes{ActivityTaskStartedEventAttributes: &historypb.ActivityTaskStartedEventAttributes{
 		ScheduledEventId: scheduled, Attempt: 1,
 	}})
+	var payloads *commonpb.Payloads
+	if result != nil {
+		payloads = h.payloads(result)
+	}
 	h.add(enumspb.EVENT_TYPE_ACTIVITY_TASK_COMPLETED, &historypb.HistoryEvent_ActivityTaskCompletedEventAttributes{ActivityTaskCompletedEventAttributes: &historypb.ActivityTaskCompletedEventAttributes{
-		ScheduledEventId: scheduled, StartedEventId: started,
+		ScheduledEventId: scheduled, StartedEventId: started, Result: payloads,
+	}})
+	return h.workflowTask()
+}
+
+// scheduled adds an activity scheduled by task, and returns its event ID.
+// The SDK names an activity after the event it is recorded as.
+func (h *replayHistory) scheduled(task int64, name string) int64 {
+	return h.add(enumspb.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED, &historypb.HistoryEvent_ActivityTaskScheduledEventAttributes{ActivityTaskScheduledEventAttributes: &historypb.ActivityTaskScheduledEventAttributes{
+		ActivityId: strconv.Itoa(len(h.events) + 1), ActivityType: &commonpb.ActivityType{Name: name},
+		TaskQueue: &taskqueuepb.TaskQueue{Name: "agent"}, WorkflowTaskCompletedEventId: task,
+	}})
+}
+
+// sideEffect adds what workflow.SideEffect records: the marker holding its
+// value, under its sequence number (the first is 1).
+func (h *replayHistory) sideEffect(task, id int64, value interface{}) {
+	h.add(enumspb.EVENT_TYPE_MARKER_RECORDED, &historypb.HistoryEvent_MarkerRecordedEventAttributes{MarkerRecordedEventAttributes: &historypb.MarkerRecordedEventAttributes{
+		MarkerName: "SideEffect",
+		Details: map[string]*commonpb.Payloads{
+			"side-effect-id": h.payloads(id),
+			"data":           h.payloads(value),
+		},
+		WorkflowTaskCompletedEventId: task,
+	}})
+}
+
+// childStarted adds a child workflow initiated by task and started, then the
+// workflow task that sees it start, whose completion it returns.
+func (h *replayHistory) childStarted(task int64, workflowID, workflowType string) int64 {
+	child := &commonpb.WorkflowExecution{WorkflowId: workflowID, RunId: "child-run"}
+	wfType := &commonpb.WorkflowType{Name: workflowType}
+	initiated := h.add(enumspb.EVENT_TYPE_START_CHILD_WORKFLOW_EXECUTION_INITIATED, &historypb.HistoryEvent_StartChildWorkflowExecutionInitiatedEventAttributes{StartChildWorkflowExecutionInitiatedEventAttributes: &historypb.StartChildWorkflowExecutionInitiatedEventAttributes{
+		WorkflowId: workflowID, WorkflowType: wfType, WorkflowTaskCompletedEventId: task,
+	}})
+	h.add(enumspb.EVENT_TYPE_CHILD_WORKFLOW_EXECUTION_STARTED, &historypb.HistoryEvent_ChildWorkflowExecutionStartedEventAttributes{ChildWorkflowExecutionStartedEventAttributes: &historypb.ChildWorkflowExecutionStartedEventAttributes{
+		InitiatedEventId: initiated, WorkflowExecution: child, WorkflowType: wfType,
 	}})
 	return h.workflowTask()
 }

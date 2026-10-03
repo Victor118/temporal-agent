@@ -28,6 +28,7 @@
 - **AgentWorkflow** : boucle ReAct (LLM + tools), `agent_id` obligatoire (prompt, skills, allowlist)
 - **Les sous-agents** : chaque agent est un tool `agent_<id>(task)` généré par le catalogue (pas publié par un worker), soumis à l'allowlist comme les autres (`agent_*` = tous). L'appeler lance un AgentWorkflow one-shot, sans persistance, contexte isolé du parent, avec l'allowlist de son propre agent
 - Le parent ne voit que la réponse finale du sous-agent (string)
+- Délégation refusée (erreur d'outil rendue au modèle) vers un agent déjà dans la chaîne d'appel (`AgentChain`, A → B → A) ou au-delà de `maxDelegationDepth` (3) niveaux de sous-agents ; versionné (`delegation-limit`)
 
 ## Agents, Tools & Task Queues
 

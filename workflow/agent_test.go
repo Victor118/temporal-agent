@@ -801,3 +801,80 @@ func TestAgentWorkflow_UndeliveredAnswerEndsTheTurn(t *testing.T) {
 		t.Errorf("%d attempts, want 3", attempts)
 	}
 }
+
+func TestDelegationRefusal(t *testing.T) {
+	for _, c := range []struct {
+		chain   []string
+		agentID string
+		refused string // part of the refusal; "" = allowed
+	}{
+		{[]string{"root"}, "analyst", ""},
+		{[]string{"root", "analyst"}, "root", "already in the call chain (root → analyst)"},
+		{[]string{"root", "a", "b"}, "a", "already in the call chain"},
+		{[]string{"root", "a", "b"}, "c", ""}, // the third level
+		{[]string{"root", "a", "b", "c"}, "d", "limited to 3 levels"},
+	} {
+		err := delegationRefusal(c.chain, c.agentID)
+		switch {
+		case c.refused == "" && err != nil:
+			t.Errorf("%v → %s refused: %v", c.chain, c.agentID, err)
+		case c.refused != "" && (err == nil || !strings.Contains(err.Error(), c.refused)):
+			t.Errorf("%v → %s = %v, want a refusal saying %q", c.chain, c.agentID, err, c.refused)
+		}
+	}
+}
+
+// A sub-agent calling back an agent above it gets the refusal as the tool's
+// error, and no child starts: it would only bounce the task back.
+func TestAgentWorkflow_RefusesADelegationLoop(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+
+	var listed []string
+	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.ListToolsInput) (activity.ListToolsOutput, error) {
+		listed = append(listed, in.AgentID)
+		return activity.ListToolsOutput{
+			Tools:       []provider.ToolDefinition{{Name: "agent_root", InputSchema: json.RawMessage(`{"type":"object"}`)}},
+			Resolutions: map[string]activity.ToolResolution{"agent_root": {Kind: "workflow", WorkflowName: "AgentWorkflow", AgentID: "root"}},
+		}, nil
+	}, sdkactivity.RegisterOptions{Name: "ListTools"})
+	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.LoadSkillsForAgentInput) (activity.LoadSkillsForAgentOutput, error) {
+		return activity.LoadSkillsForAgentOutput{}, nil
+	}, sdkactivity.RegisterOptions{Name: "LoadSkillsForAgent"})
+	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.NotifyInput) error {
+		return nil
+	}, sdkactivity.RegisterOptions{Name: "NotifyStep"})
+
+	var second provider.ChatRequest
+	calls := 0
+	env.RegisterActivityWithOptions(func(ctx context.Context, req provider.ChatRequest) (provider.ChatResponse, error) {
+		calls++
+		if calls == 1 {
+			return provider.ChatResponse{ToolCalls: []provider.ToolCallInfo{
+				{ID: "c1", Name: "agent_root", Input: json.RawMessage(`{"task":"ask root"}`)},
+			}}, nil
+		}
+		second = req
+		return provider.ChatResponse{Content: "done", StopReason: "end_turn"}, nil
+	}, sdkactivity.RegisterOptions{Name: "CallLLM"})
+
+	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{
+		SessionID: "s1-tool-agent_analyst-c0", AgentID: "analyst", AgentChain: []string{"root"}, UserMessage: "go",
+	})
+
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatalf("workflow error: %v", err)
+	}
+	if fmt.Sprint(listed) != "[analyst]" {
+		t.Errorf("tools listed for %v: a child agent ran", listed)
+	}
+	var result *provider.ToolResultInfo
+	for _, m := range second.Messages {
+		if m.ToolResult != nil {
+			result = m.ToolResult
+		}
+	}
+	if result == nil || !result.IsError || !strings.Contains(result.Content, `agent "root" is already in the call chain`) {
+		t.Errorf("tool result = %+v, want the refusal as an error", result)
+	}
+}

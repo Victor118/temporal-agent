@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -379,6 +380,9 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 
 				// Build input first — a sub-agent runs on the current workflow queue
 				childWorkflow, childInput, err := buildChildInput(tc.Input, input, d.workflowID, &res, currentChain, currentAgentID, workflow.GetInfo(ctx).TaskQueueName)
+				if err == nil && d.agent {
+					err = delegationLimit(ctx, currentChain, res.AgentID)
+				}
 				if err != nil {
 					dispatches[j] = toolDispatch{unavailable: err.Error()}
 					continue
@@ -710,6 +714,40 @@ func subAgentInput(rawInput json.RawMessage, parent AgentWorkflowInput, childID 
 		Channel:   parent.Channel,
 		ChannelID: parent.ChannelID,
 	}, nil
+}
+
+// maxDelegationDepth bounds how many levels of sub-agents run below the
+// session's agent. Each level may take maxReActIterations LLM calls and has
+// no run timeout: a deep chain is a cost, not a plan.
+const maxDelegationDepth = 3
+
+// delegationChangeID versions the refusal of a loop or too deep a chain: a
+// run started before it may have started such a sub-agent, and must replay.
+const delegationChangeID = "delegation-limit"
+
+// delegationLimit refuses a sub-agent already in the chain of agents calling
+// it (A → B → A would only bounce the task until the iteration limits) or one
+// beyond maxDelegationDepth. The model gets the refusal as the tool's error.
+// The version is read only when the call would be refused, as runs that
+// never hit the limit replay alike.
+func delegationLimit(ctx workflow.Context, chain []string, agentID string) error {
+	refusal := delegationRefusal(chain, agentID)
+	if refusal == nil || workflow.GetVersion(ctx, delegationChangeID, workflow.DefaultVersion, 1) == workflow.DefaultVersion {
+		return nil
+	}
+	return refusal
+}
+
+// delegationRefusal is why chain, the agents calling (the caller last), may
+// not delegate to agentID, or nil.
+func delegationRefusal(chain []string, agentID string) error {
+	if slices.Contains(chain, agentID) {
+		return fmt.Errorf("agent %q is already in the call chain (%s): delegating to it would loop; answer with what you have", agentID, strings.Join(chain, " → "))
+	}
+	if len(chain) > maxDelegationDepth {
+		return fmt.Errorf("sub-agents are limited to %d levels: do the work in this turn", maxDelegationDepth)
+	}
+	return nil
 }
 
 func notifyToolCalls(ctx workflow.Context, sessionID, channel, channelID string, toolCalls []provider.ToolCallInfo, resolutions map[string]activity.ToolResolution) {
