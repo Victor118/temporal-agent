@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"encoding/json"
+	"maps"
 	"strings"
 	"sync"
 	"testing"
@@ -236,6 +237,12 @@ func TestAgentWorkflow_AnotherMembersSaveIsHidden(t *testing.T) {
 	bob := registerLLM(env, answers(done))
 	registerMemoryTool(env, bob)
 	bob.session.messages = stored
+	// One store: Alice's memory is there, as is Bob's.
+	if m := alice.session.memory["u-alice"]; m.Content != "Alice drinks tea" {
+		t.Fatalf("Alice's memory %+v, want her save", m)
+	}
+	maps.Copy(bob.session.memory, alice.session.memory)
+	bob.session.memory["u-bob"] = store.Memory{Content: "Bob likes coffee", Version: 1}
 	upTo = bob.session.add(store.HumanMessageKey("b"), store.Message{Role: store.RoleUser, Content: `"what about Alice?"`, UserID: "u-bob", Author: "Bob"})
 	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{
 		SessionID: "s1", UserID: "u-bob", UserName: "Bob", AgentID: "default",
@@ -245,6 +252,9 @@ func TestAgentWorkflow_AnotherMembersSaveIsHidden(t *testing.T) {
 		t.Fatal(err)
 	}
 	seen := bob.model.sent()[0]
+	if strings.Contains(seen.System, "drinks tea") || !strings.Contains(seen.System, "Bob likes coffee") {
+		t.Errorf("Bob's prompt holds another memory than his: %s", seen.System)
+	}
 	if b, _ := json.Marshal(seen.Messages); strings.Contains(string(b), "drinks tea") || strings.Contains(string(b), "Memory saved") {
 		t.Errorf("Bob's turn read Alice's save: %s", b)
 	}
