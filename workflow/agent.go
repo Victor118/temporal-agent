@@ -434,7 +434,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 					content = fmt.Sprintf("Workflow failed: %s", err.Error())
 					isError = true
 				} else if d.agent {
-					content = subAgentContent(result)
+					content, isError = subAgentContent(result)
 				} else {
 					content, isError = tool.DecodeResult(result)
 				}
@@ -714,15 +714,27 @@ func llmFailure(err error) string {
 	return "call LLM: " + failureText(err)
 }
 
+// subAgentTooLong is what the parent reads of a sub-agent whose conversation
+// outgrew its model: the fork advice the members read is not for it.
+const subAgentTooLong = "The agent stopped without an answer: its conversation grew too long for its model. Give it a smaller task, or fewer and shorter tool outputs to read."
+
 // subAgentContent is what the parent reads of a sub-agent's run: its final
-// response. A sub-agent is the parent's own workflow type, so this is the one
-// result decoded by type; every other workflow tool returns a tool.Result.
-func subAgentContent(result json.RawMessage) string {
+// response, or why it stopped without one, as an error. A sub-agent is the
+// parent's own workflow type, so this is the one result decoded by type;
+// every other workflow tool returns a tool.Result.
+func subAgentContent(result json.RawMessage) (content string, isError bool) {
 	var agent AgentWorkflowOutput
-	if err := json.Unmarshal(result, &agent); err == nil && agent.Response != "" {
-		return agent.Response
+	if err := json.Unmarshal(result, &agent); err == nil {
+		switch {
+		case agent.Response != "":
+			return agent.Response, false
+		case agent.Error == activity.ContextTooLongMessage:
+			return subAgentTooLong, true
+		case agent.Error != "":
+			return "The agent stopped without an answer: " + agent.Error, true
+		}
 	}
-	return string(result)
+	return string(result), false
 }
 
 // childWorkflowID names a workflow tool call "{sessionID}-tool-{tool}-{callID}".

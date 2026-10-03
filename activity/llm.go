@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 
 	"go.temporal.io/sdk/temporal"
 
@@ -225,6 +226,10 @@ func (a *LLMActivities) conversation(ctx context.Context, req LLMTurnRequest) ([
 		return nil, temporal.NewNonRetryableApplicationError("a call gives its conversation inline or by reference, not both", "BadLLMRequest", nil)
 	}
 	turns := append(append([]string(nil), h.EarlierTurns...), h.TurnKey)
+	// Read and converted again on every call of the turn, the whole history:
+	// what it costs is not measured yet. If it shows, a worker cache of the
+	// ordered prefix keyed by (session, UpTo, EarlierTurns) would serve the
+	// turn's next calls (a retry elsewhere only misses it).
 	loaded, err := a.Store.LoadConversation(ctx, h.SessionID, h.UpTo, turns)
 	if err != nil {
 		return nil, fmt.Errorf("load conversation: %w", err)
@@ -272,11 +277,14 @@ func (a *LLMActivities) maxContextBytes() int {
 	return DefaultMaxContextBytes
 }
 
-// requestSize is the request's size as JSON, what the guard measures.
+// requestSize is the request's size as JSON, what the guard measures. A
+// request that cannot be encoded is past any limit: the guard stops it,
+// rather than letting it through unmeasured.
 func requestSize(r provider.ChatRequest) int {
 	b, err := json.Marshal(r)
 	if err != nil {
-		return 0
+		log.Printf("LLM call: request not measurable: %v", err)
+		return math.MaxInt
 	}
 	return len(b)
 }

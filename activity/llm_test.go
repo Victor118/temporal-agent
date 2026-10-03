@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -365,5 +366,13 @@ func TestCallLLM_HidesPrivateInputs(t *testing.T) {
 	got := what(model.requests[0])
 	if strings.Contains(got, "secret") || !strings.Contains(got, `[agent Jarvis (@jarvis) called save_user_memory {"content":"(private)"}]`) {
 		t.Errorf("model read %q", got)
+	}
+}
+
+// A request that cannot be encoded is past the guard, never under it.
+func TestRequestSize_UnencodableIsPastAnyLimit(t *testing.T) {
+	bad := provider.ChatRequest{Messages: []provider.ChatMessage{{Role: "user", Content: json.RawMessage(`{not json`)}}}
+	if got := requestSize(bad); got != math.MaxInt {
+		t.Errorf("requestSize = %d, want math.MaxInt", got)
 	}
 }

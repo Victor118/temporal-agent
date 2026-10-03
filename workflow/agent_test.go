@@ -325,14 +325,23 @@ func TestAgentWorkflow_DelegatesThroughAgentTool(t *testing.T) {
 	}
 }
 
+// The parent reads a sub-agent's answer; with none, why it stopped, as an
+// error, never its whole output, nor the fork advice meant for the members.
 func TestSubAgentContent(t *testing.T) {
-	cases := map[string]string{
-		`{"response":"CAC 40 summary","messages":[{"role":"user"}],"goal_achieved":true}`: "CAC 40 summary",
-		`{"other":1}`: `{"other":1}`,
+	tooLong, _ := json.Marshal(AgentWorkflowOutput{Error: activity.ContextTooLongMessage, NewMessages: []store.Message{{Role: store.RoleUser}}})
+	cases := []struct {
+		raw     string
+		want    string
+		isError bool
+	}{
+		{`{"response":"CAC 40 summary","messages":[{"role":"user"}],"goal_achieved":true}`, "CAC 40 summary", false},
+		{string(tooLong), subAgentTooLong, true},
+		{`{"response":"","error":"call LLM: overloaded","new_messages":[{"role":"user"}]}`, "The agent stopped without an answer: call LLM: overloaded", true},
+		{`{"other":1}`, `{"other":1}`, false},
 	}
-	for raw, want := range cases {
-		if got := subAgentContent(json.RawMessage(raw)); got != want {
-			t.Errorf("subAgentContent(%s) = %q, want %q", raw, got, want)
+	for _, c := range cases {
+		if got, isError := subAgentContent(json.RawMessage(c.raw)); got != c.want || isError != c.isError {
+			t.Errorf("subAgentContent(%s) = %q, %v; want %q, %v", c.raw, got, isError, c.want, c.isError)
 		}
 	}
 }
