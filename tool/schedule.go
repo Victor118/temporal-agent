@@ -157,7 +157,7 @@ func registerScheduleTask(registry *Registry, scheduler Scheduler, st ScheduleSt
 				Prompt:      params.Prompt,
 				UserID:      userID,
 				Channel:     params.DeliveryChannel,
-				Status:      "scheduled",
+				Status:      store.TaskScheduled,
 			}); err != nil {
 				_ = handle.Delete(ctx)
 				return fmt.Sprintf("Failed to record the schedule: %s", err.Error()), nil
@@ -258,7 +258,7 @@ func registerCancelSchedule(registry *Registry, scheduler Scheduler, st Schedule
 				return fmt.Sprintf("Failed to cancel schedule: %s", err.Error()), nil
 			}
 
-			st.UpdateTaskLogStatus(ctx, params.ScheduleID, "cancelled")
+			st.UpdateTaskLogStatus(ctx, params.ScheduleID, store.TaskCancelled)
 
 			return fmt.Sprintf("Schedule %s cancelled.", params.ScheduleID), nil
 		},

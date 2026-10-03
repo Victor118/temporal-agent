@@ -5,6 +5,8 @@ import (
 	"log"
 
 	"go.temporal.io/sdk/client"
+
+	"github.com/victor/temporal-agent/store"
 )
 
 // TaskLogUpdater records where a scheduled task stands.
@@ -26,6 +28,9 @@ type ScheduleActivities struct {
 
 type DeleteScheduleInput struct {
 	ScheduleID string `json:"schedule_id"`
+	// Status closes the task log: store.TaskCompleted or store.TaskFailed.
+	// Empty (scheduled by a worker from before it) = completed.
+	Status string `json:"status,omitempty"`
 }
 
 func (a *ScheduleActivities) DeleteSchedule(ctx context.Context, input DeleteScheduleInput) error {
@@ -35,6 +40,10 @@ func (a *ScheduleActivities) DeleteSchedule(ctx context.Context, input DeleteSch
 		// Don't fail the workflow for cleanup errors
 		return nil
 	}
-	a.Store.UpdateTaskLogStatus(ctx, input.ScheduleID, "completed")
+	status := input.Status
+	if status == "" {
+		status = store.TaskCompleted
+	}
+	a.Store.UpdateTaskLogStatus(ctx, input.ScheduleID, status)
 	return nil
 }

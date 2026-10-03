@@ -10,6 +10,7 @@ import (
 	sdkworkflow "go.temporal.io/sdk/workflow"
 
 	"github.com/victor/temporal-agent/activity"
+	"github.com/victor/temporal-agent/store"
 	"github.com/victor/temporal-agent/tool"
 )
 
@@ -38,9 +39,9 @@ func TestScheduledAgentWorkflow_Cleanup(t *testing.T) {
 				return nil
 			}, sdkactivity.RegisterOptions{Name: "DeliverResult"})
 
-			deleted := false
+			deleted, status := false, ""
 			env.RegisterActivityWithOptions(func(ctx context.Context, in activity.DeleteScheduleInput) error {
-				deleted = true
+				deleted, status = true, in.Status
 				return nil
 			}, sdkactivity.RegisterOptions{Name: "DeleteSchedule"})
 
@@ -64,40 +65,56 @@ func TestScheduledAgentWorkflow_Cleanup(t *testing.T) {
 			if deleted != tc.wantDelete {
 				t.Errorf("schedule deleted = %v, want %v", deleted, tc.wantDelete)
 			}
+			if deleted && status != store.TaskCompleted {
+				t.Errorf("task log closed as %q, want completed", status)
+			}
 		})
 	}
 }
 
 // A one-shot schedule has fired its only action: a delivery that failed still
-// deletes it and closes its task log, and the run reports the failure.
-func TestScheduledAgentWorkflow_CleansUpAfterAFailedDelivery(t *testing.T) {
-	var suite testsuite.WorkflowTestSuite
-	env := suite.NewTestWorkflowEnvironment()
-
-	env.RegisterWorkflowWithOptions(func(ctx sdkworkflow.Context, in AgentWorkflowInput) (AgentWorkflowOutput, error) {
-		return AgentWorkflowOutput{Response: "done"}, nil
-	}, sdkworkflow.RegisterOptions{Name: "AgentWorkflow"})
-	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.DeliverInput) error {
-		return errors.New("server refused the notification")
-	}, sdkactivity.RegisterOptions{Name: "DeliverResult"})
-	deleted := ""
-	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.DeleteScheduleInput) error {
-		deleted = in.ScheduleID
-		return nil
-	}, sdkactivity.RegisterOptions{Name: "DeleteSchedule"})
-
-	env.ExecuteWorkflow(ScheduledAgentWorkflow, tool.ScheduledAgentInput{
-		AgentID: "default", Prompt: "remind me", UserID: "victor", ScheduleID: "schedule-test",
-	})
-
-	if !env.IsWorkflowCompleted() {
-		t.Fatal("workflow did not complete")
+// deletes it, but closes its task log as failed, and the run reports the
+// failure. So does a run of the agent that failed, its error delivered.
+func TestScheduledAgentWorkflow_FailedOneShotIsClosedAsFailed(t *testing.T) {
+	cases := map[string]struct {
+		agent       AgentWorkflowOutput
+		deliverErr  error
+		wantErrored bool
+	}{
+		"delivery failed": {agent: AgentWorkflowOutput{Response: "done"}, deliverErr: errors.New("server refused the notification"), wantErrored: true},
+		"agent failed":    {agent: AgentWorkflowOutput{Error: "LLM unavailable"}},
 	}
-	if env.GetWorkflowError() == nil {
-		t.Error("a failed delivery was reported as a success")
-	}
-	if deleted != "schedule-test" {
-		t.Errorf("deleted schedule %q, want schedule-test", deleted)
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			var suite testsuite.WorkflowTestSuite
+			env := suite.NewTestWorkflowEnvironment()
+
+			env.RegisterWorkflowWithOptions(func(ctx sdkworkflow.Context, in AgentWorkflowInput) (AgentWorkflowOutput, error) {
+				return tc.agent, nil
+			}, sdkworkflow.RegisterOptions{Name: "AgentWorkflow"})
+			env.RegisterActivityWithOptions(func(ctx context.Context, in activity.DeliverInput) error {
+				return tc.deliverErr
+			}, sdkactivity.RegisterOptions{Name: "DeliverResult"})
+			var deleted activity.DeleteScheduleInput
+			env.RegisterActivityWithOptions(func(ctx context.Context, in activity.DeleteScheduleInput) error {
+				deleted = in
+				return nil
+			}, sdkactivity.RegisterOptions{Name: "DeleteSchedule"})
+
+			env.ExecuteWorkflow(ScheduledAgentWorkflow, tool.ScheduledAgentInput{
+				AgentID: "default", Prompt: "remind me", UserID: "victor", ScheduleID: "schedule-test",
+			})
+
+			if !env.IsWorkflowCompleted() {
+				t.Fatal("workflow did not complete")
+			}
+			if errored := env.GetWorkflowError() != nil; errored != tc.wantErrored {
+				t.Errorf("workflow error = %v, want an error: %v", env.GetWorkflowError(), tc.wantErrored)
+			}
+			if deleted.ScheduleID != "schedule-test" || deleted.Status != store.TaskFailed {
+				t.Errorf("deleted %+v, want schedule-test closed as failed", deleted)
+			}
+		})
 	}
 }
 

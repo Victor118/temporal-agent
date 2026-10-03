@@ -8,6 +8,7 @@ import (
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/victor/temporal-agent/activity"
+	"github.com/victor/temporal-agent/store"
 	"github.com/victor/temporal-agent/tool"
 )
 
@@ -43,7 +44,7 @@ func ScheduledAgentWorkflow(ctx workflow.Context, input tool.ScheduledAgentInput
 		LoadUserMemory: true,
 	}).Get(ctx, &result)
 
-	response := result.Response
+	response, failed := result.Response, true
 	switch {
 	case err != nil:
 		response = fmt.Sprintf("Scheduled task failed: %s", err.Error())
@@ -51,6 +52,8 @@ func ScheduledAgentWorkflow(ctx workflow.Context, input tool.ScheduledAgentInput
 	case result.Error != "":
 		response = fmt.Sprintf("Scheduled task failed: %s", result.Error)
 		logger.Error("Scheduled agent failed", "schedule_id", input.ScheduleID, "error", result.Error)
+	default:
+		failed = false
 	}
 
 	// Deliver the result
@@ -74,12 +77,18 @@ func ScheduledAgentWorkflow(ctx workflow.Context, input tool.ScheduledAgentInput
 
 	// A one-shot schedule has fired its only action: delete it and close its
 	// task log even when the delivery failed, since keeping them would only
-	// list a task that will never run again. Recurring tasks keep their
-	// schedule until cancel_schedule.
+	// list a task that will never run again. The log says whether the result
+	// reached the user: a failed task is not "completed". Recurring tasks
+	// keep their schedule until cancel_schedule.
 	if input.Cron == "" {
+		status := store.TaskCompleted
+		if failed || deliverErr != nil {
+			status = store.TaskFailed
+		}
 		var schedAct *activity.ScheduleActivities
 		if err := workflow.ExecuteActivity(deliverCtx, schedAct.DeleteSchedule, activity.DeleteScheduleInput{
 			ScheduleID: input.ScheduleID,
+			Status:     status,
 		}).Get(ctx, nil); err != nil {
 			logger.Error("Failed to delete the schedule", "schedule_id", input.ScheduleID, "error", err)
 		}
