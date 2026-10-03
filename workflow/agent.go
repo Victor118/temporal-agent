@@ -239,6 +239,9 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 		skillAct.LoadSkillsForAgent,
 		activity.LoadSkillsForAgentInput{AgentID: currentAgentID},
 	).Get(ctx, &skillsResult); err != nil {
+		if ctx.Err() != nil {
+			return cancelledOutput(messages[newStart:]), nil
+		}
 		return AgentWorkflowOutput{}, fmt.Errorf("load skills: %w", err)
 	}
 	systemPrompt := input.SystemPrompt
@@ -271,6 +274,9 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 		toolAct.ListTools,
 		activity.ListToolsInput{AgentID: currentAgentID},
 	).Get(ctx, &toolList); err != nil {
+		if ctx.Err() != nil {
+			return cancelledOutput(messages[newStart:]), nil
+		}
 		return AgentWorkflowOutput{}, fmt.Errorf("list tools: %w", err)
 	}
 
@@ -295,10 +301,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 		// Check for cancellation before each iteration
 		if ctx.Err() != nil {
 			cancelSafeFlush()
-			return AgentWorkflowOutput{
-				Response:    "Agent cancelled.",
-				NewMessages: messages[newStart:],
-			}, nil
+			return cancelledOutput(messages[newStart:]), nil
 		}
 
 		chatMessages := convertMessages(messages, view)
@@ -329,10 +332,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 		if err := workflow.ExecuteActivity(llmCtx, llmAct.CallLLM, request).Get(ctx, &response); err != nil {
 			cancelSafeFlush()
 			if ctx.Err() != nil {
-				return AgentWorkflowOutput{
-					Response:    "Agent cancelled.",
-					NewMessages: messages[newStart:],
-				}, nil
+				return cancelledOutput(messages[newStart:]), nil
 			}
 			// Soft failure: returning an error would discard everything the turn
 			// produced, since a failed workflow carries no result.
@@ -501,6 +501,14 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 		NewMessages: messages[newStart:],
 		Error:       fmt.Sprintf("stopped after %d iterations without a final answer", maxReActIterations),
 	}, nil
+}
+
+// cancelledOutput ends a cancelled run with what it produced, newMessages: a
+// run that returns no error completes, and its session gets the transcript.
+// Returning the cancellation as an error would end the run as cancelled,
+// with no result at all.
+func cancelledOutput(newMessages []store.Message) AgentWorkflowOutput {
+	return AgentWorkflowOutput{Response: "Agent cancelled.", NewMessages: newMessages}
 }
 
 // truncateToolResult shortens an oversized tool result, keeping its head and

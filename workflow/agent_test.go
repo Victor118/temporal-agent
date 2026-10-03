@@ -159,6 +159,35 @@ func TestAgentWorkflow_ToolTimeoutFromTheCatalog(t *testing.T) {
 	}
 }
 
+// A run stopped before its loop returns what it produced, the message it was
+// given: ended by an error, it would complete as cancelled, with no result
+// for the session to persist.
+func TestAgentWorkflow_CancelWhileLoadingReturnsTheTranscript(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.LoadContextInput) (activity.LoadContextOutput, error) {
+		return activity.LoadContextOutput{}, nil
+	}, sdkactivity.RegisterOptions{Name: "LoadContext"})
+	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.PersistContextInput) error {
+		return nil
+	}, sdkactivity.RegisterOptions{Name: "PersistContext"})
+	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.LoadSkillsForAgentInput) (activity.LoadSkillsForAgentOutput, error) {
+		<-ctx.Done()
+		return activity.LoadSkillsForAgentOutput{}, ctx.Err()
+	}, sdkactivity.RegisterOptions{Name: "LoadSkillsForAgent"})
+	env.RegisterDelayedCallback(env.CancelWorkflow, time.Second)
+
+	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{SessionID: "s1", AgentID: "dev", UserMessage: "hello", TurnKey: "run-1"})
+
+	var out AgentWorkflowOutput
+	if err := env.GetWorkflowResult(&out); err != nil {
+		t.Fatalf("cancelled run: %v, want its output", err)
+	}
+	if len(out.NewMessages) != 1 || out.NewMessages[0].Role != store.RoleUser {
+		t.Errorf("new messages %+v, want the user's message", out.NewMessages)
+	}
+}
+
 func TestIsScheduleToStartTimeout(t *testing.T) {
 	scheduleToStart := temporal.NewTimeoutError(enumspb.TIMEOUT_TYPE_SCHEDULE_TO_START, nil)
 	startToClose := temporal.NewTimeoutError(enumspb.TIMEOUT_TYPE_START_TO_CLOSE, nil)

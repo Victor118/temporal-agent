@@ -253,6 +253,9 @@ func processTurn(actCtx, ctx workflow.Context, input SessionWorkflowInput, userM
 	childCtx, cancelChild := workflow.WithCancel(ctx)
 	childCtx = workflow.WithChildOptions(childCtx, workflow.ChildWorkflowOptions{
 		WorkflowID: fmt.Sprintf("%s-turn-%d", input.SessionID, state.TurnCount),
+		// A cancelled turn still writes what it produced, then returns it:
+		// the session waits for that, not only for the request to be sent.
+		WaitForCancellation: true,
 	})
 
 	agentFuture := workflow.ExecuteChildWorkflow(childCtx, AgentWorkflow, AgentWorkflowInput{
@@ -295,10 +298,11 @@ func processTurn(actCtx, ctx workflow.Context, input SessionWorkflowInput, userM
 	cancelSel.Select(ctx)
 
 	if cancelled {
-		// Wait for the child to actually finish after cancellation
+		// Wait for the child to end. AgentWorkflow answers a cancel by
+		// returning its transcript, not an error: the run completes, and its
+		// output arrives here. A child cancelled before it produced anything
+		// fails with a CanceledError instead, and leaves result empty.
 		_ = agentFuture.Get(ctx, &result)
-		// Notify the user
-		notifyResponse(ctx, input.SessionID, input.Channel, input.ChannelID, "", "Agent interrupted by user.")
 	}
 
 	// 2. Persist before reporting anything, so a failed or cancelled turn keeps
@@ -321,22 +325,25 @@ func processTurn(actCtx, ctx workflow.Context, input SessionWorkflowInput, userM
 		}
 	}
 
-	// 3. Report failures once the transcript is safe
-	if !cancelled {
-		if agentErr != nil {
-			return false, fmt.Errorf("agent workflow: %w", agentErr)
-		}
-		if result.Error != "" {
-			return false, fmt.Errorf("agent workflow: %s", result.Error)
-		}
+	// 3. Report the stop or the failure once the transcript is safe: the
+	// interface reloads the conversation when told.
+	if cancelled {
+		notifyResponse(ctx, input.SessionID, input.Channel, input.ChannelID, "", "Agent interrupted by user.")
+		return true, nil
+	}
+	if agentErr != nil {
+		return false, fmt.Errorf("agent workflow: %w", agentErr)
+	}
+	if result.Error != "" {
+		return false, fmt.Errorf("agent workflow: %s", result.Error)
 	}
 
 	// 4. Check goal
-	if !cancelled && result.GoalAchieved {
+	if result.GoalAchieved {
 		state.Status = "completed"
 	}
 
-	return cancelled, nil
+	return false, nil
 }
 
 // maxTurnErrorBytes bounds the error kept in the conversation: an API error can

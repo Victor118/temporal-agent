@@ -346,6 +346,54 @@ func TestSessionWorkflow_ACancelStopsTheRest(t *testing.T) {
 	}
 }
 
+// A stopped turn ends before the session goes on: the agent still writes
+// what it produced, and the session persists it and reports the
+// interruption only once the agent has ended.
+func TestSessionWorkflow_ACancelWaitsForTheTurnToEnd(t *testing.T) {
+	var events []string
+	stopping := func(ctx sdkworkflow.Context, in AgentWorkflowInput) (AgentWorkflowOutput, error) {
+		if err := sdkworkflow.Sleep(ctx, 10*time.Second); err == nil {
+			return AgentWorkflowOutput{Response: "done"}, nil
+		}
+		// Cancelled: the agent takes a while to wrap up, as a flush does.
+		dctx, cancel := sdkworkflow.NewDisconnectedContext(ctx)
+		defer cancel()
+		_ = sdkworkflow.Sleep(dctx, 3*time.Second)
+		events = append(events, "agent ended")
+		content, _ := json.Marshal("half an answer")
+		return AgentWorkflowOutput{
+			Response:    "Agent cancelled.",
+			NewMessages: []store.Message{{Role: store.RoleAssistant, Content: string(content), AgentID: in.AgentID}},
+		}, nil
+	}
+
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+	env.RegisterWorkflowWithOptions(stopping, sdkworkflow.RegisterOptions{Name: "AgentWorkflow"})
+	var persisted []activity.PersistContextInput
+	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.PersistContextInput) error {
+		events = append(events, "persisted")
+		persisted = append(persisted, in)
+		return nil
+	}, sdkactivity.RegisterOptions{Name: "PersistContext"})
+	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.NotifyInput) error {
+		if strings.Contains(string(in.Event.Data), "interrupted") {
+			events = append(events, "interrupted")
+		}
+		return nil
+	}, sdkactivity.RegisterOptions{Name: "NotifyStep"})
+	env.RegisterDelayedCallback(func() { env.SignalWorkflow(SignalUserMessage, addressed) }, time.Second)
+	env.RegisterDelayedCallback(func() { env.SignalWorkflow(SignalCancelAgent, nil) }, 5*time.Second)
+	env.ExecuteWorkflow(SessionWorkflow, SessionWorkflowInput{SessionID: "s1", AgentID: "default"})
+
+	if got := strings.Join(events, ", "); got != "agent ended, persisted, interrupted" {
+		t.Errorf("events: %s; want the agent ended before the session persists and reports", got)
+	}
+	if len(persisted) != 1 || len(persisted[0].Messages) != 1 || persisted[0].Messages[0].AgentID != "jarvis" {
+		t.Errorf("persisted %+v, want jarvis's half answer, and no turn of smith's", persisted)
+	}
+}
+
 // The real AgentWorkflow, over a store in memory: the second agent loads the
 // conversation after the first answered, and reads that answer under the
 // first agent's name.
