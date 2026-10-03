@@ -36,18 +36,18 @@ const EventMemberLeft = "member_left"
 // its row in the trees, a question, a summary, a report. The server learns
 // from them (Observe): the cached statuses go, the members' trees ring.
 var StateEvents = []string{
-	workflow.EventTurnStarted, workflow.EventTurnDone, workflow.EventAskUser,
+	workflow.EventTurnStarted, workflow.EventTurnDone, activity.EventAskUser,
 	workflow.EventForkReady, workflow.EventForkFailed,
 	workflow.EventForkReport, workflow.EventForkReported, workflow.EventForkReportFailed,
 }
 
 // ThreadEvents are the session's events after which its thread shows
 // something new: its state, a message, a tool call.
-var ThreadEvents = slices.Concat(StateEvents, []string{EventUserMessage, workflow.EventMessage, workflow.EventToolCalls})
+var ThreadEvents = slices.Concat(StateEvents, []string{EventUserMessage, activity.EventMessage, activity.EventToolCalls})
 
 // ReportEvents are the fork's events after which its report section may
 // change: its state, a message (there is something new to report).
-var ReportEvents = slices.Concat(StateEvents, []string{EventUserMessage, workflow.EventMessage})
+var ReportEvents = slices.Concat(StateEvents, []string{EventUserMessage, activity.EventMessage})
 
 // publishMembersLeft tells the session's streams that these users are out
 // of it.

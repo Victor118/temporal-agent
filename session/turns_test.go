@@ -90,7 +90,7 @@ func TestObserve_TurnEventsInvalidate(t *testing.T) {
 			t.Errorf("a turn recorded for %q, not a session", topic)
 		}
 	}
-	s.Observe(sid, activity.SSEEvent{Type: workflow.EventToolCalls, Data: []byte(`{}`)})
+	s.Observe(sid, activity.SSEEvent{Type: activity.EventToolCalls, Data: []byte(`{}`)})
 	s.Statuses(ctx)
 	if len(tc.lists) != 4 {
 		t.Fatalf("%d queries: an event that changes nothing reloaded the statuses", len(tc.lists))
@@ -127,12 +127,12 @@ func TestTreesRing(t *testing.T) {
 		return fmt.Sprint(len(hub.on(TreeTopic("u-alice"))), len(hub.on(TreeTopic("u-bob"))), len(hub.on(TreeTopic("u-carol"))))
 	}
 
-	s.Observe(sid, activity.SSEEvent{Type: workflow.EventToolCalls, Data: []byte(`{}`)})
+	s.Observe(sid, activity.SSEEvent{Type: activity.EventToolCalls, Data: []byte(`{}`)})
 	s.Observe(TreeTopic("u-alice"), activity.SSEEvent{Type: EventTreeChanged})
 	if got := rung(); got != "0 0 0" {
 		t.Fatalf("rung %s for nothing", got)
 	}
-	for _, typ := range []string{workflow.EventTurnStarted, workflow.EventTurnDone, workflow.EventAskUser, workflow.EventForkReady} {
+	for _, typ := range []string{workflow.EventTurnStarted, workflow.EventTurnDone, activity.EventAskUser, workflow.EventForkReady} {
 		s.Observe(sid, turnEvent(typ, "default", ""))
 	}
 	if got := rung(); got != "4 4 0" {

@@ -20,6 +20,14 @@ type SSEEvent struct {
 	Data json.RawMessage `json:"data"`
 }
 
+// Events an agent's turn sends to its session's members. The workflows send
+// them, and every channel's Notifier reads them.
+const (
+	EventMessage   = "message"    // an answer
+	EventToolCalls = "tool_calls" // the tools a step calls
+	EventAskUser   = "ask_user"   // a question waits for a member's answer
+)
+
 // ChannelWeb is the web interface's channel, and the one a session without a
 // channel uses.
 const ChannelWeb = "web"

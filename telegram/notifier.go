@@ -21,7 +21,7 @@ type Notifier struct {
 
 func (n *Notifier) Notify(ctx context.Context, note activity.Notification) error {
 	switch note.Event.Type {
-	case "message":
+	case activity.EventMessage:
 		var data struct {
 			Content string `json:"content"`
 			// Agent signs an answer that could be taken for another agent's:
@@ -33,7 +33,7 @@ func (n *Notifier) Notify(ctx context.Context, note activity.Notification) error
 		}
 		return n.Client.SendMessage(ctx, note.ChannelID, signed(data.Agent, data.Content))
 
-	case "ask_user":
+	case activity.EventAskUser:
 		var data struct {
 			Question string `json:"question"`
 			Agent    string `json:"agent"` // signed as the answer is

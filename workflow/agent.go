@@ -559,7 +559,7 @@ const channelNotifyTimeout = time.Minute
 // must end.
 func notifyResponse(ctx workflow.Context, sessionID, channel, channelID, agent, content string) {
 	event := map[string]string{
-		"type":    EventMessage,
+		"type":    activity.EventMessage,
 		"content": content,
 	}
 	if agent != "" {
@@ -578,7 +578,7 @@ func notifyResponse(ctx workflow.Context, sessionID, channel, channelID, agent, 
 			Channel:   channel,
 			ChannelID: channelID,
 			Event: activity.SSEEvent{
-				Type: EventMessage,
+				Type: activity.EventMessage,
 				Data: data,
 			},
 		},
@@ -695,7 +695,7 @@ func notifyToolCalls(ctx workflow.Context, sessionID, channel, channelID string,
 		shown[i] = tc
 	}
 	data, _ := json.Marshal(map[string]interface{}{
-		"type":       EventToolCalls,
+		"type":       activity.EventToolCalls,
 		"tool_calls": shown,
 	})
 	var notifAct *activity.NotificationActivities
@@ -710,7 +710,7 @@ func notifyToolCalls(ctx workflow.Context, sessionID, channel, channelID string,
 			Channel:   channel,
 			ChannelID: channelID,
 			Event: activity.SSEEvent{
-				Type: EventToolCalls,
+				Type: activity.EventToolCalls,
 				Data: data,
 			},
 		},
