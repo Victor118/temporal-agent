@@ -634,3 +634,100 @@ func TestLoadConversation(t *testing.T) {
 		t.Errorf("the next turn loaded %q\nwant %q", keys(got), want)
 	}
 }
+
+// clearMemory deletes the test's memory rows: nothing else deletes from
+// memory.
+func clearMemory(t *testing.T, s *PostgresStore, ids ...string) {
+	t.Helper()
+	for _, id := range ids {
+		if _, err := s.db.Exec("DELETE FROM memory WHERE scope = $1 AND scope_id = $2", string(MemoryScopeUser), id); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// A save names the version it replaces: the first from 0, each next from the
+// one before. A save from a version another save replaced writes nothing and
+// says what the memory is now.
+func TestSaveMemory_Versions(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	const id, other = "zz-memory-versions", "zz-memory-none"
+	clearMemory(t, s, id, other)
+	t.Cleanup(func() { clearMemory(t, s, id, other) })
+
+	if m, err := s.LoadMemory(ctx, MemoryScopeUser, id); err != nil || m != (Memory{}) {
+		t.Fatalf("never saved: %+v, %v", m, err)
+	}
+	if v, err := s.SaveMemory(ctx, MemoryScopeUser, id, "likes tea", 0); err != nil || v != 1 {
+		t.Fatalf("first save: version %d, %v", v, err)
+	}
+	if v, err := s.SaveMemory(ctx, MemoryScopeUser, id, "likes tea and coffee", 1); err != nil || v != 2 {
+		t.Fatalf("update: version %d, %v", v, err)
+	}
+	if m, _ := s.LoadMemory(ctx, MemoryScopeUser, id); m != (Memory{Content: "likes tea and coffee", Version: 2}) {
+		t.Errorf("loaded %+v", m)
+	}
+
+	for _, expected := range []int64{0, 1, 3} {
+		_, err := s.SaveMemory(ctx, MemoryScopeUser, id, "stale", expected)
+		var conflict *MemoryConflict
+		if !errors.As(err, &conflict) || conflict.Current != (Memory{Content: "likes tea and coffee", Version: 2}) {
+			t.Errorf("save from version %d: %v", expected, err)
+		}
+	}
+	if m, _ := s.LoadMemory(ctx, MemoryScopeUser, id); m.Content != "likes tea and coffee" || m.Version != 2 {
+		t.Errorf("a refused save wrote: %+v", m)
+	}
+
+	// A version for a memory never saved: nothing to replace, nothing written.
+	_, err := s.SaveMemory(ctx, MemoryScopeUser, other, "blind", 4)
+	var conflict *MemoryConflict
+	if !errors.As(err, &conflict) || conflict.Current != (Memory{}) {
+		t.Errorf("save over a missing memory: %v", err)
+	}
+	if m, _ := s.LoadMemory(ctx, MemoryScopeUser, other); m != (Memory{}) {
+		t.Errorf("a refused save created %+v", m)
+	}
+}
+
+// Saves from the same version at once, first save or not: exactly one wins,
+// the others are told of it.
+func TestSaveMemory_ConcurrentSavesOneWins(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	const id = "zz-memory-race"
+	clearMemory(t, s, id)
+	t.Cleanup(func() { clearMemory(t, s, id) })
+
+	const writers = 8
+	for round := range 5 {
+		expected := int64(round) // round 0: the first save, an INSERT
+		type result struct {
+			version int64
+			err     error
+		}
+		results := make(chan result, writers)
+		for w := range writers {
+			go func() {
+				v, err := s.SaveMemory(ctx, MemoryScopeUser, id, fmt.Sprintf("round %d writer %d", round, w), expected)
+				results <- result{v, err}
+			}()
+		}
+		won := 0
+		for range writers {
+			r := <-results
+			var conflict *MemoryConflict
+			switch {
+			case r.err == nil && r.version == expected+1:
+				won++
+			case errors.As(r.err, &conflict) && conflict.Current.Version == expected+1:
+			default:
+				t.Fatalf("round %d: version %d, %v", round, r.version, r.err)
+			}
+		}
+		if won != 1 {
+			t.Fatalf("round %d: %d saves won, want exactly one", round, won)
+		}
+	}
+}

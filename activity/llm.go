@@ -38,7 +38,7 @@ const ContextTooLongMessage = "La conversation est trop longue pour le modèle :
 // conversation and its user's memory.
 type ConversationLoader interface {
 	LoadConversation(ctx context.Context, sessionID string, upTo int64, turnKeys []string) ([]store.MessageWithID, error)
-	LoadMemory(ctx context.Context, scope store.MemoryScope, scopeID string) (string, error)
+	LoadMemory(ctx context.Context, scope store.MemoryScope, scopeID string) (store.Memory, error)
 }
 
 // LLMCatalog is what the LLM call reads of the worker's catalog: the tools'
@@ -114,18 +114,29 @@ type TurnHistory struct {
 	TailStart int             `json:"tail_start,omitempty"`
 }
 
-func (a *LLMActivities) CallLLM(ctx context.Context, req LLMTurnRequest) (provider.ChatResponse, error) {
-	request, err := a.buildRequest(ctx, req)
+// LLMTurnResponse is the model's answer, and the version of the user's memory
+// its prompt held: what the model read, so the version a save_user_memory it
+// calls replaces. The model never sees the number.
+type LLMTurnResponse struct {
+	provider.ChatResponse
+	// MemoryVersion: 0 for a memory never saved; nil when the prompt held
+	// none (none asked, or unreadable), and a save would be blind.
+	MemoryVersion *int64 `json:"memory_version,omitempty"`
+}
+
+func (a *LLMActivities) CallLLM(ctx context.Context, req LLMTurnRequest) (LLMTurnResponse, error) {
+	request, memoryVersion, err := a.buildRequest(ctx, req)
 	if err != nil {
-		return provider.ChatResponse{}, err
+		return LLMTurnResponse{}, err
 	}
 	size, limit := requestSize(request), a.maxContextBytes()
 	if size > limit {
 		log.Printf("LLM call refused: agent %s, %d bytes over the %d limit (LLM_MAX_CONTEXT_BYTES)", req.AgentID, size, limit)
-		return provider.ChatResponse{}, temporal.NewNonRetryableApplicationError(ContextTooLongMessage, ErrContextTooLong, nil)
+		return LLMTurnResponse{}, temporal.NewNonRetryableApplicationError(ContextTooLongMessage, ErrContextTooLong, nil)
 	}
 
-	resp, err := a.Provider.Chat(ctx, request)
+	chat, err := a.Provider.Chat(ctx, request)
+	resp := LLMTurnResponse{ChatResponse: chat, MemoryVersion: memoryVersion}
 	if err != nil {
 		// Under the guard, the model refused it all the same: the same
 		// advice, never retried.
@@ -150,11 +161,12 @@ func (a *LLMActivities) CallLLM(ctx context.Context, req LLMTurnRequest) (provid
 	return resp, err
 }
 
-// buildRequest builds the request req points at.
-func (a *LLMActivities) buildRequest(ctx context.Context, req LLMTurnRequest) (provider.ChatRequest, error) {
+// buildRequest builds the request req points at, and says which version of
+// the user's memory its prompt holds (nil: none).
+func (a *LLMActivities) buildRequest(ctx context.Context, req LLMTurnRequest) (provider.ChatRequest, *int64, error) {
 	messages, err := a.conversation(ctx, req)
 	if err != nil {
-		return provider.ChatRequest{}, err
+		return provider.ChatRequest{}, nil, err
 	}
 	chat := conversation.Convert(messages, conversation.View{Self: req.AgentID, Agents: a.Catalog.AgentLabels(), Private: a.Catalog})
 
@@ -174,14 +186,15 @@ func (a *LLMActivities) buildRequest(ctx context.Context, req LLMTurnRequest) (p
 	if len(chat) >= 2 {
 		chat[len(chat)-2].CacheBreakpoint = true
 	}
+	system, memoryVersion := a.systemPrompt(ctx, req, offered)
 	return provider.ChatRequest{
 		Model:       req.Model,
-		System:      a.systemPrompt(ctx, req, offered),
+		System:      system,
 		Messages:    chat,
 		Tools:       tools,
 		MaxTokens:   maxResponseTokens,
 		CacheSystem: true,
-	}, nil
+	}, memoryVersion, nil
 }
 
 // withdrawnDescription is what the model reads of a tool withdrawn while it
@@ -255,23 +268,29 @@ func (a *LLMActivities) conversation(ctx context.Context, req LLMTurnRequest) ([
 }
 
 // systemPrompt builds the prompt: the override or the agent's base prompt
-// for the tools offered, the user's memory, the part note. A memory that
-// cannot be read costs the personalisation, not the call.
-func (a *LLMActivities) systemPrompt(ctx context.Context, req LLMTurnRequest, tools []string) string {
+// for the tools offered, the user's memory, the part note; and returns the
+// version of that memory (nil: none in the prompt). A memory that cannot be
+// read costs the personalisation, not the call, and its saves: their version
+// is unknown.
+func (a *LLMActivities) systemPrompt(ctx context.Context, req LLMTurnRequest, tools []string) (string, *int64) {
 	p := req.Prompt
 	prompt := p.Override
 	if prompt == "" {
 		prompt = a.Prompts.AgentPrompt(req.AgentID, tools)
 	}
+	var version *int64
 	if p.MemoryOf != "" {
 		memory, err := a.Store.LoadMemory(ctx, store.MemoryScopeUser, p.MemoryOf)
 		if err != nil {
 			log.Printf("LLM call: memory of user %s not loaded: %v", p.MemoryOf, err)
-		} else if memory != "" {
-			prompt += userMemorySection(p.UserName, memory)
+		} else {
+			version = &memory.Version
+			if memory.Content != "" {
+				prompt += userMemorySection(p.UserName, memory.Content)
+			}
 		}
 	}
-	return prompt + p.PartNote
+	return prompt + p.PartNote, version
 }
 
 func (a *LLMActivities) maxContextBytes() int {

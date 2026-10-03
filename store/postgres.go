@@ -103,6 +103,10 @@ const schema = `
 			updated_at TIMESTAMPTZ DEFAULT NOW(),
 			PRIMARY KEY (scope, scope_id)
 		);
+		-- version is bumped on every save, and a save names the version it
+		-- replaces: a user's memory is shared by all their sessions and forks,
+		-- and two saves from the same version must not lose one silently.
+		ALTER TABLE memory ADD COLUMN IF NOT EXISTS version BIGINT NOT NULL DEFAULT 0;
 
 		-- A conversation. created_by is who opened it; who may use it is in
 		-- session_members.
@@ -396,24 +400,50 @@ func (s *PostgresStore) DeleteMessagesBySession(ctx context.Context, sessionID s
 	return err
 }
 
-func (s *PostgresStore) LoadMemory(ctx context.Context, scope MemoryScope, scopeID string) (string, error) {
-	var content string
+func (s *PostgresStore) LoadMemory(ctx context.Context, scope MemoryScope, scopeID string) (Memory, error) {
+	var m Memory
 	err := s.db.QueryRowContext(ctx,
-		"SELECT content FROM memory WHERE scope = $1 AND scope_id = $2",
-		string(scope), scopeID).Scan(&content)
-	if err == sql.ErrNoRows {
-		return "", nil
+		"SELECT content, version FROM memory WHERE scope = $1 AND scope_id = $2",
+		string(scope), scopeID).Scan(&m.Content, &m.Version)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Memory{}, nil
 	}
-	return content, err
+	return m, err
 }
 
-func (s *PostgresStore) SaveMemory(ctx context.Context, scope MemoryScope, scopeID string, content string) error {
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO memory (scope, scope_id, content, updated_at)
-		VALUES ($1, $2, $3, NOW())
-		ON CONFLICT (scope, scope_id) DO UPDATE SET content = EXCLUDED.content, updated_at = NOW()`,
-		string(scope), scopeID, content)
-	return err
+// SaveMemory replaces a scope's memory if it is still at version expected,
+// and returns the new version. Expected 0 is a memory never saved: the save
+// inserts it. When another save came first, nothing is written and the error
+// is a *MemoryConflict holding the memory as it is now. Concurrent saves from
+// one version: the row lock makes the others see the bumped version, so
+// exactly one wins.
+func (s *PostgresStore) SaveMemory(ctx context.Context, scope MemoryScope, scopeID string, content string, expected int64) (int64, error) {
+	var version int64
+	var err error
+	if expected == 0 {
+		err = s.db.QueryRowContext(ctx, `
+			INSERT INTO memory (scope, scope_id, content, version, updated_at)
+			VALUES ($1, $2, $3, 1, NOW())
+			ON CONFLICT (scope, scope_id) DO UPDATE
+				SET content = EXCLUDED.content, version = memory.version + 1, updated_at = NOW()
+				WHERE memory.version = 0
+			RETURNING version`,
+			string(scope), scopeID, content).Scan(&version)
+	} else {
+		err = s.db.QueryRowContext(ctx, `
+			UPDATE memory SET content = $3, version = version + 1, updated_at = NOW()
+			WHERE scope = $1 AND scope_id = $2 AND version = $4
+			RETURNING version`,
+			string(scope), scopeID, content, expected).Scan(&version)
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return version, err
+	}
+	current, err := s.LoadMemory(ctx, scope, scopeID)
+	if err != nil {
+		return 0, err
+	}
+	return 0, &MemoryConflict{Current: current}
 }
 
 func (s *PostgresStore) SaveTaskLog(ctx context.Context, log TaskLog) error {

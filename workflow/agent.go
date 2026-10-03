@@ -304,7 +304,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 		}
 
 		var llmAct *activity.LLMActivities
-		var response provider.ChatResponse
+		var response activity.LLMTurnResponse
 		if err := workflow.ExecuteActivity(llmCtx, llmAct.CallLLM, llmRequest()).Get(ctx, &response); err != nil {
 			cancelSafeFlush()
 			if ctx.Err() != nil {
@@ -318,6 +318,11 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 				ErrorType:   failureType(err),
 			}, nil
 		}
+
+		// The tools this answer calls act on what the model read: a memory
+		// save replaces the version this call's prompt held, and none when
+		// it held none.
+		call.MemoryVersion = response.MemoryVersion
 
 		// No tool calls → final response
 		if len(response.ToolCalls) == 0 {

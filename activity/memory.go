@@ -7,11 +7,10 @@ import (
 )
 
 // ConversationStore is what the memory activities need of the store: where a
-// session's messages end, how to append a turn's, and a scope's memory.
+// session's messages end, and how to append a turn's.
 type ConversationStore interface {
 	LastMessageID(ctx context.Context, sessionID string) (int64, error)
 	AppendMessages(ctx context.Context, sessionID, turnKey string, startIndex int, messages []store.Message) error
-	SaveMemory(ctx context.Context, scope store.MemoryScope, scopeID string, content string) error
 }
 
 type MemoryActivities struct {
@@ -43,14 +42,4 @@ type PersistContextInput struct {
 
 func (a *MemoryActivities) PersistContext(ctx context.Context, input PersistContextInput) error {
 	return a.Store.AppendMessages(ctx, input.SessionID, input.TurnKey, input.StartIndex, input.Messages)
-}
-
-type SaveMemoryInput struct {
-	Scope   store.MemoryScope
-	ScopeID string
-	Content string
-}
-
-func (a *MemoryActivities) SaveMemory(ctx context.Context, input SaveMemoryInput) error {
-	return a.Store.SaveMemory(ctx, input.Scope, input.ScopeID, input.Content)
 }

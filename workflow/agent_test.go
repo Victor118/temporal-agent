@@ -543,7 +543,7 @@ func TestAgentWorkflow_ScheduledRunLoadsOnlyTheUserMemory(t *testing.T) {
 	env := suite.NewTestWorkflowEnvironment()
 	registerAgentStubs(env)
 	f := registerLLM(env, answers(done))
-	f.session.memory["victor"] = "likes concise answers"
+	f.session.memory["victor"] = store.Memory{Content: "likes concise answers", Version: 1}
 
 	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{
 		SessionID: "schedule-1", UserID: "victor", AgentID: "default",
@@ -573,7 +573,7 @@ func TestAgentWorkflow_LoadsItsOwnHistory(t *testing.T) {
 	env := suite.NewTestWorkflowEnvironment()
 	registerAgentStubs(env)
 	f := registerLLM(env, answers(done))
-	f.session.memory["victor"] = "likes concise answers"
+	f.session.memory["victor"] = store.Memory{Content: "likes concise answers", Version: 1}
 	f.session.add(store.HumanMessageKey("a"), store.Message{Role: store.RoleUser, Content: `"earlier question"`})
 	upTo := f.session.add(store.TurnMessageKey("run-abc-3", 0), store.Message{Role: store.RoleAssistant, Content: `"earlier answer"`})
 

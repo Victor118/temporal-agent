@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -14,6 +15,23 @@ const (
 	MemoryScopeProject MemoryScope = "project"
 	MemoryScopeSession MemoryScope = "session"
 )
+
+// Memory is a scope's memory and its version, bumped by every save: 0, with
+// no content, while none was saved.
+type Memory struct {
+	Content string `json:"content"`
+	Version int64  `json:"version"`
+}
+
+// MemoryConflict is the error of a memory save made from a version another
+// save replaced since: nothing was written. Current is the memory now.
+type MemoryConflict struct {
+	Current Memory
+}
+
+func (e *MemoryConflict) Error() string {
+	return fmt.Sprintf("memory changed since it was read: now at version %d", e.Current.Version)
+}
 
 type Store interface {
 	// Users
@@ -62,9 +80,10 @@ type Store interface {
 	DeleteMessage(ctx context.Context, sessionID string, id int64) error
 	DeleteMessagesBySession(ctx context.Context, sessionID string) error
 
-	// Agent memory
-	LoadMemory(ctx context.Context, scope MemoryScope, scopeID string) (string, error)
-	SaveMemory(ctx context.Context, scope MemoryScope, scopeID string, content string) error
+	// Agent memory. Every write is conditional (SaveMemory): there is no
+	// last-write-wins path.
+	LoadMemory(ctx context.Context, scope MemoryScope, scopeID string) (Memory, error)
+	SaveMemory(ctx context.Context, scope MemoryScope, scopeID string, content string, expected int64) (int64, error)
 
 	// Task logs (scheduled tasks)
 	SaveTaskLog(ctx context.Context, log TaskLog) error

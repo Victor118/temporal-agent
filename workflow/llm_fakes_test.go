@@ -20,7 +20,7 @@ import (
 type memSession struct {
 	mu       sync.Mutex
 	messages []store.MessageWithID
-	memory   map[string]string
+	memory   map[string]store.Memory
 	persists []persistCall // every PersistContext, in order
 	// failPersists makes the next n PersistContext fail, after writing
 	// their messages when writeThenFail: written, but not confirmed.
@@ -110,14 +110,22 @@ func (s *memSession) LoadConversation(_ context.Context, _ string, upTo int64, t
 	return out, nil
 }
 
-func (s *memSession) LoadMemory(_ context.Context, _ store.MemoryScope, userID string) (string, error) {
+func (s *memSession) LoadMemory(_ context.Context, _ store.MemoryScope, userID string) (store.Memory, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.memory[userID], nil
 }
 
-func (s *memSession) SaveMemory(context.Context, store.MemoryScope, string, string) error {
-	return nil
+// SaveMemory writes as Postgres does: only over the version expected.
+func (s *memSession) SaveMemory(_ context.Context, _ store.MemoryScope, userID, content string, expected int64) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current := s.memory[userID]
+	if current.Version != expected {
+		return 0, &store.MemoryConflict{Current: current}
+	}
+	s.memory[userID] = store.Memory{Content: content, Version: expected + 1}
+	return expected + 1, nil
 }
 
 // fakeModel answers the n-th request (from 1) it is sent with answer, and
@@ -167,7 +175,7 @@ func registerLLM(env *testsuite.TestWorkflowEnvironment, answer func(n int, req 
 	catalog := activity.NewCatalog()
 	catalog.SetTools([]store.ToolRecord{{Name: "exec", InputSchema: schema}, {Name: "web_fetch", InputSchema: schema}, {Name: "web_search", InputSchema: schema}})
 	f := &llmFakes{
-		session: &memSession{memory: map[string]string{}},
+		session: &memSession{memory: map[string]store.Memory{}},
 		model:   &fakeModel{answer: answer},
 		catalog: catalog,
 	}
@@ -177,7 +185,7 @@ func registerLLM(env *testsuite.TestWorkflowEnvironment, answer func(n int, req 
 		Catalog:  catalog,
 		Prompts:  promptFunc(func(string, []string) string { return "prompt" }),
 	}
-	env.RegisterActivityWithOptions(func(ctx context.Context, req activity.LLMTurnRequest) (provider.ChatResponse, error) {
+	env.RegisterActivityWithOptions(func(ctx context.Context, req activity.LLMTurnRequest) (activity.LLMTurnResponse, error) {
 		encoded, _ := json.Marshal(req)
 		f.mu.Lock()
 		f.inputs = append(f.inputs, len(encoded))

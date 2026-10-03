@@ -64,6 +64,10 @@ type CallContext struct {
 	// Agent signs what the tool sends to the channel, as the agent's answer
 	// is (AgentWorkflowInput.SignReply). Empty: unsigned.
 	Agent string `json:"agent,omitempty"`
+	// MemoryVersion is the version of the user's memory the model read in
+	// the prompt of the call that made this one: what save_user_memory
+	// replaces. Nil: the prompt held none.
+	MemoryVersion *int64 `json:"memory_version,omitempty"`
 }
 
 // WithCallContext adds cc's fields to a tool's input object. They are the
@@ -81,6 +85,7 @@ func WithCallContext(input json.RawMessage, cc CallContext) (json.RawMessage, er
 	delete(fields, "channel")
 	delete(fields, "channel_id")
 	delete(fields, "agent")
+	delete(fields, "memory_version")
 	extra, _ := json.Marshal(cc)
 	var ccFields map[string]json.RawMessage
 	json.Unmarshal(extra, &ccFields)

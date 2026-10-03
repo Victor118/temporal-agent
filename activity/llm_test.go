@@ -36,7 +36,7 @@ func (m *recordingModel) Chat(_ context.Context, req provider.ChatRequest) (prov
 // memConversation is the store in memory, read as Postgres reads it.
 type memConversation struct {
 	messages []store.MessageWithID
-	memory   map[string]string
+	memory   map[string]store.Memory
 	memErr   error
 }
 
@@ -57,7 +57,7 @@ func (s *memConversation) LoadConversation(_ context.Context, _ string, upTo int
 	return out, nil
 }
 
-func (s *memConversation) LoadMemory(_ context.Context, _ store.MemoryScope, userID string) (string, error) {
+func (s *memConversation) LoadMemory(_ context.Context, _ store.MemoryScope, userID string) (store.Memory, error) {
 	return s.memory[userID], s.memErr
 }
 
@@ -321,7 +321,7 @@ func TestCallLLM_BuildsThePromptAsBefore(t *testing.T) {
 	c.SetAgents([]AgentCatalogEntry{{ID: "smith", Name: "Agent Smith", Mention: "smith", Skills: []string{"review"}}})
 	skills := NewSkillActivities([]skill.Skill{{Name: "review", Content: "REVIEW SKILL"}}, c)
 	base, _ := skills.LoadSkillsForAgent(context.Background(), LoadSkillsForAgentInput{AgentID: "smith"})
-	st := &memConversation{memory: map[string]string{"u-alice": "likes tea"}}
+	st := &memConversation{memory: map[string]store.Memory{"u-alice": {Content: "likes tea", Version: 3}}}
 
 	for _, tc := range []struct {
 		name   string
@@ -349,6 +349,48 @@ func TestCallLLM_BuildsThePromptAsBefore(t *testing.T) {
 	if !strings.Contains(base.SystemPrompt, "Your name is Agent Smith") || !strings.Contains(base.SystemPrompt, "REVIEW SKILL") {
 		t.Errorf("base prompt %q lacks the identity or the skill", base.SystemPrompt)
 	}
+}
+
+// The answer says which version of the user's memory the prompt held, the
+// one the model read: 0 for a memory never saved, none when the prompt held
+// no memory, asked for or not.
+func TestCallLLM_ReturnsTheMemoryVersionInThePrompt(t *testing.T) {
+	st := &memConversation{memory: map[string]store.Memory{"u-alice": {Content: "likes tea", Version: 3}}}
+	msgs := []store.Message{{Role: store.RoleUser, Content: text("go")}}
+	for _, tc := range []struct {
+		name   string
+		of     string
+		memErr error
+		want   *int64
+	}{
+		{"saved", "u-alice", nil, ptr(int64(3))},
+		{"never saved", "u-bob", nil, ptr(int64(0))},
+		{"unread", "u-alice", errors.New("db down"), nil},
+		{"not asked", "", nil, nil},
+	} {
+		st.memErr = tc.memErr
+		model := &recordingModel{}
+		resp, err := newLLM(model, st).CallLLM(context.Background(), LLMTurnRequest{AgentID: "smith", Prompt: PromptRef{MemoryOf: tc.of}, Messages: msgs})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(resp.MemoryVersion, tc.want) || resp.Content != "done" {
+			t.Errorf("%s: answer %+v, memory version %v, want %v", tc.name, resp.ChatResponse, deref(resp.MemoryVersion), deref(tc.want))
+		}
+		if inPrompt := strings.Contains(model.requests[0].System, "likes tea"); inPrompt != (tc.name == "saved") {
+			t.Errorf("%s: memory in the prompt = %v", tc.name, inPrompt)
+		}
+	}
+}
+
+func ptr[T any](v T) *T { return &v }
+
+// deref shows a version or its absence.
+func deref(v *int64) string {
+	if v == nil {
+		return "none"
+	}
+	return fmt.Sprint(*v)
 }
 
 // Another agent's call to a private tool reaches the model as the members
