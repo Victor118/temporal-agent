@@ -14,8 +14,12 @@ import (
 )
 
 type implementEnv struct {
-	env       *testsuite.TestWorkflowEnvironment
-	run       *activity.RunClaudeCodeInput
+	env      *testsuite.TestWorkflowEnvironment
+	queues   *activityQueues
+	run      *activity.RunClaudeCodeInput
+	inspects int
+	// duringRun, when set, is what the run does instead of returning at once.
+	duringRun func(ctx context.Context) error
 	pushed    *activity.PushBranchInput
 	cleaned   []string
 	inspected activity.InspectWorkspaceOutput
@@ -25,6 +29,7 @@ func newImplementEnv(t *testing.T, result claudeCodeResult, runErr error, inspec
 	t.Helper()
 	var suite testsuite.WorkflowTestSuite
 	e := &implementEnv{env: suite.NewTestWorkflowEnvironment(), inspected: inspected}
+	e.queues = asRunWorker(e.env)
 
 	e.env.RegisterActivityWithOptions(func(ctx context.Context, in activity.PrepareWorkspaceInput) (activity.PrepareWorkspaceOutput, error) {
 		return activity.PrepareWorkspaceOutput{Dir: "/work/" + in.Name, Commit: "base0000", Branch: in.Branch}, nil
@@ -32,10 +37,14 @@ func newImplementEnv(t *testing.T, result claudeCodeResult, runErr error, inspec
 
 	e.env.RegisterActivityWithOptions(func(ctx context.Context, in activity.RunClaudeCodeInput) (claudeCodeResult, error) {
 		e.run = &in
+		if e.duringRun != nil {
+			return result, e.duringRun(ctx)
+		}
 		return result, runErr
 	}, sdkactivity.RegisterOptions{Name: "RunClaudeCode"})
 
 	e.env.RegisterActivityWithOptions(func(ctx context.Context, in activity.InspectWorkspaceInput) (activity.InspectWorkspaceOutput, error) {
+		e.inspects++
 		out := e.inspected
 		if out.Branch == "" {
 			out.Branch = in.Branch

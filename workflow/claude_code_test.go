@@ -17,15 +17,19 @@ import (
 // workflow asked them to do.
 type analyzeEnv struct {
 	env      *testsuite.TestWorkflowEnvironment
+	queues   *activityQueues
 	prepared *activity.PrepareWorkspaceInput
 	run      *activity.RunClaudeCodeInput
 	cleaned  []string
+	// duringRun, when set, is what the run does instead of returning at once.
+	duringRun func(ctx context.Context) error
 }
 
 func newAnalyzeEnv(t *testing.T, prepareErr error, result claudeCodeResult, runErr error) *analyzeEnv {
 	t.Helper()
 	var suite testsuite.WorkflowTestSuite
 	a := &analyzeEnv{env: suite.NewTestWorkflowEnvironment()}
+	a.queues = asRunWorker(a.env)
 
 	a.env.RegisterActivityWithOptions(func(ctx context.Context, in activity.PrepareWorkspaceInput) (activity.PrepareWorkspaceOutput, error) {
 		a.prepared = &in
@@ -37,6 +41,9 @@ func newAnalyzeEnv(t *testing.T, prepareErr error, result claudeCodeResult, runE
 
 	a.env.RegisterActivityWithOptions(func(ctx context.Context, in activity.RunClaudeCodeInput) (claudeCodeResult, error) {
 		a.run = &in
+		if a.duringRun != nil {
+			return result, a.duringRun(ctx)
+		}
 		return result, runErr
 	}, sdkactivity.RegisterOptions{Name: "RunClaudeCode"})
 

@@ -19,6 +19,8 @@ const (
 	implementTimeout = 2 * time.Hour
 	inspectTimeout   = 2 * time.Minute
 	pushTimeout      = 10 * time.Minute
+	inspectAttempts  = 2
+	pushAttempts     = 2
 
 	// implementPermissionMode auto-accepts edits. It does not cover Bash,
 	// which is why the git commands below are named explicitly: without them
@@ -67,7 +69,8 @@ type ImplementFeatureInput struct {
 
 // ImplementFeatureWorkflow makes a change to a repository and publishes it as
 // a branch: clone, branch, run Claude Code, check what it actually produced,
-// push, delete the clone.
+// push, delete the clone. Every step runs on the one worker whose disk holds
+// the clone (openRun): a push from another would find no commit to publish.
 //
 // The run writes the commits; the workflow does the clone, the branch and the
 // push. That split is not stylistic: the push is the only step that holds a
@@ -94,38 +97,37 @@ func implementFeature(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCod
 	out := ClaudeCodeOutput{Repo: input.Repo, Ref: input.Base, Branch: branch}
 	var ccAct *activity.ClaudeCodeActivities
 
+	runCtx, err := openRun(ctx, implementSessionTimeout)
+	if err != nil {
+		out.Error = err.Error()
+		return out, nil
+	}
+	defer workflow.CompleteSession(runCtx)
+
 	var prepared activity.PrepareWorkspaceOutput
-	err := workflow.ExecuteActivity(
-		workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+	err = workflow.ExecuteActivity(
+		onRunWorker(runCtx, workflow.ActivityOptions{
 			StartToCloseTimeout: prepareTimeout,
 			HeartbeatTimeout:    gitHeartbeatTimeout,
-			RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 2},
+			RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: prepareAttempts},
 		}),
 		ccAct.PrepareWorkspace,
 		activity.PrepareWorkspaceInput{Name: name, Repo: input.Repo, Ref: input.Base, Branch: branch},
-	).Get(ctx, &prepared)
+	).Get(runCtx, &prepared)
 	if err != nil {
-		out.Error = fmt.Sprintf("could not prepare the workspace: %v", err)
+		if workerLost(runCtx, err) {
+			out.Error = workerStopped("while it cloned the repository", "nothing was done")
+		} else {
+			out.Error = fmt.Sprintf("could not prepare the workspace: %v", err)
+		}
 		return out, nil
 	}
 	out.Commit = prepared.Commit
-
-	defer func() {
-		cleanupCtx, cancel := workflow.NewDisconnectedContext(ctx)
-		defer cancel()
-		_ = workflow.ExecuteActivity(
-			workflow.WithActivityOptions(cleanupCtx, workflow.ActivityOptions{
-				StartToCloseTimeout: cleanupTimeout,
-				RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 3},
-			}),
-			ccAct.CleanupWorkspace,
-			activity.CleanupWorkspaceInput{Dir: prepared.Dir},
-		).Get(cleanupCtx, nil)
-	}()
+	defer cleanupWorkspace(runCtx, prepared.Dir)
 
 	var result claudeCodeResult
 	runErr := workflow.ExecuteActivity(
-		workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+		onRunWorker(runCtx, workflow.ActivityOptions{
 			StartToCloseTimeout: implementTimeout,
 			HeartbeatTimeout:    analyzeHeartbeat,
 			RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 1},
@@ -139,7 +141,14 @@ func implementFeature(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCod
 			DisallowedTools: implementDeniedTools,
 			MaxBudgetUSD:    input.MaxBudgetUSD,
 		},
-	).Get(ctx, &result)
+	).Get(runCtx, &result)
+
+	// The commits are in the clone, on the lost worker's disk: no other
+	// worker can inspect or push them.
+	if workerLost(runCtx, runErr) {
+		out.Error = workerStopped("before the run finished", "nothing was pushed")
+		return out, nil
+	}
 
 	out.Report = result.Report
 	out.CostUSD = result.CostUSD
@@ -158,15 +167,19 @@ func implementFeature(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCod
 
 	var inspected activity.InspectWorkspaceOutput
 	if err := workflow.ExecuteActivity(
-		workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+		onRunWorker(runCtx, workflow.ActivityOptions{
 			StartToCloseTimeout: inspectTimeout,
 			HeartbeatTimeout:    gitHeartbeatTimeout,
-			RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 2},
+			RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: inspectAttempts},
 		}),
 		ccAct.InspectWorkspace,
 		activity.InspectWorkspaceInput{Dir: prepared.Dir, Base: prepared.Commit, Branch: branch},
-	).Get(ctx, &inspected); err != nil {
-		out.Error = joinErrors(out.Error, fmt.Sprintf("could not inspect the workspace: %v", err))
+	).Get(runCtx, &inspected); err != nil {
+		if workerLost(runCtx, err) {
+			out.Error = joinErrors(out.Error, workerStopped("before the commits were checked", "nothing was pushed"))
+		} else {
+			out.Error = joinErrors(out.Error, fmt.Sprintf("could not inspect the workspace: %v", err))
+		}
 		return out, nil
 	}
 	out.Commits = inspected.Commits
@@ -194,12 +207,12 @@ func implementFeature(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCod
 	}
 
 	if err := workflow.ExecuteActivity(
-		workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+		onRunWorker(runCtx, workflow.ActivityOptions{
 			StartToCloseTimeout: pushTimeout,
 			HeartbeatTimeout:    gitHeartbeatTimeout,
 			// A push either lands or it does not; retrying a rejected one
 			// just repeats the rejection.
-			RetryPolicy: &temporal.RetryPolicy{MaximumAttempts: 2},
+			RetryPolicy: &temporal.RetryPolicy{MaximumAttempts: pushAttempts},
 		}),
 		ccAct.PushBranch,
 		// The newest commit the inspection listed, not the branch as it
@@ -210,8 +223,14 @@ func implementFeature(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCod
 			Branch: branch,
 			Commit: inspected.Commits[0].SHA,
 		},
-	).Get(ctx, nil); err != nil {
-		out.Error = joinErrors(out.Error, fmt.Sprintf("the commits were not pushed: %v", err))
+	).Get(runCtx, nil); err != nil {
+		if workerLost(runCtx, err) {
+			// The push may have reached the remote before the worker went.
+			out.Error = joinErrors(out.Error, workerStopped("during the push",
+				fmt.Sprintf("the branch may or may not have been published; check %s on the remote", branch)))
+		} else {
+			out.Error = joinErrors(out.Error, fmt.Sprintf("the commits were not pushed: %v", err))
+		}
 		return out, nil
 	}
 	out.Pushed = true

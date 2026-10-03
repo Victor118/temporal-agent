@@ -82,7 +82,8 @@ type ClaudeCodeOutput struct {
 }
 
 // AnalyzeRepoWorkflow reads a repository and answers a question about it. It
-// clones, runs Claude Code with no write access, and deletes the clone.
+// clones, runs Claude Code with no write access, and deletes the clone, all on
+// the one worker whose disk holds the clone (openRun).
 //
 // It is not a sub-agent: no LLM decides the steps. The calling agent says what
 // to look at and what to find out; the code decides how, which is what keeps
@@ -113,45 +114,41 @@ func analyzeRepo(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCodeOutp
 	out := ClaudeCodeOutput{Repo: input.Repo, Ref: input.Ref}
 	var ccAct *activity.ClaudeCodeActivities
 
+	runCtx, err := openRun(ctx, analyzeSessionTimeout)
+	if err != nil {
+		out.Error = err.Error()
+		return out, nil
+	}
+	defer workflow.CompleteSession(runCtx)
+
 	// The run id names the workspace: unique per execution, and stable across
 	// a replay, so a retried PrepareWorkspace reuses the same directory.
 	name := "run-" + workflow.GetInfo(ctx).WorkflowExecution.RunID
 
 	var prepared activity.PrepareWorkspaceOutput
-	err := workflow.ExecuteActivity(
-		workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+	err = workflow.ExecuteActivity(
+		onRunWorker(runCtx, workflow.ActivityOptions{
 			StartToCloseTimeout: prepareTimeout,
 			HeartbeatTimeout:    gitHeartbeatTimeout,
-			RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 2},
+			RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: prepareAttempts},
 		}),
 		ccAct.PrepareWorkspace,
 		activity.PrepareWorkspaceInput{Name: name, Repo: input.Repo, Ref: input.Ref},
-	).Get(ctx, &prepared)
+	).Get(runCtx, &prepared)
 	if err != nil {
-		out.Error = fmt.Sprintf("could not prepare the workspace: %v", err)
+		if workerLost(runCtx, err) {
+			out.Error = workerStopped("while it cloned the repository", "nothing was done")
+		} else {
+			out.Error = fmt.Sprintf("could not prepare the workspace: %v", err)
+		}
 		return out, nil
 	}
 	out.Commit = prepared.Commit
-
-	// Deleting the clone is the one step that must happen on every path out,
-	// including a cancelled workflow — and a cancelled workflow cannot start
-	// an activity on its own context.
-	defer func() {
-		cleanupCtx, cancel := workflow.NewDisconnectedContext(ctx)
-		defer cancel()
-		_ = workflow.ExecuteActivity(
-			workflow.WithActivityOptions(cleanupCtx, workflow.ActivityOptions{
-				StartToCloseTimeout: cleanupTimeout,
-				RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 3},
-			}),
-			ccAct.CleanupWorkspace,
-			activity.CleanupWorkspaceInput{Dir: prepared.Dir},
-		).Get(cleanupCtx, nil)
-	}()
+	defer cleanupWorkspace(runCtx, prepared.Dir)
 
 	var result claudeCodeResult
 	err = workflow.ExecuteActivity(
-		workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+		onRunWorker(runCtx, workflow.ActivityOptions{
 			StartToCloseTimeout: analyzeTimeout,
 			HeartbeatTimeout:    analyzeHeartbeat,
 			// Never retried: a run costs real money and has already changed
@@ -165,9 +162,13 @@ func analyzeRepo(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCodeOutp
 			PermissionMode:     analyzePermissionMode,
 			AppendSystemPrompt: analyzeSystemPrompt,
 		},
-	).Get(ctx, &result)
+	).Get(runCtx, &result)
 	if err != nil {
-		out.Error = fmt.Sprintf("the analysis did not complete: %v", err)
+		if workerLost(runCtx, err) {
+			out.Error = workerStopped("before the analysis finished", "there is no report")
+		} else {
+			out.Error = fmt.Sprintf("the analysis did not complete: %v", err)
+		}
 		return out, nil
 	}
 
