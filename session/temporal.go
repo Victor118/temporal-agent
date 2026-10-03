@@ -92,21 +92,32 @@ func (s *Service) activeWorkflowID(ctx context.Context, sessionID string) string
 // legacyRunID returns the session's run resumed under the former scheme if it
 // still runs, or "": until it times out, a message goes to it rather than
 // starting a second run on the fixed ID. Only the runs started before the
-// fixed ID was adopted have such an ID.
-func (s *Service) legacyRunID(ctx context.Context, sessionID string) string {
+// fixed ID was adopted have such an ID. A visibility error is returned, not
+// taken for "none": a run may be there, and starting on the fixed ID would
+// make a second one.
+//
+// The fallback (legacyRunQuery, legacyRunID, its branch in signalSession) can
+// go once no "session-<id>-<unix>" run can still be running: 30 minutes idle
+// after the fixed ID was deployed.
+func (s *Service) legacyRunID(ctx context.Context, sessionID string) (string, error) {
 	query, err := legacyRunQuery(sessionID)
 	if err != nil {
-		return ""
+		// Not a UUID: no run was ever resumed under it, every session
+		// created had a UUID, before the fixed ID as after.
+		return "", nil
 	}
 	resp, err := s.temporal.ListWorkflow(ctx, &workflowservice.ListWorkflowExecutionsRequest{
 		Namespace: s.cfg.Namespace,
 		Query:     query,
 		PageSize:  1,
 	})
-	if err != nil || len(resp.Executions) == 0 {
-		return ""
+	if err != nil {
+		return "", fmt.Errorf("list legacy runs: %w", err)
 	}
-	return resp.Executions[0].Execution.WorkflowId
+	if len(resp.Executions) == 0 {
+		return "", nil
+	}
+	return resp.Executions[0].Execution.WorkflowId, nil
 }
 
 // IsActive reports whether the session's workflow runs.

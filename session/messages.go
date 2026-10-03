@@ -97,8 +97,12 @@ func (s *Service) Deliver(ctx context.Context, sess *store.Session, author *stor
 // running, so two messages never start two runs, and a run ending while the
 // message is sent cannot lose it.
 func (s *Service) signalSession(ctx context.Context, sess *store.Session, msg workflow.UserMessage) error {
-	if id := s.legacyRunID(ctx, sess.SessionID); id != "" {
-		err := s.temporal.SignalWorkflow(ctx, id, "", workflow.SignalUserMessage, msg)
+	legacy, err := s.legacyRunID(ctx, sess.SessionID)
+	if err != nil {
+		return fmt.Errorf("signal session: %w", err)
+	}
+	if legacy != "" {
+		err := s.temporal.SignalWorkflow(ctx, legacy, "", workflow.SignalUserMessage, msg)
 		var gone *serviceerror.NotFound
 		if !errors.As(err, &gone) {
 			if err != nil {

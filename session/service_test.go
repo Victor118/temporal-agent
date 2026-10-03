@@ -290,6 +290,26 @@ func TestDeliver_SignalsALegacyRun(t *testing.T) {
 	}
 }
 
+// Visibility down, a legacy run may still be there: the message stays stored
+// and the delivery fails, rather than starting a second run on the fixed ID.
+func TestDeliver_FailsWhenTheLegacyRunsCannotBeListed(t *testing.T) {
+	st := &memStore{members: []store.SessionMember{{UserID: "u-alice"}}}
+	tc := &fakeTemporal{listErr: errors.New("visibility unavailable")}
+	alice := &store.User{ID: "u-alice", Email: "alice@example.com"}
+	sess := &store.Session{SessionID: sid, AgentID: "default"}
+
+	called, err := newTest(st, tc).Deliver(context.Background(), sess, alice, "bonjour")
+	if err == nil || called {
+		t.Errorf("Deliver = %v, %v; want an error", called, err)
+	}
+	if len(tc.signals) != 0 || len(tc.signalStarts) != 0 {
+		t.Errorf("signalled %v, signal-with-start %d: want neither", tc.signals, len(tc.signalStarts))
+	}
+	if n := len(st.appended); n != 1 {
+		t.Errorf("%d messages stored, want the user's", n)
+	}
+}
+
 // The state is the running run's, a resumed session's included, on the fixed
 // ID or the former scheme; with none running, the last run's.
 func TestState_FindsTheSession(t *testing.T) {

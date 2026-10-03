@@ -81,6 +81,7 @@ func (m *memStore) LoadMessagesUpTo(context.Context, string, int64) ([]store.Mes
 type fakeTemporal struct {
 	running      []string // workflow IDs the visibility queries return
 	lists        []string // the queries
+	listErr      error    // what ListWorkflow returns
 	signals      []string // workflow IDs signalled
 	signalErr    error    // what SignalWorkflow returns
 	started      []string
@@ -137,6 +138,9 @@ func (f *fakeTemporal) DescribeWorkflowExecution(_ context.Context, id, _ string
 }
 func (f *fakeTemporal) ListWorkflow(_ context.Context, req *workflowservice.ListWorkflowExecutionsRequest) (*workflowservice.ListWorkflowExecutionsResponse, error) {
 	f.lists = append(f.lists, req.Query)
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
 	resp := &workflowservice.ListWorkflowExecutionsResponse{}
 	for _, id := range f.running {
 		resp.Executions = append(resp.Executions, &workflowpb.WorkflowExecutionInfo{Execution: &commonpb.WorkflowExecution{WorkflowId: id}})
