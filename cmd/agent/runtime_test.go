@@ -6,7 +6,9 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
+	"github.com/victor/temporal-agent/activity"
 	"github.com/victor/temporal-agent/config"
 	"github.com/victor/temporal-agent/subproc"
 )
@@ -127,4 +129,25 @@ func TestParseMaxRuns(t *testing.T) {
 			t.Errorf("parseMaxRuns(%q) = %v, want a refusal that names the uid per run", raw, err)
 		}
 	}
+}
+
+// A root this worker cannot claim stops it: serving runs without a claim, it
+// would see its clones deleted by the next worker to start alone.
+func TestClaimRunsRoot_FailureIsFatal(t *testing.T) {
+	root := t.TempDir()
+	// The claim file is never opened through a link.
+	if err := os.Symlink(filepath.Join(t.TempDir(), "elsewhere"), filepath.Join(root, ".workers.lock")); err != nil {
+		t.Fatal(err)
+	}
+	if release, err := claimRunsRoot(&activity.ClaudeCodeActivities{Root: root}, time.Second); err == nil {
+		release()
+		t.Fatal("claimed a root whose claim file is a link")
+	}
+
+	ok := t.TempDir()
+	release, err := claimRunsRoot(&activity.ClaudeCodeActivities{Root: ok}, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
 }

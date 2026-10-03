@@ -48,7 +48,7 @@ const (
 // RunWorkspaceLifetime bounds how long a run's workspace is in use: the
 // longest session, which began before the clone did, and the time its worker
 // takes to notice that the session is over. A workspace older than this
-// belongs to no live run (activity.ClaudeCodeActivities.SweepWorkspaces).
+// belongs to no live run (activity.RootClaim.Sweep).
 const RunWorkspaceLifetime = max(analyzeSessionTimeout, implementSessionTimeout) + 15*time.Minute
 
 // runQueue is the task queue a run's worker is taken from: the one the
@@ -107,7 +107,7 @@ func workerLost(runCtx workflow.Context, err error) bool {
 
 // workerStopped is what the output says of a run whose worker was lost
 // (workerLost) at the step named by when. Its clone stays on that worker's
-// disk until it starts again (SweepWorkspaces): no other worker can reach it.
+// disk until it starts again (RootClaim.Sweep): no other worker can reach it.
 func workerStopped(when, consequence string) string {
 	return fmt.Sprintf("the worker that held the run stopped %s: %s", when, consequence)
 }

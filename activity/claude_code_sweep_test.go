@@ -54,19 +54,35 @@ func entries(t *testing.T, root string) []string {
 	return names
 }
 
+// claimAndSweep is a worker's startup: claim Root, sweep it, share the claim.
+func claimAndSweep(t *testing.T, a *ClaudeCodeActivities, lifetime time.Duration) (removed []string, release func()) {
+	t.Helper()
+	claim, err := a.ClaimRoot(time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	removed, err = claim.Sweep(lifetime)
+	if err != nil {
+		claim.Release()
+		t.Fatal(err)
+	}
+	if err := claim.Share(time.Second); err != nil {
+		claim.Release()
+		t.Fatal(err)
+	}
+	return removed, claim.Release
+}
+
 // Alone on its root, a starting worker deletes every run's workspace there,
 // and its companions: they belong to runs that are over. Nothing else.
-func TestSweepWorkspaces_AloneRemovesEveryRun(t *testing.T) {
+func TestSweep_AloneRemovesEveryRun(t *testing.T) {
 	root := t.TempDir()
 	sweepFixture(t, root)
 	runs := &countingRuns{}
 	a := &ClaudeCodeActivities{Root: root, Runs: runs}
 
-	removed, release, err := a.SweepWorkspaces(time.Hour)
+	removed, release := claimAndSweep(t, a, time.Hour)
 	defer release()
-	if err != nil {
-		t.Fatal(err)
-	}
 	if got, want := entries(t, root), []string{".workers.lock", "notes.txt", "other", "run-"}; !slices.Equal(got, want) {
 		t.Errorf("left %v, want %v", got, want)
 	}
@@ -80,7 +96,7 @@ func TestSweepWorkspaces_AloneRemovesEveryRun(t *testing.T) {
 
 // A link under root, whatever its name and wherever it points, is removed as
 // a link: its target is not the worker's to delete.
-func TestSweepWorkspaces_NeverFollowsALink(t *testing.T) {
+func TestSweep_NeverFollowsALink(t *testing.T) {
 	root, outside := t.TempDir(), t.TempDir()
 	keep := filepath.Join(outside, "keep.txt")
 	os.WriteFile(keep, []byte("x"), 0o644)
@@ -88,12 +104,8 @@ func TestSweepWorkspaces_NeverFollowsALink(t *testing.T) {
 	os.MkdirAll(filepath.Join(root, "run-c"), 0o755)
 	os.Symlink(outside, filepath.Join(root, "run-c", "escape"))
 
-	a := &ClaudeCodeActivities{Root: root}
-	_, release, err := a.SweepWorkspaces(time.Hour)
+	_, release := claimAndSweep(t, &ClaudeCodeActivities{Root: root}, time.Hour)
 	defer release()
-	if err != nil {
-		t.Fatal(err)
-	}
 	if got := entries(t, root); !slices.Equal(got, []string{".workers.lock"}) {
 		t.Errorf("left %v", got)
 	}
@@ -105,13 +117,9 @@ func TestSweepWorkspaces_NeverFollowsALink(t *testing.T) {
 // Another live worker on the same root (it holds its claim): a starting one
 // is not alone, and leaves what may be a live run of the other's — anything
 // newer than a run's lifetime. Once the other is gone, it is alone again.
-func TestSweepWorkspaces_SharedRootKeepsRecentRuns(t *testing.T) {
+func TestSweep_SharedRootKeepsRecentRuns(t *testing.T) {
 	root := t.TempDir()
-	first := &ClaudeCodeActivities{Root: root}
-	_, releaseFirst, err := first.SweepWorkspaces(time.Hour)
-	if err != nil {
-		t.Fatal(err)
-	}
+	_, releaseFirst := claimAndSweep(t, &ClaudeCodeActivities{Root: root}, time.Hour)
 
 	sweepFixture(t, root)
 	old := time.Now().Add(-2 * time.Hour)
@@ -122,11 +130,7 @@ func TestSweepWorkspaces_SharedRootKeepsRecentRuns(t *testing.T) {
 	}
 
 	runs := &countingRuns{}
-	second := &ClaudeCodeActivities{Root: root, Runs: runs}
-	removed, releaseSecond, err := second.SweepWorkspaces(time.Hour)
-	if err != nil {
-		t.Fatal(err)
-	}
+	removed, releaseSecond := claimAndSweep(t, &ClaudeCodeActivities{Root: root, Runs: runs}, time.Hour)
 	if len(removed) != 3 {
 		t.Errorf("removed %v, want run a's three entries", removed)
 	}
@@ -139,31 +143,91 @@ func TestSweepWorkspaces_SharedRootKeepsRecentRuns(t *testing.T) {
 
 	releaseFirst()
 	releaseSecond()
-	third := &ClaudeCodeActivities{Root: root}
-	_, releaseThird, err := third.SweepWorkspaces(time.Hour)
+	_, releaseThird := claimAndSweep(t, &ClaudeCodeActivities{Root: root}, time.Hour)
 	defer releaseThird()
-	if err != nil {
-		t.Fatal(err)
-	}
 	if got := entries(t, root); slices.Contains(got, "run-b") {
 		t.Errorf("left %v: alone again, run-b should be gone", got)
 	}
 }
 
-func TestSweepWorkspaces_CreatesTheRoot(t *testing.T) {
+func TestClaimRoot_CreatesTheRoot(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "runs")
-	_, release, err := (&ClaudeCodeActivities{Root: root}).SweepWorkspaces(time.Hour)
-	defer release()
+	claim, err := (&ClaudeCodeActivities{Root: root}).ClaimRoot(time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer claim.Release()
 	if _, err := os.Stat(root); err != nil {
 		t.Error(err)
 	}
+	if !claim.Alone() || !claim.Held() {
+		t.Errorf("alone %v, held %v on a new root", claim.Alone(), claim.Held())
+	}
 
-	if _, release, err := (&ClaudeCodeActivities{}).SweepWorkspaces(time.Hour); err == nil {
-		release()
-		t.Error("swept with no root configured")
+	if claim, err := (&ClaudeCodeActivities{}).ClaimRoot(time.Second); err == nil {
+		claim.Release()
+		t.Error("claimed with no root configured")
+	}
+}
+
+// A claim file that cannot be locked (here, a link: never followed) is an
+// error, not a claim: the caller must not serve runs without one.
+func TestClaimRoot_FailsOnALink(t *testing.T) {
+	root := t.TempDir()
+	os.Symlink(filepath.Join(t.TempDir(), "elsewhere"), filepath.Join(root, rootClaimFile))
+	if claim, err := (&ClaudeCodeActivities{Root: root}).ClaimRoot(time.Second); err == nil {
+		claim.Release()
+		t.Error("claimed through a link")
+	}
+}
+
+// A process that sweeps holds the claim exclusively. One starting meanwhile
+// waits for it a bounded time, then goes on without sweeping, and takes the
+// claim, shared, as soon as the other lets it go.
+func TestClaimRoot_WaitsForASweepThenClaimsLater(t *testing.T) {
+	root := t.TempDir()
+	sweeping, err := (&ClaudeCodeActivities{Root: root}).ClaimRoot(time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sweeping.Alone() {
+		t.Fatal("the first claim is not alone")
+	}
+
+	a := &ClaudeCodeActivities{Root: root}
+	start := time.Now()
+	claim, err := a.ClaimRoot(200 * time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer claim.Release()
+	if waited := time.Since(start); waited < 200*time.Millisecond || waited > 5*time.Second {
+		t.Errorf("waited %s, want about the 200ms given", waited)
+	}
+	if claim.Held() || claim.Alone() {
+		t.Fatalf("held %v, alone %v while another process sweeps", claim.Held(), claim.Alone())
+	}
+	if _, err := claim.Sweep(time.Hour); err == nil {
+		t.Error("swept without holding the claim")
+	}
+
+	sweeping.Release()
+	// Taken in the background: a newcomer is no longer alone.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		probe, err := (&ClaudeCodeActivities{Root: root}).ClaimRoot(0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		alone := probe.Alone()
+		probe.Release()
+		if !alone {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the waiting process never took its claim")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
@@ -186,7 +250,7 @@ func TestIsRunEntry(t *testing.T) {
 
 // A clone is the run user's when its worker dies: the sweep takes it back,
 // and removes it, closed directories included.
-func TestSweepWorkspaces_TakesTheRunsCloneBack(t *testing.T) {
+func TestSweep_TakesTheRunsCloneBack(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("giving files away takes root")
 	}
@@ -200,11 +264,8 @@ func TestSweepWorkspaces_TakesTheRunsCloneBack(t *testing.T) {
 	}
 	os.Chmod(filepath.Join(dir, "closed"), 0o500)
 
-	_, release, err := (&ClaudeCodeActivities{Root: root, RunAs: id, Runs: subproc.NewRuns(id)}).SweepWorkspaces(time.Hour)
+	_, release := claimAndSweep(t, &ClaudeCodeActivities{Root: root, RunAs: id, Runs: subproc.NewRuns(id)}, time.Hour)
 	defer release()
-	if err != nil {
-		t.Fatal(err)
-	}
 	if _, err := os.Lstat(dir); !os.IsNotExist(err) {
 		t.Errorf("run-x left behind: %v", err)
 	}

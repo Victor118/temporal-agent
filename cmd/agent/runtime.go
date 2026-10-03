@@ -54,7 +54,7 @@ type workerRuntime struct {
 	skills    []skill.Skill      // as loaded at startup
 	stop      context.CancelFunc // ends the polling
 	// releaseRuns gives up this process's claim on the coding runs' root
-	// (SweepWorkspaces).
+	// (claimRunsRoot).
 	releaseRuns func()
 }
 
@@ -112,6 +112,16 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 	// the coding runs share it, or one would end the other's processes.
 	runs := subproc.NewRuns(runAs)
 
+	codeAct := &activity.ClaudeCodeActivities{Root: cfg.ClaudeCodeWorkspace, SSHKeyPath: cfg.ClaudeCodeSSHKey, AllowedRepos: cfg.ClaudeCodeRepos, RunAs: runAs, Runs: runs, ClaudeConfigDir: cfg.ClaudeConfigDir, Model: cfg.ClaudeCodeModel, MaxBudgetUSD: budget, Auth: auth}
+	// Before this worker offers a run: what a run left on this machine's
+	// disk when its worker died is reachable from here alone.
+	releaseRuns := func() {}
+	if coding {
+		if releaseRuns, err = claimRunsRoot(codeAct, rootClaimWait); err != nil {
+			return nil, err
+		}
+	}
+
 	workerConf := loadWorkerConfig(cfg)
 	registry := buildRegistry(cfg, st, tc, runAs, runs, auth)
 
@@ -144,9 +154,7 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 	if coding {
 		log.Printf("Coding runs: at most %d at a time on this worker (CLAUDE_CODE_MAX_CONCURRENT_RUNS)", maxRuns)
 	}
-	codeAct := &activity.ClaudeCodeActivities{Root: cfg.ClaudeCodeWorkspace, SSHKeyPath: cfg.ClaudeCodeSSHKey, AllowedRepos: cfg.ClaudeCodeRepos, RunAs: runAs, Runs: runs, ClaudeConfigDir: cfg.ClaudeConfigDir, Model: cfg.ClaudeCodeModel, MaxBudgetUSD: budget, Auth: auth}
-
-	rt := &workerRuntime{queues: queues, workflows: workerConf.Workflows, skills: skills, releaseRuns: func() {}}
+	rt := &workerRuntime{queues: queues, workflows: workerConf.Workflows, skills: skills, releaseRuns: releaseRuns}
 	for _, queue := range queues {
 		wopts := worker.Options{
 			// A worker that stops polling for good takes the process with
@@ -186,12 +194,6 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 
 		rt.workers = append(rt.workers, w)
 		log.Printf("Worker registered on task queue %q", queue)
-	}
-
-	// Before this worker takes a run: what a run left on this machine's disk
-	// when its worker died is reachable from here alone.
-	if coding {
-		rt.releaseRuns = sweepRunWorkspaces(codeAct)
 	}
 
 	// Poll DB for activity queue mapping, agents catalog and skills changes
@@ -305,19 +307,36 @@ func parseMaxRuns(raw string) (int, error) {
 	return v, nil
 }
 
-// sweepRunWorkspaces deletes what coding runs left under the workspace root
-// when their worker stopped mid-run, and returns the claim on that root this
-// process keeps until it stops (activity.ClaudeCodeActivities.SweepWorkspaces).
-// A failure is logged: the worker still serves its runs.
-func sweepRunWorkspaces(codeAct *activity.ClaudeCodeActivities) (release func()) {
-	removed, release, err := codeAct.SweepWorkspaces(workflow.RunWorkspaceLifetime)
+// rootClaimWait bounds how long a starting worker waits for another worker
+// process sweeping the coding runs' root (activity.RootClaim).
+const rootClaimWait = 2 * time.Minute
+
+// claimRunsRoot claims the coding runs' root for this process, then deletes
+// what runs left there when their worker stopped mid-run, and returns the
+// release of the claim, to call when this process stops
+// (activity.RootClaim). Failing to claim the root is an error: a worker
+// serving runs without a claim could see its clones deleted by the next one
+// to start. A failed deletion is only logged.
+func claimRunsRoot(codeAct *activity.ClaudeCodeActivities, wait time.Duration) (release func(), err error) {
+	claim, err := codeAct.ClaimRoot(wait)
+	if err != nil {
+		return nil, fmt.Errorf("claim the coding runs' workspace %q (CLAUDE_CODE_WORKSPACE): %w", codeAct.Root, err)
+	}
+	if !claim.Held() {
+		return claim.Release, nil // logged by the claim
+	}
+	removed, err := claim.Sweep(workflow.RunWorkspaceLifetime)
 	if len(removed) > 0 {
 		log.Printf("Removed %d leftovers of coding runs that are over from %s", len(removed), codeAct.Root)
 	}
 	if err != nil {
 		log.Printf("Warning: sweeping the coding runs' workspaces: %v", err)
 	}
-	return release
+	if err := claim.Share(wait); err != nil {
+		claim.Release()
+		return nil, fmt.Errorf("share the claim on the coding runs' workspace %q: %w", codeAct.Root, err)
+	}
+	return claim.Release, nil
 }
 
 // parseContextBytes reads LLM_MAX_CONTEXT_BYTES: empty is the default (0), a
