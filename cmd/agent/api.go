@@ -44,9 +44,6 @@ type api struct {
 	sessions *session.Service
 	store    readStore
 	hub      *sse.Hub
-	// keepAlive is how often an idle SSE stream sends a comment; zero =
-	// sseKeepAlive.
-	keepAlive time.Duration
 }
 
 // sseKeepAlive is how often an SSE stream with nothing to say sends a
@@ -332,6 +329,12 @@ func (a *api) stream(w http.ResponseWriter, r *http.Request) {
 // streamTopic relays the hub's events for topic over SSE until the client
 // goes away.
 func (a *api) streamTopic(w http.ResponseWriter, r *http.Request, topic string) {
+	relaySSE(w, r, a.hub, topic, sseKeepAlive)
+}
+
+// relaySSE relays hub's events for topic over SSE until the client goes away,
+// with a comment every keepAlive while nothing else is sent.
+func relaySSE(w http.ResponseWriter, r *http.Request, hub *sse.Hub, topic string, keepAlive time.Duration) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "Streaming not supported", http.StatusInternalServerError)
@@ -342,14 +345,10 @@ func (a *api) streamTopic(w http.ResponseWriter, r *http.Request, topic string) 
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	ch := a.hub.Subscribe(topic)
-	defer a.hub.Unsubscribe(topic, ch)
+	ch := hub.Subscribe(topic)
+	defer hub.Unsubscribe(topic, ch)
 
-	every := a.keepAlive
-	if every <= 0 {
-		every = sseKeepAlive
-	}
-	ping := time.NewTicker(every)
+	ping := time.NewTicker(keepAlive)
 	defer ping.Stop()
 
 	ctx := r.Context()

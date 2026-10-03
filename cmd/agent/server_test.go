@@ -27,11 +27,10 @@ func TestNewHTTPServer_Timeouts(t *testing.T) {
 
 // An idle stream sends a comment now and then, which keeps a proxy from
 // closing it; events still go through.
-func TestStreamTopic_PingsWhileIdle(t *testing.T) {
+func TestRelaySSE_PingsWhileIdle(t *testing.T) {
 	hub := sse.NewHub()
-	a := &api{hub: hub, keepAlive: 10 * time.Millisecond}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		a.streamTopic(w, r, "s1")
+		relaySSE(w, r, hub, "s1", 10*time.Millisecond)
 	}))
 	defer srv.Close()
 

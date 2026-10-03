@@ -3,14 +3,12 @@ package session
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"regexp"
 	"strings"
 
 	"github.com/google/uuid"
-	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/sdk/client"
 
 	"github.com/victor/temporal-agent/activity"
@@ -102,12 +100,11 @@ func (s *Service) signalSession(ctx context.Context, sess *store.Session, msg wo
 		return fmt.Errorf("signal session: %w", err)
 	}
 	if legacy != "" {
-		err := s.temporal.SignalWorkflow(ctx, legacy, "", workflow.SignalUserMessage, msg)
-		var gone *serviceerror.NotFound
-		if !errors.As(err, &gone) {
-			if err != nil {
-				return fmt.Errorf("signal session: %w", err)
-			}
+		sent, err := s.signalIfRunning(ctx, legacy, workflow.SignalUserMessage, msg)
+		if err != nil {
+			return fmt.Errorf("signal session: %w", err)
+		}
+		if sent {
 			return nil
 		}
 		// It ended since it was listed: start on the fixed ID.

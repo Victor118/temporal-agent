@@ -2,12 +2,14 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
 
 	"github.com/google/uuid"
 	enumspb "go.temporal.io/api/enums/v1"
+	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/api/workflowservice/v1"
 
 	"github.com/victor/temporal-agent/workflow"
@@ -118,6 +120,18 @@ func (s *Service) legacyRunID(ctx context.Context, sessionID string) (string, er
 		return "", nil
 	}
 	return resp.Executions[0].Execution.WorkflowId, nil
+}
+
+// signalIfRunning signals a workflow and reports whether it took the signal:
+// one that has ended is no error, only not there. Any other failure is
+// returned, the signal possibly not sent.
+func (s *Service) signalIfRunning(ctx context.Context, workflowID, signal string, arg any) (bool, error) {
+	err := s.temporal.SignalWorkflow(ctx, workflowID, "", signal, arg)
+	var gone *serviceerror.NotFound
+	if errors.As(err, &gone) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 // IsActive reports whether the session's workflow runs.
