@@ -226,10 +226,19 @@ diagnostic.
   utilisateurs, réservé au rôle `admin`. Pas encore d'historique des
   modifications.
 - **Fork de session** : depuis un message, la nouvelle session part d'un résumé
-  de la conversation jusqu'à ce message. Le résumé est la première brique de la
+  de la conversation jusqu'à ce message, orienté par le but du fork quand il est
+  donné (« Pour quoi faire ? »). Le résumé est la première brique de la
   compaction du contexte, pas encore faite. Suppression d'une session qui a des
   forks : autorisée pour l'instant (le fork perd son lien), à revoir pour la
   traçabilité.
+- **Rapport d'un fork au parent** : on planifie dans une session, on ouvre un
+  fork par chantier, et chaque fork rapporte au parent ce qui s'y est fait
+  depuis son dernier rapport (`ReportToParentWorkflow` : résumé en quatre
+  parties — fait, décisions, écarts au plan, points ouverts — posté dans le
+  parent comme message du membre qui l'envoie, `kind = fork_report`). Le
+  rapport n'appelle aucun agent : les membres mentionnent l'agent ensuite s'ils
+  veulent sa réaction. Seul le dernier rapport est suivi sur le fork ; pas
+  encore d'historique des rapports côté fork.
 - **Comptes** : connexion par email et mot de passe (argon2id), sessions de
   connexion en base. Pas encore d'envoi d'emails (réinitialisation du mot de
   passe par un admin seulement).
