@@ -53,6 +53,9 @@ type workerRuntime struct {
 	workflows bool
 	skills    []skill.Skill      // as loaded at startup
 	stop      context.CancelFunc // ends the polling
+	// releaseRuns gives up this process's claim on the coding runs' root
+	// (SweepWorkspaces).
+	releaseRuns func()
 }
 
 // newWorkerRuntime builds the workers of a process, the same way for `agent
@@ -83,8 +86,9 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 	// Who pays for a coding run, the API or a subscription, is settled before
 	// any run, where the CLI is installed: never left to the CLI picking
 	// whichever credential it finds.
+	coding := (&claudecode.Runner{}).Available()
 	var auth claudecode.Auth
-	if (&claudecode.Runner{}).Available() {
+	if coding {
 		if auth, err = claudecode.ResolveAuth(cfg.ClaudeCodeAuth, os.Environ()); err != nil {
 			return nil, err
 		}
@@ -130,9 +134,11 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 		log.Println("Telegram bot client configured")
 	}
 
-	rt := &workerRuntime{queues: queues, workflows: workerConf.Workflows, skills: skills}
+	codeAct := &activity.ClaudeCodeActivities{Root: cfg.ClaudeCodeWorkspace, SSHKeyPath: cfg.ClaudeCodeSSHKey, AllowedRepos: cfg.ClaudeCodeRepos, RunAs: runAs, Runs: runs, ClaudeConfigDir: cfg.ClaudeConfigDir, Model: cfg.ClaudeCodeModel, MaxBudgetUSD: budget, Auth: auth}
+
+	rt := &workerRuntime{queues: queues, workflows: workerConf.Workflows, skills: skills, releaseRuns: func() {}}
 	for _, queue := range queues {
-		// Sessions pin stateful tool calls to one worker of the tool queue
+		// Sessions pin a coding run's steps to one worker of the tool queue
 		w := worker.New(tc, queue, worker.Options{
 			EnableSessionWorker: queue == workerConf.Queue,
 			// A worker that stops polling for good takes the process with
@@ -153,7 +159,7 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 		w.RegisterActivity(&activity.ForkActivities{Store: st, LLM: llmProvider, Private: catalog})
 		w.RegisterActivity(&activity.MemoryActivities{Store: st})
 		w.RegisterActivity(&activity.ForkPostActivities{Store: st})
-		w.RegisterActivity(&activity.ClaudeCodeActivities{Root: cfg.ClaudeCodeWorkspace, SSHKeyPath: cfg.ClaudeCodeSSHKey, AllowedRepos: cfg.ClaudeCodeRepos, RunAs: runAs, Runs: runs, ClaudeConfigDir: cfg.ClaudeConfigDir, Model: cfg.ClaudeCodeModel, MaxBudgetUSD: budget, Auth: auth})
+		w.RegisterActivity(codeAct)
 		w.RegisterActivity(&activity.ToolActivities{Registry: registry, Catalog: catalog})
 		w.RegisterActivity(&activity.NotificationActivities{Notifiers: notifiers})
 		w.RegisterActivity(&activity.DeliveryActivities{Web: opts.web, Store: st})
@@ -162,6 +168,12 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 
 		rt.workers = append(rt.workers, w)
 		log.Printf("Worker registered on task queue %q", queue)
+	}
+
+	// Before this worker takes a run: what a run left on this machine's disk
+	// when its worker died is reachable from here alone.
+	if coding {
+		rt.releaseRuns = sweepRunWorkspaces(codeAct)
 	}
 
 	// Poll DB for activity queue mapping, agents catalog and skills changes
@@ -242,6 +254,21 @@ func parseBudget(raw string) (float64, error) {
 		return 0, fmt.Errorf("%q is not a positive amount of dollars", raw)
 	}
 	return v, nil
+}
+
+// sweepRunWorkspaces deletes what coding runs left under the workspace root
+// when their worker stopped mid-run, and returns the claim on that root this
+// process keeps until it stops (activity.ClaudeCodeActivities.SweepWorkspaces).
+// A failure is logged: the worker still serves its runs.
+func sweepRunWorkspaces(codeAct *activity.ClaudeCodeActivities) (release func()) {
+	removed, release, err := codeAct.SweepWorkspaces(workflow.RunWorkspaceLifetime)
+	if len(removed) > 0 {
+		log.Printf("Removed %d leftovers of coding runs that are over from %s", len(removed), codeAct.Root)
+	}
+	if err != nil {
+		log.Printf("Warning: sweeping the coding runs' workspaces: %v", err)
+	}
+	return release
 }
 
 // parseContextBytes reads LLM_MAX_CONTEXT_BYTES: empty is the default (0), a
@@ -335,6 +362,7 @@ func (rt *workerRuntime) shutdown() {
 	for _, w := range rt.workers {
 		w.Stop()
 	}
+	rt.releaseRuns()
 }
 
 // httpOptions is where `agent server` and `agent dev` differ on the HTTP

@@ -123,7 +123,7 @@ func analyzeRepo(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCodeOutp
 
 	// The run id names the workspace: unique per execution, and stable across
 	// a replay, so a retried PrepareWorkspace reuses the same directory.
-	name := "run-" + workflow.GetInfo(ctx).WorkflowExecution.RunID
+	name := activity.RunWorkspacePrefix + workflow.GetInfo(ctx).WorkflowExecution.RunID
 
 	var prepared activity.PrepareWorkspaceOutput
 	err = workflow.ExecuteActivity(

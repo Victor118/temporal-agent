@@ -91,7 +91,7 @@ func implementFeature(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCod
 	}
 
 	info := workflow.GetInfo(ctx)
-	name := "run-" + info.WorkflowExecution.RunID
+	name := activity.RunWorkspacePrefix + info.WorkflowExecution.RunID
 	branch := branchName(input.Title, input.Task, info.WorkflowExecution.RunID)
 
 	out := ClaudeCodeOutput{Repo: input.Repo, Ref: input.Base, Branch: branch}
