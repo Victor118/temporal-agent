@@ -438,3 +438,82 @@ func TestMessagesKeepTheirAgent(t *testing.T) {
 		t.Errorf("loaded %+v", msgs)
 	}
 }
+
+// What calls an agent is its mention, or its ID: a mention may not be another
+// agent's ID, nor an ID another agent's mention, case aside, on create as on
+// update. An agent may take its own ID as mention.
+func TestAgentMentionIsNotAnotherID(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	const a, b, c = "zz-names-a", "zz-names-b", "zz-names-c"
+	for _, id := range []string{a, b, c} {
+		s.DeleteAgent(ctx, id)
+		t.Cleanup(func() { s.DeleteAgent(ctx, id) })
+	}
+
+	if err := s.CreateAgent(ctx, Agent{ID: a, Name: "A", Mention: "ZZ-Names-Smith"}); err != nil {
+		t.Fatal(err)
+	}
+	// b's mention would be a's ID.
+	if err := s.CreateAgent(ctx, Agent{ID: b, Name: "B", Mention: "ZZ-NAMES-A"}); !errors.Is(err, ErrMentionTaken) {
+		t.Errorf("create with another agent's ID as mention: %v, want ErrMentionTaken", err)
+	}
+	// c's ID would be a's mention.
+	if err := s.CreateAgent(ctx, Agent{ID: "zz-names-smith", Name: "Smith"}); !errors.Is(err, ErrMentionTaken) {
+		t.Errorf("create with another agent's mention as ID: %v, want ErrMentionTaken", err)
+	}
+	if got, _ := s.GetAgent(ctx, "zz-names-smith"); got != nil {
+		s.DeleteAgent(ctx, "zz-names-smith")
+		t.Error("the refused agent was written")
+	}
+	if inserted, err := s.InsertAgentIfAbsent(ctx, Agent{ID: b, Name: "B", Mention: a}); inserted || !errors.Is(err, ErrMentionTaken) {
+		t.Errorf("seed with another agent's ID as mention: %v %v, want ErrMentionTaken", inserted, err)
+	}
+
+	if err := s.CreateAgent(ctx, Agent{ID: b, Name: "B", Mention: b}); err != nil {
+		t.Fatalf("create with its own ID as mention: %v", err)
+	}
+	if err := s.CreateAgent(ctx, Agent{ID: c, Name: "C"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UpdateAgent(ctx, Agent{ID: c, Name: "C", Mention: "Zz-Names-B"}, 1); !errors.Is(err, ErrMentionTaken) {
+		t.Errorf("update to another agent's ID as mention: %v, want ErrMentionTaken", err)
+	}
+	if rev, err := s.UpdateAgent(ctx, Agent{ID: c, Name: "C", Mention: "zz-names-c2"}, 1); err != nil || rev != 2 {
+		t.Errorf("update to a free mention: %d %v", rev, err)
+	}
+	if got, _ := s.GetAgent(ctx, c); got == nil || got.Mention != "zz-names-c2" {
+		t.Errorf("agent c %+v", got)
+	}
+}
+
+// Two agents written at once cannot take each other's names: the check and
+// the write are serialized.
+func TestAgentNamesClashUnderConcurrency(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	const a, b = "zz-race-a", "zz-race-b"
+	for _, id := range []string{a, b} {
+		s.DeleteAgent(ctx, id)
+		t.Cleanup(func() { s.DeleteAgent(ctx, id) })
+	}
+
+	for range 20 {
+		s.DeleteAgent(ctx, a)
+		s.DeleteAgent(ctx, b)
+		errs := make(chan error, 2)
+		go func() { errs <- s.CreateAgent(ctx, Agent{ID: a, Name: "A", Mention: b}) }()
+		go func() { errs <- s.CreateAgent(ctx, Agent{ID: b, Name: "B"}) }()
+		failed := 0
+		for range 2 {
+			if err := <-errs; errors.Is(err, ErrMentionTaken) {
+				failed++
+			} else if err != nil {
+				t.Fatal(err)
+			}
+		}
+		if failed != 1 {
+			t.Fatalf("%d writes refused, want exactly one", failed)
+		}
+	}
+}

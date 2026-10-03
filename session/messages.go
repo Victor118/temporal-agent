@@ -33,9 +33,16 @@ const maxAgentsPerMessage = 3
 // Any agent of the installation may be called, for now: which agents a
 // session may call is a later restriction.
 func mentionedAgents(text string, agents []store.Agent, max int) (called []workflow.AddressedAgent, dropped []string) {
+	// The store keeps a mention from being another agent's ID; were they to
+	// meet anyway, the explicit mention wins over the ID standing in for one,
+	// whatever the order of agents.
 	byMention := make(map[string]store.Agent, len(agents))
 	for _, a := range agents {
-		byMention[strings.ToLower(a.MentionName())] = a
+		key := strings.ToLower(a.MentionName())
+		if prev, ok := byMention[key]; ok && prev.Mention != "" && a.Mention == "" {
+			continue
+		}
+		byMention[key] = a
 	}
 	seen := map[string]bool{}
 	for _, m := range mentionPattern.FindAllStringSubmatch(text, -1) {

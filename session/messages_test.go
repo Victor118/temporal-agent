@@ -54,6 +54,19 @@ func TestMentionedAgents_CarriesTheAgent(t *testing.T) {
 	}
 }
 
+// Were a mention to be another agent's ID (the store refuses it), the explicit
+// mention wins, whatever the order of the agents.
+func TestMentionedAgents_AMentionWinsOverAnID(t *testing.T) {
+	byID := store.Agent{ID: "smith", Name: "Smith"}
+	byMention := store.Agent{ID: "x", Name: "X", Mention: "Smith"}
+	for _, agents := range [][]store.Agent{{byID, byMention}, {byMention, byID}} {
+		called, _ := mentionedAgents("@smith ?", agents, maxAgentsPerMessage)
+		if len(called) != 1 || called[0].ID != "x" {
+			t.Errorf("agents %v: called %+v, want x", agents, called)
+		}
+	}
+}
+
 // Each agent runs a full turn: past the cap, the mentions are dropped, and
 // reported to be logged.
 func TestMentionedAgents_Cap(t *testing.T) {

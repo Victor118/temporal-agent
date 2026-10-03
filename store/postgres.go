@@ -439,6 +439,44 @@ func mentionErr(err error) error {
 	return err
 }
 
+// agentNamesLockID keys the advisory lock that serializes agent writes. What
+// calls an agent is its mention, or its ID when it has none: a mention must
+// not be another agent's ID, nor an ID another agent's mention. No index
+// spans two columns of two rows, so the check and the write run under this
+// lock, and see the same agents.
+const agentNamesLockID = 7_431_906_216
+
+// writeAgent runs write in a transaction, once it has checked, under
+// agentNamesLockID, that agent's ID and mention are not another agent's
+// mention and ID, case aside. A clash is ErrMentionTaken; so is a mention
+// shared with another agent, which idx_agents_mention refuses.
+func (s *PostgresStore) writeAgent(ctx context.Context, agent Agent, write func(*sql.Tx) error) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock($1)", agentNamesLockID); err != nil {
+		return fmt.Errorf("agent names lock: %w", err)
+	}
+	var clash bool
+	if err := tx.QueryRowContext(ctx, `
+		SELECT EXISTS (SELECT 1 FROM agents WHERE agent_id <> $1 AND (
+			($2 <> '' AND lower(agent_id) = lower($2)) OR
+			(mention <> '' AND lower(mention) = lower($1))))`,
+		agent.ID, agent.Mention).Scan(&clash); err != nil {
+		return err
+	}
+	if clash {
+		return ErrMentionTaken
+	}
+	if err := write(tx); err != nil {
+		return mentionErr(err)
+	}
+	return tx.Commit()
+}
+
 // InsertAgentIfAbsent inserts the agent only if no agent with the same ID exists.
 // Existing rows are never modified. Returns true if the agent was inserted.
 func (s *PostgresStore) InsertAgentIfAbsent(ctx context.Context, agent Agent) (bool, error) {
@@ -446,16 +484,21 @@ func (s *PostgresStore) InsertAgentIfAbsent(ctx context.Context, agent Agent) (b
 	if err != nil {
 		return false, err
 	}
-	res, err := s.db.ExecContext(ctx, `
-		INSERT INTO agents (agent_id, name, mention, description, skills, tools)
-		VALUES ($1, $2, $3, $4, $5, $6)
-		ON CONFLICT (agent_id) DO NOTHING`,
-		agent.ID, agent.Name, agent.Mention, agent.Description, skillsJSON, toolsJSON)
-	if err != nil {
-		return false, mentionErr(err)
-	}
-	n, err := res.RowsAffected()
-	return n > 0, err
+	var inserted bool
+	err = s.writeAgent(ctx, agent, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, `
+			INSERT INTO agents (agent_id, name, mention, description, skills, tools)
+			VALUES ($1, $2, $3, $4, $5, $6)
+			ON CONFLICT (agent_id) DO NOTHING`,
+			agent.ID, agent.Name, agent.Mention, agent.Description, skillsJSON, toolsJSON)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		inserted = n > 0
+		return err
+	})
+	return inserted, err
 }
 
 func (s *PostgresStore) ListAgents(ctx context.Context) ([]Agent, error) {
@@ -507,14 +550,16 @@ func (s *PostgresStore) UpdateAgent(ctx context.Context, agent Agent, expectedRe
 		return 0, err
 	}
 	var revision int64
-	err = s.db.QueryRowContext(ctx, `
-		UPDATE agents SET name = $2, mention = $3, description = $4, skills = $5, tools = $6,
-			revision = revision + 1, updated_at = NOW()
-		WHERE agent_id = $1 AND revision = $7
-		RETURNING revision`,
-		agent.ID, agent.Name, agent.Mention, agent.Description, skillsJSON, toolsJSON, expectedRevision).Scan(&revision)
+	err = s.writeAgent(ctx, agent, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			UPDATE agents SET name = $2, mention = $3, description = $4, skills = $5, tools = $6,
+				revision = revision + 1, updated_at = NOW()
+			WHERE agent_id = $1 AND revision = $7
+			RETURNING revision`,
+			agent.ID, agent.Name, agent.Mention, agent.Description, skillsJSON, toolsJSON, expectedRevision).Scan(&revision)
+	})
 	if err != sql.ErrNoRows {
-		return revision, mentionErr(err)
+		return revision, err
 	}
 	current, err := s.GetAgent(ctx, agent.ID)
 	if err != nil {

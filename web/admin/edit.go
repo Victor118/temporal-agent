@@ -268,7 +268,7 @@ func (a *Admin) createAgent(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, store.ErrAgentExists):
 		f.Error = fmt.Sprintf("L'identifiant %q est déjà pris.", f.ID)
 	case errors.Is(err, store.ErrMentionTaken):
-		f.Error = fmt.Sprintf("La mention @%s est déjà celle d'un autre agent.", f.Mention)
+		f.Error = mentionTaken(f)
 	case err != nil:
 		f.Error = err.Error()
 	default:
@@ -295,7 +295,7 @@ func (a *Admin) updateAgent(w http.ResponseWriter, r *http.Request) {
 		// overwrite the other change, so it keeps being refused.
 		f.Error = "Cet agent a été modifié ailleurs depuis l'ouverture du formulaire. Recharge la page pour repartir de la version actuelle, puis refais tes changements."
 	case errors.Is(err, store.ErrMentionTaken):
-		f.Error = fmt.Sprintf("La mention @%s est déjà celle d'un autre agent.", f.Mention)
+		f.Error = mentionTaken(f)
 	case err != nil:
 		f.Error = err.Error()
 	default:
@@ -376,4 +376,13 @@ func flash(r *http.Request) string {
 		return fmt.Sprintf("Version des skills passée à %s : le serveur et les workers rechargent le dépôt d'ici %d s.", v, int(catalogRefresh.Seconds()))
 	}
 	return ""
+}
+
+// mentionTaken explains ErrMentionTaken: what calls an agent is its mention,
+// or its ID, and neither may be another agent's mention or ID.
+func mentionTaken(f agentForm) string {
+	if f.Mention == "" {
+		return fmt.Sprintf("L'identifiant %q est déjà la mention d'un autre agent.", f.ID)
+	}
+	return fmt.Sprintf("La mention @%s ou l'identifiant %q est déjà la mention ou l'identifiant d'un autre agent.", f.Mention, f.ID)
 }
