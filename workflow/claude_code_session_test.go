@@ -224,7 +224,8 @@ func workerTakesSessionAfter(env *testsuite.TestWorkflowEnvironment, d time.Dura
 }
 
 // A run that waits for a slot more than a minute tells its user so, once, on
-// the turn's channel, through the turn's queue; then runs when a slot frees.
+// the turn's channel, through the turn's queue; then runs when a slot frees,
+// and says, after, that it waits no more (an empty notice).
 func TestCodingRuns_WaitForAWorkerThenRun(t *testing.T) {
 	e := newImplementEnv(t, claudeCodeResult{Report: "Done.", Subtype: "success"}, nil, oneCommit(), nil)
 	workerTakesSessionAfter(e.env, 3*time.Minute)
@@ -238,8 +239,8 @@ func TestCodingRuns_WaitForAWorkerThenRun(t *testing.T) {
 		t.Fatalf("pushed %v, Error %q: want the run done once a slot freed", out.Pushed, out.Error)
 	}
 	notices := e.queues.sent()
-	if len(notices) != 1 {
-		t.Fatalf("sent %+v, want one notice", notices)
+	if len(notices) != 2 {
+		t.Fatalf("sent %+v, want the notice, then its clear", notices)
 	}
 	n := notices[0]
 	var data struct{ Type, Text, Agent string }
@@ -248,15 +249,46 @@ func TestCodingRuns_WaitForAWorkerThenRun(t *testing.T) {
 		data.Agent != "Jarvis" || !strings.Contains(data.Text, "attend un worker libre") || !strings.Contains(data.Text, "30 min") {
 		t.Errorf("notice %+v %s", n, n.Event.Data)
 	}
-	var notifyQueue string
+	checkCleared(t, notices[1])
 	for _, r := range e.queues.all() {
-		if r.name == "NotifyStep" {
-			notifyQueue = r.queue
+		if r.name == "NotifyStep" && r.queue != "agent" {
+			t.Errorf("notice sent through %q, want the turn's queue", r.queue)
 		}
 	}
-	if notifyQueue != "agent" {
-		t.Errorf("notice sent through %q, want the turn's queue", notifyQueue)
+}
+
+// checkCleared fails unless n says to the session's user, on the turn's
+// channel, that the run waits no more: an empty notice.
+func checkCleared(t *testing.T, n activity.NotifyInput) {
+	t.Helper()
+	var data struct{ Text *string }
+	json.Unmarshal(n.Event.Data, &data)
+	if n.SessionID != "s1" || n.Channel != "telegram" || n.ChannelID != "42" || n.Event.Type != activity.EventNotice ||
+		data.Text == nil || *data.Text != "" {
+		t.Errorf("clear %+v %s, want an empty notice", n, n.Event.Data)
 	}
+}
+
+// A run that waited past the notice, then found every worker busy, clears
+// the notice before it ends: the turn goes on, and must not show a wait
+// that is over.
+func TestCodingRuns_AllBusyClearsTheNotice(t *testing.T) {
+	e := newImplementEnv(t, claudeCodeResult{Report: "ok", Subtype: "success"}, nil, oneCommit(), nil)
+	e.env.OnActivity(probeActivity, mock.Anything).Return(activity.ProbeRunWorkerOutput{QueueWaitSeconds: 7 * 60}, nil)
+	e.env.OnActivity(sessionCreation, mock.Anything, mock.Anything).After(7 * time.Minute).
+		Return(temporal.NewTimeoutError(enumspb.TIMEOUT_TYPE_SCHEDULE_TO_START, nil))
+	out := e.run_(t, ImplementFeatureInput{
+		Repo: "/src/repo", Task: "do it",
+		CallContext: tool.CallContext{Channel: "telegram", ChannelID: "42", NotifyQueue: "agent"},
+	})
+	if !strings.Contains(out.Error, "all busy") {
+		t.Fatalf("Error = %q", out.Error)
+	}
+	notices := e.queues.sent()
+	if len(notices) != 2 {
+		t.Fatalf("sent %+v, want the notice, then its clear", notices)
+	}
+	checkCleared(t, notices[1])
 }
 
 // A slot free within the minute: no notice.

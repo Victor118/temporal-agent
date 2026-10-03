@@ -245,6 +245,11 @@ func (u *ui) buildPage(ctx context.Context, me *store.User, sessionID, view stri
 	if id, name := u.sessions.WorkingAgent(sessionID); p.Working && id != "" {
 		p.WorkingAgent = cmp.Or(directory.ByID[id].Name, name, id)
 	}
+	// What the turn waits for, when the workflow said (a coding run waiting
+	// for a free worker).
+	if p.Working {
+		p.WorkingNote = u.sessions.WorkingNote(sessionID)
+	}
 	return p, nil
 }
 

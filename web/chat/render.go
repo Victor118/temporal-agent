@@ -58,6 +58,9 @@ type Page struct {
 	// WorkingAgent names the agent on the turn; empty when the server has
 	// only the visibility queries to tell (after a restart).
 	WorkingAgent string
+	// WorkingNote is what the turn waits for, as the workflow last said
+	// (a coding run waiting for a free worker); empty: nothing to say.
+	WorkingNote string
 	// The fork's starting summary: still being written, or failed.
 	SummaryPending bool
 	SummaryFailed  bool

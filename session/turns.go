@@ -32,6 +32,10 @@ type turn struct {
 	working bool
 	event   workflow.TurnEvent
 	at      time.Time // when the event came
+	// note is what the turn waits for, as its last notice said
+	// (activity.EventNotice): "" once said over. The next turn event
+	// replaces the whole turn, note included.
+	note string
 }
 
 // turns are the sessions' turns, by session ID. The zero value is ready to
@@ -66,6 +70,18 @@ func (t *turns) set(sessionID string, working bool, e workflow.TurnEvent) {
 		t.m = map[string]turn{}
 	}
 	t.m[sessionID] = turn{working: working, event: e, at: now}
+}
+
+// setNote records what the session's turn waits for: only on a turn known
+// to be working, which the note is about. It changes nothing else of the
+// turn, its time included: a notice says nothing of the turn's state.
+func (t *turns) setNote(sessionID, note string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if tr, ok := t.m[sessionID]; ok && tr.working {
+		tr.note = note
+		t.m[sessionID] = tr
+	}
 }
 
 // get returns the session's turn, if the server heard of one not forgotten.
@@ -139,13 +155,40 @@ func (s *Service) WorkingAgent(sessionID string) (id, name string) {
 	return tr.event.AgentID, tr.event.AgentName
 }
 
+// WorkingNote is what the session's working turn waits for, as its last
+// notice said (activity.EventNotice): "" when none did, or once the wait is
+// over, or with no turn known to work.
+func (s *Service) WorkingNote(sessionID string) string {
+	tr, ok := s.turns.get(sessionID)
+	if !ok || !tr.working {
+		return ""
+	}
+	return tr.note
+}
+
 // Observe learns from an event published on the server's hub, before the
-// pages it rings reload: the turn events feed the sessions' turns; an event
-// that changes what a session is doing (StateEvents) drops the cached
-// statuses, and rings its members' trees. It runs on the publisher's way:
-// the rings, which read the members, go in the background.
+// pages it rings reload: the turn events feed the sessions' turns, a notice
+// their note; an event that changes what a session is doing (StateEvents)
+// drops the cached statuses, and rings its members' trees. A notice is no
+// such event: no status changes, no tree rings, only the thread reloads
+// (ThreadEvents). It runs on the publisher's way: the rings, which read the
+// members, go in the background.
 func (s *Service) Observe(topic string, ev activity.SSEEvent) {
-	if !IsSessionTopic(topic) || !slices.Contains(StateEvents, ev.Type) {
+	if !IsSessionTopic(topic) {
+		return
+	}
+	if ev.Type == activity.EventNotice {
+		var n struct {
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal(ev.Data, &n); err != nil {
+			log.Printf("session %s: %s: %v", topic, ev.Type, err)
+			return
+		}
+		s.turns.setNote(topic, n.Text)
+		return
+	}
+	if !slices.Contains(StateEvents, ev.Type) {
 		return
 	}
 	if ev.Type == workflow.EventTurnStarted || ev.Type == workflow.EventTurnDone {

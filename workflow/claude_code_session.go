@@ -120,11 +120,21 @@ func openRun(ctx workflow.Context, execution time.Duration, call tool.CallContex
 
 	// Told only past runWaitNotice: most runs find a slot at once. The
 	// notice runs beside the wait, which needs this coroutine's context.
-	waiting, stopWaiting := workflow.WithCancel(ctx)
-	workflow.Go(waiting, func(ctx workflow.Context) {
-		if workflow.Sleep(ctx, runWaitNotice) == nil {
-			notifyRunWaiting(ctx, call, probe.QueueWait())
+	// Only the timer is cancelled when the wait ends: a notice already on
+	// its way goes out, and the one that clears it (below) after it.
+	timer, stopWaiting := workflow.WithCancel(ctx)
+	notified := false
+	noticeSent, sentNotice := workflow.NewFuture(ctx)
+	workflow.Go(ctx, func(ctx workflow.Context) {
+		// Cancelled with timer, waited on in this coroutine. A timer that
+		// fired as the wait ended (both in one workflow task) is over too:
+		// timer.Err tells, read once the wait is over.
+		if workflow.NewTimer(timer, runWaitNotice).Get(ctx, nil) != nil || timer.Err() != nil {
+			return
 		}
+		notified = true
+		sendRunNotice(ctx, call, waitingNotice(probe.QueueWait()))
+		sentNotice.Set(nil, nil)
 	})
 	runCtx, err := workflow.CreateSession(workflow.WithTaskQueue(ctx, queue), &workflow.SessionOptions{
 		CreationTimeout:  probe.QueueWait(),
@@ -132,6 +142,24 @@ func openRun(ctx workflow.Context, execution time.Duration, call tool.CallContex
 		HeartbeatTimeout: runHeartbeatTimeout,
 	})
 	stopWaiting()
+	// The wait is over, whatever its end: the user was told it waits, so is
+	// told it no longer does (an empty notice: the web's working line drops
+	// it, Telegram sends nothing). Coroutines are cooperative: notified is
+	// final here, set before the notice was scheduled or never. The clear
+	// follows the notice it replaces. A run that goes on does meanwhile; one
+	// that ends here waits for it, or the workflow would end first and the
+	// clear never go out.
+	if notified && ctx.Err() == nil {
+		clear := func(ctx workflow.Context) {
+			_ = noticeSent.Get(ctx, nil)
+			sendRunNotice(ctx, call, "")
+		}
+		if err == nil {
+			workflow.Go(ctx, clear)
+		} else {
+			clear(ctx)
+		}
+	}
 	switch {
 	case err == nil:
 		return &run{ctx: runCtx, started: workflow.Now(ctx), execution: execution}, nil
@@ -146,20 +174,26 @@ func openRun(ctx workflow.Context, execution time.Duration, call tool.CallContex
 	}
 }
 
-// notifyRunWaiting tells the run's user, on the turn's channel, that the run
-// waits for a free worker. Best effort: a failure is logged, and the run
-// goes on waiting.
-func notifyRunWaiting(ctx workflow.Context, call tool.CallContext, wait time.Duration) {
+// waitingNotice tells the run's user that the run waits for a free worker,
+// for at most wait.
+func waitingNotice(wait time.Duration) string {
+	return fmt.Sprintf("Ton run attend un worker libre (tous occupés) : il démarre dès qu'un worker se libère, "+
+		"ou abandonne au bout de %s.", inMinutes(wait))
+}
+
+// sendRunNotice tells the run's user, on the turn's channel, what the run
+// waits for (activity.EventNotice); an empty text says it waits no more.
+// Best effort: a failure is logged, and the run goes on.
+func sendRunNotice(ctx workflow.Context, call tool.CallContext, text string) {
 	logger := workflow.GetLogger(ctx)
 	sessionID, ok := toolCallSession(workflow.GetInfo(ctx).WorkflowExecution.ID)
 	if !ok || sessionID == "" {
-		logger.Warn("A coding run waits for a worker, and has no session to say it to")
+		logger.Warn("A coding run has a notice for its user, and no session to say it to")
 		return
 	}
 	data, _ := json.Marshal(map[string]string{
-		"type": activity.EventNotice,
-		"text": fmt.Sprintf("Ton run attend un worker libre (tous occupés) : il démarre dès qu'un worker se libère, "+
-			"ou abandonne au bout de %s.", inMinutes(wait)),
+		"type":  activity.EventNotice,
+		"text":  text,
 		"agent": call.Agent,
 	})
 	var notifAct *activity.NotificationActivities
@@ -179,7 +213,7 @@ func notifyRunWaiting(ctx workflow.Context, call tool.CallContext, wait time.Dur
 		},
 	).Get(ctx, nil)
 	if err != nil && ctx.Err() == nil {
-		logger.Warn("The notice that a coding run waits for a worker was not delivered", "session_id", sessionID, "error", err)
+		logger.Warn("A coding run's notice was not delivered", "session_id", sessionID, "cleared", text == "", "error", err)
 	}
 }
 

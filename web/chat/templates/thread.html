@@ -31,7 +31,7 @@
 
   {{if .Working}}
   <div class="working-line" id="working">
-    <span class="dot"></span>{{with .WorkingAgent}}{{.}} travaille…{{else}}L'agent travaille…{{end}}
+    <span class="dot"></span>{{with .WorkingAgent}}{{.}} travaille…{{else}}L'agent travaille…{{end}}{{with .WorkingNote}} — {{.}}{{end}}
     <form hx-post="/s/{{$sid}}/cancel" hx-target="#thread" hx-swap="morph:innerHTML"><button class="btn ghost" type="submit">Arrêter</button></form>
   </div>
   {{end}}

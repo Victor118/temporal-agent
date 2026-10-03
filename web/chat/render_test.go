@@ -425,6 +425,15 @@ func TestRender_WorkingLineNamesTheAgent(t *testing.T) {
 	if out := render(t, "thread-inner", p); !strings.Contains(out, "L'agent travaille…") {
 		t.Errorf("unnamed: %s", out)
 	}
+	// What the turn waits for follows, escaped.
+	p.WorkingAgent, p.WorkingNote = "Jarvis", "Ton run attend un <worker> libre"
+	if out := render(t, "thread-inner", p); !strings.Contains(out, "Jarvis travaille… — Ton run attend un &lt;worker&gt; libre") {
+		t.Errorf("with a note: %s", out)
+	}
+	p.WorkingNote = ""
+	if out := render(t, "thread-inner", p); strings.Contains(out, "travaille… —") || !strings.Contains(out, "Jarvis travaille…") {
+		t.Errorf("no note, a dash: %s", out)
+	}
 	if page := render(t, "page", p); !strings.Contains(page, `hx-trigger="`+mustReloadOn(t, "thread")+`"`) {
 		t.Error("the thread does not reload on its events")
 	}
@@ -444,7 +453,7 @@ func mustReloadOn(t *testing.T, pane string) string {
 // changes the session's state.
 func TestReloadOn(t *testing.T) {
 	thread := mustReloadOn(t, "thread")
-	for _, ev := range append(slices.Clone(session.StateEvents), session.EventUserMessage, "message", "tool_calls", "turn_started", "turn_done", "ask_user", "reload") {
+	for _, ev := range append(slices.Clone(session.StateEvents), session.EventUserMessage, "message", "tool_calls", "turn_started", "turn_done", "ask_user", "notice", "reload") {
 		if !strings.Contains(thread, "sse:"+ev+",") {
 			t.Errorf("the thread does not reload on %s: %s", ev, thread)
 		}
@@ -452,7 +461,10 @@ func TestReloadOn(t *testing.T) {
 	if !strings.HasSuffix(thread, "sse:reload, every 60s") {
 		t.Errorf("thread: %s", thread)
 	}
-	if report := mustReloadOn(t, "report"); strings.Contains(report, "sse:tool_calls") || !strings.Contains(report, "sse:fork_reported,") {
+	if slices.Contains(session.StateEvents, "notice") {
+		t.Error("a notice is a state event: it would drop the statuses and ring the trees")
+	}
+	if report := mustReloadOn(t, "report"); strings.Contains(report, "sse:tool_calls") || strings.Contains(report, "sse:notice") || !strings.Contains(report, "sse:fork_reported,") {
 		t.Errorf("report: %s", report)
 	}
 	if tree := mustReloadOn(t, "tree"); tree != "sse:changed, sse:reload, every 60s" {

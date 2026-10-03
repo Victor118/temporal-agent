@@ -103,6 +103,63 @@ func TestObserve_TurnEventsInvalidate(t *testing.T) {
 	s.background.Wait()
 }
 
+func notice(text string) activity.SSEEvent {
+	data, _ := json.Marshal(map[string]string{"type": activity.EventNotice, "text": text, "agent": "Jarvis"})
+	return activity.SSEEvent{Type: activity.EventNotice, Data: data}
+}
+
+// A notice sets what the working turn waits for, an empty one clears it, and
+// the next turn event replaces the turn, note included. A notice is no state
+// event: the statuses stay cached.
+func TestObserve_NoticeSetsTheWorkingNote(t *testing.T) {
+	tc := &fakeTemporal{}
+	s := newTest(&memStore{}, tc)
+	now := time.Now()
+	s.statuses.now = func() time.Time { return now }
+	ctx := context.Background()
+
+	s.Observe(sid, notice("waits"))
+	if got := s.WorkingNote(sid); got != "" {
+		t.Errorf("a note with no turn known: %q", got)
+	}
+
+	s.Observe(sid, turnEvent(workflow.EventTurnStarted, "default", ""))
+	s.Statuses(ctx)
+	queries := len(tc.lists)
+	s.Observe(sid, notice("Ton run attend un worker libre"))
+	if got := s.WorkingNote(sid); got != "Ton run attend un worker libre" {
+		t.Errorf("note %q", got)
+	}
+	if id, _ := s.WorkingAgent(sid); id != "default" {
+		t.Errorf("the notice changed the turn: working agent %q", id)
+	}
+	s.Statuses(ctx)
+	if len(tc.lists) != queries {
+		t.Errorf("a notice reloaded the statuses: %d queries, want %d", len(tc.lists), queries)
+	}
+
+	s.Observe(sid, notice(""))
+	if got := s.WorkingNote(sid); got != "" {
+		t.Errorf("cleared, the note is %q", got)
+	}
+
+	s.Observe(sid, notice("again"))
+	s.Observe(sid, activity.SSEEvent{Type: activity.EventNotice, Data: []byte(`not json`)})
+	if got := s.WorkingNote(sid); got != "again" {
+		t.Errorf("an unreadable notice changed the note: %q", got)
+	}
+	s.Observe(sid, turnEvent(workflow.EventTurnDone, "default", ""))
+	if got := s.WorkingNote(sid); got != "" {
+		t.Errorf("the turn over, the note is %q", got)
+	}
+	s.Observe(sid, notice("late"))
+	s.Observe(sid, turnEvent(workflow.EventTurnStarted, "default", ""))
+	if got := s.WorkingNote(sid); got != "" {
+		t.Errorf("the next turn inherits the note %q", got)
+	}
+	s.background.Wait()
+}
+
 // A session's topic is its ID; nothing else is one.
 func TestIsSessionTopic(t *testing.T) {
 	if !IsSessionTopic(sid) {
