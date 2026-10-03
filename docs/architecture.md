@@ -144,19 +144,30 @@ tools: [github_*]
 
 ### Tour de conversation
 
-1. L'utilisateur envoie un message → le serveur signale `SessionWorkflow`.
-2. `SessionWorkflow` charge le contexte et lance `AgentWorkflow(agentID)`.
-3. `AgentWorkflow` charge la définition de l'agent et la liste des outils
+1. L'utilisateur envoie un message → le serveur le stocke et signale
+   `SessionWorkflow`.
+2. `SessionWorkflow` prend l'instantané de la conversation (`LastMessageID`)
+   et lance `AgentWorkflow(agentID)` avec une clé de tour. L'historique ne
+   passe jamais par les workflows.
+3. `AgentWorkflow` charge le nom de l'agent et la liste des outils
    autorisés : `tools` ∩ allowlist, triée par nom (préfixe de cache stable).
 4. Boucle ReAct : `CallLLM` → appels d'outils → résultats → `CallLLM`…
-5. Réponse finale → `SessionWorkflow` persiste l'historique → SSE.
+   Chaque `CallLLM` reçoit des références (instantané, clé du tour, noms des
+   outils, de quoi bâtir le prompt) et construit la requête : historique
+   chargé et ordonné, définitions d'outils et prompt système relus du
+   catalogue. Une requête trop grosse (`LLM_MAX_CONTEXT_BYTES`) arrête le
+   tour : il faut forker. L'agent écrit ses messages au fil du tour.
+5. Réponse finale → `SessionWorkflow` réécrit le tour (sans effet si déjà
+   écrit) → SSE.
 
 ### Plusieurs agents dans une session
 
 Un message appelle les agents qu'il mentionne (`@<mention>`, au plus trois),
 résolus par le serveur ; sans mention, l'agent de la session selon son mode.
-`SessionWorkflow` lance un tour par agent, l'un après l'autre : chacun recharge
-l'historique et voit donc les réponses des précédents. Un échec ou un arrêt
+`SessionWorkflow` lance un tour par agent, l'un après l'autre, sur le même
+instantané : chacun lit aussi les tours précédents du message, et voit donc
+leurs réponses. Un message écrit pendant ces tours n'est lu ni par eux ni
+entre eux : il vient après le bloc qu'ils forment, et attend son tour. Un échec ou un arrêt
 coupe la suite. Chaque agent lit les tours des autres comme du texte signé
 (`[agent Nom (@mention)]`, appels d'outils et résultats tronqués compris),
 jamais comme ses propres messages ni comme des blocs d'outils. Une note en fin

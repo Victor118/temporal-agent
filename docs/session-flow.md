@@ -1,7 +1,7 @@
 # Session flow — séquence d'un message utilisateur
 
 Diagramme de séquence d'un tour complet : un user envoie un message, la session
-charge son contexte, lance l'agent générique qui délègue à deux sous-agents
+prend l'instantané de la conversation, lance l'agent générique qui délègue à deux sous-agents
 spécialisés, l'un d'eux pose une question à l'user, puis la réponse finale est
 streamée vers l'UI.
 
@@ -25,12 +25,13 @@ sequenceDiagram
     T-->>SW: start (or signal existing)
 
     Note over SW: processTurn — turn N
-    SW->>Mem: LoadContext (messages + user memory)
-    Mem-->>SW: history + memory
-    SW->>GA: ExecuteChildWorkflow(AgentWorkflow)
+    SW->>Mem: LastMessageID (instantané)
+    Mem-->>SW: id du dernier message
+    SW->>GA: ExecuteChildWorkflow(AgentWorkflow, turn key + instantané)
 
     Note over GA: ReAct loop
-    GA->>LLM: CallLLM(system + history + tools)
+    GA->>LLM: CallLLM(références : instantané, tour, noms d'outils)
+    Note over LLM: charge l'historique, le prompt<br/>et les outils (Postgres + catalogue)
     LLM-->>GA: tool_calls = [agent_market-analyst, agent_code-reviewer, ...]
 
     par Spécialiste 1
