@@ -267,7 +267,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 		prompt.MemoryOf = input.UserID
 	}
 	llmRequest := func() activity.LLMTurnRequest {
-		req := activity.LLMTurnRequest{Model: input.Model, AgentID: currentAgentID, Tools: toolNames, Prompt: prompt}
+		req := activity.LLMTurnRequest{Model: input.Model, AgentID: currentAgentID, UserID: input.UserID, Tools: toolNames, Prompt: prompt}
 		if input.TurnKey == "" {
 			req.Messages = turn
 			return req
@@ -331,6 +331,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 				turn = append(turn, store.Message{
 					Role:    store.RoleAssistant,
 					Content: string(respJSON),
+					UserID:  input.UserID,
 					AgentID: currentAgentID,
 					Author:  agentName,
 				})
@@ -358,8 +359,11 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 		assistantMsg := store.Message{
 			Role:      store.RoleAssistant,
 			ToolCalls: toolCalls,
-			AgentID:   currentAgentID,
-			Author:    agentName,
+			// The user this turn answers: its private tool blocks are
+			// hidden from the agent's turns for another member.
+			UserID:  input.UserID,
+			AgentID: currentAgentID,
+			Author:  agentName,
 		}
 		if response.Content != "" {
 			cJSON, _ := json.Marshal(response.Content)

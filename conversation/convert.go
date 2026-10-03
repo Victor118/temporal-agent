@@ -22,12 +22,16 @@ type Label struct {
 	Mention string `json:"mention"`
 }
 
-// View is what an agent needs to read the session's history: who it is, how
-// to name the other agents, and which tool inputs their calls hide.
+// View is what an agent needs to read the session's history: who it is, the
+// user it answers, how to name the other agents, and which tools' calls are
+// private.
 type View struct {
-	Self    string
+	Self string
+	// User is the user the reading turn answers: the agent's own turns for
+	// another user hide their private tool blocks.
+	User    string
 	Agents  map[string]Label   // the catalog's agents, by ID
-	Private tool.PrivateInputs // tools whose input the members do not see; nil = none
+	Private tool.PrivateInputs // tools whose input and result the members do not see; nil = none
 }
 
 // Bounds on what another agent's tool calls bring into the history: its
@@ -57,6 +61,13 @@ func (v View) privateInput(toolName string) bool {
 	return v.Private != nil && v.Private.PrivateInput(toolName)
 }
 
+// forAnotherUser reports whether m is the reader's own turn answering another
+// user than the one it answers now. A message without a user predates the
+// field, or answered nobody identified: read in full.
+func (v View) forAnotherUser(m store.Message) bool {
+	return m.Role == store.RoleAssistant && !v.other(m) && m.UserID != "" && m.UserID != v.User
+}
+
 // AgentLabel is how an agent is named to another one, in the history and in
 // the part note: by its name and the mention that calls it.
 func AgentLabel(name, mention string) string {
@@ -81,13 +92,27 @@ type otherCall struct {
 // agent without any), and a conversation ending on them would have the model
 // continue the other agent's answer instead of giving its own. The agent's
 // own messages, and those signed by no agent, keep their tool blocks.
+//
+// In a session several users share, the agent's own turn for another user
+// keeps its tool blocks, but a private tool's input and result are replaced
+// as the members see them (tool.DisplayInput, tool.DisplayResult): what the
+// agent saved of Alice's memory is not read when it answers Bob. The blocks
+// stay, so each call still has its result.
 func Convert(messages []store.Message, view View) []provider.ChatMessage {
-	// Tool results carry no agent: the others' are found by their calls.
+	// Tool results carry no agent nor user: they are found by their calls.
 	others := map[string]otherCall{}
+	hidden := map[string]bool{} // private calls of the agent's turns for another user
 	for _, m := range messages {
 		if view.other(m) {
 			for _, tc := range m.ToolCalls {
 				others[tc.ID] = otherCall{tool: tc.Name, agent: view.label(m)}
+			}
+		}
+		if view.forAnotherUser(m) {
+			for _, tc := range m.ToolCalls {
+				if view.privateInput(tc.Name) {
+					hidden[tc.ID] = true
+				}
 			}
 		}
 	}
@@ -125,14 +150,14 @@ func Convert(messages []store.Message, view View) []provider.ChatMessage {
 			cm.ToolCalls = append(cm.ToolCalls, provider.ToolCallInfo{
 				ID:    tc.ID,
 				Name:  tc.Name,
-				Input: tc.Input,
+				Input: tool.DisplayInput(hidden[tc.ID], tc.Input),
 			})
 		}
-		if msg.ToolResult != nil {
+		if r := msg.ToolResult; r != nil {
 			cm.ToolResult = &provider.ToolResultInfo{
-				ToolCallID: msg.ToolResult.ToolCallID,
-				Content:    msg.ToolResult.Content,
-				IsError:    msg.ToolResult.IsError,
+				ToolCallID: r.ToolCallID,
+				Content:    tool.DisplayResult(hidden[r.ToolCallID], r.Content),
+				IsError:    r.IsError,
 			}
 		}
 		if text, ok := plainUserText(cm); ok {

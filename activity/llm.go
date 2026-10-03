@@ -76,6 +76,9 @@ type LLMActivities struct {
 type LLMTurnRequest struct {
 	Model   string `json:"model,omitempty"` // empty = the worker's default
 	AgentID string `json:"agent_id"`        // who reads: its prompt, its own messages
+	// UserID is the user the turn answers: the agent's turns that answered
+	// another user are read without their private tool blocks.
+	UserID string `json:"user_id,omitempty"`
 	// Tools names the tools the turn may dispatch, resolved once at its
 	// start; the definitions come from the catalog.
 	Tools    []string        `json:"tools,omitempty"`
@@ -176,7 +179,7 @@ func (a *LLMActivities) buildRequest(ctx context.Context, req LLMTurnRequest) (p
 	if err != nil {
 		return provider.ChatRequest{}, PromptMemory{}, err
 	}
-	chat := conversation.Convert(messages, conversation.View{Self: req.AgentID, Agents: a.Catalog.AgentLabels(), Private: a.Catalog})
+	chat := conversation.Convert(messages, conversation.View{Self: req.AgentID, User: req.UserID, Agents: a.Catalog.AgentLabels(), Private: a.Catalog})
 
 	tools, missing := a.Catalog.ToolDefinitions(req.Tools)
 	offered := make([]string, len(tools))

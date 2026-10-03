@@ -37,6 +37,10 @@ type Message struct {
 	// shared by several users, and several agents answer in it. Author is
 	// the writer's name at the time of writing, user or agent; the interface
 	// shows the agent's current name, Author only once the agent is gone.
+	// On an assistant message, UserID is the user the turn answered, not an
+	// author: the agent's turn for another user hides its private tool
+	// blocks (conversation.Convert). Empty on messages written before it was
+	// set: read as today, in full.
 	UserID  string `json:"user_id,omitempty"`
 	AgentID string `json:"agent_id,omitempty"`
 	Author  string `json:"author,omitempty"`

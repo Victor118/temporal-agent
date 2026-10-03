@@ -189,6 +189,84 @@ func TestConvert_KeepsItsOwnToolPairing(t *testing.T) {
 	}
 }
 
+// In a shared session the agent's own turn for Alice keeps its tool blocks
+// when it answers Bob, but a private call's input and result read as the
+// members see them: Alice's memory does not reach Bob's answer. Each call
+// keeps its result. Alice's next turn reads her save in full; a turn written
+// before turns carried their user, too. Another agent reads it as it always
+// did, hidden whoever it answers.
+func TestConvert_OwnTurnsForAnotherUserHidePrivateCalls(t *testing.T) {
+	private := tool.PrivateSet{"save_user_memory": true}
+	var s stored
+	s.add("", store.Message{Role: store.RoleUser, Content: `"je bois du thé"`, UserID: "u-alice", Author: "Alice"}).
+		add("r-1.0", store.Message{Role: store.RoleAssistant, AgentID: "smith", UserID: "u-alice", ToolCalls: []store.ToolCall{
+			{ID: "s1", Name: "save_user_memory", Input: json.RawMessage(`{"content":"Alice's secret"}`)},
+			{ID: "s2", Name: "web_search", Input: json.RawMessage(`{"q":"thé"}`)},
+		}}).
+		add("r-1.0", store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "s1", Content: "Alice's other secret", IsError: true}}).
+		add("r-1.0", store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "s2", Content: "found"}}).
+		add("r-1.0", store.Message{Role: store.RoleAssistant, Content: `"noté"`, AgentID: "smith", UserID: "u-alice"}).
+		add("", store.Message{Role: store.RoleUser, Content: `"que sais-tu d'Alice ?"`, UserID: "u-bob", Author: "Bob"})
+
+	// pairing checks the agent's own turn: one call message, then the result
+	// of each call, the private one's as given.
+	pairing := func(t *testing.T, msgs []provider.ChatMessage, input, result string) {
+		t.Helper()
+		if len(msgs) != 6 || len(msgs[1].ToolCalls) != 2 || msgs[2].ToolResult == nil || msgs[3].ToolResult == nil {
+			t.Fatalf("messages %+v, want Alice, the call, its two results, the answer, Bob", msgs)
+		}
+		calls, r1, r2 := msgs[1].ToolCalls, msgs[2].ToolResult, msgs[3].ToolResult
+		if calls[0].ID != "s1" || string(calls[0].Input) != input || calls[1].ID != "s2" || string(calls[1].Input) != `{"q":"thé"}` {
+			t.Errorf("calls %+v", calls)
+		}
+		if r1.ToolCallID != "s1" || r1.Content != result || !r1.IsError || r2.ToolCallID != "s2" || r2.Content != "found" {
+			t.Errorf("results %+v, %+v", r1, r2)
+		}
+	}
+
+	t.Run("for Bob", func(t *testing.T) {
+		msgs := s.read(View{Self: "smith", User: "u-bob", Private: private})
+		pairing(t, msgs, `{"content":"(private)"}`, "(private)")
+		for _, m := range msgs {
+			if b, _ := json.Marshal(m); strings.Contains(string(b), "secret") {
+				t.Errorf("Alice's memory reached Bob's turn: %s", b)
+			}
+		}
+	})
+	t.Run("for Alice", func(t *testing.T) {
+		pairing(t, s.read(View{Self: "smith", User: "u-alice", Private: private}), `{"content":"Alice's secret"}`, "Alice's other secret")
+	})
+	t.Run("a turn with no user", func(t *testing.T) {
+		var old stored
+		for _, m := range s.msgs {
+			m.Message.UserID = map[store.Role]string{store.RoleUser: m.UserID}[m.Role]
+			old.add(map[bool]string{true: "r-1.0"}[m.Role != store.RoleUser], m.Message)
+		}
+		pairing(t, old.read(View{Self: "smith", User: "u-bob", Private: private}), `{"content":"Alice's secret"}`, "Alice's other secret")
+	})
+	t.Run("another agent", func(t *testing.T) {
+		for _, user := range []string{"u-alice", "u-bob"} {
+			msgs := s.read(View{Self: "jarvis", User: user, Agents: map[string]Label{"smith": {Name: "Smith", Mention: "smith"}}, Private: private})
+			if len(msgs) != 1 {
+				t.Fatalf("%s: messages %+v, want one user message", user, msgs)
+			}
+			text := textOf(msgs[0])
+			for _, want := range []string{
+				`[agent Smith (@smith) called save_user_memory {"content":"(private)"}]`,
+				"[error from save_user_memory, called by agent Smith (@smith)] (private)",
+				"[result of web_search, called by agent Smith (@smith)] found",
+			} {
+				if !strings.Contains(text, want) {
+					t.Errorf("%s: model reads %q\nwant %q in it", user, text, want)
+				}
+			}
+			if strings.Contains(text, "secret") {
+				t.Errorf("%s: a private call reached another agent: %q", user, text)
+			}
+		}
+	})
+}
+
 // Why a turn failed is for the members: the model never sees it, or it would
 // answer the error instead of the user. The two user messages around it are
 // read as one.

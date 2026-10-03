@@ -208,3 +208,56 @@ func TestAgentWorkflow_TwoSavesInOneAnswer(t *testing.T) {
 		t.Errorf("memory %+v, want one save at version 4", m)
 	}
 }
+
+// The agent's turn stores the user it answers on its messages: answering Bob
+// later in the same session, it reads its save for Alice as the members do,
+// the call and its result kept, their contents hidden.
+func TestAgentWorkflow_AnotherMembersSaveIsHidden(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+	alice := registerLLM(env, answers(saveMemory("m1", "Alice drinks tea"), done))
+	registerMemoryTool(env, alice)
+	upTo := alice.session.add(store.HumanMessageKey("a"), store.Message{Role: store.RoleUser, Content: `"I drink tea"`, UserID: "u-alice", Author: "Alice"})
+	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{
+		SessionID: "s1", UserID: "u-alice", UserName: "Alice", AgentID: "default",
+		UserMessage: "I drink tea", UserMessageStored: true, TurnKey: "run-1@1.0", HistoryUpTo: upTo,
+	})
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatal(err)
+	}
+	stored := alice.session.history()
+	for _, m := range stored {
+		if m.Role == store.RoleAssistant && m.UserID != "u-alice" {
+			t.Errorf("assistant message %+v, want the user it answered", m.Message)
+		}
+	}
+
+	env = suite.NewTestWorkflowEnvironment()
+	bob := registerLLM(env, answers(done))
+	registerMemoryTool(env, bob)
+	bob.session.messages = stored
+	upTo = bob.session.add(store.HumanMessageKey("b"), store.Message{Role: store.RoleUser, Content: `"what about Alice?"`, UserID: "u-bob", Author: "Bob"})
+	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{
+		SessionID: "s1", UserID: "u-bob", UserName: "Bob", AgentID: "default",
+		UserMessage: "what about Alice?", UserMessageStored: true, TurnKey: "run-2@2.0", HistoryUpTo: upTo,
+	})
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatal(err)
+	}
+	seen := bob.model.sent()[0]
+	if b, _ := json.Marshal(seen.Messages); strings.Contains(string(b), "drinks tea") || strings.Contains(string(b), "Memory saved") {
+		t.Errorf("Bob's turn read Alice's save: %s", b)
+	}
+	var call *provider.ToolCallInfo
+	for _, m := range seen.Messages {
+		for i := range m.ToolCalls {
+			call = &m.ToolCalls[i]
+		}
+	}
+	if call == nil || call.ID != "m1" || string(call.Input) != `{"content":"(private)"}` {
+		t.Errorf("call %+v, want m1 hidden", call)
+	}
+	if r := toolResult(seen, "m1"); r == nil || r.Content != "(private)" {
+		t.Errorf("result %+v, want m1's, hidden", r)
+	}
+}
