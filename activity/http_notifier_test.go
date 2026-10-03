@@ -46,3 +46,23 @@ func TestHTTPNotifier_ReportsARefusal(t *testing.T) {
 		t.Error("a failed notification was reported as sent")
 	}
 }
+
+// An event that does not encode is the notifier's error, not an empty body
+// the server would refuse.
+func TestHTTPNotifier_ReportsAnEventThatDoesNotEncode(t *testing.T) {
+	posted := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		posted = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	n := NewHTTPNotifier(srv.URL, "k3y")
+	err := n.Notify(context.Background(), Notification{SessionID: "s1", Event: SSEEvent{Type: "notification", Data: []byte("not json")}})
+	if err == nil {
+		t.Error("an event whose data is not JSON was reported as sent")
+	}
+	if posted {
+		t.Error("the event was posted anyway")
+	}
+}

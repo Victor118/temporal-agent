@@ -2,6 +2,7 @@ package activity
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/victor/temporal-agent/store"
@@ -46,9 +47,14 @@ func (a *DeliveryActivities) DeliverResult(ctx context.Context, input DeliverInp
 	}
 
 	// Show it live. A failure fails the activity, and the retry stores
-	// nothing twice: the message is keyed.
+	// nothing twice: the message is keyed. The event's data is JSON: the
+	// text goes as a JSON string, which the server can re-encode.
+	data, err := json.Marshal(input.Content)
+	if err != nil {
+		return fmt.Errorf("encode notification: %w", err)
+	}
 	return a.Web.Notify(ctx, Notification{SessionID: sessionID, Event: SSEEvent{
 		Type: "notification",
-		Data: []byte(input.Content),
+		Data: data,
 	}})
 }

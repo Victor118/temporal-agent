@@ -2,6 +2,7 @@ package activity
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -35,5 +36,29 @@ func TestDeliverResult_ReportsTheWebNotifier(t *testing.T) {
 	}
 	if got := a.Web.(*recordingNotifier).got; len(got) != 1 || got[0].SessionID != "notifications:u1" {
 		t.Errorf("notified %+v", got)
+	}
+}
+
+// The event's data is JSON, which the server's /internal/notify decodes: a
+// result's text, quotes and lines included, goes as a JSON string.
+func TestDeliverResult_SendsTheTextAsJSON(t *testing.T) {
+	web := &recordingNotifier{}
+	a := &DeliveryActivities{Web: web, Store: &appendedMessages{}}
+	text := "Rappel :\n- appeler \"Paul\""
+	in := DeliverInput{UserID: "u1", Content: text, ScheduleID: "sched-1", RunUnixMilli: 42}
+
+	if err := a.DeliverResult(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	if len(web.got) != 1 {
+		t.Fatalf("notified %d events, want 1", len(web.got))
+	}
+	data := web.got[0].Event.Data
+	if !json.Valid(data) {
+		t.Fatalf("event data %q is not JSON", data)
+	}
+	var got string
+	if err := json.Unmarshal(data, &got); err != nil || got != text {
+		t.Errorf("event data decodes to %q (%v), want %q", got, err, text)
 	}
 }

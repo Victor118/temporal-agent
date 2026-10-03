@@ -62,26 +62,31 @@ func ScheduledAgentWorkflow(ctx workflow.Context, input tool.ScheduledAgentInput
 	})
 
 	var deliverAct *activity.DeliveryActivities
-	if err := workflow.ExecuteActivity(deliverCtx, deliverAct.DeliverResult, activity.DeliverInput{
+	deliverErr := workflow.ExecuteActivity(deliverCtx, deliverAct.DeliverResult, activity.DeliverInput{
 		UserID:       input.UserID,
 		Content:      response,
 		ScheduleID:   input.ScheduleID,
 		RunUnixMilli: runUnixMilli,
-	}).Get(ctx, nil); err != nil {
-		logger.Error("Failed to deliver result", "schedule_id", input.ScheduleID, "error", err)
-		return fmt.Errorf("deliver result: %w", err)
-	}
-
-	// Recurring tasks keep their schedule until cancel_schedule
-	if input.Cron != "" {
-		return nil
-	}
-
-	// Cleanup: delete the schedule and update task log for one-shot tasks
-	var schedAct *activity.ScheduleActivities
-	_ = workflow.ExecuteActivity(deliverCtx, schedAct.DeleteSchedule, activity.DeleteScheduleInput{
-		ScheduleID: input.ScheduleID,
 	}).Get(ctx, nil)
+	if deliverErr != nil {
+		logger.Error("Failed to deliver result", "schedule_id", input.ScheduleID, "error", deliverErr)
+	}
 
+	// A one-shot schedule has fired its only action: delete it and close its
+	// task log even when the delivery failed, since keeping them would only
+	// list a task that will never run again. Recurring tasks keep their
+	// schedule until cancel_schedule.
+	if input.Cron == "" {
+		var schedAct *activity.ScheduleActivities
+		if err := workflow.ExecuteActivity(deliverCtx, schedAct.DeleteSchedule, activity.DeleteScheduleInput{
+			ScheduleID: input.ScheduleID,
+		}).Get(ctx, nil); err != nil {
+			logger.Error("Failed to delete the schedule", "schedule_id", input.ScheduleID, "error", err)
+		}
+	}
+
+	if deliverErr != nil {
+		return fmt.Errorf("deliver result: %w", deliverErr)
+	}
 	return nil
 }

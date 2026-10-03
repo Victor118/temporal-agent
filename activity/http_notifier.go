@@ -48,7 +48,12 @@ func (n *HTTPNotifier) Check(ctx context.Context) error {
 }
 
 func (n *HTTPNotifier) post(ctx context.Context, input NotifyInput) error {
-	payload, _ := json.Marshal(input)
+	// An event whose data is not JSON does not encode: sending an empty body
+	// would only have the server refuse it.
+	payload, err := json.Marshal(input)
+	if err != nil {
+		return fmt.Errorf("encode event: %w", err)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, n.BaseURL+"/internal/notify", bytes.NewReader(payload))
 	if err != nil {
 		return err

@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	sdkactivity "go.temporal.io/sdk/activity"
@@ -64,6 +65,39 @@ func TestScheduledAgentWorkflow_Cleanup(t *testing.T) {
 				t.Errorf("schedule deleted = %v, want %v", deleted, tc.wantDelete)
 			}
 		})
+	}
+}
+
+// A one-shot schedule has fired its only action: a delivery that failed still
+// deletes it and closes its task log, and the run reports the failure.
+func TestScheduledAgentWorkflow_CleansUpAfterAFailedDelivery(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+
+	env.RegisterWorkflowWithOptions(func(ctx sdkworkflow.Context, in AgentWorkflowInput) (AgentWorkflowOutput, error) {
+		return AgentWorkflowOutput{Response: "done"}, nil
+	}, sdkworkflow.RegisterOptions{Name: "AgentWorkflow"})
+	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.DeliverInput) error {
+		return errors.New("server refused the notification")
+	}, sdkactivity.RegisterOptions{Name: "DeliverResult"})
+	deleted := ""
+	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.DeleteScheduleInput) error {
+		deleted = in.ScheduleID
+		return nil
+	}, sdkactivity.RegisterOptions{Name: "DeleteSchedule"})
+
+	env.ExecuteWorkflow(ScheduledAgentWorkflow, tool.ScheduledAgentInput{
+		AgentID: "default", Prompt: "remind me", UserID: "victor", ScheduleID: "schedule-test",
+	})
+
+	if !env.IsWorkflowCompleted() {
+		t.Fatal("workflow did not complete")
+	}
+	if env.GetWorkflowError() == nil {
+		t.Error("a failed delivery was reported as a success")
+	}
+	if deleted != "schedule-test" {
+		t.Errorf("deleted schedule %q, want schedule-test", deleted)
 	}
 }
 
