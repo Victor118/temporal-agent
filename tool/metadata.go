@@ -55,8 +55,8 @@ func DisplayResult(private bool, content string) string {
 	return content
 }
 
-// CallContext is what a workflow tool flagged NeedsCallContext receives
-// besides the model's input: who called it, and where its user is.
+// CallContext is what a tool flagged NeedsCallContext receives besides the
+// model's input: who called it, and where its user is.
 type CallContext struct {
 	AgentChain []string `json:"agent_chain,omitempty"`
 	Channel    string   `json:"channel,omitempty"`

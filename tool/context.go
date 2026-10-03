@@ -8,6 +8,7 @@ const (
 	sessionIDKey contextKey = "session_id"
 	agentIDKey   contextKey = "agent_id"
 	userIDKey    contextKey = "user_id"
+	callKey      contextKey = "call"
 )
 
 // WithSessionID injects the session ID into the context.
@@ -42,4 +43,17 @@ func WithUserID(ctx context.Context, id string) context.Context {
 func UserIDFromContext(ctx context.Context) string {
 	v, _ := ctx.Value(userIDKey).(string)
 	return v
+}
+
+// WithCall injects the caller's context, given to an activity tool flagged
+// NeedsCallContext: a workflow tool reads it from its input instead.
+func WithCall(ctx context.Context, cc CallContext) context.Context {
+	return context.WithValue(ctx, callKey, cc)
+}
+
+// CallFromContext retrieves the caller's context; false when the tool was not
+// given one.
+func CallFromContext(ctx context.Context) (CallContext, bool) {
+	cc, ok := ctx.Value(callKey).(CallContext)
+	return cc, ok
 }

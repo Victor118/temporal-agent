@@ -292,6 +292,9 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 		replyChannel, replyChannelID = "", ""
 	}
 
+	// What a tool flagged NeedsCallContext receives of this run.
+	call := callContext(input, currentChain, signed)
+
 	// ReAct loop
 	for i := 0; i < maxReActIterations; i++ {
 		// Check for cancellation before each iteration
@@ -385,7 +388,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 				d.workflowID = childWorkflowID(input.SessionID, tc.Name, tc.ID, i, j)
 
 				// Build input first — a sub-agent runs on the current workflow queue
-				childWorkflow, childInput, err := buildChildInput(tc.Input, input, d.workflowID, &res, currentChain, currentAgentID, workflow.GetInfo(ctx).TaskQueueName, signed)
+				childWorkflow, childInput, err := buildChildInput(tc.Input, input, d.workflowID, &res, call, currentAgentID, workflow.GetInfo(ctx).TaskQueueName)
 				if err == nil && d.agent {
 					err = delegationRefusal(currentChain, res.AgentID)
 				}
@@ -411,13 +414,18 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 					opts.StartToCloseTimeout = tool.DefaultTimeout
 				}
 				execCtx := workflow.WithActivityOptions(ctx, opts)
-				d.future = workflow.ExecuteActivity(execCtx, toolAct.ExecuteTool, activity.ExecuteToolInput{
+				execInput := activity.ExecuteToolInput{
 					Name:      tc.Name,
 					Input:     tc.Input,
 					SessionID: input.SessionID,
 					AgentID:   currentAgentID,
 					UserID:    input.UserID,
-				})
+				}
+				if res.NeedsCallContext {
+					cc := call
+					execInput.Call = &cc
+				}
+				d.future = workflow.ExecuteActivity(execCtx, toolAct.ExecuteTool, execInput)
 			}
 			dispatches[j] = d
 		}
@@ -577,26 +585,33 @@ func notifyResponse(ctx workflow.Context, sessionID, channel, channelID, agent, 
 // keeps the child on the current workflow queue. The target comes from the
 // tool's resolution, never from the model's input: the catalog only offers the
 // agents the allowlist grants, so there is no target left to validate.
-// A tool published as needing the call context (ask_user) gets the agent chain,
-// the user's channel and signer, the name that signs on that channel (empty:
-// unsigned), added to its input. Any other gets the raw input.
-func buildChildInput(rawInput json.RawMessage, parent AgentWorkflowInput, childID string, res *activity.ToolResolution, agentChain []string, currentAgentID string, currentQueue string, signer string) (childWorkflow interface{}, input interface{}, err error) {
+// A tool published as needing the call context (ask_user) gets call added to
+// its input. Any other gets the raw input.
+func buildChildInput(rawInput json.RawMessage, parent AgentWorkflowInput, childID string, res *activity.ToolResolution, call tool.CallContext, currentAgentID string, currentQueue string) (childWorkflow interface{}, input interface{}, err error) {
 	if res.AgentID != "" {
-		return subAgentInput(rawInput, parent, childID, res, agentChain, currentAgentID, currentQueue)
+		return subAgentInput(rawInput, parent, childID, res, call.AgentChain, currentAgentID, currentQueue)
 	}
 	if res.NeedsCallContext {
-		in, err := tool.WithCallContext(rawInput, tool.CallContext{
-			AgentChain: agentChain,
-			Channel:    parent.Channel,
-			ChannelID:  parent.ChannelID,
-			Agent:      signer,
-		})
+		in, err := tool.WithCallContext(rawInput, call)
 		if err != nil {
 			return nil, nil, err
 		}
 		return res.WorkflowName, in, nil
 	}
 	return res.WorkflowName, rawInput, nil
+}
+
+// callContext is what a tool flagged NeedsCallContext receives of the run
+// input: the agent chain, the user's channel, and signer, the name that signs
+// on that channel (empty: unsigned). A workflow tool gets it in its input, an
+// activity tool in its context (tool.CallFromContext).
+func callContext(input AgentWorkflowInput, chain []string, signer string) tool.CallContext {
+	return tool.CallContext{
+		AgentChain: chain,
+		Channel:    input.Channel,
+		ChannelID:  input.ChannelID,
+		Agent:      signer,
+	}
 }
 
 // subAgentInput starts res.AgentID as a one-shot sub-agent: no session history,

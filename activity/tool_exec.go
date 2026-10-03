@@ -20,6 +20,9 @@ type ExecuteToolInput struct {
 	SessionID string          `json:"session_id,omitempty"`
 	AgentID   string          `json:"agent_id,omitempty"` // Agent calling the tool
 	UserID    string          `json:"user_id,omitempty"`  // User the turn answers
+	// Call is the caller's context, for a tool flagged NeedsCallContext; nil
+	// for any other.
+	Call *tool.CallContext `json:"call,omitempty"`
 }
 
 type ExecuteToolOutput struct {
@@ -37,7 +40,8 @@ type ToolResolution struct {
 	AgentID string `json:"agent_id,omitempty"`
 	// PrivateInput: the call's input is hidden from the session's members.
 	PrivateInput bool `json:"private_input,omitempty"`
-	// NeedsCallContext: the workflow tool gets tool.CallContext in its input.
+	// NeedsCallContext: the tool gets tool.CallContext, a workflow tool in its
+	// input, an activity tool in its context.
 	NeedsCallContext bool `json:"needs_call_context,omitempty"`
 	// Timeout bounds one call of an activity or MCP tool; zero =
 	// tool.DefaultTimeout.
@@ -67,6 +71,9 @@ func (a *ToolActivities) ExecuteTool(ctx context.Context, input ExecuteToolInput
 	}
 	if input.UserID != "" {
 		ctx = tool.WithUserID(ctx, input.UserID)
+	}
+	if input.Call != nil {
+		ctx = tool.WithCall(ctx, *input.Call)
 	}
 	result, err := a.Registry.Execute(ctx, input.Name, input.Input)
 	if err != nil {
