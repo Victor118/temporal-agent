@@ -3,6 +3,8 @@ package tool
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
+	"strings"
 
 	"github.com/victor/temporal-agent/store"
 )
@@ -82,9 +84,26 @@ type CallContext struct {
 	MemoryUnread bool `json:"memory_unread,omitempty"`
 }
 
+// callContextKeys are the input keys CallContext's fields decode from: its
+// JSON names, read from its tags so that a field added there is reserved too.
+var callContextKeys = func() []string {
+	var keys []string
+	t := reflect.TypeFor[CallContext]()
+	for i := range t.NumField() {
+		name, _, _ := strings.Cut(t.Field(i).Tag.Get("json"), ",")
+		if name != "" && name != "-" {
+			keys = append(keys, name)
+		}
+	}
+	return keys
+}()
+
 // WithCallContext adds cc's fields to a tool's input object. They are the
-// caller's to set, never the model's: a value the model put under one of
-// these names is replaced.
+// caller's to set, never the model's: a key the model put that one of them
+// decodes from is removed, whatever cc holds. encoding/json matches a key
+// to a field regardless of case ("AGENT" fills Agent), so the keys go
+// regardless of case too: a field cc leaves empty (omitempty, absent from
+// what is added) must stay empty, not take the model's value.
 func WithCallContext(input json.RawMessage, cc CallContext) (json.RawMessage, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(input, &fields); err != nil {
@@ -93,13 +112,11 @@ func WithCallContext(input json.RawMessage, cc CallContext) (json.RawMessage, er
 	if fields == nil { // "null"
 		fields = map[string]json.RawMessage{}
 	}
-	delete(fields, "agent_chain")
-	delete(fields, "channel")
-	delete(fields, "channel_id")
-	delete(fields, "agent")
-	delete(fields, "notify_queue")
-	delete(fields, "memory_version")
-	delete(fields, "memory_unread")
+	for k := range fields {
+		if isCallContextKey(k) {
+			delete(fields, k)
+		}
+	}
 	extra, _ := json.Marshal(cc)
 	var ccFields map[string]json.RawMessage
 	json.Unmarshal(extra, &ccFields)
@@ -107,6 +124,17 @@ func WithCallContext(input json.RawMessage, cc CallContext) (json.RawMessage, er
 		fields[k] = v
 	}
 	return json.Marshal(fields)
+}
+
+// isCallContextKey tells whether encoding/json would decode key into one of
+// CallContext's fields: it folds case as strings.EqualFold does.
+func isCallContextKey(key string) bool {
+	for _, reserved := range callContextKeys {
+		if strings.EqualFold(key, reserved) {
+			return true
+		}
+	}
+	return false
 }
 
 // Result is what a workflow tool returns, so the calling agent reads every
