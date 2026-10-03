@@ -7,7 +7,16 @@ import (
 	"io/fs"
 	"path/filepath"
 	"strings"
+	"time"
 )
+
+// globTimeout bounds a recursive search, as grepTimeout does grep's: a search
+// stopped by it returns the files found so far. The tool's Timeout derives
+// from it.
+const globTimeout = 60 * time.Second
+
+// maxGlobResults caps the files one search lists.
+const maxGlobResults = 1000
 
 func RegisterGlobTool(r *Registry, workspacePath string) {
 	ws := newWorkspace(workspacePath, nil)
@@ -24,7 +33,8 @@ Examples: "**/*.go" (all Go files), "cmd/**/*.go" (Go files under cmd/), "*.yaml
 			},
 			"required": ["pattern"]
 		}`),
-		Kind: ToolKindActivity,
+		Kind:    ToolKindActivity,
+		Timeout: globTimeout + TimeoutMargin,
 		Execute: func(ctx context.Context, input json.RawMessage) (string, error) {
 			var params struct {
 				Pattern string `json:"pattern"`
@@ -84,31 +94,11 @@ Examples: "**/*.go" (all Go files), "cmd/**/*.go" (Go files under cmd/), "*.yaml
 			defer root.Close()
 
 			var matches []string
-			const maxResults = 1000
-
+			stopped := false
 			if recursive {
-				err := fs.WalkDir(walkFS{root}, start, func(rel string, d fs.DirEntry, err error) error {
-					if err != nil {
-						return nil
-					}
-					if d.IsDir() {
-						name := d.Name()
-						if rel != "." && (strings.HasPrefix(name, ".") || name == "node_modules" || name == "vendor") {
-							return fs.SkipDir
-						}
-						return nil
-					}
-
-					matched, _ := filepath.Match(filePattern, d.Name())
-					if matched {
-						matches = append(matches, rel)
-						if len(matches) >= maxResults {
-							return fs.SkipAll
-						}
-					}
-					return nil
-				})
-				if err != nil && err != fs.SkipAll {
+				ctx, cancel := context.WithTimeout(ctx, globTimeout)
+				defer cancel()
+				if matches, stopped, err = globWalk(ctx, walkFS{root}, start, filePattern); err != nil {
 					return "", fmt.Errorf("glob: %w", err)
 				}
 			} else {
@@ -123,21 +113,63 @@ Examples: "**/*.go" (all Go files), "cmd/**/*.go" (Go files under cmd/), "*.yaml
 					matched, _ := filepath.Match(filePattern, e.Name())
 					if matched {
 						matches = append(matches, filepath.Join(start, e.Name()))
-						if len(matches) >= maxResults {
+						if len(matches) >= maxGlobResults {
 							break
 						}
 					}
 				}
 			}
 
+			if stopped && len(matches) == 0 {
+				return "", fmt.Errorf("glob: no file found before the search stopped after %s: narrow it with path or pattern", globTimeout)
+			}
 			if len(matches) == 0 {
 				return "No files found.", nil
 			}
 			result := strings.Join(matches, "\n")
-			if len(matches) >= maxResults {
-				result += fmt.Sprintf("\n\n... (truncated at %d results)", maxResults)
+			if len(matches) >= maxGlobResults {
+				result += fmt.Sprintf("\n\n... (truncated at %d results)", maxGlobResults)
+			}
+			if stopped {
+				result += fmt.Sprintf("\n\n... (search stopped after %s: narrow it with path or pattern)", globTimeout)
 			}
 			return result, nil
 		},
 	})
+}
+
+// globWalk lists the files under start whose name matches filePattern,
+// skipping hidden directories, node_modules and vendor. It stops at ctx's end
+// with the files found so far (stopped): a walk the activity no longer waits
+// for would otherwise go on on the worker.
+func globWalk(ctx context.Context, fsys fs.FS, start, filePattern string) (matches []string, stopped bool, err error) {
+	err = fs.WalkDir(fsys, start, func(rel string, d fs.DirEntry, err error) error {
+		if ctx.Err() != nil {
+			stopped = true
+			return fs.SkipAll
+		}
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			name := d.Name()
+			if rel != "." && (strings.HasPrefix(name, ".") || name == "node_modules" || name == "vendor") {
+				return fs.SkipDir
+			}
+			return nil
+		}
+
+		matched, _ := filepath.Match(filePattern, d.Name())
+		if matched {
+			matches = append(matches, rel)
+			if len(matches) >= maxGlobResults {
+				return fs.SkipAll
+			}
+		}
+		return nil
+	})
+	if err == fs.SkipAll {
+		err = nil
+	}
+	return matches, stopped, err
 }
