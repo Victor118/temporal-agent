@@ -56,6 +56,7 @@ func (s *Service) Open(ctx context.Context, me *store.User, o OpenOptions) (stri
 	}); err != nil {
 		return "", fmt.Errorf("persist session: %w", err)
 	}
+	s.ringTrees(ctx, sessionID)
 	return sessionID, nil
 }
 
@@ -104,7 +105,16 @@ func (s *Service) Delete(ctx context.Context, sessionID, by string) error {
 	if wf := s.activeWorkflowID(ctx, sessionID); wf != "" {
 		_ = s.temporal.TerminateWorkflow(ctx, wf, "", "session deleted by user")
 	}
-	return s.store.DeleteSession(ctx, sessionID)
+	members, _ := s.store.ListSessionMembers(ctx, sessionID)
+	if err := s.store.DeleteSession(ctx, sessionID); err != nil {
+		return err
+	}
+	ids := make([]string, len(members))
+	for i, m := range members {
+		ids[i] = m.UserID
+	}
+	s.ringTrees(ctx, sessionID, ids...) // the session is gone: it has no members to list
+	return nil
 }
 
 // Invite adds a user to a session, by email. Any member may invite.
@@ -120,6 +130,7 @@ func (s *Service) Invite(ctx context.Context, sessionID, email, by string) error
 		return err
 	}
 	log.Printf("Session %s: %s added %s", sessionID, by, u.ID)
+	s.ringTrees(ctx, sessionID)
 	return nil
 }
 
@@ -130,6 +141,7 @@ func (s *Service) Leave(ctx context.Context, sessionID, userID string) error {
 	if err := s.store.RemoveSessionMember(ctx, sessionID, userID); err != nil {
 		return err
 	}
+	defer s.ringTrees(ctx, sessionID, userID)
 	members, err := s.store.ListSessionMembers(ctx, sessionID)
 	if err == nil && len(members) == 0 {
 		if wf := s.activeWorkflowID(ctx, sessionID); wf != "" {

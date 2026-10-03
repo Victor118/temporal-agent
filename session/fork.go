@@ -80,6 +80,7 @@ func (s *Service) Fork(ctx context.Context, parentID string, messageID int64, pu
 		return nil, fmt.Errorf("start the summary: %w", err)
 	}
 	log.Printf("Session %s forked at message %d into %s by %s", parentID, messageID, f.SessionID, me.ID)
+	s.ringTrees(ctx, f.SessionID, me.ID)
 	return &f, nil
 }
 

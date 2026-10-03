@@ -108,6 +108,7 @@ func (s *server) routes() http.Handler {
 			r.Use(u.requireUserPage)
 			r.Get("/", u.home)
 			r.Get("/tree", u.treeFragment)
+			r.Get("/tree/stream", u.treeStream)
 			r.Post("/s/new", u.newSessionForm)
 			r.Get("/notifications", u.notificationsPage)
 			r.Post("/notifications/{notifID}/delete", u.deleteNotificationForm)

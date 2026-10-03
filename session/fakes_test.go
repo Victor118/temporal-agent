@@ -5,6 +5,7 @@ import (
 	"errors"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	commonpb "go.temporal.io/api/common/v1"
@@ -181,6 +182,30 @@ func (f *fakeTemporal) TerminateWorkflow(context.Context, string, string, string
 	return nil
 }
 
-type nopHub struct{ events []activity.SSEEvent }
+// nopHub records the events published, whatever their topic: the trees
+// ring from a background goroutine too.
+type nopHub struct {
+	mu     sync.Mutex
+	events []activity.SSEEvent
+	topics []string
+}
 
-func (h *nopHub) Publish(_ string, ev activity.SSEEvent) { h.events = append(h.events, ev) }
+func (h *nopHub) Publish(topic string, ev activity.SSEEvent) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.events = append(h.events, ev)
+	h.topics = append(h.topics, topic)
+}
+
+// on returns the events published on topic.
+func (h *nopHub) on(topic string) []activity.SSEEvent {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var out []activity.SSEEvent
+	for i, t := range h.topics {
+		if t == topic {
+			out = append(out, h.events[i])
+		}
+	}
+	return out
+}

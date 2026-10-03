@@ -164,7 +164,7 @@ func TestDeliver_SignalsTheMentionedAgents(t *testing.T) {
 				t.Errorf("agents %s, want %s", got, c.wantAgents)
 			}
 			// The members see live who answers.
-			ev := svc.hub.(*nopHub).events
+			ev := svc.hub.(*nopHub).on(sid)
 			var data struct {
 				Called bool     `json:"agent_called"`
 				Agents []string `json:"agents"`

@@ -207,6 +207,8 @@ func (s *Service) setTitleFrom(sessionID, text string) {
 	if err := s.store.UpdateSessionTitle(context.Background(), sessionID, titleFrom(text)); err != nil {
 		log.Printf("Session %s: set title: %v", sessionID, err)
 	}
+	// The trees show the message's session first, under its title.
+	s.ringTrees(context.Background(), sessionID)
 }
 
 // titleFrom is text as a title: trimmed, and cut to maxTitleRunes.

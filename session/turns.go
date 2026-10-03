@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"maps"
@@ -119,8 +120,9 @@ func (s *Service) WorkingAgent(sessionID string) (id, name string) {
 }
 
 // Observe learns from an event published on the server's hub, before the
-// pages it rings reload: the turn events feed the sessions' turns, and an
-// event that changes what a session is doing drops the cached statuses.
+// pages it rings reload: the turn events feed the sessions' turns; an event
+// that changes what a session is doing drops the cached statuses, and rings
+// its members' trees.
 func (s *Service) Observe(topic string, ev activity.SSEEvent) {
 	if strings.Contains(topic, ":") { // not a session: a user's notifications, a tree
 		return
@@ -133,8 +135,42 @@ func (s *Service) Observe(topic string, ev activity.SSEEvent) {
 			return
 		}
 		s.turns.set(topic, ev.Type == workflow.EventTurnStarted, e)
-		s.statuses.invalidate()
-	case "ask_user", workflow.EventForkReady, workflow.EventForkFailed:
-		s.statuses.invalidate()
+	case "ask_user", workflow.EventForkReady, workflow.EventForkFailed,
+		workflow.EventForkReport, workflow.EventForkReported, workflow.EventForkReportFailed:
+	default:
+		return
+	}
+	s.statuses.invalidate()
+	s.ringTrees(context.Background(), topic)
+}
+
+// TreeTopic is the hub topic of a user's tree: it rings when one of their
+// sessions changes in a way the tree shows (a turn, a question, a new
+// message or title, a fork, a member).
+func TreeTopic(userID string) string { return "tree:" + userID }
+
+// EventTreeChanged is the event of a tree topic.
+const EventTreeChanged = "changed"
+
+// treeRingTimeout bounds the members' lookup of a ring, which runs on the
+// publisher's way.
+const treeRingTimeout = 5 * time.Second
+
+// ringTrees rings the trees of the session's members, and of others (a
+// member who just left): their pages reload them. Best effort: a tree that
+// misses it reloads within a minute.
+func (s *Service) ringTrees(ctx context.Context, sessionID string, others ...string) {
+	ctx, cancel := context.WithTimeout(ctx, treeRingTimeout)
+	defer cancel()
+	members, err := s.store.ListSessionMembers(ctx, sessionID)
+	if err != nil {
+		log.Printf("session %s: ring the trees: %v", sessionID, err)
+	}
+	data, _ := json.Marshal(map[string]string{"session_id": sessionID})
+	for _, m := range members {
+		s.hub.Publish(TreeTopic(m.UserID), activity.SSEEvent{Type: EventTreeChanged, Data: data})
+	}
+	for _, id := range others {
+		s.hub.Publish(TreeTopic(id), activity.SSEEvent{Type: EventTreeChanged, Data: data})
 	}
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -685,8 +686,8 @@ func TestUI_ReportToParent(t *testing.T) {
 		t.Errorf("fork page: %d %s", page.Code, body)
 	}
 
-	// The report section, polled every few seconds while a report is
-	// written, loads the conversation once at most; a message to the fork
+	// The report section, reloaded on the fork's events, loads the
+	// conversation once at most; a message to the fork
 	// loads none (its summary's state is on its row).
 	req = httptest.NewRequest(http.MethodGet, "/s/s1/report", nil)
 	req.AddCookie(bob)
@@ -834,5 +835,38 @@ func TestUI_TheThreadNamesWhoWorks(t *testing.T) {
 	activity.HubNotifier{Hub: hub}.Notify(context.Background(), activity.Notification{SessionID: "s1", Event: activity.SSEEvent{Type: workflow.EventTurnStarted, Data: data}})
 	if out := thread(); !strings.Contains(out, "Default travaille…") {
 		t.Errorf("from the hub: %s", out)
+	}
+}
+
+// A member's tree stream rings when one of their sessions changes, here a
+// turn a worker reports; another user's does not.
+func TestUI_TheTreeStreamRings(t *testing.T) {
+	h, _, hub := newRouteTestHub(t, &fakeTemporal{})
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	open := func(email string) *bufio.Scanner {
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/tree/stream?last_event_id="+hub.Position(""), nil)
+		req.AddCookie(logIn(t, h, email))
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil || resp.StatusCode != http.StatusOK {
+			t.Fatalf("stream: %v %v", err, resp)
+		}
+		t.Cleanup(func() { resp.Body.Close() })
+		return bufio.NewScanner(resp.Body)
+	}
+	bob, carol := open("bob@example.com"), open("carol@example.com")
+
+	data, _ := json.Marshal(workflow.TurnEvent{AgentID: "default", Turn: "k"})
+	hub.Publish("s1", activity.SSEEvent{Type: workflow.EventTurnStarted, Data: data})
+	if got := nextEvent(t, bob); !strings.HasSuffix(got, " "+session.EventTreeChanged) {
+		t.Errorf("bob's tree: %q", got)
+	}
+	// Carol is no member of s1: the next thing her stream says is what came
+	// to her tree after, not s1's change.
+	hub.Publish(session.TreeTopic("u-carol"), activity.SSEEvent{Type: "marker", Data: []byte(`{}`)})
+	if got := nextEvent(t, carol); !strings.HasSuffix(got, " marker") {
+		t.Errorf("carol's tree: %q", got)
 	}
 }

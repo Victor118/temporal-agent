@@ -3,10 +3,12 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/victor/temporal-agent/activity"
+	"github.com/victor/temporal-agent/store"
 	"github.com/victor/temporal-agent/workflow"
 )
 
@@ -89,5 +91,35 @@ func TestObserve_TurnEventsInvalidate(t *testing.T) {
 	s.Statuses(ctx)
 	if len(tc.lists) != 8 {
 		t.Errorf("%d queries after a turn event, want 8", len(tc.lists))
+	}
+}
+
+// An event that changes what a session is doing rings its members' trees;
+// one that does not (a tool call), or one on another topic, does not. A
+// member who leaves is rung too: their tree drops the session.
+func TestTreesRing(t *testing.T) {
+	st := &memStore{members: []store.SessionMember{{UserID: "u-alice"}, {UserID: "u-bob"}}}
+	s := newTest(st, &fakeTemporal{})
+	hub := s.hub.(*nopHub)
+	rung := func() string {
+		return fmt.Sprint(len(hub.on(TreeTopic("u-alice"))), len(hub.on(TreeTopic("u-bob"))), len(hub.on(TreeTopic("u-carol"))))
+	}
+
+	s.Observe(sid, activity.SSEEvent{Type: "tool_calls", Data: []byte(`{}`)})
+	s.Observe(TreeTopic("u-alice"), activity.SSEEvent{Type: EventTreeChanged})
+	if got := rung(); got != "0 0 0" {
+		t.Fatalf("rung %s for nothing", got)
+	}
+	for _, typ := range []string{workflow.EventTurnStarted, workflow.EventTurnDone, "ask_user", workflow.EventForkReady} {
+		s.Observe(sid, turnEvent(typ, "default", ""))
+	}
+	if got := rung(); got != "4 4 0" {
+		t.Errorf("rung %s, want each member's tree four times", got)
+	}
+	if err := s.Leave(context.Background(), sid, "u-carol"); err != nil || rung() != "5 5 1" {
+		t.Errorf("leave: %v, rung %s", err, rung())
+	}
+	if ev := hub.on(TreeTopic("u-alice"))[0]; ev.Type != EventTreeChanged || string(ev.Data) != `{"session_id":"`+sid+`"}` {
+		t.Errorf("event %s %s", ev.Type, ev.Data)
 	}
 }

@@ -70,11 +70,12 @@
 {{end}}
 
 {{/* A fork's report to its parent. Its section stays; its content is swapped
-     alone, morphed in place: by its button, and every few seconds while a
-     report is written. */}}
+     alone, morphed in place: by its button, and on the fork's events that
+     change it (a report, the brief, a message, a turn). */}}
 {{define "report-section"}}
 {{with .Report}}
-<section id="report" hx-swap="morph:innerHTML">{{template "report" $}}</section>
+<section id="report" hx-get="/s/{{$.Node.Session.SessionID}}/report" hx-swap="morph:innerHTML"
+         hx-trigger="sse:fork_reported, sse:fork_report_failed, sse:fork_ready, sse:fork_failed, sse:user_message, sse:message, sse:turn_started, sse:turn_done, sse:reload, every 60s">{{template "report" $}}</section>
 {{end}}
 {{end}}
 
@@ -82,7 +83,6 @@
 {{with .Report}}
 {{$sid := $.Node.Session.SessionID}}
 <div class="report-inner" data-version="{{index $.Versions "report"}}">
-  {{if .Pending}}<div id="report-poll" hidden hx-get="/s/{{$sid}}/report" hx-trigger="every 3s" hx-target="#report" hx-swap="morph:innerHTML"></div>{{end}}
   <div class="eyebrow">Rapport au parent</div>
   {{if not .Refused}}
   <form id="report-form" hx-post="/s/{{$sid}}/report" hx-target="#report" hx-swap="morph:innerHTML" hx-confirm="{{$.ReportConfirm}}">

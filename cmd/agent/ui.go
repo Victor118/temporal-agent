@@ -123,6 +123,7 @@ func (u *ui) buildPage(ctx context.Context, me *store.User, sessionID, view stri
 	if sessionID != "" {
 		streamFrom = u.hub.Position(sessionID)
 	}
+	treeFrom := u.hub.Position(session.TreeTopic(me.ID))
 	sessions, err := u.store.ListSessionsByUser(ctx, me.ID)
 	if err != nil {
 		return nil, err
@@ -132,7 +133,7 @@ func (u *ui) buildPage(ctx context.Context, me *store.User, sessionID, view stri
 		return nil, err
 	}
 	statuses := u.sessions.Statuses(ctx)
-	p := &chat.Page{Me: chat.UserPerson(me), IsAdmin: me.IsAdmin(), View: view}
+	p := &chat.Page{Me: chat.UserPerson(me), IsAdmin: me.IsAdmin(), View: view, TreeStreamFrom: treeFrom}
 	p.Roots = chat.BuildTree(sessions, stats, statuses, sessionID)
 	if notes, err := u.store.LoadMessagesWithID(ctx, notificationsOf(me.ID)); err == nil {
 		p.Notifications = len(notes)
@@ -326,6 +327,12 @@ func (u *ui) treeFragment(w http.ResponseWriter, r *http.Request) {
 	chat.RenderFragment(w, "tree-items", &chat.Page{Roots: chat.BuildTree(sessions, stats, u.sessions.Statuses(r.Context()), current)}, r.Header.Get(chat.VersionHeader))
 }
 
+// treeStream rings the user's tree when one of their sessions changes: a
+// turn, a question, a message, a fork, a member.
+func (u *ui) treeStream(w http.ResponseWriter, r *http.Request) {
+	relaySSE(w, r, u.hub, session.TreeTopic(auth.UserFrom(r.Context()).ID), sseKeepAlive)
+}
+
 // --- Actions ---
 
 func (u *ui) newSessionForm(w http.ResponseWriter, r *http.Request) {
@@ -383,8 +390,8 @@ func (u *ui) forkForm(w http.ResponseWriter, r *http.Request) {
 	goTo(w, r, "/s/"+f.SessionID)
 }
 
-// reportFragment is the fork's report section, polled while a report is
-// written.
+// reportFragment is the fork's report section, reloaded on the fork's
+// events.
 func (u *ui) reportFragment(w http.ResponseWriter, r *http.Request) {
 	u.renderPage(w, r, chi.URLParam(r, "id"), "thread", "report", nil)
 }

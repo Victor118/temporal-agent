@@ -4,8 +4,9 @@
   <form hx-post="/s/new"><button type="submit" aria-label="Nouvelle session" title="Nouvelle session">+</button></form>
 </div>
 {{/* Refreshed in place: the container stays, so does its scroll, and a
-     morph touches only the nodes that changed. */}}
-<div class="tree-body" id="tree" hx-get="/tree{{with .Node}}?current={{.Session.SessionID}}{{end}}" hx-trigger="every 8s" hx-swap="morph:innerHTML">
+     morph touches only the nodes that changed. Its stream rings when one of
+     the user's sessions changes; once a minute too, in case. */}}
+<div class="tree-body" id="tree" hx-get="/tree{{with .Node}}?current={{.Session.SessionID}}{{end}}" hx-trigger="sse:changed, sse:reload, every 60s" hx-swap="morph:innerHTML">
   {{template "tree-items" .}}
 </div>
 <div class="legend">

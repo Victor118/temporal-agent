@@ -44,9 +44,10 @@ func (s Status) Stronger(o Status) Status {
 }
 
 // statusesTTL is how long the session states are reused. Every page and every
-// tree refresh (each open tab, every 8 s) needs them, and they cost four
-// visibility queries over every running workflow: shared for a few seconds,
-// that load no longer grows with the number of tabs.
+// tree refresh (each open tab of each member, on every turn event) needs
+// them, and they cost four visibility queries over every running workflow:
+// shared for a few seconds, that load no longer grows with the number of
+// tabs.
 const statusesTTL = 3 * time.Second
 
 // statusesLoadTimeout bounds one load of the session states. The load belongs

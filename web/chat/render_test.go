@@ -57,14 +57,13 @@ func render(t *testing.T, name string, data any) string {
 
 func TestRender_Pages(t *testing.T) {
 	p := testPage("thread")
-	p.StreamFrom = "e-7"
+	p.StreamFrom, p.TreeStreamFrom = "e-7", "t-3"
 	page := render(t, "page", p)
 	for _, want := range []string{
-		`sse-connect="/sessions/fork/stream?last_event_id=e-7"`, // live updates wired, from where the page stands
-		`hx-post="/s/fork/messages"`,                            // composer
-		`<span class="mention">@agent</span>`,                   // mention highlighted
-		`&lt;b&gt;hi&lt;/b&gt;`,                                 // a member's HTML escaped
-		`<strong>ok</strong>`,                                   // the agent's Markdown rendered
+		`hx-post="/s/fork/messages"`,          // composer
+		`<span class="mention">@agent</span>`, // mention highlighted
+		`&lt;b&gt;hi&lt;/b&gt;`,               // a member's HTML escaped
+		`<strong>ok</strong>`,                 // the agent's Markdown rendered
 		`<span class="tool">grep</span>`,
 		`name="message_id" value="9"`, // fork from a message
 		`href="/s/f2"`,                // a fork of a message
@@ -90,7 +89,7 @@ func TestRender_Pages(t *testing.T) {
 	// Reloads morph the panes in place; nothing is swapped whole.
 	for _, want := range []string{
 		`<script src="/static/idiomorph-ext-0.8.0.min.js"></script>`,
-		`<body hx-boost="true" hx-ext="morph">`,
+		`<body hx-boost="true" hx-ext="morph, sse">`,
 		`<div id="thread" hx-get="/s/fork/thread" hx-swap="morph:innerHTML"`,
 		`hx-post="/s/fork/messages" hx-target="#thread" hx-swap="morph:innerHTML"`,
 		`hx-swap="morph:innerHTML">`, // the tree
@@ -104,6 +103,22 @@ func TestRender_Pages(t *testing.T) {
 	}
 	if strings.Contains(page, "outerHTML") || strings.Contains(page, "hx-preserve") {
 		t.Error("a pane is still swapped whole")
+	}
+	// The streams ring the bell; the polls are a slow fallback.
+	for _, want := range []string{
+		`<div class="columns" sse-connect="/sessions/fork/stream?last_event_id=e-7">`,
+		`<aside class="col-tree" sse-connect="/tree/stream?last_event_id=t-3">`,
+		`hx-trigger="sse:changed, sse:reload, every 60s"`,
+		`sse:turn_done, sse:reload, every 60s"`,
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("page lacks %q", want)
+		}
+	}
+	for _, poll := range []string{"every 3s", "every 4s", "every 8s"} {
+		if strings.Contains(page, poll) {
+			t.Errorf("page still polls %s", poll)
+		}
 	}
 
 	// One agent to call: nothing about the others.
@@ -247,7 +262,7 @@ func TestRender_ReportButton(t *testing.T) {
 		"not a fork": {session.ReportState{Refused: session.ErrNotAFork},
 			[]string{"Cette session n&#39;est pas un fork"}, []string{"<button"}},
 		"pending": {session.ReportState{ParentSessionID: "root", Pending: true},
-			[]string{`hx-get="/s/fork/report" hx-trigger="every 3s"`, "disabled", "Rapport en cours…", "Le rapport s&#39;écrit"}, nil},
+			[]string{"disabled", "Rapport en cours…", "Le rapport s&#39;écrit"}, []string{"every 3s"}},
 		"failed": {session.ReportState{ParentSessionID: "root", Failed: true},
 			[]string{"Le dernier rapport n'a pas pu être écrit. Tu peux réessayer.", "⑂ Rapporter au parent"}, []string{"disabled"}},
 		"brief pending": {session.ReportState{ParentSessionID: "root", SummaryPending: true},
@@ -274,8 +289,9 @@ func TestRender_ReportButton(t *testing.T) {
 					t.Errorf("section has %q:\n%s", unwant, out)
 				}
 			}
-			if !strings.Contains(render(t, "rail", p), `id="report"`) {
-				t.Error("the rail lacks the report section")
+			if rail := render(t, "rail", p); !strings.Contains(rail, `<section id="report" hx-get="/s/fork/report" hx-swap="morph:innerHTML"`) ||
+				!strings.Contains(rail, `hx-trigger="sse:fork_reported, sse:fork_report_failed,`) {
+				t.Errorf("the rail lacks the report section, reloaded on the fork's events: %s", rail)
 			}
 		})
 	}
