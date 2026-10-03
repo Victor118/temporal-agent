@@ -79,7 +79,18 @@ See [docs/architecture.md](docs/architecture.md) for the full model.
 
 ### Setup
 
-1. Clone the repository and start services:
+This repository holds the Go module only. The Docker Compose files that run it with PostgreSQL and Temporal (`docker-compose.yml`, `docker-compose.build.yml`) live in its parent directory, outside the repository, and mount it as `./agent`:
+
+```
+temporal-agent/              # not a git repository
+├── docker-compose.yml       # postgres, temporal, temporal-ui, agent
+├── docker-compose.build.yml
+└── agent/                   # this repository
+```
+
+Run the commands below from that parent directory.
+
+1. Clone the repository as `agent/` next to the compose files, and start services:
 
 ```bash
 docker compose up -d
