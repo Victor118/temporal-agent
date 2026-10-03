@@ -439,6 +439,10 @@ func (s *PostgresStore) SaveMemory(ctx context.Context, scope MemoryScope, scope
 	if !errors.Is(err, sql.ErrNoRows) {
 		return version, err
 	}
+	// Read after the refused write, outside its statement: another save may
+	// have come in between, so Current can be newer than the version that
+	// refused this one. No matter: the caller has to read the memory again
+	// anyway, and the newest is what it must merge into.
 	current, err := s.LoadMemory(ctx, scope, scopeID)
 	if err != nil {
 		return 0, err

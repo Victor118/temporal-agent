@@ -29,7 +29,7 @@ func TestBuildTranscript(t *testing.T) {
 		{ID: 5, Message: store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{Content: "boom", IsError: true}}},
 		{ID: 6, Message: store.Message{Role: store.RoleAssistant,
 			ToolCalls: []store.ToolCall{{ID: "m1", Name: "save_user_memory", Input: json.RawMessage(`{"content":"Alice's secret"}`)}}}},
-		// A conflict answers with the memory: the result is as private as the input.
+		// The result may repeat the input: it is as private.
 		{ID: 61, Message: store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "m1", Content: "Current version: Alice's other secret", IsError: true}}},
 		{ID: 7, Message: store.Message{Role: store.RoleAssistant, Kind: store.KindTurnError, Content: text("call LLM: boom")}},
 		// Several agents answer in a session: each is named.
@@ -62,6 +62,19 @@ func TestBuildTranscript(t *testing.T) {
 	// little of what a summary needs.
 	if strings.Count(got, "x") > maxSummaryToolInputBytes+maxSummaryToolResultBytes {
 		t.Errorf("tool content not clipped: %d bytes of it", strings.Count(got, "x"))
+	}
+}
+
+// A result whose call is not in the transcript is shown as private: what the
+// call was cannot be told, and the summary may go to someone else's fork.
+func TestBuildTranscript_ResultWithoutItsCallIsPrivate(t *testing.T) {
+	got, _ := buildTranscript([]store.MessageWithID{
+		{ID: 1, Message: store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "gone", Content: "Alice's secret"}}},
+		{ID: 2, Message: store.Message{Role: store.RoleAssistant, ToolCalls: []store.ToolCall{{ID: "w1", Name: "web_search"}}}},
+		{ID: 3, Message: store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "w1", Content: "found"}}},
+	}, memoryIsPrivate)
+	if strings.Contains(got, "secret") || !strings.Contains(got, "Tool result: (private)") || !strings.Contains(got, "Tool result: found") {
+		t.Errorf("transcript %q", got)
 	}
 }
 

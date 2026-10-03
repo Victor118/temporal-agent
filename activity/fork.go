@@ -105,7 +105,8 @@ func (a *ForkActivities) SummarizeConversation(ctx context.Context, in Summarize
 func buildTranscript(msgs []store.MessageWithID, private tool.PrivateInputs) (string, bool) {
 	// Shown as the session's members see them: a user's memory stays out of
 	// the summary, which may go to someone else's fork. Unknown, every tool
-	// is private. A result is the call's: found by its ID, the call before it.
+	// is private. A result is the call's: found by its ID, the call before it;
+	// a result whose call is not in the transcript is private too.
 	isPrivate := func(name string) bool { return private == nil || private.PrivateInput(name) }
 	callTools := map[string]string{}
 	var entries []string
@@ -113,7 +114,11 @@ func buildTranscript(msgs []store.MessageWithID, private tool.PrivateInputs) (st
 		for _, tc := range m.ToolCalls {
 			callTools[tc.ID] = tc.Name
 		}
-		privateResult := m.ToolResult != nil && isPrivate(callTools[m.ToolResult.ToolCallID])
+		privateResult := false
+		if m.ToolResult != nil {
+			name, found := callTools[m.ToolResult.ToolCallID]
+			privateResult = !found || isPrivate(name)
+		}
 		if e := transcriptEntry(m.Message, isPrivate, privateResult); e != "" {
 			entries = append(entries, e)
 		}
