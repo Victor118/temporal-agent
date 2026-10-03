@@ -35,7 +35,7 @@ type ForkReport struct {
 
 // ForkSummaryKey is the idempotency key of a fork's summary, its first
 // message: a retried write is a no-op.
-var ForkSummaryKey = TurnMessageKey("fork-summary", 0)
+const ForkSummaryKey = "fork-summary:0" // TurnMessageKey("fork-summary", 0)
 
 // AppendForkSummary posts a fork's summary as its message, and records it on
 // the fork (Session.SummaryMessageID), in one transaction: the fork takes
@@ -95,6 +95,21 @@ func (s *PostgresStore) AppendForkReport(ctx context.Context, r ForkReport) (int
 	}
 	var id int64
 	err = s.inTx(ctx, func(tx *sql.Tx) error {
+		// The parent's row first: deleting the parent takes it before any of
+		// its triggers, so a deletion and a report wait for each other here,
+		// holding nothing else. Taken after the fork's row and the members',
+		// the order of the deletion's own triggers (cascade on the members,
+		// SET NULL on the fork) could make a deadlock.
+		// A missing parent is told once the fork is known to exist: a fork
+		// gone is the answer that matters more.
+		parentGone := false
+		if err := tx.QueryRowContext(ctx,
+			"SELECT 1 FROM sessions WHERE session_id = $1 FOR KEY SHARE",
+			r.ParentSessionID).Scan(new(int)); errors.Is(err, sql.ErrNoRows) {
+			parentGone = true
+		} else if err != nil {
+			return err
+		}
 		var parent sql.NullString
 		var reported int64
 		err := tx.QueryRowContext(ctx,
@@ -105,7 +120,7 @@ func (s *PostgresStore) AppendForkReport(ctx context.Context, r ForkReport) (int
 			return ErrForkGone
 		case err != nil:
 			return err
-		case parent.String != r.ParentSessionID:
+		case parentGone || parent.String != r.ParentSessionID:
 			return ErrReportParentGone
 		}
 		err = tx.QueryRowContext(ctx,

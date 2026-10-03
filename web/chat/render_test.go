@@ -217,8 +217,8 @@ func TestRender_ReportButton(t *testing.T) {
 		// The agent on a turn: a report may go, and says it stops there.
 		"agent working": {session.ReportState{ParentSessionID: "root", AgentWorking: true},
 			[]string{`⑂ Rapporter au parent</button>`,
-				`hx-confirm="L&#39;agent travaille : le rapport couvrira ce qui est écrit jusqu&#39;ici, la suite ira dans le rapport suivant. Poster dans « root » (3 membres)`,
-				`<div class="note" style="margin-top:6px">L&#39;agent travaille : le rapport couvrira ce qui est écrit jusqu&#39;ici, la suite ira dans le rapport suivant.</div>`},
+				`hx-confirm="L&#39;agent est en plein tour (il travaille ou attend une réponse) : le rapport couvrira ce qui est écrit jusqu&#39;ici, la suite ira dans le rapport suivant. Poster dans « root » (3 membres)`,
+				`<div class="note" style="margin-top:6px">L&#39;agent est en plein tour (il travaille ou attend une réponse) : le rapport couvrira ce qui est écrit jusqu&#39;ici, la suite ira dans le rapport suivant.</div>`},
 			[]string{"disabled", "en entier", "attend la fin"}},
 		// Nothing to report while the agent works: the reason, not the
 		// partial report's note.

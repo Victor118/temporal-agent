@@ -155,7 +155,7 @@ func (r ReportView) Partial() string {
 }
 
 // reportPartial is what a report sent during an agent's turn covers.
-const reportPartial = "L'agent travaille : le rapport couvrira ce qui est écrit jusqu'ici, la suite ira dans le rapport suivant."
+const reportPartial = "L'agent est en plein tour (il travaille ou attend une réponse) : le rapport couvrira ce qui est écrit jusqu'ici, la suite ira dans le rapport suivant."
 
 // LastReported is when the latest report was posted, as the thread shows
 // times; empty for none.
