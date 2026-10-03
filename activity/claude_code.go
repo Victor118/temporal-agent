@@ -82,22 +82,50 @@ const DefaultRunQueueWait = 30 * time.Minute
 // ProbeRunWorkerOutput is what a worker of a coding queue says to a run
 // about to ask it for a slot.
 type ProbeRunWorkerOutput struct {
-	// QueueWait is how long the run may wait for a slot (QueueWait).
-	QueueWait time.Duration `json:"queue_wait"`
+	// QueueWaitSeconds is how long the run may wait for a slot (QueueWait),
+	// in whole seconds, rounded up: the history shows it as people read it,
+	// where a time.Duration would be nanoseconds.
+	QueueWaitSeconds int64 `json:"queue_wait_seconds"`
 }
 
+// QueueWait is how long the run may wait for a slot: never zero, which the
+// SDK reads as no bound (DefaultRunQueueWait instead).
+func (o ProbeRunWorkerOutput) QueueWait() time.Duration {
+	if o.QueueWaitSeconds <= 0 {
+		return DefaultRunQueueWait
+	}
+	return time.Duration(o.QueueWaitSeconds) * time.Second
+}
+
+// ErrNoClaudeCLI is the type of the probe's error on a worker of a coding
+// queue without the CLI: the run fails at once, rather than in its first
+// step on that worker.
+const ErrNoClaudeCLI = "NoClaudeCLI"
+
 // ProbeRunWorker answers a run before it asks for a slot: some worker polls
-// its queue. It runs on the tool's queue, which a worker polls whether or
-// not it has a run to spare; a full one stops polling for sessions, so the
-// session's wait alone cannot tell a busy queue from an empty one. It also
-// tells how long the run may wait for a slot: this worker's setting, which
-// the workflow has no other way to read, and which its history then keeps.
+// its queue, and can run it. It runs on the tool's queue, which a worker
+// polls whether or not it has a run to spare; a full one stops polling for
+// sessions, so the session's wait alone cannot tell a busy queue from an
+// empty one. It also tells how long the run may wait for a slot: this
+// worker's setting, which the workflow has no other way to read, and which
+// its history then keeps. A worker without the CLI on the queue is a
+// misconfiguration (a coding queue's workers all have it): it says so, and
+// the run is not retried.
 func (a *ClaudeCodeActivities) ProbeRunWorker(ctx context.Context) (ProbeRunWorkerOutput, error) {
+	runner := a.Runner
+	if runner == nil {
+		runner = &claudecode.Runner{}
+	}
+	if !runner.Available() {
+		return ProbeRunWorkerOutput{}, temporal.NewNonRetryableApplicationError(
+			"this worker of the coding runs' queue has no claude CLI: every worker of that queue must have it",
+			ErrNoClaudeCLI, nil)
+	}
 	wait := a.QueueWait
 	if wait <= 0 {
 		wait = DefaultRunQueueWait
 	}
-	return ProbeRunWorkerOutput{QueueWait: wait}, nil
+	return ProbeRunWorkerOutput{QueueWaitSeconds: int64((wait + time.Second - 1) / time.Second)}, nil
 }
 
 // ErrWorkerStopping is the type of the error of a run its worker ended
@@ -528,6 +556,10 @@ func (a *ClaudeCodeActivities) RunClaudeCode(ctx context.Context, in RunClaudeCo
 		// disk would only outlive the tree it talks about.
 		NoSessionPersistence: true,
 	})
+	// Stopped is WorkerStopping whatever the CLI returned, a run that ended
+	// at the very instant of Stop included: its result is dropped. On
+	// purpose: a CLI killed by the stop may exit cleanly with a partial
+	// result, which "stopped() && err != nil" would take for a whole run.
 	if stopped() {
 		return res, temporal.NewNonRetryableApplicationError(
 			"claude code: the worker stopped during the run", ErrWorkerStopping, err)

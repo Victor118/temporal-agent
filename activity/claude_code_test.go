@@ -1139,3 +1139,29 @@ func TestRunClaudeCode_EndsWhenTheWorkerStops(t *testing.T) {
 		t.Fatal("the run outlived its worker's stop")
 	}
 }
+
+// The probe tells the run how long it may wait, in seconds the history shows
+// as they are, and fails the run at once on a worker without the CLI.
+func TestProbeRunWorker(t *testing.T) {
+	ctx := context.Background()
+	withCLI := &claudecode.Runner{Binary: "sh"}
+	for wait, want := range map[time.Duration]int64{
+		0:                       int64(DefaultRunQueueWait / time.Second),
+		45 * time.Minute:        45 * 60,
+		1500 * time.Millisecond: 2, // rounded up: never zero, no bound to the SDK
+	} {
+		out, err := (&ClaudeCodeActivities{Runner: withCLI, QueueWait: wait}).ProbeRunWorker(ctx)
+		if err != nil || out.QueueWaitSeconds != want {
+			t.Errorf("wait %s: %+v, %v; want %d s", wait, out, err, want)
+		}
+	}
+	if got := (ProbeRunWorkerOutput{}).QueueWait(); got != DefaultRunQueueWait {
+		t.Errorf("no wait reads as %s, want the default", got)
+	}
+
+	_, err := (&ClaudeCodeActivities{Runner: &claudecode.Runner{Binary: filepath.Join(t.TempDir(), "claude")}}).ProbeRunWorker(ctx)
+	var appErr *temporal.ApplicationError
+	if !errors.As(err, &appErr) || appErr.Type() != ErrNoClaudeCLI || !appErr.NonRetryable() {
+		t.Errorf("no CLI: %v, want a non-retryable %s", err, ErrNoClaudeCLI)
+	}
+}

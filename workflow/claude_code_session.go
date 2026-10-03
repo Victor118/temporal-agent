@@ -111,6 +111,9 @@ func openRun(ctx workflow.Context, execution time.Duration, call tool.CallContex
 	case isScheduleToStartTimeout(err):
 		logger.Warn("No worker answered on the coding runs' queue: none is running", "queue", queue, "waited", runProbeTimeout)
 		return nil, fmt.Errorf("no worker available for %q; nothing was done", queue)
+	case hasErrorType(err, activity.ErrNoClaudeCLI):
+		logger.Error("A worker of the coding runs' queue has no claude CLI: every worker of it must have it", "queue", queue)
+		return nil, fmt.Errorf("a worker of %q cannot run Claude Code (no CLI installed); nothing was done", queue)
 	case err != nil:
 		return nil, fmt.Errorf("could not reach a worker of %q: %w", queue, err)
 	}
@@ -120,11 +123,11 @@ func openRun(ctx workflow.Context, execution time.Duration, call tool.CallContex
 	waiting, stopWaiting := workflow.WithCancel(ctx)
 	workflow.Go(waiting, func(ctx workflow.Context) {
 		if workflow.Sleep(ctx, runWaitNotice) == nil {
-			notifyRunWaiting(ctx, call, probe.QueueWait)
+			notifyRunWaiting(ctx, call, probe.QueueWait())
 		}
 	})
 	runCtx, err := workflow.CreateSession(workflow.WithTaskQueue(ctx, queue), &workflow.SessionOptions{
-		CreationTimeout:  probe.QueueWait,
+		CreationTimeout:  probe.QueueWait(),
 		ExecutionTimeout: execution,
 		HeartbeatTimeout: runHeartbeatTimeout,
 	})
@@ -135,9 +138,9 @@ func openRun(ctx workflow.Context, execution time.Duration, call tool.CallContex
 	case isScheduleToStartTimeout(err):
 		logger.Warn("No worker of the coding runs' queue had a slot to spare: each runs its maximum "+
 			"(CLAUDE_CODE_MAX_CONCURRENT_RUNS); more workers, or a longer CLAUDE_CODE_QUEUE_WAIT, would take it",
-			"queue", queue, "waited", probe.QueueWait)
+			"queue", queue, "waited", probe.QueueWait())
 		return nil, fmt.Errorf("the workers of %q are all busy (maximum runs reached); waited %s; try again later; nothing was done",
-			queue, probe.QueueWait)
+			queue, probe.QueueWait())
 	default:
 		return nil, fmt.Errorf("could not reserve a worker of %q for the run: %w", queue, err)
 	}
@@ -256,12 +259,18 @@ func workerLost(runCtx workflow.Context, err error) bool {
 	if errors.Is(err, workflow.ErrSessionFailed) || isScheduleToStartTimeout(err) {
 		return true
 	}
-	var appErr *temporal.ApplicationError
-	if errors.As(err, &appErr) && appErr.Type() == activity.ErrWorkerStopping {
+	if hasErrorType(err, activity.ErrWorkerStopping) {
 		return true
 	}
 	var canceled *temporal.CanceledError
 	return errors.As(err, &canceled) && runCtx.Err() == nil
+}
+
+// hasErrorType tells whether err is an activity's application error of type
+// typ.
+func hasErrorType(err error, typ string) bool {
+	var appErr *temporal.ApplicationError
+	return errors.As(err, &appErr) && appErr.Type() == typ
 }
 
 // cleanup deletes the run's clone, on its worker. It is the one step that

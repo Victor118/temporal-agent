@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"go.temporal.io/sdk/worker"
+
 	"github.com/victor/temporal-agent/activity"
 	"github.com/victor/temporal-agent/config"
 	"github.com/victor/temporal-agent/subproc"
@@ -164,5 +166,35 @@ func TestParseQueueWait(t *testing.T) {
 		if _, err := parseQueueWait(raw); err == nil {
 			t.Errorf("parseQueueWait(%q) accepted", raw)
 		}
+	}
+}
+
+// Only a worker that can run Claude Code takes coding sessions, as many at a
+// time as its limit; any other takes none, and the SDK's default is moot.
+func TestWithCodingSessions(t *testing.T) {
+	var none worker.Options
+	withCodingSessions(&none, false, 1)
+	if none.EnableSessionWorker || none.MaxConcurrentSessionExecutionSize != 0 {
+		t.Errorf("no runs here: %+v", none)
+	}
+	var runs worker.Options
+	withCodingSessions(&runs, true, 1)
+	if !runs.EnableSessionWorker || runs.MaxConcurrentSessionExecutionSize != 1 {
+		t.Errorf("runs here: %+v", runs)
+	}
+}
+
+// Another process sweeping the root past the wait stops this worker too: it
+// never serves runs without the claim.
+func TestClaimRunsRoot_FatalPastTheWait(t *testing.T) {
+	root := t.TempDir()
+	sweeping, err := (&activity.ClaudeCodeActivities{Root: root}).ClaimRoot(time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sweeping.Release()
+	if release, err := claimRunsRoot(&activity.ClaudeCodeActivities{Root: root}, 100*time.Millisecond); err == nil {
+		release()
+		t.Fatal("started while another process holds the root to itself")
 	}
 }

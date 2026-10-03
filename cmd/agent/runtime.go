@@ -38,8 +38,10 @@ const catalogRefresh = 30 * time.Second
 // (worker.Options.WorkerStopTimeout; zero would not wait at all). A coding
 // run ends at once on a stop (ClaudeCodeActivities.Stop): its CLI is dead
 // within claudecode's kill grace (10s), its output drained within as much
-// again, and the bound leaves room for the answer. Whatever runs the
-// process must give it that long before killing it.
+// again, and the bound leaves room for the answer. A session's creation
+// waits it out whole (its session never ends on its own): a stop takes 30
+// to 50s. Whatever runs the process must give it that long before killing
+// it (the README says 60s).
 const workerStopTimeout = 30 * time.Second
 
 // workerOptions is where `agent worker` and `agent dev` differ.
@@ -171,7 +173,11 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 		log.Printf("Coding runs: at most %d at a time on this worker (CLAUDE_CODE_MAX_CONCURRENT_RUNS); "+
 			"a run waits up to %s for a worker with one to spare (CLAUDE_CODE_QUEUE_WAIT)", maxRuns, queueWait)
 	}
-	rt := &workerRuntime{queues: queues, workflows: workerConf.Workflows, skills: skills, endRuns: codeAct.Stop, releaseRuns: releaseRuns}
+	endRuns := func() {}
+	if coding {
+		endRuns = codeAct.Stop
+	}
+	rt := &workerRuntime{queues: queues, workflows: workerConf.Workflows, skills: skills, endRuns: endRuns, releaseRuns: releaseRuns}
 	for _, queue := range queues {
 		wopts := worker.Options{
 			// A worker that stops polling for good takes the process with
@@ -179,15 +185,7 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 			OnFatalError:      func(err error) { log.Fatalf("Worker on %q failed: %v", queue, err) },
 			WorkerStopTimeout: workerStopTimeout,
 		}
-		// Sessions pin a coding run's steps to one worker of the tool queue.
-		// Where runs can happen, how many at once is the machine's limit;
-		// elsewhere, the SDK's default.
-		if queue == workerConf.Queue {
-			wopts.EnableSessionWorker = true
-			if coding {
-				wopts.MaxConcurrentSessionExecutionSize = maxRuns
-			}
-		}
+		withCodingSessions(&wopts, queue == workerConf.Queue && coding, maxRuns)
 		w := worker.New(tc, queue, wopts)
 
 		w.RegisterWorkflow(workflow.SessionWorkflow)
@@ -231,6 +229,19 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 		})
 	}
 	return rt, nil
+}
+
+// withCodingSessions sets wopts for the coding runs' sessions, which pin a
+// run's steps to one worker of the tool queue: only where runs can happen
+// (runs: the tool queue, on a worker with the CLI). A worker without the
+// CLI takes no session, and answers the probe that it cannot
+// (ProbeRunWorker). How many at once is the machine's limit.
+func withCodingSessions(wopts *worker.Options, runs bool, maxRuns int) {
+	if !runs {
+		return
+	}
+	wopts.EnableSessionWorker = true
+	wopts.MaxConcurrentSessionExecutionSize = maxRuns
 }
 
 // buildRegistry registers the built-in tools this process can run. Which of
@@ -456,7 +467,9 @@ func (rt *workerRuntime) start() error {
 
 // shutdown stops the polling and the workers. The coding runs end first:
 // each answers while its worker still waits for it (workerStopTimeout), so
-// the workflow learns at once that the worker is gone.
+// that Temporal records that the worker is gone before the process ends.
+// The SDK stops the workflow poller first: the next worker of the queue
+// (another replica, or this one restarted) reads that answer, not this one.
 func (rt *workerRuntime) shutdown() {
 	rt.stop()
 	rt.endRuns()

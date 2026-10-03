@@ -121,7 +121,7 @@ docker compose exec -it agent ./tmp/main user create --email you@example.com --n
 
 Admins manage the other accounts in the back-office, under `/admin/users`.
 
-A worker that stops ends its coding runs first, then gives the tasks under way 30 seconds to answer before it exits, so that a run's workflow learns at once that its worker is gone. Give a worker's container a `stop_grace_period` of at least 45 seconds: Docker's default, 10 seconds, kills it before the answer goes out, and the workflow then waits a minute or two for the missed heartbeats.
+A worker that stops ends its coding runs first, then gives the tasks under way 30 seconds to answer before it exits: each run's answer, that its worker stopped, is recorded by Temporal before the process ends, and read by the next worker of the queue (another replica, or this one once restarted). A stop takes 30 to 50 seconds in all. Give a worker's container a `stop_grace_period` of 60 seconds: Docker's default, 10 seconds, kills it before the answer goes out, and the workflow then waits a minute or two for the missed heartbeats.
 
 ### Environment Variables
 

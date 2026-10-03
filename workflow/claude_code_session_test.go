@@ -71,7 +71,7 @@ func asRunWorker(env *testsuite.TestWorkflowEnvironment) *activityQueues {
 		q.runs = append(q.runs, activityRun{info.ActivityType.Name, info.TaskQueue})
 	})
 	env.RegisterActivityWithOptions(func(context.Context) (activity.ProbeRunWorkerOutput, error) {
-		return activity.ProbeRunWorkerOutput{QueueWait: activity.DefaultRunQueueWait}, nil
+		return activity.ProbeRunWorkerOutput{QueueWaitSeconds: int64(activity.DefaultRunQueueWait / time.Second)}, nil
 	}, sdkactivity.RegisterOptions{Name: probeActivity})
 	env.RegisterActivityWithOptions(func(_ context.Context, in activity.NotifyInput) error {
 		q.mu.Lock()
@@ -170,13 +170,30 @@ func TestCodingRuns_NoWorkerAvailable(t *testing.T) {
 	noSession(t, e.queues)
 }
 
+// A worker of the queue has no CLI (a misconfiguration): the run fails at
+// once, saying so, and asks for no session.
+func TestCodingRuns_WorkerWithoutCLI(t *testing.T) {
+	a := newAnalyzeEnv(t, nil, claudeCodeResult{Report: "ok", Subtype: "success"}, nil)
+	a.env.OnActivity(probeActivity, mock.Anything).Return(activity.ProbeRunWorkerOutput{},
+		temporal.NewNonRetryableApplicationError("no claude CLI", activity.ErrNoClaudeCLI, nil))
+	out := a.run_(t, AnalyzeRepoInput{Repo: "/src/repo", Task: "look"})
+	if want := `a worker of "tools-claude-code" cannot run Claude Code (no CLI installed)`; !strings.Contains(out.Error, want) {
+		t.Errorf("Error = %q, want %q", out.Error, want)
+	}
+	for _, r := range a.queues.all() {
+		if r.name != probeActivity {
+			t.Errorf("%s ran on a worker without the CLI", r.name)
+		}
+	}
+}
+
 // Every worker answers, none has a slot to spare for as long as the queue's
 // wait, which the worker that answered the probe says: the run says they are
 // busy and to try again later. The operator's setting is the worker's log's
 // business, not the model's.
 func TestCodingRuns_AllWorkersBusy(t *testing.T) {
 	e := newImplementEnv(t, claudeCodeResult{Report: "ok", Subtype: "success"}, nil, oneCommit(), nil)
-	e.env.OnActivity(probeActivity, mock.Anything).Return(activity.ProbeRunWorkerOutput{QueueWait: 7 * time.Minute}, nil)
+	e.env.OnActivity(probeActivity, mock.Anything).Return(activity.ProbeRunWorkerOutput{QueueWaitSeconds: 7 * 60}, nil)
 	e.env.OnActivity(sessionCreation, mock.Anything, mock.Anything).
 		Return(temporal.NewTimeoutError(enumspb.TIMEOUT_TYPE_SCHEDULE_TO_START, nil))
 
