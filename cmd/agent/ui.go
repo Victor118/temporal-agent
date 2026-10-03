@@ -214,7 +214,7 @@ func (u *ui) buildPage(ctx context.Context, me *store.User, sessionID, view stri
 	}
 	p.Thread = chat.BuildThread(msgs, me.ID, byMessage, u.sessions.PendingQuestions(ctx, sessionID), directory)
 	for _, it := range p.Thread {
-		if it.Kind == chat.ItemHuman || it.Kind == chat.ItemAgent {
+		if it.Kind == chat.ItemHuman || it.Kind == chat.ItemAgent || it.Kind == chat.ItemReport {
 			p.LastMessageID = it.ID
 		}
 	}

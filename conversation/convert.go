@@ -144,6 +144,8 @@ func Convert(messages []store.Message, view View) []provider.ChatMessage {
 		switch {
 		case msg.Kind == store.KindForkSummary:
 			content = asForkContext(content)
+		case msg.Kind == store.KindForkReport:
+			content = asForkReport(content, msg)
 		case msg.Role == store.RoleUser && msg.Author != "":
 			content = withAuthor(content, msg.Author)
 		}
@@ -257,6 +259,23 @@ func asForkContext(content json.RawMessage) json.RawMessage {
 		return content
 	}
 	framed, _ := json.Marshal("[Context carried over from an earlier conversation this one was forked from. A summary, not a message from the user.]\n\n" + text)
+	return framed
+}
+
+// asForkReport presents a fork's report for what it is: a summary of work
+// done in another conversation, posted by a member, not a request to the
+// model. A member who wants its reaction asks in a message of their own.
+func asForkReport(content json.RawMessage, m store.Message) json.RawMessage {
+	var text string
+	if json.Unmarshal(content, &text) != nil {
+		return content
+	}
+	title := "untitled"
+	if m.Fork != nil && m.Fork.Title != "" {
+		title = m.Fork.Title
+	}
+	framed, _ := json.Marshal("[Report from fork « " + title + " » by " + cmp.Or(m.Author, "a member") +
+		". A summary of the work done in that forked conversation, posted here for the record; not a request to you.]\n\n" + text)
 	return framed
 }
 

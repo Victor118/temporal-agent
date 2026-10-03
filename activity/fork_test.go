@@ -35,6 +35,9 @@ func TestBuildTranscript(t *testing.T) {
 		// Several agents answer in a session: each is named.
 		{ID: 8, Message: store.Message{Role: store.RoleAssistant, Content: text("it fits"), AgentID: "smith", Author: "Agent Smith",
 			ToolCalls: []store.ToolCall{{Name: "web_search", Input: json.RawMessage(`{"q":"temporal"}`)}}}},
+		// A fork reported back: labelled as its report, not as the member's words.
+		{ID: 9, Message: store.Message{Role: store.RoleUser, Kind: store.KindForkReport, Content: text("export done"), Author: "Victor",
+			Fork: &store.ForkRef{SessionID: "f1", Title: "Export CSV", UpToMessageID: 4}}},
 	}, memoryIsPrivate)
 	if truncated {
 		t.Error("a short conversation reported truncated")
@@ -46,6 +49,7 @@ func TestBuildTranscript(t *testing.T) {
 		"Tool error: boom",
 		"Tool error: (private)",
 		"Assistant (Agent Smith): it fits\nAssistant (Agent Smith) called web_search",
+		"[Report from fork « Export CSV », posted by Victor]\nexport done",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("transcript lacks %q", want)

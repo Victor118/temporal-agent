@@ -535,3 +535,22 @@ func TestUI_ForkFormTakesAPurpose(t *testing.T) {
 		t.Errorf("fork %+v, location %q", f, w.Header().Get("HX-Location"))
 	}
 }
+
+// A fork's report is listed as such, with its sender and its fork.
+func TestRoutes_HistoryListsAForkReport(t *testing.T) {
+	h, st := newRouteTest(t)
+	st.messages = map[string][]store.MessageWithID{"s1": {
+		{ID: 1, Message: store.Message{Role: store.RoleUser, Kind: store.KindForkReport, Content: `"done"`, UserID: "u-bob", Author: "Bob",
+			Fork: &store.ForkRef{SessionID: "f1", Title: "Export", UpToMessageID: 7}}},
+	}}
+	bob := logIn(t, h, "bob@example.com")
+	w := call(t, h, http.MethodGet, "/sessions/s1/history", "", bob)
+	var history []map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &history); err != nil || len(history) != 1 {
+		t.Fatalf("history %d %s (%v)", w.Code, w.Body, err)
+	}
+	fork, _ := history[0]["fork"].(map[string]any)
+	if e := history[0]; e["type"] != "fork_report" || e["author"] != "Bob" || e["content"] != "done" || fork["session_id"] != "f1" || fork["up_to_message_id"] != 7.0 {
+		t.Errorf("entry %v", e)
+	}
+}

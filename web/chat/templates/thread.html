@@ -62,6 +62,20 @@
   {{template "fork-action" itemOf $.Page .}}
 </div>
 
+{{else if eq .Kind "report"}}
+<div class="msg report" id="m{{.ID}}">
+  <div class="avatar lg" style="background:{{.Author.Color}}">{{.Author.Initials}}</div>
+  <div class="msg-body">
+    <div class="msg-head"><span class="who">⑂ Rapport du fork « {{.Report.Title}} »</span><span class="agent-meta">— par {{.Author.Name}}</span><span class="when">{{clock .Time}}</span></div>
+    <div class="agent-card report-card">
+      <div class="prose">{{.HTML}}</div>
+      <div class="tools">{{if .Report.Accessible}}<a href="/s/{{.Report.SessionID}}">Ouvrir le fork</a>{{else}}<span class="note">Fork supprimé, ou dont tu n'es pas membre</span>{{end}}</div>
+    </div>
+    {{template "forks" .}}
+  </div>
+  {{template "fork-action" itemOf $.Page .}}
+</div>
+
 {{else if eq .Kind "error"}}
 <div class="notice failed" id="m{{.ID}}">
   <div class="arrow">!</div>

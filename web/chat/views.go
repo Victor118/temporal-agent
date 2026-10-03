@@ -193,8 +193,17 @@ const (
 	ItemAgent    = "agent"
 	ItemBrief    = "brief"
 	ItemQuestion = "question"
-	ItemError    = "error" // why a turn failed
+	ItemError    = "error"  // why a turn failed
+	ItemReport   = "report" // a fork's report to this session
 )
+
+// ReportSource is the fork a report comes from.
+type ReportSource struct {
+	SessionID string
+	Title     string // the fork's title when it reported
+	// Accessible: the viewer is a member of the fork, which still exists.
+	Accessible bool
+}
 
 // ThreadItem is one entry of a thread: a member's message, an agent's answer
 // with the tools it used, the brief a fork started from, or a pending
@@ -205,13 +214,14 @@ type ThreadItem struct {
 	ID   int64
 	Time time.Time
 
-	Author Person // human
+	Author Person // human, report: who wrote or sent it
 	Mine   bool   // human: written by the viewer
 	Text   string // human: plain text; question: the question; error: the reason
 
-	HTML  template.HTML // agent answer or brief, rendered from Markdown
-	Tools []string      // agent: the tools the answer used, in order, once each
-	Agent AgentInfo     // agent answer, error: the agent that wrote it
+	HTML   template.HTML // agent answer, brief or report, rendered from Markdown
+	Report ReportSource  // report: the fork it comes from
+	Tools  []string      // agent: the tools the answer used, in order, once each
+	Agent  AgentInfo     // agent answer, error: the agent that wrote it
 
 	Forks []ForkLink // forks started from this item
 
@@ -245,7 +255,16 @@ func (d AgentDirectory) Signer(m store.Message) AgentInfo {
 // spread over several messages (tool calls, results, text), becomes one item,
 // signed by its agent: when several agents answer one after another, each has
 // its own.
+//
+// forks are the session's forks the viewer is a member of, by the message they
+// started from: a report links to its fork only if it is one of them.
 func BuildThread(msgs []store.MessageWithID, viewerID string, forks map[int64][]ForkLink, questions []Question, agents AgentDirectory) []ThreadItem {
+	visible := map[string]bool{}
+	for _, links := range forks {
+		for _, f := range links {
+			visible[f.SessionID] = true
+		}
+	}
 	var items []ThreadItem
 	var agent *ThreadItem // the agent item being assembled
 	var agentText []string
@@ -266,6 +285,13 @@ func BuildThread(msgs []store.MessageWithID, viewerID string, forks map[int64][]
 		case m.Kind == store.KindTurnError:
 			closeAgent()
 			items = append(items, ThreadItem{Kind: ItemError, ID: m.ID, Time: m.CreatedAt, Text: text(m.Content), Agent: agents.Signer(m.Message)})
+		case m.Kind == store.KindForkReport:
+			closeAgent()
+			items = append(items, ThreadItem{
+				Kind: ItemReport, ID: m.ID, Time: m.CreatedAt,
+				Author: NewPerson(m.UserID, authorName(m)), Mine: m.UserID != "" && m.UserID == viewerID,
+				HTML: Markdown(text(m.Content)), Report: reportSource(m.Fork, visible),
+			})
 		case m.Role == store.RoleUser:
 			closeAgent()
 			items = append(items, ThreadItem{
@@ -305,6 +331,18 @@ func BuildThread(msgs []store.MessageWithID, viewerID string, forks map[int64][]
 		items = append(items, ThreadItem{Kind: ItemQuestion, Text: q.Text, WorkflowID: q.WorkflowID, AgentChain: q.AgentChain})
 	}
 	return items
+}
+
+// reportSource is the fork a report names, linked when the viewer can open it.
+func reportSource(f *store.ForkRef, visible map[string]bool) ReportSource {
+	if f == nil {
+		return ReportSource{Title: "Fork"}
+	}
+	title := f.Title
+	if title == "" {
+		title = "Fork"
+	}
+	return ReportSource{SessionID: f.SessionID, Title: title, Accessible: visible[f.SessionID]}
 }
 
 func authorName(m store.MessageWithID) string {

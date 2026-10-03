@@ -322,3 +322,29 @@ func TestClip(t *testing.T) {
 		t.Errorf("Clip changed a short text: %q", got)
 	}
 }
+
+// A fork's report reaches the model as what it is: a member's record of work
+// done in a fork, under the fork's title, not a request to answer.
+func TestConvert_FramesForkReport(t *testing.T) {
+	msgs := Convert([]store.Message{
+		{Role: store.RoleUser, Content: `"split the work"`, Author: "Alice"},
+		{Role: store.RoleAssistant, Content: `"done"`},
+		{Role: store.RoleUser, Kind: store.KindForkReport, Content: `"## What was done\nthe CSV export"`, UserID: "u-victor", Author: "Victor",
+			Fork: &store.ForkRef{SessionID: "f1", Title: "Export CSV", UpToMessageID: 9}},
+		{Role: store.RoleUser, Content: `"@jarvis what do you think?"`, Author: "Alice"},
+	}, View{Self: "default", User: "u-alice"})
+	if len(msgs) != 3 {
+		t.Fatalf("%d messages: %+v", len(msgs), msgs)
+	}
+	got := textOf(msgs[2])
+	if !strings.HasPrefix(got, "[Report from fork « Export CSV » by Victor. ") || !strings.Contains(got, "not a request to you.]\n\n## What was done\nthe CSV export") {
+		t.Errorf("model sees %q", got)
+	}
+	if strings.Contains(got, "[Victor] ") {
+		t.Error("the report is framed twice")
+	}
+	// The member's message after it is theirs, joined to the same user turn.
+	if !strings.HasSuffix(got, "\n\n[Alice] @jarvis what do you think?") {
+		t.Errorf("the next message: %q", got)
+	}
+}

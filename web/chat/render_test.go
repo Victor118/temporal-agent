@@ -163,3 +163,27 @@ func TestRender_ForkPurpose(t *testing.T) {
 		t.Error("fork forms while the summary is pending")
 	}
 }
+
+// In the parent, a report reads as one: who sent it, from which fork, linked.
+func TestRender_ForkReport(t *testing.T) {
+	p := testPage("thread")
+	p.Thread = BuildThread([]store.MessageWithID{
+		{ID: 12, Message: store.Message{Role: store.RoleUser, Kind: store.KindForkReport, Content: j("**fait** <b>x</b>"), UserID: "u2", Author: "Bob",
+			Fork: &store.ForkRef{SessionID: "f2", Title: "Export <CSV>", UpToMessageID: 30}}},
+	}, "u1", map[int64][]ForkLink{9: {{SessionID: "f2", Title: "Export"}}}, nil, AgentDirectory{Session: p.Agent})
+	out := render(t, "thread", p)
+	for _, want := range []string{
+		`id="m12"`,
+		`⑂ Rapport du fork « Export &lt;CSV&gt; »</span><span class="agent-meta">— par Bob</span>`,
+		`<strong>fait</strong>`,
+		`<a href="/s/f2">Ouvrir le fork</a>`,
+		`name="message_id" value="12"`, // one can fork from a report
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("thread lacks %q", want)
+		}
+	}
+	if strings.Contains(out, "<b>x</b>") {
+		t.Error("the report's HTML reached the page")
+	}
+}

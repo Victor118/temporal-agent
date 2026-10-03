@@ -1,6 +1,7 @@
 package activity
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -172,6 +173,12 @@ func transcriptEntry(m store.Message, isPrivate func(tool string) bool, privateR
 	case m.Kind == store.KindForkSummary:
 		// The parent was itself a fork: its starting summary is context too.
 		return "[Summary of an earlier conversation this one continued]\n" + text
+	case m.Kind == store.KindForkReport:
+		title := "untitled"
+		if m.Fork != nil && m.Fork.Title != "" {
+			title = m.Fork.Title
+		}
+		return "[Report from fork « " + title + " », posted by " + cmp.Or(m.Author, "a member") + "]\n" + text
 	case m.Role == store.RoleUser && m.Author != "":
 		return "User (" + m.Author + "): " + text
 	case m.Role == store.RoleUser:

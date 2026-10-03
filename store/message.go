@@ -45,11 +45,21 @@ type Message struct {
 	AgentID string `json:"agent_id,omitempty"`
 	Author  string `json:"author,omitempty"`
 	// Kind marks a message the system wrote: KindForkSummary is the summary
-	// a fork starts from, KindTurnError why a turn failed. Empty for an
-	// ordinary message.
+	// a fork starts from, KindTurnError why a turn failed, KindForkReport a
+	// fork's report to its parent. Empty for an ordinary message.
 	Kind       string      `json:"kind,omitempty"`
 	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`
 	ToolResult *ToolResult `json:"tool_result,omitempty"`
+	// Fork is the fork a KindForkReport comes from.
+	Fork *ForkRef `json:"fork,omitempty"`
+}
+
+// ForkRef names the fork a report comes from: its session, its title when it
+// reported, and the last of its messages the report covers.
+type ForkRef struct {
+	SessionID     string `json:"session_id"`
+	Title         string `json:"title"`
+	UpToMessageID int64  `json:"up_to_message_id"`
 }
 
 // KindForkSummary marks the first message of a fork: the summary of the
@@ -59,6 +69,11 @@ const KindForkSummary = "fork_summary"
 // KindTurnError marks why a turn failed, written after what the turn produced.
 // It is for the session's members: the model never sees it.
 const KindTurnError = "turn_error"
+
+// KindForkReport marks a fork's report, posted into its parent session by a
+// member of both (UserID, Author): what the fork did, decided, changed from
+// the plan, and left open. It calls no agent; it is read as any message is.
+const KindForkReport = "fork_report"
 
 type MessageWithID struct {
 	ID        int64     `json:"id"`
@@ -70,16 +85,25 @@ type MessageWithID struct {
 }
 
 // The keys of a session's messages, by writer: a person ("msg:"), a
-// scheduled task's result ("sched:"), and a turn ("{turn key}:{index}").
+// scheduled task's result ("sched:"), a fork's report ("report:"), and a
+// turn ("{turn key}:{index}").
 
 const (
 	humanKeyPrefix     = "msg:"
 	scheduledKeyPrefix = "sched:"
+	reportKeyPrefix    = "report:"
 )
 
 // HumanMessageKey is the idempotency key of a message a person wrote, id
 // being unique.
 func HumanMessageKey(id string) string { return humanKeyPrefix + id }
+
+// ForkReportKey is the idempotency key of a fork's report in its parent: the
+// fork and the range of its messages the report covers, after from up to
+// upTo. A retried post writes nothing more.
+func ForkReportKey(forkSessionID string, from, upTo int64) string {
+	return fmt.Sprintf("%s%s:%d-%d", reportKeyPrefix, forkSessionID, from, upTo)
+}
 
 // TurnGroupKey names the turns answering one message: id is unique to the
 // message, upTo the message they answer, the last of the session they read
@@ -96,9 +120,10 @@ func TurnKey(group string, agent int) string {
 }
 
 // TurnOf returns the key of the turn that wrote the message stored under
-// msgKey; false for a message no turn wrote, a person's or a task result.
+// msgKey; false for a message no turn wrote: a person's, a task result, a
+// fork's report.
 func TurnOf(msgKey string) (string, bool) {
-	if strings.HasPrefix(msgKey, humanKeyPrefix) || strings.HasPrefix(msgKey, scheduledKeyPrefix) {
+	if strings.HasPrefix(msgKey, humanKeyPrefix) || strings.HasPrefix(msgKey, scheduledKeyPrefix) || strings.HasPrefix(msgKey, reportKeyPrefix) {
 		return "", false
 	}
 	i := strings.LastIndexByte(msgKey, ':')

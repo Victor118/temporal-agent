@@ -13,6 +13,8 @@ func TestTurnOf(t *testing.T) {
 		{TurnMessageKey("fork-summary", 0), "fork-summary", "fork-summary", true},
 		{HumanMessageKey("0b6c"), "", "", false},
 		{ScheduledMessageKey("sched-1", 42), "", "", false},
+		// A fork's report is no turn's, whatever its colons.
+		{ForkReportKey("6f1c2a9e-3b4d-4e5f-8a7b-0c1d2e3f4a5b", 0, 12), "", "", false},
 		{"nokey", "", "", false},
 	} {
 		turn, ok := TurnOf(c.key)
@@ -47,6 +49,8 @@ func TestTurnReads(t *testing.T) {
 		{10, HumanMessageKey("answered"), true},
 		{11, HumanMessageKey("after"), false},
 		{12, ScheduledMessageKey("s", 1), false},
+		{8, ForkReportKey("f", 0, 3), true},   // a report before the message: read
+		{18, ForkReportKey("f", 3, 9), false}, // after it: read by the next turn, as a person's
 		{13, TurnMessageKey(own, 0), true},
 		{14, TurnMessageKey(TurnKey(TurnGroupKey("run", 8), 0), 3), true},   // an earlier message's turn, written after this one
 		{15, TurnMessageKey(TurnKey(TurnGroupKey("run", 10), 1), 0), false}, // its group, not among its turns

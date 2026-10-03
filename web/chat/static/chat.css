@@ -149,6 +149,7 @@ button, input, textarea, select { font-family: inherit; font-size: inherit; colo
 .prose pre code { background: none; padding: 0; }
 .prose table { border-collapse: collapse; margin: 0 0 10px; }
 .prose th, .prose td { border: 1px solid var(--line); padding: 5px 8px; font-size: 13px; }
+.report-card { border-left: 2px solid var(--accent); }
 .tools { border-top: 1px solid #EFECE5; margin-top: 12px; padding-top: 11px; display: flex; gap: 8px; flex-wrap: wrap; }
 .tool { font-size: 11px; font-family: var(--mono); color: var(--muted); background: var(--chip); border-radius: 4px; padding: 4px 8px; }
 .msg.highlight { background: var(--accent-bg); border-radius: var(--radius-card); box-shadow: 0 0 0 8px var(--accent-bg); }

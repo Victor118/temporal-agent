@@ -163,6 +163,33 @@ func TestBuildThread_SignsEachAgent(t *testing.T) {
 }
 
 // The agent's text comes from a model: HTML in it must not reach the page.
+// A fork's report is an item of its own: its sender, its Markdown rendered
+// and escaped, its fork linked only for a viewer who is a member of it.
+func TestBuildThread_ForkReport(t *testing.T) {
+	report := func(id int64, fork string) store.MessageWithID {
+		return store.MessageWithID{ID: id, CreatedAt: t0, Message: store.Message{Role: store.RoleUser, Kind: store.KindForkReport,
+			Content: j("## Fait\n<script>x</script>"), UserID: "u2", Author: "Victor",
+			Fork: &store.ForkRef{SessionID: fork, Title: "Export CSV", UpToMessageID: 9}}}
+	}
+	items := BuildThread([]store.MessageWithID{report(4, "f1"), report(5, "gone")}, "u1",
+		map[int64][]ForkLink{2: {{SessionID: "f1", Title: "Export CSV"}}}, nil, AgentDirectory{})
+	if len(items) != 2 {
+		t.Fatalf("%d items", len(items))
+	}
+	it := items[0]
+	if it.Kind != ItemReport || it.ID != 4 || it.Author.Name != "Victor" || it.Mine ||
+		it.Report != (ReportSource{SessionID: "f1", Title: "Export CSV", Accessible: true}) {
+		t.Errorf("item %+v", it)
+	}
+	if !strings.Contains(string(it.HTML), "<h2>Fait</h2>") || strings.Contains(string(it.HTML), "<script>") {
+		t.Errorf("html %s", it.HTML)
+	}
+	// A fork the viewer is not a member of, or deleted: named, not linked.
+	if items[1].Report.Accessible || items[1].Report.Title != "Export CSV" {
+		t.Errorf("unreachable fork %+v", items[1].Report)
+	}
+}
+
 func TestMarkdownIsSafe(t *testing.T) {
 	out := string(Markdown("hi <script>alert(1)</script> [x](javascript:alert(1)) **bold**"))
 	if strings.Contains(out, "<script>") || strings.Contains(out, "javascript:") {

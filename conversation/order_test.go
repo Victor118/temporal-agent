@@ -109,3 +109,20 @@ func TestOrder_OverlappingGroups(t *testing.T) {
 		t.Errorf("order %s, want %s", got, want)
 	}
 }
+
+// A fork's report posted while a turn ran is a message no turn wrote: it
+// comes after the turn, as a member's would, never between a call and its
+// result.
+func TestOrder_DefersAForkReportWrittenDuringATurn(t *testing.T) {
+	msgs := []store.MessageWithID{
+		{ID: 1, Key: store.HumanMessageKey("a"), Message: store.Message{Role: store.RoleUser, Content: `"go"`}},
+		{ID: 2, Key: store.TurnMessageKey("r@1.0", 0), Message: store.Message{Role: store.RoleAssistant, ToolCalls: []store.ToolCall{{ID: "t1"}}}},
+		{ID: 3, Key: store.ForkReportKey("f1", 0, 7), Message: store.Message{Role: store.RoleUser, Kind: store.KindForkReport, Content: `"report"`}},
+		{ID: 4, Key: store.TurnMessageKey("r@1.0", 1), Message: store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "t1"}}},
+		{ID: 5, Key: store.TurnMessageKey("r@1.0", 2), Message: store.Message{Role: store.RoleAssistant, Content: `"done"`}},
+	}
+	got := keysOf(Order(msgs))
+	if want := "[msg:a r@1.0:0 r@1.0:1 r@1.0:2 report:f1:0-7]"; got != want {
+		t.Errorf("order %s, want %s", got, want)
+	}
+}
