@@ -83,6 +83,11 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 		return nil, fmt.Errorf("LLM_MAX_CONTEXT_BYTES: %w", err)
 	}
 
+	maxRuns, err := parseMaxRuns(cfg.ClaudeCodeMaxConcurrentRuns)
+	if err != nil {
+		return nil, fmt.Errorf("CLAUDE_CODE_MAX_CONCURRENT_RUNS: %w", err)
+	}
+
 	// Who pays for a coding run, the API or a subscription, is settled before
 	// any run, where the CLI is installed: never left to the CLI picking
 	// whichever credential it finds.
@@ -134,13 +139,22 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 		log.Println("Telegram bot client configured")
 	}
 
+	// A coding run is a Temporal session on its tool's queue: all of its
+	// steps on the worker that took it. Where runs can happen, how many at
+	// once is the machine's limit; elsewhere, the SDK's default.
+	var sessions int
+	if coding {
+		sessions = maxRuns
+		log.Printf("Coding runs: at most %d at a time on this worker (CLAUDE_CODE_MAX_CONCURRENT_RUNS)", maxRuns)
+	}
 	codeAct := &activity.ClaudeCodeActivities{Root: cfg.ClaudeCodeWorkspace, SSHKeyPath: cfg.ClaudeCodeSSHKey, AllowedRepos: cfg.ClaudeCodeRepos, RunAs: runAs, Runs: runs, ClaudeConfigDir: cfg.ClaudeConfigDir, Model: cfg.ClaudeCodeModel, MaxBudgetUSD: budget, Auth: auth}
 
 	rt := &workerRuntime{queues: queues, workflows: workerConf.Workflows, skills: skills, releaseRuns: func() {}}
 	for _, queue := range queues {
 		// Sessions pin a coding run's steps to one worker of the tool queue
 		w := worker.New(tc, queue, worker.Options{
-			EnableSessionWorker: queue == workerConf.Queue,
+			EnableSessionWorker:               queue == workerConf.Queue,
+			MaxConcurrentSessionExecutionSize: sessions,
 			// A worker that stops polling for good takes the process with
 			// it, so that whatever runs it starts a new one.
 			OnFatalError: func(err error) { log.Fatalf("Worker on %q failed: %v", queue, err) },
@@ -252,6 +266,24 @@ func parseBudget(raw string) (float64, error) {
 	v, err := strconv.ParseFloat(raw, 64)
 	if err != nil || !(v > 0) || math.IsInf(v, 0) {
 		return 0, fmt.Errorf("%q is not a positive amount of dollars", raw)
+	}
+	return v, nil
+}
+
+// defaultMaxRuns is how many coding runs a worker takes at a time when
+// CLAUDE_CODE_MAX_CONCURRENT_RUNS is empty.
+const defaultMaxRuns = 2
+
+// parseMaxRuns reads CLAUDE_CODE_MAX_CONCURRENT_RUNS: empty is the default, a
+// value that is no positive number stops the worker rather than lift the
+// limit (the SDK reads 0 as 1000).
+func parseMaxRuns(raw string) (int, error) {
+	if raw == "" {
+		return defaultMaxRuns, nil
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil || v <= 0 {
+		return 0, fmt.Errorf("%q is not a positive number of runs", raw)
 	}
 	return v, nil
 }

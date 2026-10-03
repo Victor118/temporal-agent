@@ -104,3 +104,18 @@ func TestParseContextBytes(t *testing.T) {
 		}
 	}
 }
+
+// A limit the operator mistyped stops the worker: read as zero, the SDK
+// would take a thousand runs at once.
+func TestParseMaxRuns(t *testing.T) {
+	for raw, want := range map[string]int{"": defaultMaxRuns, "1": 1, "4": 4} {
+		if got, err := parseMaxRuns(raw); err != nil || got != want {
+			t.Errorf("parseMaxRuns(%q) = %d, %v; want %d", raw, got, err, want)
+		}
+	}
+	for _, raw := range []string{"0", "-1", "two", "1.5", " 2"} {
+		if _, err := parseMaxRuns(raw); err == nil {
+			t.Errorf("parseMaxRuns(%q) accepted", raw)
+		}
+	}
+}

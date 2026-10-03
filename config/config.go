@@ -81,6 +81,10 @@ type Config struct {
 	// key, so the model asking for it does not choose its price.
 	ClaudeCodeModel        string
 	ClaudeCodeMaxBudgetUSD string
+	// ClaudeCodeMaxConcurrentRuns is how many coding runs one worker takes at
+	// a time (Temporal sessions); empty = 2. Each is a CLI with its builds
+	// and tests: the machine, not the queue, is what runs out.
+	ClaudeCodeMaxConcurrentRuns string
 	// ClaudeCodeAuth is how this worker's coding runs authenticate: "api"
 	// (ANTHROPIC_API_KEY) or "subscription" (CLAUDE_CODE_OAUTH_TOKEN, or the
 	// CLI's login); empty = the one credential set (claudecode.ResolveAuth).
@@ -186,9 +190,10 @@ func Load() *Config {
 		RunAsGID:            os.Getenv("RUN_AS_GID"),
 		ClaudeCodeRepos:     splitList(os.Getenv("CLAUDE_CODE_REPOS")),
 
-		ClaudeCodeModel:        os.Getenv("CLAUDE_CODE_MODEL"),
-		ClaudeCodeMaxBudgetUSD: os.Getenv("CLAUDE_CODE_MAX_BUDGET_USD"),
-		ClaudeCodeAuth:         os.Getenv("CLAUDE_CODE_AUTH"),
+		ClaudeCodeModel:             os.Getenv("CLAUDE_CODE_MODEL"),
+		ClaudeCodeMaxBudgetUSD:      os.Getenv("CLAUDE_CODE_MAX_BUDGET_USD"),
+		ClaudeCodeMaxConcurrentRuns: os.Getenv("CLAUDE_CODE_MAX_CONCURRENT_RUNS"),
+		ClaudeCodeAuth:              os.Getenv("CLAUDE_CODE_AUTH"),
 
 		SkillsRepo:          os.Getenv("SKILLS_REPO"),
 		SkillsBranch:        envOr("SKILLS_BRANCH", "main"),
