@@ -352,14 +352,19 @@ func (c *MCPClient) connect(ctx context.Context) (mcpConn, error) {
 	return conn, nil
 }
 
+// current is the open session, if any. A dead one is forgotten, and closed
+// once the lock is released: closing may take a request to the server.
 func (c *MCPClient) current() mcpConn {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.conn != nil && !c.conn.alive() {
-		c.conn.close()
-		c.conn = nil
+	conn := c.conn
+	if conn == nil || conn.alive() {
+		c.mu.Unlock()
+		return conn
 	}
-	return c.conn
+	c.conn = nil
+	c.mu.Unlock()
+	conn.close()
+	return nil
 }
 
 // drop forgets conn, unless another session already replaced it.
