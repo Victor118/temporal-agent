@@ -34,7 +34,7 @@ func (s *Service) Open(ctx context.Context, me *store.User, o OpenOptions) (stri
 	}
 	sessionID := uuid.New().String()
 	if _, err := s.temporal.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
-		ID:        "session-" + sessionID,
+		ID:        sessionWorkflowID(sessionID),
 		TaskQueue: s.cfg.WorkflowQueue,
 	}, workflow.SessionWorkflow, workflow.SessionWorkflowInput{
 		SessionID:    sessionID,

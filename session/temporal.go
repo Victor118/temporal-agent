@@ -27,13 +27,26 @@ func checkSessionID(sessionID string) error {
 	return nil
 }
 
-// runningSessionQuery finds the session's own workflow, first run or resumed
-// ("session-<id>", "session-<id>-<unix time>").
+// sessionWorkflowID is the ID of every run of a session's workflow: opened,
+// resumed after it timed out, or continued as new.
+func sessionWorkflowID(sessionID string) string { return "session-" + sessionID }
+
+// runningSessionQuery finds the session's own workflow, on its fixed ID or
+// resumed under the former scheme ("session-<id>-<unix time>").
 func runningSessionQuery(sessionID string) (string, error) {
 	if err := checkSessionID(sessionID); err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("WorkflowId STARTS_WITH 'session-%s' AND ExecutionStatus = 'Running'", sessionID), nil
+}
+
+// legacyRunQuery finds a run of the session resumed under the former scheme,
+// "session-<id>-<unix time>", which ends after 30 minutes idle.
+func legacyRunQuery(sessionID string) (string, error) {
+	if err := checkSessionID(sessionID); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("WorkflowType = 'SessionWorkflow' AND ExecutionStatus = 'Running' AND WorkflowId STARTS_WITH 'session-%s-'", sessionID), nil
 }
 
 // pendingQuestionsQuery finds the questions waiting in a session, its agent's
@@ -57,11 +70,31 @@ func (s *Service) isWorkflowRunning(ctx context.Context, workflowID string) bool
 // activeWorkflowID returns the ID of the session's running workflow, or "".
 // Handles both "session-{id}" and "session-{id}-{timestamp}" workflow IDs.
 func (s *Service) activeWorkflowID(ctx context.Context, sessionID string) string {
-	base := "session-" + sessionID
+	base := sessionWorkflowID(sessionID)
 	if s.isWorkflowRunning(ctx, base) {
 		return base
 	}
 	query, err := runningSessionQuery(sessionID)
+	if err != nil {
+		return ""
+	}
+	resp, err := s.temporal.ListWorkflow(ctx, &workflowservice.ListWorkflowExecutionsRequest{
+		Namespace: s.cfg.Namespace,
+		Query:     query,
+		PageSize:  1,
+	})
+	if err != nil || len(resp.Executions) == 0 {
+		return ""
+	}
+	return resp.Executions[0].Execution.WorkflowId
+}
+
+// legacyRunID returns the session's run resumed under the former scheme if it
+// still runs, or "": until it times out, a message goes to it rather than
+// starting a second run on the fixed ID. Only the runs started before the
+// fixed ID was adopted have such an ID.
+func (s *Service) legacyRunID(ctx context.Context, sessionID string) string {
+	query, err := legacyRunQuery(sessionID)
 	if err != nil {
 		return ""
 	}
@@ -180,10 +213,15 @@ func (s *Service) PendingQuestions(ctx context.Context, sessionID string) []Ques
 	return out
 }
 
-// State queries the state of the session's first workflow run.
+// State queries the state of the session's running workflow, or of its last
+// run, which still answers once completed.
 func (s *Service) State(ctx context.Context, sessionID string) (workflow.SessionState, error) {
 	var state workflow.SessionState
-	resp, err := s.temporal.QueryWorkflow(ctx, "session-"+sessionID, "", workflow.QuerySessionState)
+	id := s.activeWorkflowID(ctx, sessionID)
+	if id == "" {
+		id = sessionWorkflowID(sessionID)
+	}
+	resp, err := s.temporal.QueryWorkflow(ctx, id, "", workflow.QuerySessionState)
 	if err != nil {
 		return state, fmt.Errorf("query state: %w", err)
 	}

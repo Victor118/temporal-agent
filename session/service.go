@@ -10,7 +10,6 @@ package session
 import (
 	"context"
 	"errors"
-	"time"
 
 	"go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/client"
@@ -64,6 +63,7 @@ type Store interface {
 type Temporal interface {
 	ExecuteWorkflow(ctx context.Context, options client.StartWorkflowOptions, workflow interface{}, args ...interface{}) (client.WorkflowRun, error)
 	SignalWorkflow(ctx context.Context, workflowID, runID, signalName string, arg interface{}) error
+	SignalWithStartWorkflow(ctx context.Context, workflowID, signalName string, signalArg interface{}, options client.StartWorkflowOptions, workflow interface{}, workflowArgs ...interface{}) (client.WorkflowRun, error)
 	QueryWorkflow(ctx context.Context, workflowID, runID, queryType string, args ...interface{}) (converter.EncodedValue, error)
 	DescribeWorkflowExecution(ctx context.Context, workflowID, runID string) (*workflowservice.DescribeWorkflowExecutionResponse, error)
 	ListWorkflow(ctx context.Context, request *workflowservice.ListWorkflowExecutionsRequest) (*workflowservice.ListWorkflowExecutionsResponse, error)
@@ -90,9 +90,8 @@ type Service struct {
 	hub      Publisher
 	cfg      Config
 	statuses statusCache
-	now      func() time.Time
 }
 
 func New(st Store, tc Temporal, hub Publisher, cfg Config) *Service {
-	return &Service{store: st, temporal: tc, hub: hub, cfg: cfg, now: time.Now}
+	return &Service{store: st, temporal: tc, hub: hub, cfg: cfg}
 }

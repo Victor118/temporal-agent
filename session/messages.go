@@ -3,12 +3,14 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"regexp"
 	"strings"
 
 	"github.com/google/uuid"
+	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/sdk/client"
 
 	"github.com/victor/temporal-agent/activity"
@@ -83,29 +85,36 @@ func (s *Service) Deliver(ctx context.Context, sess *store.Session, author *stor
 	}
 
 	defer s.statuses.invalidate()
-	workflowID, err := s.ensureWorkflow(ctx, sess)
-	if err != nil {
+	if err := s.signalSession(ctx, sess, msg); err != nil {
 		return false, err
-	}
-	if err := s.temporal.SignalWorkflow(ctx, workflowID, "", workflow.SignalUserMessage, msg); err != nil {
-		return false, fmt.Errorf("signal session: %w", err)
 	}
 	return true, nil
 }
 
-// ensureWorkflow returns the running workflow of a session, starting a new
-// run when the last one is over (an idle session times out).
-func (s *Service) ensureWorkflow(ctx context.Context, sess *store.Session) (string, error) {
-	if id := s.activeWorkflowID(ctx, sess.SessionID); id != "" {
-		return id, nil
+// signalSession hands a message to the session's workflow, starting a new run
+// when the last one is over (an idle session times out). Signal and start are
+// one call on the session's fixed ID: Temporal starts a run only if none is
+// running, so two messages never start two runs, and a run ending while the
+// message is sent cannot lose it.
+func (s *Service) signalSession(ctx context.Context, sess *store.Session, msg workflow.UserMessage) error {
+	if id := s.legacyRunID(ctx, sess.SessionID); id != "" {
+		err := s.temporal.SignalWorkflow(ctx, id, "", workflow.SignalUserMessage, msg)
+		var gone *serviceerror.NotFound
+		if !errors.As(err, &gone) {
+			if err != nil {
+				return fmt.Errorf("signal session: %w", err)
+			}
+			return nil
+		}
+		// It ended since it was listed: start on the fixed ID.
 	}
 	// Resume with the session's agent, or the default one if it is gone.
 	agentID, err := s.agentOrDefault(ctx, sess.AgentID)
 	if err != nil {
-		return "", err
+		return err
 	}
-	id := fmt.Sprintf("session-%s-%d", sess.SessionID, s.now().Unix())
-	if _, err := s.temporal.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
+	id := sessionWorkflowID(sess.SessionID)
+	if _, err := s.temporal.SignalWithStartWorkflow(ctx, id, workflow.SignalUserMessage, msg, client.StartWorkflowOptions{
 		ID:        id,
 		TaskQueue: s.cfg.WorkflowQueue,
 	}, workflow.SessionWorkflow, workflow.SessionWorkflowInput{
@@ -114,10 +123,9 @@ func (s *Service) ensureWorkflow(ctx context.Context, sess *store.Session) (stri
 		Channel:   sess.Channel,
 		ChannelID: sess.ChannelID,
 	}); err != nil {
-		return "", fmt.Errorf("resume session: %w", err)
+		return fmt.Errorf("signal session: %w", err)
 	}
-	log.Printf("Session %s resumed with workflow %s", sess.SessionID, id)
-	return id, nil
+	return nil
 }
 
 // publishUserMessage shows a user's message to the other members of the

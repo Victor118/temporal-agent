@@ -3,8 +3,10 @@ package session
 import (
 	"context"
 	"errors"
+	"slices"
 
 	commonpb "go.temporal.io/api/common/v1"
+	enumspb "go.temporal.io/api/enums/v1"
 	workflowpb "go.temporal.io/api/workflow/v1"
 	"go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/client"
@@ -12,6 +14,7 @@ import (
 
 	"github.com/victor/temporal-agent/activity"
 	"github.com/victor/temporal-agent/store"
+	"github.com/victor/temporal-agent/workflow"
 )
 
 // memStore is a session.Store in memory: one session at most is enough here.
@@ -73,12 +76,40 @@ func (m *memStore) LoadMessagesUpTo(context.Context, string, int64) ([]store.Mes
 }
 
 // fakeTemporal answers every list with running, the same workflow IDs, and
-// records the queries and signals.
+// records the queries and signals. A workflow of running is described as
+// running, and answers a query with states, if set.
 type fakeTemporal struct {
-	running []string // workflow IDs the visibility queries return
-	lists   []string // the queries
-	signals []string // workflow IDs signalled
-	started []string
+	running      []string // workflow IDs the visibility queries return
+	lists        []string // the queries
+	signals      []string // workflow IDs signalled
+	signalErr    error    // what SignalWorkflow returns
+	started      []string
+	signalStarts []signalStart
+	states       map[string]workflow.SessionState // by workflow ID
+	queried      []string                         // workflow IDs queried
+}
+
+// signalStart is a SignalWithStartWorkflow call.
+type signalStart struct {
+	id      string
+	options client.StartWorkflowOptions
+	signal  string
+	arg     interface{}
+	input   []interface{}
+}
+
+func (f *fakeTemporal) SignalWithStartWorkflow(_ context.Context, id, signal string, arg interface{}, o client.StartWorkflowOptions, _ interface{}, input ...interface{}) (client.WorkflowRun, error) {
+	f.signalStarts = append(f.signalStarts, signalStart{id: id, options: o, signal: signal, arg: arg, input: input})
+	return nil, nil
+}
+
+// encodedState is a query's answer.
+type encodedState struct{ state workflow.SessionState }
+
+func (e encodedState) HasValue() bool { return true }
+func (e encodedState) Get(v interface{}) error {
+	*v.(*workflow.SessionState) = e.state
+	return nil
 }
 
 func (f *fakeTemporal) ExecuteWorkflow(_ context.Context, o client.StartWorkflowOptions, _ interface{}, _ ...interface{}) (client.WorkflowRun, error) {
@@ -87,13 +118,22 @@ func (f *fakeTemporal) ExecuteWorkflow(_ context.Context, o client.StartWorkflow
 }
 func (f *fakeTemporal) SignalWorkflow(_ context.Context, id, _, _ string, _ interface{}) error {
 	f.signals = append(f.signals, id)
-	return nil
+	return f.signalErr
 }
-func (f *fakeTemporal) QueryWorkflow(context.Context, string, string, string, ...interface{}) (converter.EncodedValue, error) {
+func (f *fakeTemporal) QueryWorkflow(_ context.Context, id, _, _ string, _ ...interface{}) (converter.EncodedValue, error) {
+	f.queried = append(f.queried, id)
+	if state, ok := f.states[id]; ok {
+		return encodedState{state}, nil
+	}
 	return nil, errors.New("not running")
 }
-func (f *fakeTemporal) DescribeWorkflowExecution(context.Context, string, string) (*workflowservice.DescribeWorkflowExecutionResponse, error) {
-	return nil, errors.New("not running")
+func (f *fakeTemporal) DescribeWorkflowExecution(_ context.Context, id, _ string) (*workflowservice.DescribeWorkflowExecutionResponse, error) {
+	if !slices.Contains(f.running, id) {
+		return nil, errors.New("not running")
+	}
+	return &workflowservice.DescribeWorkflowExecutionResponse{WorkflowExecutionInfo: &workflowpb.WorkflowExecutionInfo{
+		Status: enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING,
+	}}, nil
 }
 func (f *fakeTemporal) ListWorkflow(_ context.Context, req *workflowservice.ListWorkflowExecutionsRequest) (*workflowservice.ListWorkflowExecutionsResponse, error) {
 	f.lists = append(f.lists, req.Query)

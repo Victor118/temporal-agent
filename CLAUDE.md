@@ -24,6 +24,7 @@
 ## Workflows
 
 - **SessionWorkflow** : orchestration long-lived, gère la persistance (LoadContext/PersistContext via PostgreSQL)
+- ID fixe `session-<id>` pour tous les runs d'une session (ouverture, reprise après 30 min d'inactivité, continue-as-new) : un message part par `SignalWithStartWorkflow`, qui démarre un run seulement si aucun ne tourne. Repli transitoire : un run `session-<id>-<unix>` (ancien schéma de reprise) encore actif reçoit le signal
 - **AgentWorkflow** : boucle ReAct (LLM + tools), `agent_id` obligatoire (prompt, skills, allowlist)
 - **Les sous-agents** : chaque agent est un tool `agent_<id>(task)` généré par le catalogue (pas publié par un worker), soumis à l'allowlist comme les autres (`agent_*` = tous). L'appeler lance un AgentWorkflow one-shot, sans persistance, contexte isolé du parent, avec l'allowlist de son propre agent
 - Le parent ne voit que la réponse finale du sous-agent (string)

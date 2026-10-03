@@ -401,6 +401,11 @@ func (f *fakeTemporal) SignalWorkflow(_ context.Context, workflowID, _, signal s
 	return nil
 }
 
+func (f *fakeTemporal) SignalWithStartWorkflow(_ context.Context, workflowID, signal string, arg interface{}, _ client.StartWorkflowOptions, _ interface{}, _ ...interface{}) (client.WorkflowRun, error) {
+	f.signals = append(f.signals, arg)
+	return nil, nil
+}
+
 func TestRoutes_MessagesCallTheAgentOnlyWhenMeant(t *testing.T) {
 	tc := &fakeTemporal{}
 	h, st := newRouteTestWith(t, tc)
