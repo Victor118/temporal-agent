@@ -237,8 +237,10 @@ diagnostic.
   parties — fait, décisions, écarts au plan, points ouverts — posté dans le
   parent comme message du membre qui l'envoie, `kind = fork_report`). Le
   rapport n'appelle aucun agent : les membres mentionnent l'agent ensuite s'ils
-  veulent sa réaction. Seul le dernier rapport est suivi sur le fork ; pas
-  encore d'historique des rapports côté fork. Un parent de canal Telegram ne
+  veulent sa réaction. Envoyé pendant un tour de l'agent du fork, il est
+  partiel : il couvre ce qui est écrit, la suite va au rapport suivant. Seul
+  le dernier rapport est suivi sur le fork ; pas encore d'historique des
+  rapports côté fork. Un parent de canal Telegram ne
   voit pas le rapport arriver sur Telegram (il est en base et annoncé en SSE
   seulement) : à faire si le besoin apparaît. Dans le parent, un rapport dont
   le fork a été supprimé, ou dont le lecteur n'est pas membre, affiche « Fork
