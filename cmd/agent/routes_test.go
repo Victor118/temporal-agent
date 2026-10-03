@@ -897,3 +897,45 @@ func TestUI_TheTreeStreamRings(t *testing.T) {
 		t.Errorf("carol's tree: %q", got)
 	}
 }
+
+// A member who leaves hears no more of the session: their streams of it end
+// at once, the page's and the JSON one; the other members' go on, and are
+// told.
+func TestStreams_EndForAMemberWhoLeaves(t *testing.T) {
+	h, st, _ := newRouteTestHub(t, &fakeTemporal{})
+	st.session.SessionID = liveSID
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	open := func(path string, cookie *http.Cookie) *bufio.Scanner {
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+path, nil)
+		req.AddCookie(cookie)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil || resp.StatusCode != http.StatusOK {
+			t.Fatalf("stream %s: %v %v", path, err, resp)
+		}
+		t.Cleanup(func() { resp.Body.Close() })
+		return bufio.NewScanner(resp.Body)
+	}
+	bob, alice := logIn(t, h, "bob@example.com"), logIn(t, h, "alice@example.com")
+	bobPage, bobJSON := open("/s/"+liveSID+"/stream", bob), open("/sessions/"+liveSID+"/stream", bob)
+	alicePage := open("/s/"+liveSID+"/stream", alice)
+
+	if w := call(t, h, http.MethodDelete, "/sessions/"+liveSID+"/members/u-bob", "", bob); w.Code != http.StatusNoContent {
+		t.Fatalf("bob leaving: %d", w.Code)
+	}
+	for name, lines := range map[string]*bufio.Scanner{"page": bobPage, "JSON": bobJSON} {
+		for lines.Scan() {
+			if strings.Contains(lines.Text(), session.EventMemberLeft) || strings.HasPrefix(lines.Text(), "data:") {
+				t.Errorf("bob's %s stream after he left: %q", name, lines.Text())
+			}
+		}
+		if err := lines.Err(); err != nil {
+			t.Errorf("bob's %s stream still open: %v", name, err)
+		}
+	}
+	if got := nextEvent(t, alicePage); !strings.HasSuffix(got, " "+session.EventMemberLeft) {
+		t.Errorf("alice's stream: %q", got)
+	}
+}

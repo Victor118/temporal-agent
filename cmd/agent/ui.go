@@ -335,13 +335,14 @@ func pageTopics(me *store.User, sessionID string) []string {
 
 // treeStream is the stream of a page with no session: the tree's alone.
 func (u *ui) treeStream(w http.ResponseWriter, r *http.Request) {
-	relaySSE(w, r, u.hub, sseKeepAlive, pageTopics(auth.UserFrom(r.Context()), "")...)
+	relaySSE(w, r, u.hub, sseKeepAlive, nil, pageTopics(auth.UserFrom(r.Context()), "")...)
 }
 
 // sessionStream is a session page's stream: its session's events and the
-// user's tree's.
+// user's tree's, while the user is a member.
 func (u *ui) sessionStream(w http.ResponseWriter, r *http.Request) {
-	relaySSE(w, r, u.hub, sseKeepAlive, pageTopics(auth.UserFrom(r.Context()), chi.URLParam(r, "id"))...)
+	sessionID := chi.URLParam(r, "id")
+	relaySSE(w, r, u.hub, sseKeepAlive, stillMember(r, u.sessions, sessionID), pageTopics(auth.UserFrom(r.Context()), sessionID)...)
 }
 
 // --- Actions ---

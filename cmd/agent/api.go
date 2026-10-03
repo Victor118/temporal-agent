@@ -327,22 +327,37 @@ func (a *api) getState(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, state)
 }
 
-// stream sends the session's events as they come.
+// stream sends the session's events as they come, while its user is a
+// member.
 func (a *api) stream(w http.ResponseWriter, r *http.Request) {
-	a.streamTopic(w, r, chi.URLParam(r, "id"))
+	sessionID := chi.URLParam(r, "id")
+	relaySSE(w, r, a.hub, sseKeepAlive, stillMember(r, a.sessions, sessionID), sessionID)
 }
 
-// streamTopic relays the hub's events for topic over SSE until the client
-// goes away.
-func (a *api) streamTopic(w http.ResponseWriter, r *http.Request, topic string) {
-	relaySSE(w, r, a.hub, sseKeepAlive, topic)
+// stillMember is the check that keeps a session's stream open: its user is
+// still a member. When the store cannot tell, the stream goes on: the next
+// check will.
+func stillMember(r *http.Request, sessions *session.Service, sessionID string) func() bool {
+	userID := auth.UserFrom(r.Context()).ID
+	return func() bool {
+		ok, err := sessions.IsMember(r.Context(), sessionID, userID)
+		if err != nil {
+			log.Printf("stream of session %s: membership check: %v", sessionID, err)
+			return true
+		}
+		return ok
+	}
 }
 
 // relaySSE relays hub's events for topics over SSE, on one stream, until the
 // client goes away, with a comment every keepAlive while nothing else is
 // sent. Each event goes with its ID: a client that reconnects is first sent
 // the events it missed, or a reload event when the hub no longer has them.
-func relaySSE(w http.ResponseWriter, r *http.Request, hub *sse.Hub, keepAlive time.Duration, topics ...string) {
+//
+// alive, when not nil, is checked at every keep-alive and on every
+// session.EventMemberLeft: once false, the stream ends (a member removed
+// from the session hears no more of it), without that event.
+func relaySSE(w http.ResponseWriter, r *http.Request, hub *sse.Hub, keepAlive time.Duration, alive func() bool, topics ...string) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "Streaming not supported", http.StatusInternalServerError)
@@ -372,11 +387,17 @@ func relaySSE(w http.ResponseWriter, r *http.Request, hub *sse.Hub, keepAlive ti
 		case <-ctx.Done():
 			return
 		case <-ping.C:
+			if alive != nil && !alive() {
+				return
+			}
 			// A comment line: EventSource ignores it.
 			fmt.Fprint(w, ": ping\n\n")
 			flusher.Flush()
 		case event, ok := <-sub.C:
 			if !ok { // too slow: dropped, the client reconnects and catches up
+				return
+			}
+			if event.Type == session.EventMemberLeft && alive != nil && !alive() {
 				return
 			}
 			writeSSE(w, event)
@@ -686,7 +707,7 @@ func (a *api) deleteAllNotifications(w http.ResponseWriter, r *http.Request) {
 
 // streamNotifications streams live notifications for a user via SSE.
 func (a *api) streamNotifications(w http.ResponseWriter, r *http.Request) {
-	a.streamTopic(w, r, notificationsOf(auth.UserFrom(r.Context()).ID))
+	relaySSE(w, r, a.hub, sseKeepAlive, nil, notificationsOf(auth.UserFrom(r.Context()).ID))
 }
 
 // allPrivate hides every tool input.

@@ -6,10 +6,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/victor/temporal-agent/activity"
+	"github.com/victor/temporal-agent/session"
 	"github.com/victor/temporal-agent/sse"
 )
 
@@ -30,7 +32,7 @@ func TestNewHTTPServer_Timeouts(t *testing.T) {
 func TestRelaySSE_PingsWhileIdle(t *testing.T) {
 	hub := sse.NewHub()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		relaySSE(w, r, hub, 10*time.Millisecond, "s1")
+		relaySSE(w, r, hub, 10*time.Millisecond, nil, "s1")
 	}))
 	defer srv.Close()
 
@@ -68,6 +70,58 @@ func TestRelaySSE_PingsWhileIdle(t *testing.T) {
 			t.Fatalf("event line %q", line)
 		}
 		return
+	}
+}
+
+// A stream whose check fails ends at the next keep-alive; one that passes
+// goes on. A member_left event makes it check at once, and is not sent to
+// the one it ends.
+func TestRelaySSE_EndsWhenNoLongerAlive(t *testing.T) {
+	hub := sse.NewHub()
+	var member atomic.Bool
+	member.Store(true)
+	serve := func(keepAlive time.Duration) string {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			relaySSE(w, r, hub, keepAlive, member.Load, "s1")
+		}))
+		t.Cleanup(srv.Close)
+		return srv.URL
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	lines := openStream(t, ctx, serve(10*time.Millisecond), "")
+	for range 3 { // pings, the stream alive
+		if !lines.Scan() {
+			t.Fatalf("stream ended while alive: %v", lines.Err())
+		}
+	}
+	member.Store(false)
+	for lines.Scan() {
+		if line := lines.Text(); line != ": ping" && line != "" {
+			t.Errorf("line %q after the check failed", line)
+		}
+	}
+	if err := lines.Err(); err != nil {
+		t.Fatalf("stream did not end: %v", err)
+	}
+
+	// With a keep-alive too far to wait for: the event ends it.
+	member.Store(true)
+	lines = openStream(t, ctx, serve(time.Hour), "")
+	hub.Publish("s1", activity.SSEEvent{Type: session.EventMemberLeft, Data: []byte(`{"user_ids":["u-carol"]}`)})
+	if got := nextEvent(t, lines); !strings.HasSuffix(got, " "+session.EventMemberLeft) {
+		t.Fatalf("a member still in: %q", got)
+	}
+	member.Store(false)
+	hub.Publish("s1", activity.SSEEvent{Type: session.EventMemberLeft, Data: []byte(`{"user_ids":["u-bob"]}`)})
+	for lines.Scan() {
+		if line := lines.Text(); line != "" {
+			t.Errorf("line %q sent to a member out", line)
+		}
+	}
+	if err := lines.Err(); err != nil {
+		t.Fatalf("stream did not end: %v", err)
 	}
 }
 
@@ -111,7 +165,7 @@ func nextEvent(t *testing.T, lines *bufio.Scanner) string {
 func TestRelaySSE_ReplaysWhatAReconnectionMissed(t *testing.T) {
 	hub := sse.NewHub()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		relaySSE(w, r, hub, time.Hour, "s1")
+		relaySSE(w, r, hub, time.Hour, nil, "s1")
 	}))
 	defer srv.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
