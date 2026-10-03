@@ -147,10 +147,12 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 		w.RegisterWorkflow(workflow.ImplementFeatureWorkflow)
 		w.RegisterWorkflow(workflow.ScheduledAgentWorkflow)
 		w.RegisterWorkflow(workflow.ForkSessionWorkflow)
+		w.RegisterWorkflow(workflow.ReportToParentWorkflow)
 
 		w.RegisterActivity(&activity.LLMActivities{Provider: llmProvider, Store: st, Catalog: catalog, Prompts: skillAct.Prompts, MaxContextBytes: maxContext})
 		w.RegisterActivity(&activity.ForkActivities{Store: st, LLM: llmProvider, Private: catalog})
 		w.RegisterActivity(&activity.MemoryActivities{Store: st})
+		w.RegisterActivity(&activity.ReportActivities{Store: st})
 		w.RegisterActivity(&activity.ClaudeCodeActivities{Root: cfg.ClaudeCodeWorkspace, SSHKeyPath: cfg.ClaudeCodeSSHKey, AllowedRepos: cfg.ClaudeCodeRepos, RunAs: runAs, Runs: runs, ClaudeConfigDir: cfg.ClaudeConfigDir, Model: cfg.ClaudeCodeModel, MaxBudgetUSD: budget, Auth: auth})
 		w.RegisterActivity(&activity.ToolActivities{Registry: registry, Catalog: catalog})
 		w.RegisterActivity(&activity.NotificationActivities{Notifiers: notifiers})

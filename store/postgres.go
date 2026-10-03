@@ -130,6 +130,12 @@ const schema = `
 		-- What the fork is for, as the member who opened it put it ('' = not
 		-- said): it steers the fork's summary.
 		ALTER TABLE sessions ADD COLUMN IF NOT EXISTS fork_purpose TEXT NOT NULL DEFAULT '';
+		-- A fork's latest report to its parent (AppendForkReport): the last fork
+		-- message it covers, the next report starting after it; its message in
+		-- the parent; when it was posted.
+		ALTER TABLE sessions ADD COLUMN IF NOT EXISTS last_reported_message_id BIGINT NOT NULL DEFAULT 0;
+		ALTER TABLE sessions ADD COLUMN IF NOT EXISTS last_report_id BIGINT NOT NULL DEFAULT 0;
+		ALTER TABLE sessions ADD COLUMN IF NOT EXISTS last_reported_at TIMESTAMPTZ;
 
 		-- When a human message calls the agent: 'auto' (every message when one
 		-- user is alone in the session, on @agent once several are), 'always',

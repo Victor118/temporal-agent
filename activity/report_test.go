@@ -1,0 +1,142 @@
+package activity
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"testing"
+
+	"go.temporal.io/sdk/temporal"
+
+	"github.com/victor/temporal-agent/store"
+)
+
+// forkThread is a fork: its brief, a first part already reported up to 3,
+// and what happened since.
+var forkThread = []store.MessageWithID{
+	{ID: 1, Message: store.Message{Role: store.RoleUser, Kind: store.KindForkSummary, Content: text("plan: CSV export, `;` separated")}},
+	{ID: 2, Message: store.Message{Role: store.RoleUser, Content: text("start with the header"), Author: "Victor"}},
+	{ID: 3, Message: store.Message{Role: store.RoleAssistant, Content: text("header written")}},
+	{ID: 4, Message: store.Message{Role: store.RoleUser, Content: text("use `,` after all"), Author: "Victor"}},
+	{ID: 5, Message: store.Message{Role: store.RoleAssistant, Content: text("switched to commas"),
+		ToolCalls: []store.ToolCall{{ID: "m1", Name: "save_user_memory", Input: json.RawMessage(`{"content":"Victor's secret"}`)}}}},
+	{ID: 6, Message: store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "m1", Content: "saved: Victor's secret"}}},
+	{ID: 7, Message: store.Message{Role: store.RoleAssistant, Kind: store.KindTurnError, Content: text("call LLM: boom")}},
+}
+
+func sentText(t *testing.T, llm *fakeLLM) string {
+	t.Helper()
+	var sent string
+	json.Unmarshal(llm.seen.Messages[0].Content, &sent)
+	return sent
+}
+
+// The first report covers everything after the brief, which goes apart as
+// the plan; the purpose comes first; the instructions ask for the four
+// sections.
+func TestSummarizeForkReport_First(t *testing.T) {
+	llm := &fakeLLM{reply: " ## Fait\n- export "}
+	a := &ForkActivities{Store: &forkStore{msgs: forkThread}, LLM: llm, Private: memoryIsPrivate}
+	out, err := a.SummarizeForkReport(context.Background(), SummarizeForkReportInput{SessionID: "f", UpToMessageID: 6, Purpose: "CSV export", Model: "small"})
+	if err != nil || out.Summary != "## Fait\n- export" {
+		t.Fatalf("report %q, %v", out.Summary, err)
+	}
+	sent := sentText(t, llm)
+	brief := strings.Index(sent, "(the brief it started from):\n\nplan: CSV export")
+	conv := strings.Index(sent, "Conversation to report on:\n\nUser (Victor): start with the header")
+	if !strings.HasPrefix(sent, "Goal of the fork: CSV export\n\n") || brief < 0 || conv < brief {
+		t.Errorf("request %q", sent)
+	}
+	if strings.Contains(sent, "secret") {
+		t.Error("a user's memory reached the report")
+	}
+	for _, want := range []string{"What was done", "Decisions taken", "Deviations from the plan", "Open points", "report against it"} {
+		if !strings.Contains(llm.seen.System, want) {
+			t.Errorf("instructions lack %q", want)
+		}
+	}
+	if strings.Contains(llm.seen.System, "reported before") || strings.Contains(llm.seen.System, "CSV") || llm.seen.Model != "small" {
+		t.Errorf("instructions %q, model %q", llm.seen.System, llm.seen.Model)
+	}
+}
+
+// A later report covers only what happened since the last one: the brief
+// still says what the plan was.
+func TestSummarizeForkReport_Later(t *testing.T) {
+	llm := &fakeLLM{reply: "since"}
+	a := &ForkActivities{Store: &forkStore{msgs: forkThread}, LLM: llm, Private: memoryIsPrivate}
+	if _, err := a.SummarizeForkReport(context.Background(), SummarizeForkReportInput{SessionID: "f", AfterMessageID: 3, UpToMessageID: 6}); err != nil {
+		t.Fatal(err)
+	}
+	sent := sentText(t, llm)
+	if strings.Contains(sent, "start with the header") || strings.Contains(sent, "header written") || !strings.Contains(sent, "use `,` after all") ||
+		!strings.Contains(sent, "plan: CSV export") || strings.Contains(sent, "Goal of the fork") {
+		t.Errorf("request %q", sent)
+	}
+	if !strings.Contains(llm.seen.System, "reported before") || strings.Contains(llm.seen.System, "report against it") {
+		t.Errorf("instructions %q", llm.seen.System)
+	}
+}
+
+// Nothing since the last report (a failed turn is nothing), or a range that
+// ends on no message of the fork: final failures, not retried.
+func TestSummarizeForkReport_Refusals(t *testing.T) {
+	llm := &fakeLLM{reply: "x"}
+	a := &ForkActivities{Store: &forkStore{msgs: forkThread}, LLM: llm, Private: memoryIsPrivate}
+	for name, in := range map[string]SummarizeForkReportInput{
+		"nothing new": {SessionID: "f", AfterMessageID: 6, UpToMessageID: 7},
+		"no message":  {SessionID: "f", AfterMessageID: 3, UpToMessageID: 99},
+	} {
+		_, err := a.SummarizeForkReport(context.Background(), in)
+		var appErr *temporal.ApplicationError
+		if !errors.As(err, &appErr) || !appErr.NonRetryable() {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
+type reportStore struct {
+	got store.ForkReport
+	err error
+}
+
+func (r *reportStore) AppendForkReport(_ context.Context, fr store.ForkReport) (int64, error) {
+	r.got = fr
+	return 77, r.err
+}
+
+// The report is the sender's message in the parent, naming its fork; the
+// store's refusals are final.
+func TestPostForkReport(t *testing.T) {
+	st := &reportStore{}
+	a := &ReportActivities{Store: st}
+	in := PostForkReportInput{ForkSessionID: "f", ParentSessionID: "p", ForkTitle: "Export", From: 3, UpTo: 9,
+		ReporterID: "u-victor", ReporterName: "Victor", Report: "## Fait"}
+	id, err := a.PostForkReport(context.Background(), in)
+	if err != nil || id != 77 {
+		t.Fatalf("post: %d, %v", id, err)
+	}
+	m := st.got.Message
+	if st.got.ForkSessionID != "f" || st.got.ParentSessionID != "p" || st.got.ReporterID != "u-victor" || st.got.From != 3 || st.got.UpTo != 9 ||
+		m.Role != store.RoleUser || m.Kind != store.KindForkReport || m.UserID != "u-victor" || m.Author != "Victor" || m.Content != text("## Fait") ||
+		*m.Fork != (store.ForkRef{SessionID: "f", Title: "Export", UpToMessageID: 9}) {
+		t.Errorf("posted %+v", st.got)
+	}
+
+	for _, refusal := range []error{store.ErrReportParentGone, store.ErrReportNotMember, store.ErrReportStale} {
+		st.err = fmt.Errorf("append: %w", refusal)
+		_, err := a.PostForkReport(context.Background(), in)
+		var appErr *temporal.ApplicationError
+		if !errors.As(err, &appErr) || !appErr.NonRetryable() {
+			t.Errorf("%v: %v", refusal, err)
+		}
+	}
+	st.err = errors.New("connection reset")
+	_, err = a.PostForkReport(context.Background(), in)
+	var appErr *temporal.ApplicationError
+	if err == nil || errors.As(err, &appErr) {
+		t.Errorf("a transient failure must be retried: %v", err)
+	}
+}

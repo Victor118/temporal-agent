@@ -142,14 +142,17 @@ func (s *PostgresStore) DeleteLoginSession(ctx context.Context, tokenHash string
 // --- Sessions and their members ---
 
 const sessionColumns = "s.session_id, s.created_by, s.title, s.agent_id, s.channel, s.channel_id, s.created_at, " +
-	"s.parent_session_id, s.forked_at_message_id, s.forked_by, s.agent_mode, s.fork_purpose"
+	"s.parent_session_id, s.forked_at_message_id, s.forked_by, s.agent_mode, s.fork_purpose, " +
+	"s.last_reported_message_id, s.last_report_id, s.last_reported_at"
 
 func scanSession(row interface{ Scan(...any) error }) (*Session, error) {
 	var sess Session
 	var parent, forkedBy sql.NullString
 	var forkedAt sql.NullInt64
+	var reportedAt sql.NullTime
 	err := row.Scan(&sess.SessionID, &sess.CreatedBy, &sess.Title, &sess.AgentID, &sess.Channel, &sess.ChannelID, &sess.CreatedAt,
-		&parent, &forkedAt, &forkedBy, &sess.AgentMode, &sess.ForkPurpose)
+		&parent, &forkedAt, &forkedBy, &sess.AgentMode, &sess.ForkPurpose,
+		&sess.LastReportedMessageID, &sess.LastReportID, &reportedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -157,6 +160,9 @@ func scanSession(row interface{ Scan(...any) error }) (*Session, error) {
 		return nil, err
 	}
 	sess.ParentSessionID, sess.ForkedAtMessageID, sess.ForkedBy = parent.String, forkedAt.Int64, forkedBy.String
+	if reportedAt.Valid {
+		sess.LastReportedAt = &reportedAt.Time
+	}
 	return &sess, nil
 }
 
@@ -265,13 +271,16 @@ func (s *PostgresStore) ListSessionStats(ctx context.Context, userID string) (ma
 	return stats, rows.Err()
 }
 
-// DeleteSession removes a session, its members and its messages.
+// DeleteSession removes a session, its members and its messages. The row goes
+// first: unlinking its forks waits for a report a fork is posting
+// (AppendForkReport holds the fork's row), and the messages, deleted after,
+// take that report with them.
 func (s *PostgresStore) DeleteSession(ctx context.Context, sessionID string) error {
 	return s.inTx(ctx, func(tx *sql.Tx) error {
 		for _, q := range []string{
+			"DELETE FROM sessions WHERE session_id = $1", // members cascade, forks lose their link
 			"DELETE FROM messages WHERE session_id = $1",
 			"DELETE FROM memory WHERE scope = 'session' AND scope_id = $1",
-			"DELETE FROM sessions WHERE session_id = $1", // members cascade
 		} {
 			if _, err := tx.ExecContext(ctx, q, sessionID); err != nil {
 				return err

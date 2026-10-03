@@ -71,6 +71,9 @@ type Store interface {
 	// AppendMessage appends one message under an explicit idempotency key,
 	// and returns its ID (the stored one, when the key was already written).
 	AppendMessage(ctx context.Context, sessionID, key string, msg Message) (int64, error)
+	// AppendForkReport posts a fork's report into its parent and records it
+	// on the fork, in one transaction (see ForkReport).
+	AppendForkReport(ctx context.Context, r ForkReport) (int64, error)
 	DeleteMessage(ctx context.Context, sessionID string, id int64) error
 	DeleteMessagesBySession(ctx context.Context, sessionID string) error
 

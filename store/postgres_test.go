@@ -733,3 +733,95 @@ func TestSaveMemory_ConcurrentSavesOneWins(t *testing.T) {
 		}
 	}
 }
+
+// A fork's report goes into its parent and is recorded on the fork at once;
+// retried, it is not posted twice; started from a stale point, by someone who
+// left the parent, or after the parent's deletion, it is refused.
+func TestForkReports(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	cleanup := func() {
+		s.db.Exec("DELETE FROM messages WHERE session_id LIKE 'zz-%'")
+		s.db.Exec("DELETE FROM sessions WHERE session_id LIKE 'zz-f%'")
+		s.db.Exec("DELETE FROM sessions WHERE session_id LIKE 'zz-%'")
+		s.db.Exec("DELETE FROM users WHERE id LIKE 'zz-%'")
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+	for _, id := range []string{"zz-alice", "zz-bob"} {
+		if err := s.CreateUser(ctx, User{ID: id, Email: id + "@example.com", Role: UserRoleStandard, PasswordHash: "h"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.CreateSession(ctx, Session{SessionID: "zz-parent", CreatedBy: "zz-alice", Channel: "web"}); err != nil {
+		t.Fatal(err)
+	}
+	s.AddSessionMember(ctx, "zz-parent", "zz-bob", "zz-alice")
+	at, _ := s.AppendMessage(ctx, "zz-parent", "k0", Message{Role: RoleUser, Content: `"plan"`})
+	if err := s.CreateSession(ctx, Session{SessionID: "zz-fork", CreatedBy: "zz-bob", Channel: "web",
+		ParentSessionID: "zz-parent", ForkedAtMessageID: at, ForkedBy: "zz-bob"}); err != nil {
+		t.Fatal(err)
+	}
+	report := func(from, upTo int64, text string) ForkReport {
+		return ForkReport{ForkSessionID: "zz-fork", ParentSessionID: "zz-parent", ReporterID: "zz-bob", From: from, UpTo: upTo,
+			Message: Message{Role: RoleUser, Kind: KindForkReport, Content: `"` + text + `"`, UserID: "zz-bob", Author: "Bob",
+				Fork: &ForkRef{SessionID: "zz-fork", Title: "Export", UpToMessageID: upTo}}}
+	}
+
+	if f, _ := s.GetSession(ctx, "zz-fork"); f.LastReportedMessageID != 0 || f.LastReportID != 0 || f.LastReportedAt != nil {
+		t.Errorf("a fork that never reported: %+v", f)
+	}
+	id, err := s.AppendForkReport(ctx, report(0, 40, "first"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, _ := s.GetSession(ctx, "zz-fork")
+	if f.LastReportedMessageID != 40 || f.LastReportID != id || f.LastReportedAt == nil {
+		t.Errorf("fork after its report: %+v", f)
+	}
+	msgs, _ := s.LoadMessagesWithID(ctx, "zz-parent")
+	if len(msgs) != 2 || msgs[1].ID != id || msgs[1].Key != ForkReportKey("zz-fork", 0, 40) || msgs[1].Kind != KindForkReport ||
+		msgs[1].UserID != "zz-bob" || msgs[1].Fork == nil || *msgs[1].Fork != (ForkRef{SessionID: "zz-fork", Title: "Export", UpToMessageID: 40}) {
+		t.Errorf("parent's messages %+v", msgs)
+	}
+
+	// A retry returns the report posted, and posts nothing.
+	if again, err := s.AppendForkReport(ctx, report(0, 40, "first")); err != nil || again != id {
+		t.Errorf("retry: %d, %v; want %d", again, err, id)
+	}
+	// A report started before the first was posted would cover it again.
+	if _, err := s.AppendForkReport(ctx, report(0, 45, "overlap")); !errors.Is(err, ErrReportStale) {
+		t.Errorf("stale report: %v", err)
+	}
+	second, err := s.AppendForkReport(ctx, report(40, 50, "second"))
+	if err != nil || second <= id {
+		t.Fatalf("second report: %d, %v", second, err)
+	}
+	if f, _ := s.GetSession(ctx, "zz-fork"); f.LastReportedMessageID != 50 || f.LastReportID != second {
+		t.Errorf("fork after its second report: %+v", f)
+	}
+	if msgs, _ := s.LoadMessagesWithID(ctx, "zz-parent"); len(msgs) != 3 {
+		t.Errorf("%d messages in the parent, want 3", len(msgs))
+	}
+
+	// Bob left the parent: he reports there no more.
+	s.RemoveSessionMember(ctx, "zz-parent", "zz-bob")
+	if _, err := s.AppendForkReport(ctx, report(50, 60, "third")); !errors.Is(err, ErrReportNotMember) {
+		t.Errorf("a reporter who left the parent: %v", err)
+	}
+	s.AddSessionMember(ctx, "zz-parent", "zz-bob", "zz-alice")
+
+	// The parent is deleted: the fork has nowhere to report, and the
+	// parent's messages are gone with it.
+	if err := s.DeleteSession(ctx, "zz-parent"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AppendForkReport(ctx, report(50, 60, "third")); !errors.Is(err, ErrReportParentGone) {
+		t.Errorf("parent deleted: %v", err)
+	}
+	var n int
+	s.db.QueryRow("SELECT count(*) FROM messages WHERE session_id = 'zz-parent'").Scan(&n)
+	if n != 0 {
+		t.Errorf("%d messages left in the deleted parent", n)
+	}
+}

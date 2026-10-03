@@ -58,6 +58,12 @@ type Session struct {
 	// ForkPurpose is what the fork was opened for, in its creator's words;
 	// empty when they gave none. It steers the fork's summary.
 	ForkPurpose string `json:"fork_purpose,omitempty"`
+	// A fork's latest report to its parent: the last of the fork's messages
+	// it covers (the next one starts after it; 0 = none yet), its message
+	// in the parent, and when it was posted.
+	LastReportedMessageID int64      `json:"last_reported_message_id,omitempty"`
+	LastReportID          int64      `json:"last_report_id,omitempty"`
+	LastReportedAt        *time.Time `json:"last_reported_at,omitempty"`
 }
 
 // When a human message calls a session's agent.
