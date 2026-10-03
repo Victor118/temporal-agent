@@ -20,9 +20,11 @@ type implementEnv struct {
 	inspects int
 	// duringRun, when set, is what the run does instead of returning at once.
 	duringRun func(ctx context.Context) error
-	pushed    *activity.PushBranchInput
-	cleaned   []string
-	inspected activity.InspectWorkspaceOutput
+	// inspectErr, when set, is what the inspection fails with.
+	inspectErr error
+	pushed     *activity.PushBranchInput
+	cleaned    []string
+	inspected  activity.InspectWorkspaceOutput
 }
 
 func newImplementEnv(t *testing.T, result claudeCodeResult, runErr error, inspected activity.InspectWorkspaceOutput, pushErr error) *implementEnv {
@@ -45,6 +47,9 @@ func newImplementEnv(t *testing.T, result claudeCodeResult, runErr error, inspec
 
 	e.env.RegisterActivityWithOptions(func(ctx context.Context, in activity.InspectWorkspaceInput) (activity.InspectWorkspaceOutput, error) {
 		e.inspects++
+		if e.inspectErr != nil {
+			return activity.InspectWorkspaceOutput{}, e.inspectErr
+		}
 		out := e.inspected
 		if out.Branch == "" {
 			out.Branch = in.Branch

@@ -97,37 +97,37 @@ func implementFeature(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCod
 	out := ClaudeCodeOutput{Repo: input.Repo, Ref: input.Base, Branch: branch}
 	var ccAct *activity.ClaudeCodeActivities
 
-	runCtx, err := openRun(ctx, implementSessionTimeout)
+	r, err := openRun(ctx, implementSessionTimeout)
 	if err != nil {
 		out.Error = err.Error()
 		return out, nil
 	}
-	defer workflow.CompleteSession(runCtx)
+	defer r.complete()
 
 	var prepared activity.PrepareWorkspaceOutput
 	err = workflow.ExecuteActivity(
-		onRunWorker(runCtx, workflow.ActivityOptions{
+		r.step(workflow.ActivityOptions{
 			StartToCloseTimeout: prepareTimeout,
 			HeartbeatTimeout:    gitHeartbeatTimeout,
 			RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: prepareAttempts},
 		}),
 		ccAct.PrepareWorkspace,
 		activity.PrepareWorkspaceInput{Name: name, Repo: input.Repo, Ref: input.Base, Branch: branch},
-	).Get(runCtx, &prepared)
+	).Get(r.ctx, &prepared)
 	if err != nil {
-		if workerLost(runCtx, err) {
-			out.Error = workerStopped("while it cloned the repository", "nothing was done")
+		if r.failed(err) {
+			out.Error = r.lostAt("while it cloned the repository", "nothing was done")
 		} else {
 			out.Error = fmt.Sprintf("could not prepare the workspace: %v", err)
 		}
 		return out, nil
 	}
 	out.Commit = prepared.Commit
-	defer cleanupWorkspace(runCtx, prepared.Dir)
+	defer r.cleanup(prepared.Dir)
 
 	var result claudeCodeResult
 	runErr := workflow.ExecuteActivity(
-		onRunWorker(runCtx, workflow.ActivityOptions{
+		r.step(workflow.ActivityOptions{
 			StartToCloseTimeout: implementTimeout,
 			HeartbeatTimeout:    analyzeHeartbeat,
 			RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 1},
@@ -141,12 +141,12 @@ func implementFeature(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCod
 			DisallowedTools: implementDeniedTools,
 			MaxBudgetUSD:    input.MaxBudgetUSD,
 		},
-	).Get(runCtx, &result)
+	).Get(r.ctx, &result)
 
 	// The commits are in the clone, on the lost worker's disk: no other
 	// worker can inspect or push them.
-	if workerLost(runCtx, runErr) {
-		out.Error = workerStopped("before the run finished", "nothing was pushed")
+	if r.failed(runErr) {
+		out.Error = r.lostAt("before the run finished", "nothing was pushed")
 		return out, nil
 	}
 
@@ -167,16 +167,16 @@ func implementFeature(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCod
 
 	var inspected activity.InspectWorkspaceOutput
 	if err := workflow.ExecuteActivity(
-		onRunWorker(runCtx, workflow.ActivityOptions{
+		r.step(workflow.ActivityOptions{
 			StartToCloseTimeout: inspectTimeout,
 			HeartbeatTimeout:    gitHeartbeatTimeout,
 			RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: inspectAttempts},
 		}),
 		ccAct.InspectWorkspace,
 		activity.InspectWorkspaceInput{Dir: prepared.Dir, Base: prepared.Commit, Branch: branch},
-	).Get(runCtx, &inspected); err != nil {
-		if workerLost(runCtx, err) {
-			out.Error = joinErrors(out.Error, workerStopped("before the commits were checked", "nothing was pushed"))
+	).Get(r.ctx, &inspected); err != nil {
+		if r.failed(err) {
+			out.Error = joinErrors(out.Error, r.lostAt("before the commits were checked", "nothing was pushed"))
 		} else {
 			out.Error = joinErrors(out.Error, fmt.Sprintf("could not inspect the workspace: %v", err))
 		}
@@ -207,7 +207,7 @@ func implementFeature(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCod
 	}
 
 	if err := workflow.ExecuteActivity(
-		onRunWorker(runCtx, workflow.ActivityOptions{
+		r.step(workflow.ActivityOptions{
 			StartToCloseTimeout: pushTimeout,
 			HeartbeatTimeout:    gitHeartbeatTimeout,
 			// A push either lands or it does not; retrying a rejected one
@@ -223,10 +223,10 @@ func implementFeature(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCod
 			Branch: branch,
 			Commit: inspected.Commits[0].SHA,
 		},
-	).Get(runCtx, nil); err != nil {
-		if workerLost(runCtx, err) {
+	).Get(r.ctx, nil); err != nil {
+		if r.failed(err) {
 			// The push may have reached the remote before the worker went.
-			out.Error = joinErrors(out.Error, workerStopped("during the push",
+			out.Error = joinErrors(out.Error, r.lostAt("during the push",
 				fmt.Sprintf("the branch may or may not have been published; check %s on the remote", branch)))
 		} else {
 			out.Error = joinErrors(out.Error, fmt.Sprintf("the commits were not pushed: %v", err))

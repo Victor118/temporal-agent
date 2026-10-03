@@ -58,11 +58,29 @@ func runQueue(ctx workflow.Context) string {
 	return workflow.GetInfo(ctx).TaskQueueName
 }
 
-// openRun reserves a worker for a run that lasts at most execution, and
-// returns the context its steps run in. The error says, for the output, why
-// no worker was reserved. The caller completes the session
-// (workflow.CompleteSession) once the run is over.
-func openRun(ctx workflow.Context, execution time.Duration) (workflow.Context, error) {
+// sessionExpirySlack is how much earlier than the workflow learns it a
+// session's clock starts: its worker takes it, then tells the workflow.
+const sessionExpirySlack = time.Minute
+
+// run is a coding run's hold on the worker that took it: the session its
+// steps run in.
+type run struct {
+	// ctx is the session's: a step run on it goes to the session's worker
+	// (step).
+	ctx workflow.Context
+	// started is when the session opened, and execution its bound: past it,
+	// the SDK fails the session, though its worker is fine.
+	started   time.Time
+	execution time.Duration
+	// lost: a step found the worker gone, or the session over (failed). The
+	// worker is asked nothing more, the clone's cleanup included.
+	lost bool
+}
+
+// openRun reserves a worker for a run that lasts at most execution. The
+// error says, for the output, why no worker was reserved. The caller
+// completes the run (complete) once it is over.
+func openRun(ctx workflow.Context, execution time.Duration) (*run, error) {
 	queue := runQueue(ctx)
 	runCtx, err := workflow.CreateSession(workflow.WithTaskQueue(ctx, queue), &workflow.SessionOptions{
 		CreationTimeout:  runCreationTimeout,
@@ -71,7 +89,7 @@ func openRun(ctx workflow.Context, execution time.Duration) (workflow.Context, e
 	})
 	switch {
 	case err == nil:
-		return runCtx, nil
+		return &run{ctx: runCtx, started: workflow.Now(ctx), execution: execution}, nil
 	case isScheduleToStartTimeout(err):
 		return nil, fmt.Errorf("no worker available for %q: none took the run within %s "+
 			"(none is running, or each already runs as many as it may, CLAUDE_CODE_MAX_CONCURRENT_RUNS); nothing was done",
@@ -81,17 +99,52 @@ func openRun(ctx workflow.Context, execution time.Duration) (workflow.Context, e
 	}
 }
 
+// complete releases the worker: the session's end.
+func (r *run) complete() { workflow.CompleteSession(r.ctx) }
+
+// step is the run's context with the options of one step: on the session's
+// worker, which takes it at once if it is alive.
+func (r *run) step(opts workflow.ActivityOptions) workflow.Context {
+	return onRunWorker(r.ctx, opts)
+}
+
 // onRunWorker is runCtx with the options of one step of the run.
 func onRunWorker(runCtx workflow.Context, opts workflow.ActivityOptions) workflow.Context {
 	opts.ScheduleToStartTimeout = runStartTimeout
 	return workflow.WithActivityOptions(runCtx, opts)
 }
 
+// failed tells whether a step's error means the run lost its worker
+// (workerLost), and remembers it: nothing more is asked of that worker.
+func (r *run) failed(err error) bool {
+	if !workerLost(r.ctx, err) {
+		return false
+	}
+	r.lost = true
+	return true
+}
+
+// expired tells whether the session has reached its bound: what a lost
+// worker looks like to the steps, though the worker is fine.
+func (r *run) expired() bool {
+	return workflow.Now(r.ctx).Sub(r.started) >= r.execution-sessionExpirySlack
+}
+
+// lostAt is what the output says of a run that lost its worker (failed) at
+// the step named by when. Its clone stays on that worker's disk until it
+// starts again (RootClaim.Sweep): no other worker can reach it.
+func (r *run) lostAt(when, consequence string) string {
+	if r.expired() {
+		return fmt.Sprintf("the run reached its time limit (%s) %s: %s", r.execution, when, consequence)
+	}
+	return fmt.Sprintf("the worker that held the run stopped %s: %s", when, consequence)
+}
+
 // workerLost tells whether a step failed because the worker that holds the
-// run is gone: the session failed (it died, or lost touch with Temporal), no
-// one picked the step up, or the worker ended the step itself — it stopped
-// (activity.ErrWorkerStopping, or a cancellation the workflow had not asked
-// for).
+// run is gone: the session failed (it died, or lost touch with Temporal, or
+// the session reached its bound), no one picked the step up, or the worker
+// ended the step itself — it stopped (activity.ErrWorkerStopping, or a
+// cancellation the workflow had not asked for).
 func workerLost(runCtx workflow.Context, err error) bool {
 	if err == nil {
 		return false
@@ -110,21 +163,18 @@ func workerLost(runCtx workflow.Context, err error) bool {
 	return errors.As(err, &canceled) && runCtx.Err() == nil
 }
 
-// workerStopped is what the output says of a run whose worker was lost
-// (workerLost) at the step named by when. Its clone stays on that worker's
-// disk until it starts again (RootClaim.Sweep): no other worker can reach it.
-func workerStopped(when, consequence string) string {
-	return fmt.Sprintf("the worker that held the run stopped %s: %s", when, consequence)
-}
-
-// cleanupWorkspace deletes the run's clone, on its worker. It is the one step
-// that must happen on every path out, a cancelled workflow included, which
-// cannot start an activity on its own context: a disconnected one, derived
-// from runCtx, still carries the session and so reaches the same worker. A
-// failed session does not: the SDK refuses the step, and the clone waits for
-// its worker's next start.
-func cleanupWorkspace(runCtx workflow.Context, dir string) {
-	ctx, cancel := workflow.NewDisconnectedContext(runCtx)
+// cleanup deletes the run's clone, on its worker. It is the one step that
+// must happen on every path out, a cancelled workflow included, which cannot
+// start an activity on its own context: a disconnected one, derived from the
+// session's, still carries the session and so reaches the same worker. A run
+// that lost its worker skips it: it would wait for no one (runStartTimeout),
+// and a failed session refuses it anyway. The clone then waits for its
+// worker's next start.
+func (r *run) cleanup(dir string) {
+	if r.lost {
+		return
+	}
+	ctx, cancel := workflow.NewDisconnectedContext(r.ctx)
 	defer cancel()
 	var ccAct *activity.ClaudeCodeActivities
 	_ = workflow.ExecuteActivity(

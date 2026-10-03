@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -16,6 +17,7 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 	"go.temporal.io/sdk/worker"
+	"go.temporal.io/sdk/workflow"
 
 	"github.com/victor/temporal-agent/activity"
 )
@@ -224,6 +226,89 @@ func TestImplementFeatureWorkflow_WorkerStoppedCancelsTheRun(t *testing.T) {
 	if !strings.Contains(out.Error, "the worker that held the run stopped before the run finished") {
 		t.Errorf("Error = %q", out.Error)
 	}
+	// Nothing more is asked of a worker that is gone: the cleanup would
+	// wait for no one.
+	if len(e.cleaned) != 0 {
+		t.Errorf("cleaned %v on a worker that is gone", e.cleaned)
+	}
+}
+
+// The worker goes while the commits are checked, or while they are pushed:
+// the output says which, and nothing more is asked of it, the cleanup
+// included.
+func TestImplementFeatureWorkflow_WorkerLostAfterTheRun(t *testing.T) {
+	t.Run("inspect", func(t *testing.T) {
+		e := newImplementEnv(t, claudeCodeResult{Report: "Done.", Subtype: "success"}, nil, oneCommit(), nil)
+		e.inspectErr = temporal.NewCanceledError()
+		out := e.run_(t, ImplementFeatureInput{Repo: "/src/repo", Task: "do it"})
+		if want := "the worker that held the run stopped before the commits were checked: nothing was pushed"; !strings.Contains(out.Error, want) {
+			t.Errorf("Error = %q, want %q", out.Error, want)
+		}
+		if e.pushed != nil || out.Pushed || len(e.cleaned) != 0 {
+			t.Errorf("pushed %+v, cleaned %v after the worker was lost", e.pushed, e.cleaned)
+		}
+	})
+	t.Run("push", func(t *testing.T) {
+		e := newImplementEnv(t, claudeCodeResult{Report: "Done.", Subtype: "success"}, nil, oneCommit(), temporal.NewCanceledError())
+		out := e.run_(t, ImplementFeatureInput{Repo: "/src/repo", Task: "do it"})
+		for _, want := range []string{
+			"the worker that held the run stopped during the push",
+			"the branch may or may not have been published; check " + out.Branch + " on the remote",
+		} {
+			if !strings.Contains(out.Error, want) {
+				t.Errorf("Error = %q, want %q", out.Error, want)
+			}
+		}
+		if out.Pushed || len(e.cleaned) != 0 {
+			t.Errorf("pushed %v, cleaned %v after the worker was lost", out.Pushed, e.cleaned)
+		}
+	})
+}
+
+// expiryWorkflow opens a run of the given bound, and runs one step that
+// fails as a lost worker's does, after the step's own time.
+func expiryWorkflow(ctx workflow.Context, execution time.Duration) (string, error) {
+	r, err := openRun(ctx, execution)
+	if err != nil {
+		return "", err
+	}
+	defer r.complete()
+	err = workflow.ExecuteActivity(r.step(workflow.ActivityOptions{StartToCloseTimeout: time.Hour}), "Step").Get(r.ctx, nil)
+	if !r.failed(err) {
+		return "", fmt.Errorf("step error %v not read as a lost worker", err)
+	}
+	return r.lostAt("during the step", "nothing was done"), nil
+}
+
+// A session that reaches its bound looks to the step like a lost worker: the
+// output says which it was, by the time the session has lasted.
+func TestRun_SessionExpiryIsNotALostWorker(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		after time.Duration // how long the step lasts before it fails
+		want  string
+	}{
+		{"lost worker", 10 * time.Second, "the worker that held the run stopped during the step: nothing was done"},
+		{"expired", 20 * time.Minute, "the run reached its time limit (20m0s) during the step: nothing was done"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var suite testsuite.WorkflowTestSuite
+			env := suite.NewTestWorkflowEnvironment()
+			asRunWorker(env)
+			env.RegisterWorkflow(expiryWorkflow)
+			env.RegisterActivityWithOptions(func(context.Context) error { return nil }, sdkactivity.RegisterOptions{Name: "Step"})
+			env.OnActivity("Step", mock.Anything).After(c.after).Return(temporal.NewCanceledError())
+
+			env.ExecuteWorkflow(expiryWorkflow, 20*time.Minute)
+			var got string
+			if err := env.GetWorkflowResult(&got); err != nil {
+				t.Fatal(err)
+			}
+			if got != c.want {
+				t.Errorf("got %q, want %q", got, c.want)
+			}
+		})
+	}
 }
 
 // A worker that stops ends its run itself and says so
@@ -299,15 +384,16 @@ func TestCodingRuns_CleanupAfterCancel(t *testing.T) {
 }
 
 // The session outlives every step of its run, retries included: past it, the
-// SDK fails the session under a run still going.
+// SDK fails the session under a run still going. The values are written out:
+// changing a step's timeout or attempts must come with a look at these.
 func TestRunSessionTimeouts(t *testing.T) {
-	if analyzeSessionTimeout <= prepareAttempts*prepareTimeout+analyzeTimeout+cleanupAttempts*cleanupTimeout {
-		t.Errorf("analyze session %s leaves no margin", analyzeSessionTimeout)
+	if want := 91 * time.Minute; analyzeSessionTimeout != want {
+		t.Errorf("analyze session %s, want %s", analyzeSessionTimeout, want)
 	}
-	if implementSessionTimeout <= implementTimeout+pushAttempts*pushTimeout {
-		t.Errorf("implement session %s shorter than its steps", implementSessionTimeout)
+	if want := 190 * time.Minute; implementSessionTimeout != want {
+		t.Errorf("implement session %s, want %s", implementSessionTimeout, want)
 	}
-	if RunWorkspaceLifetime <= implementSessionTimeout || RunWorkspaceLifetime <= analyzeSessionTimeout {
-		t.Errorf("RunWorkspaceLifetime %s within a session", RunWorkspaceLifetime)
+	if want := 205 * time.Minute; RunWorkspaceLifetime != want {
+		t.Errorf("RunWorkspaceLifetime %s, want %s", RunWorkspaceLifetime, want)
 	}
 }

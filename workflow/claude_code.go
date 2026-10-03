@@ -114,12 +114,12 @@ func analyzeRepo(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCodeOutp
 	out := ClaudeCodeOutput{Repo: input.Repo, Ref: input.Ref}
 	var ccAct *activity.ClaudeCodeActivities
 
-	runCtx, err := openRun(ctx, analyzeSessionTimeout)
+	r, err := openRun(ctx, analyzeSessionTimeout)
 	if err != nil {
 		out.Error = err.Error()
 		return out, nil
 	}
-	defer workflow.CompleteSession(runCtx)
+	defer r.complete()
 
 	// The run id names the workspace: unique per execution, and stable across
 	// a replay, so a retried PrepareWorkspace reuses the same directory.
@@ -127,28 +127,28 @@ func analyzeRepo(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCodeOutp
 
 	var prepared activity.PrepareWorkspaceOutput
 	err = workflow.ExecuteActivity(
-		onRunWorker(runCtx, workflow.ActivityOptions{
+		r.step(workflow.ActivityOptions{
 			StartToCloseTimeout: prepareTimeout,
 			HeartbeatTimeout:    gitHeartbeatTimeout,
 			RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: prepareAttempts},
 		}),
 		ccAct.PrepareWorkspace,
 		activity.PrepareWorkspaceInput{Name: name, Repo: input.Repo, Ref: input.Ref},
-	).Get(runCtx, &prepared)
+	).Get(r.ctx, &prepared)
 	if err != nil {
-		if workerLost(runCtx, err) {
-			out.Error = workerStopped("while it cloned the repository", "nothing was done")
+		if r.failed(err) {
+			out.Error = r.lostAt("while it cloned the repository", "nothing was done")
 		} else {
 			out.Error = fmt.Sprintf("could not prepare the workspace: %v", err)
 		}
 		return out, nil
 	}
 	out.Commit = prepared.Commit
-	defer cleanupWorkspace(runCtx, prepared.Dir)
+	defer r.cleanup(prepared.Dir)
 
 	var result claudeCodeResult
 	err = workflow.ExecuteActivity(
-		onRunWorker(runCtx, workflow.ActivityOptions{
+		r.step(workflow.ActivityOptions{
 			StartToCloseTimeout: analyzeTimeout,
 			HeartbeatTimeout:    analyzeHeartbeat,
 			// Never retried: a run costs real money and has already changed
@@ -162,10 +162,10 @@ func analyzeRepo(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCodeOutp
 			PermissionMode:     analyzePermissionMode,
 			AppendSystemPrompt: analyzeSystemPrompt,
 		},
-	).Get(runCtx, &result)
+	).Get(r.ctx, &result)
 	if err != nil {
-		if workerLost(runCtx, err) {
-			out.Error = workerStopped("before the analysis finished", "there is no report")
+		if r.failed(err) {
+			out.Error = r.lostAt("before the analysis finished", "there is no report")
 		} else {
 			out.Error = fmt.Sprintf("the analysis did not complete: %v", err)
 		}
