@@ -24,6 +24,7 @@ type memStore struct {
 	messages []store.MessageWithID
 	appended []store.Message
 	title    string
+	agents   []store.Agent // nil: the default agent alone
 }
 
 func (m *memStore) CreateSession(_ context.Context, s store.Session) error {
@@ -58,6 +59,9 @@ func (m *memStore) GetAgent(_ context.Context, id string) (*store.Agent, error) 
 	return &store.Agent{ID: id}, nil
 }
 func (m *memStore) ListAgents(context.Context) ([]store.Agent, error) {
+	if m.agents != nil {
+		return m.agents, nil
+	}
 	return []store.Agent{{ID: "default"}}, nil
 }
 func (m *memStore) AppendMessage(_ context.Context, _, _ string, msg store.Message) error {

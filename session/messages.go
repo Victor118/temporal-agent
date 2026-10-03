@@ -1,6 +1,7 @@
 package session
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -20,56 +21,61 @@ import (
 // character (so an email address is not one), then a name.
 var mentionPattern = regexp.MustCompile(`(?:^|[^\w@.])@([\w-]+)`)
 
-// mentionsAgent reports whether text calls the session's agent by its
-// mention (@jarvis), the name the admin gave it. Case does not matter.
-func mentionsAgent(text, mention string) bool {
-	if mention == "" {
-		return false
+// maxAgentsPerMessage bounds the agents one message calls: each runs a full
+// turn, one after another, while the session's next messages wait.
+const maxAgentsPerMessage = 3
+
+// mentionedAgents returns the agents text calls by their mentions, in the
+// order they first appear, once each. Case does not matter, and a mention
+// that names no agent (a member, say) is ignored. Beyond max agents, the
+// mentions are dropped, and returned apart.
+//
+// Any agent of the installation may be called, for now: which agents a
+// session may call is a later restriction.
+func mentionedAgents(text string, agents []store.Agent, max int) (called []workflow.AddressedAgent, dropped []string) {
+	byMention := make(map[string]store.Agent, len(agents))
+	for _, a := range agents {
+		byMention[strings.ToLower(a.MentionName())] = a
 	}
+	seen := map[string]bool{}
 	for _, m := range mentionPattern.FindAllStringSubmatch(text, -1) {
-		if strings.EqualFold(m[1], mention) {
-			return true
+		a, ok := byMention[strings.ToLower(m[1])]
+		if !ok || seen[a.ID] {
+			continue
 		}
+		seen[a.ID] = true
+		if len(called) == max {
+			dropped = append(dropped, a.MentionName())
+			continue
+		}
+		called = append(called, workflow.AddressedAgent{ID: a.ID, Name: cmp.Or(a.Name, a.ID), Mention: a.MentionName()})
 	}
-	return false
+	return called, dropped
 }
 
-// callsAgent decides whether a human message starts an agent turn. Alone in a
-// session, a user talks to the agent; once several share it, they talk to
-// each other and call the agent by its mention. A session can force either.
-func callsAgent(mode string, members int, text, mention string) bool {
+// answered decides whether a human message starts agent turns. The agents it
+// mentions answer, whatever the session's mode. A message that mentions none
+// calls the session's agent, as the mode says: alone in a session, a user
+// talks to the agent; once several share it, they talk to each other and
+// call agents by their mentions. A session can force either.
+func answered(mode string, members int, mentioned []workflow.AddressedAgent) bool {
+	if len(mentioned) > 0 {
+		return true
+	}
 	switch mode {
 	case store.AgentModeAlways:
 		return true
 	case store.AgentModeMention:
-		return mentionsAgent(text, mention)
+		return false
 	default: // auto
-		return members <= 1 || mentionsAgent(text, mention)
+		return members <= 1
 	}
-}
-
-// agentMention is what calls the session's agent: its mention, or its ID
-// when it has none. The agent is the one a turn would run, the default one
-// when the session's is unset or gone (agentOrDefault).
-func (s *Service) agentMention(ctx context.Context, agentID string) (string, error) {
-	id, err := s.agentOrDefault(ctx, agentID)
-	if err != nil {
-		return "", err
-	}
-	a, err := s.store.GetAgent(ctx, id)
-	if err != nil {
-		return "", fmt.Errorf("load agent %q: %w", id, err)
-	}
-	if a == nil {
-		return id, nil
-	}
-	return a.MentionName(), nil
 }
 
 // Deliver takes a human message into a session, from any channel: it stores
-// it at once, shows it to the members, and starts an agent turn if the
-// message calls the agent. The turn then loads the whole conversation, the
-// messages the agent was not called on included. Reports whether it called.
+// it at once, shows it to the members, and starts the turns of the agents the
+// message calls (answered). Each turn then loads the whole conversation, the
+// messages no agent was called on included. Reports whether it called one.
 //
 // An empty message is refused: stored as an empty user turn, every later turn
 // would replay it to the LLM, which rejects a user message with no content —
@@ -96,12 +102,17 @@ func (s *Service) Deliver(ctx context.Context, sess *store.Session, author *stor
 	if err != nil {
 		return false, fmt.Errorf("list members: %w", err)
 	}
-	mention, err := s.agentMention(ctx, sess.AgentID)
+	agents, err := s.store.ListAgents(ctx)
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("list agents: %w", err)
 	}
-	called := callsAgent(sess.AgentMode, len(members), text, mention)
-	msg := workflow.UserMessage{Text: text, UserID: author.ID, UserName: author.Name(), Stored: true}
+	mentioned, dropped := mentionedAgents(text, agents, maxAgentsPerMessage)
+	if len(dropped) > 0 {
+		log.Printf("Session %s: a message calls more than %d agents; not called: %s", sess.SessionID, maxAgentsPerMessage, strings.Join(dropped, ", "))
+	}
+	called := answered(sess.AgentMode, len(members), mentioned)
+	// No agent mentioned: the session's agent answers (an empty list).
+	msg := workflow.UserMessage{Text: text, UserID: author.ID, UserName: author.Name(), Stored: true, Agents: mentioned}
 	s.publishUserMessage(sess.SessionID, msg, called)
 	if !called {
 		return false, nil
