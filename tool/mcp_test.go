@@ -98,8 +98,9 @@ func TestMCPClient_Handshake(t *testing.T) {
 }
 
 // A server may answer a POST with an event stream: the client reads it to
-// the response, skipping comments and notifications, and answers a ping the
-// server sends first.
+// the response, skipping comments, notifications and an error without an ID
+// (on a stream, it may be about any message), and answers a ping the server
+// sends first.
 func TestMCPClient_EventStreamResponse(t *testing.T) {
 	f := newFakeMCP(t, func(f *fakeMCP) { f.sse, f.preface = true, true })
 	tools := discover(t, NewMCPClient(f.config("srv")))
@@ -519,5 +520,61 @@ func TestMCPClient_DoesNotFollowRedirects(t *testing.T) {
 	}
 	if n := reached.Load(); n != 0 {
 		t.Errorf("the redirect was followed %d times", n)
+	}
+}
+
+// An error without an ID, as the whole answer to a POST, is the answer to
+// its request: the server could not read it.
+func TestMCPClient_ErrorWithoutIDAnswersAPost(t *testing.T) {
+	f := newFakeMCP(t, func(f *fakeMCP) { f.idless = true })
+	tools := discover(t, NewMCPClient(f.config("srv")))
+	f.mu.Lock()
+	f.callError = &jsonRPCError{Code: -32700, Message: "parse error"}
+	f.mu.Unlock()
+	var rpcErr *jsonRPCError
+	if _, err := call(t, tools, "srv_echo", `{}`); !errors.As(err, &rpcErr) || rpcErr.Code != -32700 {
+		t.Errorf("err = %v, want the error without an ID", err)
+	}
+}
+
+// A legacy server may echo request IDs as strings.
+func TestMCPClient_LegacyStringIDs(t *testing.T) {
+	f := newFakeMCP(t, func(f *fakeMCP) { f.legacy, f.stringIDs = true, true })
+	c := NewMCPClient(f.config("srv"))
+	defer c.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tools, err := c.Discover(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := tools[0].Execute(ctx, json.RawMessage(`{}`)); err != nil || got != "echo {}" {
+		t.Errorf("call = %q, %v", got, err)
+	}
+}
+
+// A legacy server's requests are answered a few at a time: beyond
+// mcpMaxReplies replies in flight, a request goes unanswered rather than
+// costing a goroutine and a POST each. The stream is read on meanwhile.
+func TestMCPClient_LegacyBoundsRepliesToTheServer(t *testing.T) {
+	gate := make(chan struct{})
+	f := newFakeMCP(t, func(f *fakeMCP) { f.legacy, f.pings, f.replyGate = true, 50, gate })
+	t.Cleanup(func() { close(gate) }) // before the server closes
+	c := NewMCPClient(f.config("srv"))
+	defer c.Close()
+
+	// The response comes after the 50 pings on the stream: once the
+	// discovery returns, the client has dealt with every one of them, its
+	// replies held by the server.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := c.Discover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the replies reach the server", func() bool { return f.count("(reply)") >= mcpMaxReplies })
+	// No other reply is under way: every request was answered or dropped
+	// before the response, and only mcpMaxReplies were let through.
+	if n := f.count("(reply)"); n != mcpMaxReplies {
+		t.Errorf("%d replies, want %d", n, mcpMaxReplies)
 	}
 }

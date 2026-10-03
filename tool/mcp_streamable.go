@@ -127,7 +127,7 @@ func (c *streamableConn) untilResponse(ctx context.Context, sse *sseReader, id i
 		msg, ok := parseMessage([]byte(ev.data))
 		switch {
 		case !ok:
-		case msg.answers(id) || msg.unattributedError():
+		case msg.answers(id):
 			res, err := msg.outcome()
 			return res, true, err
 		case msg.isRequest():

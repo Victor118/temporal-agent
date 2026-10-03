@@ -29,6 +29,11 @@ type fakeMCP struct {
 	linger  bool     // ... held open after the response
 	pages   int      // > 0: tools/list answers this many tools a page
 	gate    *barrier // non-nil: tools/list waits for every server sharing it
+	idless  bool     // JSON errors carry no ID, as for a request not read
+	// legacy only
+	pings     int           // pings sent before each response
+	stringIDs bool          // responses echo the request's ID as a string
+	replyGate chan struct{} // non-nil: the client's replies wait for it
 
 	down atomic.Bool // the connection is cut before any answer
 
@@ -314,6 +319,9 @@ func encodeResponse(id json.RawMessage, result any, rpcErr *jsonRPCError) string
 }
 
 func (f *fakeMCP) respond(w http.ResponseWriter, r *http.Request, id json.RawMessage, result any, rpcErr *jsonRPCError, preface bool) {
+	if rpcErr != nil && f.idless {
+		id = json.RawMessage("null")
+	}
 	resp := encodeResponse(id, result, rpcErr)
 	if !f.sse {
 		w.Header().Set("Content-Type", "application/json")
@@ -325,6 +333,7 @@ func (f *fakeMCP) respond(w http.ResponseWriter, r *http.Request, id json.RawMes
 	if preface {
 		io.WriteString(w, ": a comment\n\n")
 		io.WriteString(w, `data: {"jsonrpc":"2.0","method":"notifications/message","params":{"level":"info","data":"hi"}}`+"\n\n")
+		io.WriteString(w, `data: {"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"parse error about another message"}}`+"\n\n")
 		io.WriteString(w, `event: message`+"\n"+`data: {"jsonrpc":"2.0","id":"srv-1","method":"ping"}`+"\n\n")
 	}
 	if f.early {
@@ -405,7 +414,14 @@ func (f *fakeMCP) serveLegacyPost(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown session", http.StatusNotFound)
 		return
 	}
+	if m.Method == "" && f.replyGate != nil {
+		<-f.replyGate
+	}
 	w.WriteHeader(http.StatusAccepted)
+	id := m.ID
+	if f.stringIDs {
+		id = json.RawMessage(strconv.Quote(string(m.ID)))
+	}
 	switch {
 	case m.Method == "initialize":
 		var p struct {
@@ -415,7 +431,7 @@ func (f *fakeMCP) serveLegacyPost(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		s.version = p.ProtocolVersion
 		f.mu.Unlock()
-		f.push(sid, encodeResponse(m.ID, map[string]any{
+		f.push(sid, encodeResponse(id, map[string]any{
 			"protocolVersion": "2024-11-05",
 			"capabilities":    map[string]any{"tools": map[string]any{}},
 			"serverInfo":      map[string]any{"name": "fake", "version": "0"},
@@ -423,15 +439,19 @@ func (f *fakeMCP) serveLegacyPost(w http.ResponseWriter, r *http.Request) {
 	case m.Method == "" || len(m.ID) == 0:
 		f.notified(s, m)
 	case !f.isInitialized(s):
-		f.push(sid, encodeResponse(m.ID, nil, &jsonRPCError{Code: -32600, Message: "not initialized"}))
+		f.push(sid, encodeResponse(id, nil, &jsonRPCError{Code: -32600, Message: "not initialized"}))
 	default:
 		go func() {
 			result, rpcErr := f.answer(m)
 			if f.preface {
 				f.push(sid, `{"jsonrpc":"2.0","method":"notifications/progress","params":{}}`)
+				f.push(sid, `{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"parse error"}}`)
 				f.push(sid, `{"jsonrpc":"2.0","id":7,"method":"ping"}`)
 			}
-			f.push(sid, encodeResponse(m.ID, result, rpcErr))
+			for i := range f.pings {
+				f.push(sid, fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"ping"}`, 1000+i))
+			}
+			f.push(sid, encodeResponse(id, result, rpcErr))
 		}()
 	}
 }

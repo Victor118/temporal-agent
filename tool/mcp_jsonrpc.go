@@ -73,26 +73,34 @@ func (m jsonRPCMessage) hasID() bool {
 // isRequest: the server asks something and waits for the answer.
 func (m jsonRPCMessage) isRequest() bool { return m.Method != "" && m.hasID() }
 
-// answers reports whether m is the response to the request numbered id. A
+// responseID is the ID of the request m answers, if m is a response. A
 // server echoes the ID as sent; one written as a string is accepted too.
-func (m jsonRPCMessage) answers(id int64) bool {
+func (m jsonRPCMessage) responseID() (int64, bool) {
 	if m.Method != "" || !m.hasID() {
-		return false
+		return 0, false
 	}
 	var n int64
 	if json.Unmarshal(m.ID, &n) == nil {
-		return n == id
+		return n, true
 	}
 	var s string
 	if json.Unmarshal(m.ID, &s) == nil {
 		n, err := strconv.ParseInt(s, 10, 64)
-		return err == nil && n == id
+		return n, err == nil
 	}
-	return false
+	return 0, false
+}
+
+// answers reports whether m is the response to the request numbered id.
+func (m jsonRPCMessage) answers(id int64) bool {
+	n, ok := m.responseID()
+	return ok && n == id
 }
 
 // unattributedError: an error response without an ID, which a server sends
-// when it could not read the request at all.
+// when it could not read the request at all. Only the answer to a POST
+// alone (a JSON body) can be taken for the request's: on a stream, it may be
+// about any message.
 func (m jsonRPCMessage) unattributedError() bool {
 	return m.Method == "" && !m.hasID() && m.Error != nil
 }

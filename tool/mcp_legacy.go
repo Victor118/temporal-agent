@@ -15,6 +15,10 @@ import (
 	"time"
 )
 
+// mcpMaxReplies bounds the replies to a legacy server's requests being sent
+// at once.
+const mcpMaxReplies = 4
+
 // sseConn is a session over the HTTP+SSE transport of MCP 2024-11-05,
 // deprecated since but still served: the client keeps a GET event stream
 // open, the server names on it the endpoint to POST messages to, and sends
@@ -25,6 +29,8 @@ type sseConn struct {
 	endpoint string
 	ids      *atomic.Int64
 	cancel   context.CancelFunc // ends the stream
+
+	replying chan struct{} // a slot per reply to the server being sent
 
 	mu      sync.Mutex
 	pending map[int64]chan jsonRPCMessage
@@ -100,6 +106,7 @@ func dialSSE(ctx context.Context, httpc *http.Client, rawURL, apiKey string, ids
 		endpoint: target,
 		ids:      ids,
 		cancel:   cancel,
+		replying: make(chan struct{}, mcpMaxReplies),
 		pending:  make(map[int64]chan jsonRPCMessage),
 		done:     make(chan struct{}),
 	}
@@ -130,6 +137,7 @@ func sameOriginEndpoint(base, endpoint string) (string, error) {
 func (c *sseConn) read(ctx context.Context, sse *sseReader, body io.ReadCloser) {
 	defer body.Close()
 	var err error
+	dropped := false // logged that requests went unanswered
 	for {
 		var ev sseEvent
 		if ev, err = sse.next(); err != nil {
@@ -142,14 +150,25 @@ func (c *sseConn) read(ctx context.Context, sse *sseReader, body io.ReadCloser) 
 		switch {
 		case !ok:
 		case msg.isRequest():
-			go func() {
-				rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-				defer cancel()
-				if err := c.send(rctx, replyTo(msg)); err != nil {
-					log.Printf("Warning: mcp: reply to the server's %q request: %v", msg.Method, err)
+			// Answered aside, the stream read on meanwhile, but a few at
+			// a time: a server asking more than that gets no answer.
+			select {
+			case c.replying <- struct{}{}:
+				go func() {
+					defer func() { <-c.replying }()
+					rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+					defer cancel()
+					if err := c.send(rctx, replyTo(msg)); err != nil {
+						log.Printf("Warning: mcp: reply to the server's %q request: %v", msg.Method, err)
+					}
+				}()
+			default:
+				if !dropped {
+					log.Printf("Warning: mcp: the server sent more than %d requests at once; those beyond are not answered", cap(c.replying))
+					dropped = true
 				}
-			}()
-		case msg.Method == "" && msg.hasID():
+			}
+		default:
 			c.deliver(msg)
 		}
 	}
@@ -159,9 +178,11 @@ func (c *sseConn) read(ctx context.Context, sse *sseReader, body io.ReadCloser) 
 	c.mu.Unlock()
 }
 
+// deliver hands a response to the request waiting for it. Anything else
+// (a notification, a response nobody waits for) is dropped.
 func (c *sseConn) deliver(msg jsonRPCMessage) {
-	var id int64
-	if json.Unmarshal(msg.ID, &id) != nil {
+	id, ok := msg.responseID()
+	if !ok {
 		return
 	}
 	c.mu.Lock()
