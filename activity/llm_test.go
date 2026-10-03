@@ -353,7 +353,7 @@ func TestCallLLM_BuildsThePromptAsBefore(t *testing.T) {
 
 // The answer says which version of the user's memory the prompt held, the
 // one the model read: 0 for a memory never saved, none when the prompt held
-// no memory, asked for or not.
+// no memory, asked for (unread) or not.
 func TestCallLLM_ReturnsTheMemoryVersionInThePrompt(t *testing.T) {
 	st := &memConversation{memory: map[string]store.Memory{"u-alice": {Content: "likes tea", Version: 3}}}
 	msgs := []store.Message{{Role: store.RoleUser, Content: text("go")}}
@@ -362,11 +362,12 @@ func TestCallLLM_ReturnsTheMemoryVersionInThePrompt(t *testing.T) {
 		of     string
 		memErr error
 		want   *int64
+		unread bool
 	}{
-		{"saved", "u-alice", nil, ptr(int64(3))},
-		{"never saved", "u-bob", nil, ptr(int64(0))},
-		{"unread", "u-alice", errors.New("db down"), nil},
-		{"not asked", "", nil, nil},
+		{"saved", "u-alice", nil, ptr(int64(3)), false},
+		{"never saved", "u-bob", nil, ptr(int64(0)), false},
+		{"unread", "u-alice", errors.New("db down"), nil, true},
+		{"not asked", "", nil, nil, false},
 	} {
 		st.memErr = tc.memErr
 		model := &recordingModel{}
@@ -374,8 +375,8 @@ func TestCallLLM_ReturnsTheMemoryVersionInThePrompt(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !reflect.DeepEqual(resp.MemoryVersion, tc.want) || resp.Content != "done" {
-			t.Errorf("%s: answer %+v, memory version %v, want %v", tc.name, resp.ChatResponse, deref(resp.MemoryVersion), deref(tc.want))
+		if !reflect.DeepEqual(resp.MemoryVersion, tc.want) || resp.MemoryUnread != tc.unread || resp.Content != "done" {
+			t.Errorf("%s: answer %+v, memory version %v (unread %v), want %v (unread %v)", tc.name, resp.ChatResponse, deref(resp.MemoryVersion), resp.MemoryUnread, deref(tc.want), tc.unread)
 		}
 		if inPrompt := strings.Contains(model.requests[0].System, "likes tea"); inPrompt != (tc.name == "saved") {
 			t.Errorf("%s: memory in the prompt = %v", tc.name, inPrompt)

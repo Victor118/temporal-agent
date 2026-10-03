@@ -45,9 +45,10 @@ type Tool struct {
 	// pushes code, sends mail). Shown in the back-office; the allowlist is
 	// what grants or denies it.
 	Sensitive bool `json:"-"`
-	// PrivateInput: its input is the user's alone, and is not shown to the
-	// session's other members, nor put in a summary for someone else's fork.
-	// Nor is its result, which may repeat it (DisplayResult).
+	// PrivateInput: its input and its result are the user's alone (the
+	// result may repeat the input). Neither is shown to the session's other
+	// members, put in a summary for someone else's fork, nor read by an
+	// agent's turn that answers another user (DisplayInput, DisplayResult).
 	PrivateInput bool `json:"-"`
 	// NeedsCallContext: the tool receives the caller's context (CallContext):
 	// a workflow tool in its input, alongside what the model wrote; an

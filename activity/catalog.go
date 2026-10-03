@@ -193,8 +193,8 @@ func (c *Catalog) AgentLabels() map[string]conversation.Label {
 	return labels
 }
 
-// PrivateInput reports whether a published tool keeps its input from the
-// session's members (tool.PrivateInputs).
+// PrivateInput reports whether a published tool keeps its input and its
+// result from the session's members (tool.PrivateInputs).
 func (c *Catalog) PrivateInput(name string) bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()

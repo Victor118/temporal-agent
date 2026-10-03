@@ -31,7 +31,7 @@ func TestDisplayInput_HidesMemory(t *testing.T) {
 
 func TestWithCallContext(t *testing.T) {
 	cc := CallContext{AgentChain: []string{"default", "analyst"}, Channel: "telegram", ChannelID: "42"}
-	got, err := WithCallContext(json.RawMessage(`{"question":"ok?","channel":"forged","agent":"forged","memory_version":99}`), cc)
+	got, err := WithCallContext(json.RawMessage(`{"question":"ok?","channel":"forged","agent":"forged","memory_version":99,"memory_unread":true}`), cc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +40,7 @@ func TestWithCallContext(t *testing.T) {
 		CallContext
 	}
 	json.Unmarshal(got, &in)
-	if in.Question != "ok?" || in.Channel != "telegram" || in.ChannelID != "42" || len(in.AgentChain) != 2 || in.Agent != "" || in.MemoryVersion != nil {
+	if in.Question != "ok?" || in.Channel != "telegram" || in.ChannelID != "42" || len(in.AgentChain) != 2 || in.Agent != "" || in.MemoryVersion != nil || in.MemoryUnread {
 		t.Errorf("input %s", got)
 	}
 	if _, err := WithCallContext(json.RawMessage(`null`), cc); err != nil {
@@ -112,25 +112,30 @@ func TestSaveUserMemory(t *testing.T) {
 	alice := WithUserID(context.Background(), "u-alice")
 	read := func(v int64) context.Context { return WithCall(alice, CallContext{MemoryVersion: &v}) }
 
-	// Read at 3, changed since by another session: nothing saved, and the
-	// model is given the memory to merge into.
+	// Read at 3, changed since by another session: nothing saved. The
+	// result does not repeat the memory, which stays in the session's
+	// history: the next prompt holds it.
 	_, err := save(read(3))
-	if err == nil || !strings.Contains(err.Error(), "changed elsewhere") ||
-		!strings.Contains(err.Error(), "likes tea; lives in Lyon") || !strings.Contains(err.Error(), "call save_user_memory again") {
+	if err == nil || !strings.Contains(err.Error(), "changed since you read it") ||
+		strings.Contains(err.Error(), "Lyon") || !strings.Contains(err.Error(), "call save_user_memory again") {
 		t.Errorf("conflict: %v", err)
 	}
 	if saver.memory.Version != 4 {
 		t.Errorf("a conflicting save wrote: %+v", saver.memory)
 	}
 
-	// No version: the prompt held no memory (a sub-agent), or no LLM call
-	// was made. Refused before the store.
+	// No version: the prompt held no memory (a sub-agent, no LLM call), or
+	// could not read it. Refused before the store, each with its advice.
 	saves := saver.saves
-	for name, ctx := range map[string]context.Context{
-		"no call context": alice,
-		"no version":      WithCall(alice, CallContext{Channel: "web"}),
+	for name, tc := range map[string]struct {
+		ctx  context.Context
+		want string
+	}{
+		"no call context": {alice, "a sub-agent is given none"},
+		"no version":      {WithCall(alice, CallContext{Channel: "web"}), "a sub-agent is given none"},
+		"memory unread":   {WithCall(alice, CallContext{MemoryUnread: true}), "Try again at your next step"},
 	} {
-		if _, err := save(ctx); err == nil || !strings.Contains(err.Error(), "not in your prompt") {
+		if _, err := save(tc.ctx); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
@@ -146,10 +151,9 @@ func TestSaveUserMemory(t *testing.T) {
 	}
 }
 
-// The result of a private tool is shown as its input is: a conflict carries
-// the memory.
+// The result of a private tool is shown as its input is: it may repeat it.
 func TestDisplayResult_HidesAPrivateResult(t *testing.T) {
-	if got := DisplayResult(true, "Current version: Alice likes tea"); got != "(private)" {
+	if got := DisplayResult(true, "Alice likes tea"); got != "(private)" {
 		t.Errorf("private result shown: %q", got)
 	}
 	if got := DisplayResult(false, "page"); got != "page" {

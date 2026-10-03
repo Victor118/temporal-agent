@@ -72,9 +72,9 @@ func toolResult(req provider.ChatRequest, id string) *provider.ToolResultInfo {
 
 // save_user_memory replaces the version of the memory the model read at the
 // LLM call that made it. Another session saving in between makes it a
-// conflict, an error result holding the memory now; the next call reads that
-// memory with its version, and the merged save succeeds. A session turn and a
-// scheduled task alike.
+// conflict, an error result that does not repeat the memory; the next call
+// reads that memory with its version in its prompt, and the merged save
+// succeeds. A session turn and a scheduled task alike.
 func TestAgentWorkflow_SaveMemoryFromTheVersionTheModelRead(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -125,8 +125,8 @@ func TestAgentWorkflow_SaveMemoryFromTheVersionTheModelRead(t *testing.T) {
 			if len(sent) != 3 {
 				t.Fatalf("%d LLM calls, want 3", len(sent))
 			}
-			if r := toolResult(sent[1], "m1"); r == nil || !r.IsError || !strings.Contains(r.Content, "changed elsewhere") || !strings.Contains(r.Content, "lives in Lyon") {
-				t.Errorf("conflict result %+v", r)
+			if r := toolResult(sent[1], "m1"); r == nil || !r.IsError || !strings.Contains(r.Content, "changed since you read it") || strings.Contains(r.Content, "Lyon") {
+				t.Errorf("conflict result %+v, want a conflict that does not repeat the memory", r)
 			}
 			if !strings.Contains(sent[1].System, "lives in Lyon") {
 				t.Errorf("the second call did not read the new memory: %q", sent[1].System)
@@ -160,10 +160,51 @@ func TestAgentWorkflow_SubAgentCannotSaveMemoryBlind(t *testing.T) {
 	if got := calls(); len(got) != 1 || got[0].Call == nil || got[0].Call.MemoryVersion != nil {
 		t.Errorf("tool calls %+v, want one with no memory version", got)
 	}
-	if r := toolResult(f.model.sent()[1], "m1"); r == nil || !r.IsError || !strings.Contains(r.Content, "not in your prompt") {
+	if r := toolResult(f.model.sent()[1], "m1"); r == nil || !r.IsError || !strings.Contains(r.Content, "a sub-agent is given none") {
 		t.Errorf("result %+v", r)
 	}
 	if m := f.session.memory["u-alice"]; m != (store.Memory{Content: "likes tea", Version: 3}) {
 		t.Errorf("memory %+v", m)
+	}
+}
+
+// Two saves in one answer read the same version: the first to reach the store
+// replaces it, the other is a conflict, and nothing of either is lost
+// silently.
+func TestAgentWorkflow_TwoSavesInOneAnswer(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+	both := provider.ChatResponse{ToolCalls: []provider.ToolCallInfo{
+		saveMemory("m1", "likes coffee").ToolCalls[0],
+		saveMemory("m2", "likes cake").ToolCalls[0],
+	}}
+	f := registerLLM(env, answers(both, done))
+	f.session.memory["u-alice"] = store.Memory{Content: "likes tea", Version: 3}
+	calls := registerMemoryTool(env, f)
+
+	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{
+		SessionID: "s1", TurnKey: "run-1", UserID: "u-alice", UserName: "Alice", AgentID: "default", UserMessage: "coffee and cake",
+	})
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatal(err)
+	}
+	got := calls()
+	if len(got) != 2 || got[0].Call == nil || got[1].Call == nil || *got[0].Call.MemoryVersion != 3 || *got[1].Call.MemoryVersion != 3 {
+		t.Fatalf("tool calls %+v, want two from version 3", got)
+	}
+	sent := f.model.sent()
+	r1, r2 := toolResult(sent[1], "m1"), toolResult(sent[1], "m2")
+	if r1 == nil || r2 == nil {
+		t.Fatalf("results %+v, %+v", r1, r2)
+	}
+	won, lost := r1, r2
+	if r1.IsError {
+		won, lost = r2, r1
+	}
+	if won.IsError || won.Content != "Memory saved." || !lost.IsError || !strings.Contains(lost.Content, "changed since you read it") {
+		t.Errorf("results %+v, %+v: want one saved, one conflict", r1, r2)
+	}
+	if m := f.session.memory["u-alice"]; m.Version != 4 || (m.Content != "likes coffee" && m.Content != "likes cake") {
+		t.Errorf("memory %+v, want one save at version 4", m)
 	}
 }

@@ -15,18 +15,21 @@ type MemorySaver interface {
 	SaveMemory(ctx context.Context, scope store.MemoryScope, scopeID string, content string, expected int64) (int64, error)
 }
 
-// memoryUnread refuses a save from a call whose prompt held no memory: the
-// save replaces the memory whole, and the model would replace what it never
-// read. A sub-agent is given none.
-const memoryUnread = "Cannot save memory: the user's current memory is not in your prompt, and a save replaces it whole. If you are working for another agent, put what is worth remembering in your answer instead."
+// A save replaces the memory whole: it is refused from a call whose prompt
+// held no memory, the model would replace what it never read. Either the
+// memory could not be read for this step (the next LLM call reads it again),
+// or the run is given none (a sub-agent: its parent has the memory).
+const (
+	memoryUnread = "Cannot save memory: the user's memory could not be read for this step, and a save replaces it whole. Nothing was saved. Try again at your next step."
+	memoryAbsent = "Cannot save memory: the user's memory is not in your prompt (a sub-agent is given none), and a save replaces it whole. Nothing was saved. If you are working for another agent, put what is worth remembering in your answer instead."
+)
 
-// memoryConflict tells the model its save came after another one, from
-// another session or fork, and what the memory is now: the next LLM call
-// reads it with its new version, so the merged save succeeds.
-func memoryConflict(current string) string {
-	return "The memory was changed elsewhere since you read it (another session or fork). Nothing was saved. Current version:\n\n" +
-		current + "\n\nMerge your change into it and call save_user_memory again."
-}
+// memoryConflict tells the model its save came after another one. It does
+// not repeat the memory: this result stays in the session's history, which
+// the agent reads when it answers another member, and the memory may hold
+// what the user said elsewhere. The next LLM call reads the memory again, at
+// its new version, so the merged save succeeds.
+const memoryConflict = "The memory was changed since you read it (a parallel save, another session or a fork). Nothing was saved. Your system prompt now holds the current version: merge your change into it and call save_user_memory again."
 
 // RegisterMemoryTools registers tools that let the LLM persist user memory.
 func RegisterMemoryTools(registry *Registry, st MemorySaver) {
@@ -35,7 +38,8 @@ func RegisterMemoryTools(registry *Registry, st MemorySaver) {
 		Description: `Save or update your memory about the user who wrote the message you are answering. Use this to remember important information across sessions: preferences, role, expertise, ongoing projects, communication style, etc.
 The content you save will be loaded automatically at the start of every future session with this user.
 The memory is private to that one user. In a session several people share, record only what concerns the author of the current message, never anything about the other participants: it would follow this user into sessions the others are not part of.
-Write the memory as a concise, structured note. Each call REPLACES the previous memory — include everything you want to remember.`,
+Write the memory as a concise, structured note. Each call REPLACES the previous memory — include everything you want to remember.
+Only works when the user's memory is in your system prompt; a sub-agent has none.`,
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -48,7 +52,7 @@ Write the memory as a concise, structured note. Each call REPLACES the previous 
 		}`),
 		Kind: ToolKindActivity,
 		// Everyone in a shared session sees the tool calls, and a user's
-		// memory is theirs alone; a conflict answers with that memory.
+		// memory is theirs alone.
 		PrivateInput: true,
 		// The version of the memory the model read (CallContext.MemoryVersion):
 		// the save replaces that one only.
@@ -69,13 +73,16 @@ Write the memory as a concise, structured note. Each call REPLACES the previous 
 			}
 			call, _ := CallFromContext(ctx)
 			if call.MemoryVersion == nil {
-				return "", errors.New(memoryUnread)
+				if call.MemoryUnread {
+					return "", errors.New(memoryUnread)
+				}
+				return "", errors.New(memoryAbsent)
 			}
 
 			_, err := st.SaveMemory(ctx, store.MemoryScopeUser, userID, params.Content, *call.MemoryVersion)
 			var conflict *store.MemoryConflict
 			if errors.As(err, &conflict) {
-				return "", errors.New(memoryConflict(conflict.Current.Content))
+				return "", errors.New(memoryConflict)
 			}
 			if err != nil {
 				return "", fmt.Errorf("Failed to save memory: %w", err)

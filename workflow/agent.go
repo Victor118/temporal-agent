@@ -322,7 +322,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 		// The tools this answer calls act on what the model read: a memory
 		// save replaces the version this call's prompt held, and none when
 		// it held none.
-		call.MemoryVersion = response.MemoryVersion
+		call.MemoryVersion, call.MemoryUnread = response.MemoryVersion, response.MemoryUnread
 
 		// No tool calls → final response
 		if len(response.ToolCalls) == 0 {

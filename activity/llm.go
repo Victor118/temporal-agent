@@ -114,18 +114,26 @@ type TurnHistory struct {
 	TailStart int             `json:"tail_start,omitempty"`
 }
 
-// LLMTurnResponse is the model's answer, and the version of the user's memory
-// its prompt held: what the model read, so the version a save_user_memory it
+// LLMTurnResponse is the model's answer, and what its prompt held of the
+// user's memory: what the model read, so the version a save_user_memory it
 // calls replaces. The model never sees the number.
 type LLMTurnResponse struct {
 	provider.ChatResponse
+	PromptMemory
+}
+
+// PromptMemory is what a call's prompt held of the user's memory.
+type PromptMemory struct {
 	// MemoryVersion: 0 for a memory never saved; nil when the prompt held
-	// none (none asked, or unreadable), and a save would be blind.
+	// none, and a save would be blind.
 	MemoryVersion *int64 `json:"memory_version,omitempty"`
+	// MemoryUnread: the prompt was to hold the memory, which could not be
+	// read (MemoryVersion nil). The next call reads it again.
+	MemoryUnread bool `json:"memory_unread,omitempty"`
 }
 
 func (a *LLMActivities) CallLLM(ctx context.Context, req LLMTurnRequest) (LLMTurnResponse, error) {
-	request, memoryVersion, err := a.buildRequest(ctx, req)
+	request, memory, err := a.buildRequest(ctx, req)
 	if err != nil {
 		return LLMTurnResponse{}, err
 	}
@@ -136,7 +144,7 @@ func (a *LLMActivities) CallLLM(ctx context.Context, req LLMTurnRequest) (LLMTur
 	}
 
 	chat, err := a.Provider.Chat(ctx, request)
-	resp := LLMTurnResponse{ChatResponse: chat, MemoryVersion: memoryVersion}
+	resp := LLMTurnResponse{ChatResponse: chat, PromptMemory: memory}
 	if err != nil {
 		// Under the guard, the model refused it all the same: the same
 		// advice, never retried.
@@ -161,12 +169,12 @@ func (a *LLMActivities) CallLLM(ctx context.Context, req LLMTurnRequest) (LLMTur
 	return resp, err
 }
 
-// buildRequest builds the request req points at, and says which version of
-// the user's memory its prompt holds (nil: none).
-func (a *LLMActivities) buildRequest(ctx context.Context, req LLMTurnRequest) (provider.ChatRequest, *int64, error) {
+// buildRequest builds the request req points at, and says what its prompt
+// holds of the user's memory.
+func (a *LLMActivities) buildRequest(ctx context.Context, req LLMTurnRequest) (provider.ChatRequest, PromptMemory, error) {
 	messages, err := a.conversation(ctx, req)
 	if err != nil {
-		return provider.ChatRequest{}, nil, err
+		return provider.ChatRequest{}, PromptMemory{}, err
 	}
 	chat := conversation.Convert(messages, conversation.View{Self: req.AgentID, Agents: a.Catalog.AgentLabels(), Private: a.Catalog})
 
@@ -186,7 +194,7 @@ func (a *LLMActivities) buildRequest(ctx context.Context, req LLMTurnRequest) (p
 	if len(chat) >= 2 {
 		chat[len(chat)-2].CacheBreakpoint = true
 	}
-	system, memoryVersion := a.systemPrompt(ctx, req, offered)
+	system, memory := a.systemPrompt(ctx, req, offered)
 	return provider.ChatRequest{
 		Model:       req.Model,
 		System:      system,
@@ -194,7 +202,7 @@ func (a *LLMActivities) buildRequest(ctx context.Context, req LLMTurnRequest) (p
 		Tools:       tools,
 		MaxTokens:   maxResponseTokens,
 		CacheSystem: true,
-	}, memoryVersion, nil
+	}, memory, nil
 }
 
 // withdrawnDescription is what the model reads of a tool withdrawn while it
@@ -268,29 +276,29 @@ func (a *LLMActivities) conversation(ctx context.Context, req LLMTurnRequest) ([
 }
 
 // systemPrompt builds the prompt: the override or the agent's base prompt
-// for the tools offered, the user's memory, the part note; and returns the
-// version of that memory (nil: none in the prompt). A memory that cannot be
-// read costs the personalisation, not the call, and its saves: their version
-// is unknown.
-func (a *LLMActivities) systemPrompt(ctx context.Context, req LLMTurnRequest, tools []string) (string, *int64) {
+// for the tools offered, the user's memory, the part note; and returns what
+// it holds of that memory. A memory that cannot be read costs the
+// personalisation, not the call, and its saves: their version is unknown.
+func (a *LLMActivities) systemPrompt(ctx context.Context, req LLMTurnRequest, tools []string) (string, PromptMemory) {
 	p := req.Prompt
 	prompt := p.Override
 	if prompt == "" {
 		prompt = a.Prompts.AgentPrompt(req.AgentID, tools)
 	}
-	var version *int64
+	var held PromptMemory
 	if p.MemoryOf != "" {
 		memory, err := a.Store.LoadMemory(ctx, store.MemoryScopeUser, p.MemoryOf)
 		if err != nil {
 			log.Printf("LLM call: memory of user %s not loaded: %v", p.MemoryOf, err)
+			held.MemoryUnread = true
 		} else {
-			version = &memory.Version
+			held.MemoryVersion = &memory.Version
 			if memory.Content != "" {
 				prompt += userMemorySection(p.UserName, memory.Content)
 			}
 		}
 	}
-	return prompt + p.PartNote, version
+	return prompt + p.PartNote, held
 }
 
 func (a *LLMActivities) maxContextBytes() int {

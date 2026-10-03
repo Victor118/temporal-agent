@@ -33,7 +33,7 @@ func PrivateSetOf(records []store.ToolRecord) PrivateSet {
 var hiddenInput = json.RawMessage(`{"content":"(private)"}`)
 
 // DisplayInput is the input of a tool call as the session's members see it:
-// hidden when the tool's input is private.
+// hidden when the tool is private (Tool.PrivateInput: input and result).
 func DisplayInput(private bool, input json.RawMessage) json.RawMessage {
 	if private {
 		return hiddenInput
@@ -42,12 +42,11 @@ func DisplayInput(private bool, input json.RawMessage) json.RawMessage {
 }
 
 // hiddenResult stands for the result of a call to a private tool: it may
-// carry what the input did (save_user_memory answers a conflict with the
-// memory).
+// repeat what the input carried.
 const hiddenResult = "(private)"
 
 // DisplayResult is the result of a tool call as the session's members see it:
-// hidden when the tool's input is private.
+// hidden when the tool is private (Tool.PrivateInput: input and result).
 func DisplayResult(private bool, content string) string {
 	if private {
 		return hiddenResult
@@ -56,7 +55,11 @@ func DisplayResult(private bool, content string) string {
 }
 
 // CallContext is what a tool flagged NeedsCallContext receives besides the
-// model's input: who called it, and where its user is.
+// model's input: what the run knows of the call and the model must not
+// forge. Who called (the chain of agents), where its user is (the channel),
+// how to sign, what the model read of the user's memory. Set by the workflow,
+// never taken from the model's input (WithCallContext replaces any such
+// field); a value the model could choose belongs in the tool's input instead.
 type CallContext struct {
 	AgentChain []string `json:"agent_chain,omitempty"`
 	Channel    string   `json:"channel,omitempty"`
@@ -68,6 +71,10 @@ type CallContext struct {
 	// the prompt of the call that made this one: what save_user_memory
 	// replaces. Nil: the prompt held none.
 	MemoryVersion *int64 `json:"memory_version,omitempty"`
+	// MemoryUnread: the prompt was to hold the user's memory, and it could
+	// not be read (MemoryVersion is nil). False with no version: the run is
+	// given no memory, a sub-agent.
+	MemoryUnread bool `json:"memory_unread,omitempty"`
 }
 
 // WithCallContext adds cc's fields to a tool's input object. They are the
@@ -86,6 +93,7 @@ func WithCallContext(input json.RawMessage, cc CallContext) (json.RawMessage, er
 	delete(fields, "channel_id")
 	delete(fields, "agent")
 	delete(fields, "memory_version")
+	delete(fields, "memory_unread")
 	extra, _ := json.Marshal(cc)
 	var ccFields map[string]json.RawMessage
 	json.Unmarshal(extra, &ccFields)
