@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -35,6 +36,9 @@ type routeStore struct {
 	created  []store.Session
 	appended []store.Message
 	tools    []store.ToolRecord
+	// Other sessions than s1, with their members: a fork's parent.
+	others       map[string]store.Session
+	otherMembers map[string][]string
 }
 
 func (f *routeStore) user(match func(store.User) bool) *store.User {
@@ -62,6 +66,9 @@ func (f *routeStore) GetLoginSessionUser(_ context.Context, tokenHash string) (*
 
 func (f *routeStore) GetSession(_ context.Context, id string) (*store.Session, error) {
 	if id != f.session.SessionID {
+		if s, ok := f.others[id]; ok {
+			return &s, nil
+		}
 		return nil, nil
 	}
 	return &f.session, nil
@@ -69,7 +76,7 @@ func (f *routeStore) GetSession(_ context.Context, id string) (*store.Session, e
 
 func (f *routeStore) IsSessionMember(_ context.Context, sessionID, userID string) (bool, error) {
 	if sessionID != f.session.SessionID {
-		return false, nil
+		return slices.Contains(f.otherMembers[sessionID], userID), nil
 	}
 	for _, m := range f.members {
 		if m == userID {
@@ -552,5 +559,94 @@ func TestRoutes_HistoryListsAForkReport(t *testing.T) {
 	fork, _ := history[0]["fork"].(map[string]any)
 	if e := history[0]; e["type"] != "fork_report" || e["author"] != "Bob" || e["content"] != "done" || fork["session_id"] != "f1" || fork["up_to_message_id"] != 7.0 {
 		t.Errorf("entry %v", e)
+	}
+}
+
+// newReportTest makes s1 a fork of p1, its brief written. Alice and Bob are
+// members of s1; Bob alone is a member of p1.
+func newReportTest(t *testing.T) (http.Handler, *routeStore, *fakeTemporal) {
+	t.Helper()
+	h, st, tc := newForkTest(t)
+	st.session.ParentSessionID, st.session.ForkedAtMessageID = "p1", 1
+	st.messages["s1"][0].Kind = store.KindForkSummary
+	st.others = map[string]store.Session{"p1": {SessionID: "p1", CreatedBy: "u-bob", Title: "Plan"}}
+	st.otherMembers = map[string][]string{"p1": {"u-bob"}}
+	return h, st, tc
+}
+
+// A member of the fork and of its parent reports; a member of the fork alone
+// cannot, nor can a stranger to the fork.
+func TestRoutes_ReportToParent(t *testing.T) {
+	h, _, tc := newReportTest(t)
+	bob, alice, carol := logIn(t, h, "bob@example.com"), logIn(t, h, "alice@example.com"), logIn(t, h, "carol@example.com")
+
+	if w := call(t, h, http.MethodPost, "/sessions/s1/report", "", alice); w.Code != http.StatusForbidden {
+		t.Errorf("a member of the fork alone: %d %s", w.Code, w.Body)
+	}
+	if w := call(t, h, http.MethodPost, "/sessions/s1/report", "", carol); w.Code != http.StatusNotFound {
+		t.Errorf("a stranger to the fork: %d", w.Code)
+	}
+	if len(tc.started) != 0 {
+		t.Fatalf("started %v", tc.started)
+	}
+	if w := call(t, h, http.MethodPost, "/sessions/s1/report", "", bob); w.Code != http.StatusAccepted {
+		t.Fatalf("bob: %d %s", w.Code, w.Body)
+	}
+	if len(tc.started) != 1 || tc.started[0] != workflow.ReportWorkflowID("s1", 0) {
+		t.Errorf("started %v", tc.started)
+	}
+
+	// The session's info says who can report, and why not.
+	var info struct {
+		Report struct {
+			CanReport bool   `json:"can_report"`
+			Refused   string `json:"refused"`
+		} `json:"report"`
+	}
+	json.Unmarshal(call(t, h, http.MethodGet, "/sessions/s1", "", bob).Body.Bytes(), &info)
+	if !info.Report.CanReport || info.Report.Refused != "" {
+		t.Errorf("bob's report state %+v", info.Report)
+	}
+	json.Unmarshal(call(t, h, http.MethodGet, "/sessions/s1", "", alice).Body.Bytes(), &info)
+	if info.Report.CanReport || info.Report.Refused != session.ErrNotParentMember.Error() {
+		t.Errorf("alice's report state %+v", info.Report)
+	}
+}
+
+// A session that is not a fork, or with nothing to report: a conflict.
+func TestRoutes_ReportConflicts(t *testing.T) {
+	h, st, _ := newReportTest(t)
+	bob := logIn(t, h, "bob@example.com")
+	st.session.LastReportedMessageID = 3 // everything reported
+	if w := call(t, h, http.MethodPost, "/sessions/s1/report", "", bob); w.Code != http.StatusConflict {
+		t.Errorf("nothing new: %d", w.Code)
+	}
+	st.session.ParentSessionID, st.session.ForkedAtMessageID = "", 0
+	if w := call(t, h, http.MethodPost, "/sessions/s1/report", "", bob); w.Code != http.StatusConflict {
+		t.Errorf("not a fork: %d", w.Code)
+	}
+}
+
+// The interface's button answers with the report section: started, or why
+// not; the rail shows it in a fork.
+func TestUI_ReportToParent(t *testing.T) {
+	h, _, tc := newReportTest(t)
+	bob, alice := logIn(t, h, "bob@example.com"), logIn(t, h, "alice@example.com")
+
+	w := form(t, h, "/s/s1/report", url.Values{}, bob)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `<section id="report"`) || len(tc.started) != 1 {
+		t.Errorf("bob: %d %s, started %v", w.Code, w.Body, tc.started)
+	}
+	w = form(t, h, "/s/s1/report", url.Values{}, alice)
+	if !strings.Contains(w.Body.String(), "Rapport impossible depuis cette session.") || strings.Contains(w.Body.String(), "<button") || len(tc.started) != 1 {
+		t.Errorf("alice: %d %s", w.Code, w.Body)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/s/s1", nil)
+	req.AddCookie(bob)
+	page := httptest.NewRecorder()
+	h.ServeHTTP(page, req)
+	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), "⑂ Rapporter au parent") {
+		t.Errorf("fork page: %d", page.Code)
 	}
 }

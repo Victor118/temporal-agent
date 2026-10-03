@@ -193,15 +193,18 @@ const (
 	ItemAgent    = "agent"
 	ItemBrief    = "brief"
 	ItemQuestion = "question"
-	ItemError    = "error"  // why a turn failed
-	ItemReport   = "report" // a fork's report to this session
+	ItemError    = "error"    // why a turn failed
+	ItemReport   = "report"   // a fork's report to this session
+	ItemReported = "reported" // in a fork: where its latest report stopped
 )
 
-// ReportSource is the fork a report comes from.
-type ReportSource struct {
+// ReportLink is the other end of a report: in the parent, the fork it comes
+// from; in the fork, the parent it went to.
+type ReportLink struct {
 	SessionID string
 	Title     string // the fork's title when it reported
-	// Accessible: the viewer is a member of the fork, which still exists.
+	MessageID int64  // in the fork: the report's message in the parent
+	// Accessible: the viewer is a member of that session, which still exists.
 	Accessible bool
 }
 
@@ -219,7 +222,7 @@ type ThreadItem struct {
 	Text   string // human: plain text; question: the question; error: the reason
 
 	HTML   template.HTML // agent answer, brief or report, rendered from Markdown
-	Report ReportSource  // report: the fork it comes from
+	Report ReportLink    // report: the fork it comes from; reported: the parent
 	Tools  []string      // agent: the tools the answer used, in order, once each
 	Agent  AgentInfo     // agent answer, error: the agent that wrote it
 
@@ -334,15 +337,35 @@ func BuildThread(msgs []store.MessageWithID, viewerID string, forks map[int64][]
 }
 
 // reportSource is the fork a report names, linked when the viewer can open it.
-func reportSource(f *store.ForkRef, visible map[string]bool) ReportSource {
+func reportSource(f *store.ForkRef, visible map[string]bool) ReportLink {
 	if f == nil {
-		return ReportSource{Title: "Fork"}
+		return ReportLink{Title: "Fork"}
 	}
 	title := f.Title
 	if title == "" {
 		title = "Fork"
 	}
-	return ReportSource{SessionID: f.SessionID, Title: title, Accessible: visible[f.SessionID]}
+	return ReportLink{SessionID: f.SessionID, Title: title, Accessible: visible[f.SessionID]}
+}
+
+// MarkReported shows, in a fork's thread, where its latest report stopped:
+// after the last item it covers, before the questions waiting. The parent is
+// linked when the viewer is a member of it. A fork that never reported is
+// left as it is.
+func MarkReported(items []ThreadItem, fork store.Session, parentVisible bool) []ThreadItem {
+	if fork.LastReportedMessageID == 0 || fork.LastReportedAt == nil {
+		return items
+	}
+	at := 0
+	for i, it := range items {
+		if it.ID != 0 && it.ID <= fork.LastReportedMessageID {
+			at = i + 1
+		}
+	}
+	mark := ThreadItem{Kind: ItemReported, Time: *fork.LastReportedAt, Report: ReportLink{
+		SessionID: fork.ParentSessionID, MessageID: fork.LastReportID, Accessible: parentVisible && fork.ParentSessionID != "",
+	}}
+	return append(items[:at:at], append([]ThreadItem{mark}, items[at:]...)...)
 }
 
 func authorName(m store.MessageWithID) string {

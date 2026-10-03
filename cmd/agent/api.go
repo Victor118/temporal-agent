@@ -431,6 +431,25 @@ func (a *api) forkSession(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// reportToParent starts the report of this fork to its parent, sent by the
+// user: it arrives in the parent as their message, and calls no agent.
+// Accepted at once; the parent's members hear of it when it is posted.
+func (a *api) reportToParent(w http.ResponseWriter, r *http.Request) {
+	switch err := a.sessions.ReportToParent(r.Context(), chi.URLParam(r, "id"), auth.UserFrom(r.Context())); {
+	case errors.Is(err, session.ErrNotFound):
+		http.Error(w, "Session not found", http.StatusNotFound)
+	case errors.Is(err, session.ErrNotParentMember):
+		http.Error(w, err.Error(), http.StatusForbidden)
+	case errors.Is(err, session.ErrNotAFork), errors.Is(err, session.ErrNoParent),
+		errors.Is(err, session.ErrSummaryPending), errors.Is(err, session.ErrNothingToReport):
+		http.Error(w, err.Error(), http.StatusConflict)
+	case err != nil:
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	default:
+		w.WriteHeader(http.StatusAccepted)
+	}
+}
+
 type sessionLink struct {
 	SessionID string `json:"session_id"`
 	Title     string `json:"title"`
@@ -460,6 +479,20 @@ type sessionInfo struct {
 	Summary session.SummaryState `json:"summary,omitempty"`
 	// Forks are this session's forks the user is a member of.
 	Forks []forkInfo `json:"forks"`
+	// Report is where a fork stands with its reports to its parent, for the
+	// user. Empty for a session that is not a fork.
+	Report *reportInfo `json:"report,omitempty"`
+}
+
+type reportInfo struct {
+	CanReport bool `json:"can_report"`
+	// Refused: why the user cannot report at all (parent deleted, not a
+	// member of it).
+	Refused        string `json:"refused,omitempty"`
+	SummaryPending bool   `json:"summary_pending,omitempty"`
+	Pending        bool   `json:"pending,omitempty"`
+	Failed         bool   `json:"failed,omitempty"`
+	NothingNew     bool   `json:"nothing_new,omitempty"`
 }
 
 // getSessionInfo describes a session and its place in a fork tree, as far as
@@ -482,6 +515,15 @@ func (a *api) getSessionInfo(w http.ResponseWriter, r *http.Request) {
 		if info.Summary, err = a.sessions.ForkSummaryState(ctx, sess); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
+		}
+		st, err := a.sessions.ReportState(ctx, sess, me)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		info.Report = &reportInfo{CanReport: st.CanReport(), SummaryPending: st.SummaryPending, Pending: st.Pending, Failed: st.Failed, NothingNew: st.NothingNew}
+		if st.Refused != nil {
+			info.Report.Refused = st.Refused.Error()
 		}
 	}
 	if sess.ParentSessionID != "" {

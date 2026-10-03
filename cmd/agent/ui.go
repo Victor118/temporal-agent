@@ -188,6 +188,11 @@ func (u *ui) buildPage(ctx context.Context, me *store.User, sessionID, view stri
 			return nil, err
 		}
 		p.SummaryPending, p.SummaryFailed = state == session.SummaryPending, state == session.SummaryFailed
+		report, err := u.sessions.ReportState(ctx, &sess, me)
+		if err != nil {
+			return nil, err
+		}
+		p.Report = &chat.ReportView{ReportState: report}
 	}
 
 	if view == "map" {
@@ -213,6 +218,9 @@ func (u *ui) buildPage(ctx context.Context, me *store.User, sessionID, view stri
 		byMessage[f.ForkedAtMessageID] = append(byMessage[f.ForkedAtMessageID], chat.ForkLink{SessionID: f.SessionID, Title: title})
 	}
 	p.Thread = chat.BuildThread(msgs, me.ID, byMessage, u.sessions.PendingQuestions(ctx, sessionID), directory)
+	if p.Report != nil {
+		p.Thread = chat.MarkReported(p.Thread, sess, p.Report.Refused == nil)
+	}
 	for _, it := range p.Thread {
 		if it.Kind == chat.ItemHuman || it.Kind == chat.ItemAgent || it.Kind == chat.ItemReport {
 			p.LastMessageID = it.ID
@@ -349,6 +357,36 @@ func (u *ui) forkForm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	goTo(w, r, "/s/"+f.SessionID)
+}
+
+// reportFragment is the fork's report section, polled while a report is
+// written.
+func (u *ui) reportFragment(w http.ResponseWriter, r *http.Request) {
+	u.renderPage(w, r, chi.URLParam(r, "id"), "thread", "report", nil)
+}
+
+// reportForm starts the fork's report to its parent, and answers with the
+// report section: running, or why it did not start.
+func (u *ui) reportForm(w http.ResponseWriter, r *http.Request) {
+	sessionID := chi.URLParam(r, "id")
+	var msg string
+	switch err := u.sessions.ReportToParent(r.Context(), sessionID, auth.UserFrom(r.Context())); {
+	case err == nil:
+	case errors.Is(err, session.ErrNothingToReport):
+		msg = "Rien de nouveau à rapporter."
+	case errors.Is(err, session.ErrSummaryPending):
+		msg = "Le brief du fork est en cours d'écriture : patiente un instant."
+	case errors.Is(err, session.ErrNotParentMember), errors.Is(err, session.ErrNoParent), errors.Is(err, session.ErrNotAFork):
+		msg = "Rapport impossible depuis cette session."
+	default:
+		log.Printf("ui: report %s: %v", sessionID, err)
+		msg = "Le rapport n'a pas pu démarrer."
+	}
+	u.renderPage(w, r, sessionID, "thread", "report", func(p *chat.Page) {
+		if p.Report != nil {
+			p.Report.Error = msg
+		}
+	})
 }
 
 func (u *ui) inviteForm(w http.ResponseWriter, r *http.Request) {

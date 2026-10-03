@@ -3,7 +3,7 @@
 {{/* Reloaded on every event of the session's stream; also polled while the
      agent works, in case an event is missed. */}}
 <div id="thread" hx-get="/s/{{$sid}}/thread" hx-swap="outerHTML"
-     hx-trigger="sse:message, sse:user_message, sse:ask_user, sse:fork_ready, sse:fork_failed, sse:tool_calls{{if or .Working .SummaryPending}}, every 4s{{end}}">
+     hx-trigger="sse:message, sse:user_message, sse:ask_user, sse:fork_ready, sse:fork_failed, sse:fork_report, sse:fork_reported, sse:fork_report_failed, sse:tool_calls{{if or .Working .SummaryPending}}, every 4s{{end}}">
 <div class="thread-inner">
   {{with .Parent}}
   <div class="divider"><span>forké depuis {{if .Accessible}}<a href="/s/{{.SessionID}}#m{{.MessageID}}">{{.Title}}</a>{{else}}une session à laquelle tu n'as pas accès{{end}}</span></div>
@@ -13,6 +13,8 @@
   {{if .SummaryFailed}}<div class="note">Le résumé de la session parente n'a pas pu être écrit : ce fork démarre sans.</div>{{end}}
 
   {{range .Thread}}{{template "item" itemOf $ .}}{{end}}
+
+  {{with .Report}}{{if and .Failed (not .Pending)}}<div class="note">Le rapport à la session parente n'a pas pu être écrit. Tu peux réessayer depuis le panneau « Rapport au parent ».</div>{{end}}{{end}}
 
   {{if and (not .Thread) (not .SummaryPending)}}<div class="empty-thread">Rien encore. Écris le premier message.</div>{{end}}
 
@@ -75,6 +77,9 @@
   </div>
   {{template "fork-action" itemOf $.Page .}}
 </div>
+
+{{else if eq .Kind "reported"}}
+<div class="divider reported"><span>⑂ Rapport envoyé à la session parente · {{clock .Time}}{{if .Report.Accessible}} · <a href="/s/{{.Report.SessionID}}#m{{.Report.MessageID}}">le voir</a>{{end}}</span></div>
 
 {{else if eq .Kind "error"}}
 <div class="notice failed" id="m{{.ID}}">

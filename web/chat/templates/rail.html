@@ -53,6 +53,8 @@
   </section>
   {{end}}
 
+  {{template "report" .}}
+
   <section class="rail-actions">
     {{if .IsCreator}}
     <form hx-post="/s/{{$sid}}/delete" hx-confirm="Supprimer cette session et ses messages, pour tous ses membres ?">
@@ -65,4 +67,25 @@
     {{end}}
   </section>
 </div>
+{{end}}
+
+{{/* A fork's report to its parent. Swapped alone: by its button, and every
+     few seconds while a report is written. */}}
+{{define "report"}}
+{{with .Report}}
+{{$sid := $.Node.Session.SessionID}}
+<section id="report"{{if .Pending}} hx-get="/s/{{$sid}}/report" hx-trigger="every 3s" hx-swap="outerHTML"{{end}}>
+  <div class="eyebrow">Rapport au parent</div>
+  {{if not .Refused}}
+  <form hx-post="/s/{{$sid}}/report" hx-target="#report" hx-swap="outerHTML">
+    <button class="btn" type="submit" {{if not .CanReport}}disabled{{end}}
+            title="Résumer ce qui s'est fait ici depuis le dernier rapport, et le poster dans la session parente">{{if .Pending}}Rapport en cours…{{else}}⑂ Rapporter au parent{{end}}</button>
+  </form>
+  {{end}}
+  {{with .Reason}}<div class="note" style="margin-top:6px">{{.}}</div>{{end}}
+  {{if and .Failed (not .Pending)}}<div class="error">Le dernier rapport n'a pas pu être écrit. Tu peux réessayer.</div>{{end}}
+  {{if and .LastReportID (not .Refused)}}<div class="note" style="margin-top:6px">Dernier rapport : <a href="/s/{{.ParentSessionID}}#m{{.LastReportID}}">{{.LastReported}}</a></div>{{end}}
+  {{with .Error}}<div class="error">{{.}}</div>{{end}}
+</section>
+{{end}}
 {{end}}

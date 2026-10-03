@@ -4,7 +4,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/victor/temporal-agent/session"
 	"github.com/victor/temporal-agent/store"
 )
 
@@ -185,5 +187,83 @@ func TestRender_ForkReport(t *testing.T) {
 	}
 	if strings.Contains(out, "<b>x</b>") {
 		t.Error("the report's HTML reached the page")
+	}
+}
+
+// The rail's report section, by state: the button, why it is disabled, the
+// polling while a report is written, a failure, the latest report.
+func TestRender_ReportButton(t *testing.T) {
+	at := time.Date(2026, 10, 1, 14, 2, 0, 0, time.Local)
+	for name, c := range map[string]struct {
+		state  session.ReportState
+		want   []string
+		unwant []string
+	}{
+		"ready": {session.ReportState{ParentSessionID: "root"},
+			[]string{`hx-post="/s/fork/report" hx-target="#report"`, `⑂ Rapporter au parent</button>`}, []string{"disabled", "every 3s"}},
+		"pending": {session.ReportState{ParentSessionID: "root", Pending: true},
+			[]string{`hx-get="/s/fork/report" hx-trigger="every 3s"`, "disabled", "Rapport en cours…", "Le rapport s&#39;écrit"}, nil},
+		"failed": {session.ReportState{ParentSessionID: "root", Failed: true},
+			[]string{"Le dernier rapport n'a pas pu être écrit. Tu peux réessayer.", "⑂ Rapporter au parent"}, []string{"disabled"}},
+		"brief pending": {session.ReportState{ParentSessionID: "root", SummaryPending: true},
+			[]string{"disabled", "Le brief du fork est en cours d&#39;écriture."}, nil},
+		"nothing new": {session.ReportState{ParentSessionID: "root", NothingNew: true, LastReportID: 31, LastReportedAt: &at},
+			[]string{"disabled", "Rien de nouveau depuis le dernier rapport.", `Dernier rapport : <a href="/s/root#m31">` + clock(at) + `</a>`}, nil},
+		"not a member of the parent": {session.ReportState{ParentSessionID: "root", Refused: session.ErrNotParentMember, LastReportID: 31, LastReportedAt: &at},
+			[]string{"Seul un membre de la session parente peut y rapporter"}, []string{"<button", "Dernier rapport"}},
+		"parent deleted": {session.ReportState{Refused: session.ErrNoParent},
+			[]string{"La session parente a été supprimée"}, []string{"<button"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := testPage("thread")
+			p.Report = &ReportView{ReportState: c.state}
+			out := render(t, "report", p)
+			for _, want := range c.want {
+				if !strings.Contains(out, want) {
+					t.Errorf("section lacks %q:\n%s", want, out)
+				}
+			}
+			for _, unwant := range c.unwant {
+				if strings.Contains(out, unwant) {
+					t.Errorf("section has %q:\n%s", unwant, out)
+				}
+			}
+			if !strings.Contains(render(t, "rail", p), `id="report"`) {
+				t.Error("the rail lacks the report section")
+			}
+		})
+	}
+
+	// Not a fork: no section.
+	p := testPage("thread")
+	if out := render(t, "rail", p); strings.Contains(out, `id="report"`) {
+		t.Error("a report section outside a fork")
+	}
+}
+
+// In the fork, where the latest report stopped, linked to it in the parent;
+// and a failed report, said in the thread.
+func TestRender_ReportedMarkAndFailure(t *testing.T) {
+	p := testPage("thread")
+	at := time.Date(2026, 10, 1, 14, 2, 0, 0, time.Local)
+	fork := store.Session{SessionID: "fork", ParentSessionID: "root", LastReportedMessageID: 2, LastReportID: 31, LastReportedAt: &at}
+	p.Thread = MarkReported(p.Thread, fork, true)
+	p.Report = &ReportView{ReportState: session.ReportState{ParentSessionID: "root", Failed: true}}
+	out := render(t, "thread", p)
+	mark := `⑂ Rapport envoyé à la session parente · ` + clock(at) + ` · <a href="/s/root#m31">le voir</a>`
+	if !strings.Contains(out, mark) {
+		t.Errorf("thread lacks the mark %q", mark)
+	}
+	// After Bob's message (2), before the answer (9).
+	if i, j, k := strings.Index(out, `id="m2"`), strings.Index(out, mark), strings.Index(out, `id="m9"`); !(i < j && j < k) {
+		t.Errorf("mark at %d, between %d and %d", j, i, k)
+	}
+	if !strings.Contains(out, "Le rapport à la session parente n'a pas pu être écrit.") {
+		t.Error("the thread does not say the report failed")
+	}
+	for _, ev := range []string{"sse:fork_report,", "sse:fork_reported,", "sse:fork_report_failed,"} {
+		if !strings.Contains(out, ev) {
+			t.Errorf("the thread does not reload on %s", ev)
+		}
 	}
 }

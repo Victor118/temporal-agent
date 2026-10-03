@@ -42,11 +42,17 @@ func pendingQuestionsQuery(sessionID string) (string, error) {
 
 // isWorkflowRunning checks if a Temporal workflow is still running.
 func (s *Service) isWorkflowRunning(ctx context.Context, workflowID string) bool {
+	return s.workflowStatus(ctx, workflowID) == enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING
+}
+
+// workflowStatus is the status of a workflow's latest run; unspecified when
+// Temporal knows of none, or cannot tell.
+func (s *Service) workflowStatus(ctx context.Context, workflowID string) enumspb.WorkflowExecutionStatus {
 	desc, err := s.temporal.DescribeWorkflowExecution(ctx, workflowID, "")
-	if err != nil {
-		return false
+	if err != nil || desc.WorkflowExecutionInfo == nil {
+		return enumspb.WORKFLOW_EXECUTION_STATUS_UNSPECIFIED
 	}
-	return desc.WorkflowExecutionInfo.Status == enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING
+	return desc.WorkflowExecutionInfo.Status
 }
 
 // activeWorkflowID returns the ID of the session's running workflow, or "":

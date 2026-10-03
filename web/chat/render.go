@@ -3,6 +3,7 @@ package chat
 import (
 	"bytes"
 	"embed"
+	"errors"
 	"html/template"
 	"io/fs"
 	"log"
@@ -55,6 +56,9 @@ type Page struct {
 	AgentOnMention bool // a plain message does not call the agent
 	Parent         *ParentInfo
 	IsCreator      bool
+	// Report is the fork's report to its parent; nil for a session that is
+	// not a fork.
+	Report *ReportView
 
 	Map *MapView
 
@@ -89,6 +93,42 @@ type ParentInfo struct {
 	Title      string
 	Accessible bool // the viewer is a member of the parent
 	MessageID  int64
+}
+
+// ReportView is where a fork stands with its reports, for the viewer.
+type ReportView struct {
+	session.ReportState
+	Error string // why the last click started no report
+}
+
+// Reason is why the viewer cannot report now, in words; empty when they can.
+func (r ReportView) Reason() string {
+	switch {
+	case errors.Is(r.Refused, session.ErrNoParent):
+		return "La session parente a été supprimée : ce fork n'a plus à qui rapporter."
+	case errors.Is(r.Refused, session.ErrNotParentMember):
+		return "Seul un membre de la session parente peut y rapporter, et tu n'en es pas membre."
+	case r.Refused != nil:
+		return "Rapport impossible."
+	case r.Pending:
+		return "Le rapport s'écrit. Il arrivera dans la session parente comme ton message, sans solliciter d'agent."
+	case r.SummaryPending:
+		return "Le brief du fork est en cours d'écriture."
+	case r.NothingNew && r.LastReportedAt != nil:
+		return "Rien de nouveau depuis le dernier rapport."
+	case r.NothingNew:
+		return "Rien à rapporter pour l'instant."
+	}
+	return ""
+}
+
+// LastReported is when the latest report was posted, as the thread shows
+// times; empty for none.
+func (r ReportView) LastReported() string {
+	if r.LastReportedAt == nil {
+		return ""
+	}
+	return clock(*r.LastReportedAt)
 }
 
 // ItemView is a thread item with the page it is shown on: its actions need

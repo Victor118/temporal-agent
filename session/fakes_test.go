@@ -19,12 +19,16 @@ import (
 
 // memStore is a session.Store in memory: one session at most is enough here.
 type memStore struct {
-	session  *store.Session
-	members  []store.SessionMember
-	messages []store.MessageWithID
-	appended []store.Message
-	title    string
-	agents   []store.Agent // nil: the default agent alone
+	session *store.Session
+	others  map[string]*store.Session // more sessions, by ID: a fork's parent
+	// outsiders are the users who are not members of a session, by session
+	// ID: everyone else is.
+	outsiders map[string][]string
+	members   []store.SessionMember
+	messages  []store.MessageWithID
+	appended  []store.Message
+	title     string
+	agents    []store.Agent // nil: the default agent alone
 }
 
 func (m *memStore) CreateSession(_ context.Context, s store.Session) error {
@@ -33,7 +37,7 @@ func (m *memStore) CreateSession(_ context.Context, s store.Session) error {
 }
 func (m *memStore) GetSession(_ context.Context, id string) (*store.Session, error) {
 	if m.session == nil || m.session.SessionID != id {
-		return nil, nil
+		return m.others[id], nil
 	}
 	return m.session, nil
 }
@@ -46,8 +50,8 @@ func (m *memStore) UpdateSessionTitle(_ context.Context, _, title string) error 
 	return nil
 }
 func (m *memStore) SetSessionAgentMode(context.Context, string, string) error { return nil }
-func (m *memStore) IsSessionMember(context.Context, string, string) (bool, error) {
-	return true, nil
+func (m *memStore) IsSessionMember(_ context.Context, sessionID, userID string) (bool, error) {
+	return !slices.Contains(m.outsiders[sessionID], userID), nil
 }
 func (m *memStore) ListSessionMembers(context.Context, string) ([]store.SessionMember, error) {
 	return m.members, nil
@@ -83,9 +87,11 @@ func (m *memStore) LoadMessagesUpTo(context.Context, string, int64) ([]store.Mes
 // records the queries and signals. A workflow of running is described as
 // running, and answers a query with states, if set.
 type fakeTemporal struct {
-	running      []string // workflow IDs the visibility queries return
-	lists        []string // the queries
-	signals      []string // workflow IDs signalled
+	running      []string                                   // workflow IDs the visibility queries return
+	closed       map[string]enumspb.WorkflowExecutionStatus // how the workflows not running ended
+	options      []client.StartWorkflowOptions              // of each workflow started
+	lists        []string                                   // the queries
+	signals      []string                                   // workflow IDs signalled
 	started      []string
 	inputs       []interface{} // the input of each workflow started
 	signalStarts []signalStart
@@ -118,6 +124,7 @@ func (e encodedState) Get(v interface{}) error {
 
 func (f *fakeTemporal) ExecuteWorkflow(_ context.Context, o client.StartWorkflowOptions, _ interface{}, args ...interface{}) (client.WorkflowRun, error) {
 	f.started = append(f.started, o.ID)
+	f.options = append(f.options, o)
 	if len(args) > 0 {
 		f.inputs = append(f.inputs, args[0])
 	}
@@ -135,6 +142,9 @@ func (f *fakeTemporal) QueryWorkflow(_ context.Context, id, _, _ string, _ ...in
 	return nil, errors.New("not running")
 }
 func (f *fakeTemporal) DescribeWorkflowExecution(_ context.Context, id, _ string) (*workflowservice.DescribeWorkflowExecutionResponse, error) {
+	if status, ok := f.closed[id]; ok {
+		return &workflowservice.DescribeWorkflowExecutionResponse{WorkflowExecutionInfo: &workflowpb.WorkflowExecutionInfo{Status: status}}, nil
+	}
 	if !slices.Contains(f.running, id) {
 		return nil, errors.New("not running")
 	}

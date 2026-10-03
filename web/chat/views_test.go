@@ -178,7 +178,7 @@ func TestBuildThread_ForkReport(t *testing.T) {
 	}
 	it := items[0]
 	if it.Kind != ItemReport || it.ID != 4 || it.Author.Name != "Victor" || it.Mine ||
-		it.Report != (ReportSource{SessionID: "f1", Title: "Export CSV", Accessible: true}) {
+		it.Report != (ReportLink{SessionID: "f1", Title: "Export CSV", Accessible: true}) {
 		t.Errorf("item %+v", it)
 	}
 	if !strings.Contains(string(it.HTML), "<h2>Fait</h2>") || strings.Contains(string(it.HTML), "<script>") {
@@ -187,6 +187,33 @@ func TestBuildThread_ForkReport(t *testing.T) {
 	// A fork the viewer is not a member of, or deleted: named, not linked.
 	if items[1].Report.Accessible || items[1].Report.Title != "Export CSV" {
 		t.Errorf("unreachable fork %+v", items[1].Report)
+	}
+}
+
+// The mark of the latest report goes after the last item it covers, before
+// the questions waiting; the parent is linked only for its members.
+func TestMarkReported(t *testing.T) {
+	items := []ThreadItem{{Kind: ItemBrief, ID: 1}, {Kind: ItemHuman, ID: 2}, {Kind: ItemAgent, ID: 5}, {Kind: ItemHuman, ID: 8}, {Kind: ItemQuestion}}
+	at := t0
+	fork := store.Session{SessionID: "f", ParentSessionID: "p", LastReportedMessageID: 6, LastReportID: 40, LastReportedAt: &at}
+	got := MarkReported(append([]ThreadItem(nil), items...), fork, true)
+	if len(got) != 6 || got[3].Kind != ItemReported || got[4].ID != 8 ||
+		got[3].Report != (ReportLink{SessionID: "p", MessageID: 40, Accessible: true}) || !got[3].Time.Equal(t0) {
+		t.Errorf("marked %+v", got)
+	}
+	if got := MarkReported(items, fork, false); got[3].Report.Accessible {
+		t.Error("the parent linked for a non-member")
+	}
+	fork.LastReportedMessageID = 99 // past the thread: before the question
+	if got := MarkReported(items, fork, true); got[4].Kind != ItemReported || got[5].Kind != ItemQuestion {
+		t.Errorf("marked %+v", got)
+	}
+	if got := MarkReported(items, store.Session{SessionID: "f"}, true); len(got) != len(items) {
+		t.Error("a fork that never reported is marked")
+	}
+	// The items handed in are left as they were.
+	if items[3].Kind != ItemHuman {
+		t.Error("MarkReported changed its input")
 	}
 }
 
