@@ -208,20 +208,22 @@ func TestDeliver_Refusals(t *testing.T) {
 	if len(st.appended) != 1 {
 		t.Errorf("%d messages stored, want 1", len(st.appended))
 	}
-	// Its workflow still writing it: refused.
-	pending := newTest(st, &fakeTemporal{running: []string{workflow.ForkWorkflowID(sid)}})
-	if _, err := pending.Deliver(context.Background(), fork, alice, "hello"); !errors.Is(err, ErrSummaryPending) || len(st.appended) != 1 {
-		t.Errorf("fork with its summary pending: %v, %d messages stored", err, len(st.appended))
+	// Its workflow still writing it: refused. (Each store takes one message:
+	// a stored message titles the session in the background.)
+	pendingStore := &memStore{members: st.members}
+	pending := newTest(pendingStore, &fakeTemporal{running: []string{workflow.ForkWorkflowID(sid)}})
+	if _, err := pending.Deliver(context.Background(), fork, alice, "hello"); !errors.Is(err, ErrSummaryPending) || len(pendingStore.appended) != 0 {
+		t.Errorf("fork with its summary pending: %v, %d messages stored", err, len(pendingStore.appended))
 	}
 	// Recorded on the fork: in, whatever the workflow's state says.
 	fork.SummaryMessageID = 1
-	if _, err := pending.Deliver(context.Background(), fork, alice, "hello"); err != nil || len(st.appended) != 2 {
-		t.Errorf("fork with its summary: %v, %d messages stored", err, len(st.appended))
+	if _, err := pending.Deliver(context.Background(), fork, alice, "hello"); err != nil || len(pendingStore.appended) != 1 {
+		t.Errorf("fork with its summary: %v, %d messages stored", err, len(pendingStore.appended))
 	}
 	// Whether the summary is in is read from the fork's row: no conversation
 	// is loaded for it.
-	if st.loads != 0 {
-		t.Errorf("%d conversations loaded", st.loads)
+	if st.loads+pendingStore.loads != 0 {
+		t.Errorf("%d conversations loaded", st.loads+pendingStore.loads)
 	}
 }
 
