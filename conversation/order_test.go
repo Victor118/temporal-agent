@@ -87,3 +87,25 @@ func TestOrder_LeavesTheRestInPlace(t *testing.T) {
 		t.Errorf("order %s, want %s", got, want)
 	}
 }
+
+// Two messages written while a turn ran: the first is answered next, so its
+// turns start inside the first one's; the second, also inside them, comes
+// after both blocks, where its own turn will read it.
+func TestOrder_OverlappingGroups(t *testing.T) {
+	first := store.TurnKey(store.TurnGroupKey("r-1", 1), 0)
+	second := store.TurnKey(store.TurnGroupKey("r-2", 3), 0)
+	var s stored
+	s.add("", store.Message{Role: store.RoleUser, Content: `"M1"`}).
+		add(first, store.Message{Role: store.RoleAssistant, ToolCalls: []store.ToolCall{{ID: "t1"}}}).
+		add("", store.Message{Role: store.RoleUser, Content: `"M2"`}).
+		add("", store.Message{Role: store.RoleUser, Content: `"M3"`}).
+		add(first, store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "t1"}}).
+		add(second, store.Message{Role: store.RoleAssistant, Content: `"R2"`}).
+		add("", store.Message{Role: store.RoleUser, Content: `"M4"`})
+
+	got := keysOf(Order(s.msgs))
+	want := fmt.Sprint([]string{"msg:a", first + ":0", first + ":1", "msg:c", second + ":0", "msg:d", "msg:g"})
+	if got != want {
+		t.Errorf("order %s, want %s", got, want)
+	}
+}
