@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/victor/temporal-agent/provider"
 )
@@ -93,23 +94,37 @@ func MatchAny(globs []string, name string) bool {
 	return false
 }
 
+// Registry holds the tools this process runs. MCP servers' tools change
+// while activities read it, so every method is safe for concurrent use.
 type Registry struct {
-	tools map[string]*Tool
+	mu    sync.RWMutex
+	tools map[string]registered
+}
+
+// registered is a tool and where it comes from.
+type registered struct {
+	tool   *Tool
+	source string // "" = built in; otherwise the MCP server that gave it
 }
 
 func NewRegistry() *Registry {
 	return &Registry{
-		tools: make(map[string]*Tool),
+		tools: make(map[string]registered),
 	}
 }
 
+// Register adds a built-in tool.
 func (r *Registry) Register(t *Tool) {
-	r.tools[t.Name] = t
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.tools[t.Name] = registered{tool: t}
 }
 
 func (r *Registry) Get(name string) (*Tool, bool) {
-	t, ok := r.tools[name]
-	return t, ok
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	e, ok := r.tools[name]
+	return e.tool, ok
 }
 
 var emptySchema = json.RawMessage(`{"type":"object","properties":{}}`)
@@ -118,10 +133,9 @@ var emptySchema = json.RawMessage(`{"type":"object","properties":{}}`)
 // tools are the start of the LLM prompt prefix, so any reordering invalidates
 // the prompt cache (tools, system prompt and history).
 func (r *Registry) List() []provider.ToolDefinition {
-	names := r.sortedNames()
-	defs := make([]provider.ToolDefinition, 0, len(r.tools))
-	for _, name := range names {
-		t := r.tools[name]
+	tools := r.All()
+	defs := make([]provider.ToolDefinition, 0, len(tools))
+	for _, t := range tools {
 		schema := t.InputSchema
 		if len(schema) == 0 {
 			schema = emptySchema
@@ -137,10 +151,12 @@ func (r *Registry) List() []provider.ToolDefinition {
 
 // All returns the registered tools sorted by name.
 func (r *Registry) All() []*Tool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	names := r.sortedNames()
 	tools := make([]*Tool, len(names))
 	for i, name := range names {
-		tools[i] = r.tools[name]
+		tools[i] = r.tools[name].tool
 	}
 	return tools
 }
@@ -148,6 +164,8 @@ func (r *Registry) All() []*Tool {
 // Retain removes every tool whose name matches none of the globs and returns
 // the removed names, sorted.
 func (r *Registry) Retain(globs []string) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	var removed []string
 	for _, name := range r.sortedNames() {
 		if !MatchAny(globs, name) {
@@ -158,6 +176,64 @@ func (r *Registry) Retain(globs []string) []string {
 	return removed
 }
 
+// SourceChange is what SyncSource did to the registry.
+type SourceChange struct {
+	Changed []*Tool   // added, or whose contract changed (SchemaHash)
+	Removed []string  // no longer given by the source
+	Refused []Refusal // held by another source
+}
+
+// Refusal is a tool not registered because its name is already held.
+type Refusal struct {
+	Name   string
+	HeldBy string // "" = a built-in tool; otherwise an MCP server
+}
+
+func (r Refusal) String() string {
+	if r.HeldBy == "" {
+		return fmt.Sprintf("%s (a built-in tool)", r.Name)
+	}
+	return fmt.Sprintf("%s (held by MCP server %s)", r.Name, r.HeldBy)
+}
+
+// SyncSource makes the tools of an MCP server exactly tools: new ones are
+// added, the others replaced, and the ones the server no longer gives are
+// removed. A name another source holds — a built-in tool, another server —
+// is never taken over: it stays its holder's until the holder drops it.
+// So no tool silently replaces another, and since startup syncs the
+// servers in config order, the earlier server wins there.
+func (r *Registry) SyncSource(source string, tools []*Tool) SourceChange {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var change SourceChange
+	given := make(map[string]bool, len(tools))
+	for _, t := range tools {
+		if given[t.Name] {
+			continue // the server named two tools alike: the first stands
+		}
+		prev, held := r.tools[t.Name]
+		if held && prev.source != source {
+			change.Refused = append(change.Refused, Refusal{Name: t.Name, HeldBy: prev.source})
+			continue
+		}
+		given[t.Name] = true
+		r.tools[t.Name] = registered{tool: t, source: source}
+		if !held || prev.tool.SchemaHash() != t.SchemaHash() {
+			change.Changed = append(change.Changed, t)
+		}
+	}
+	for _, name := range r.sortedNames() {
+		if e := r.tools[name]; e.source == source && !given[name] {
+			delete(r.tools, name)
+			change.Removed = append(change.Removed, name)
+		}
+	}
+	sort.Slice(change.Changed, func(i, j int) bool { return change.Changed[i].Name < change.Changed[j].Name })
+	sort.Slice(change.Refused, func(i, j int) bool { return change.Refused[i].Name < change.Refused[j].Name })
+	return change
+}
+
+// sortedNames: the caller holds the lock.
 func (r *Registry) sortedNames() []string {
 	names := make([]string, 0, len(r.tools))
 	for name := range r.tools {
@@ -169,17 +245,21 @@ func (r *Registry) sortedNames() []string {
 
 // WorkflowTools returns all tools of kind workflow, for registration at worker startup.
 func (r *Registry) WorkflowTools() []*Tool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	var tools []*Tool
-	for _, t := range r.tools {
-		if t.Kind == ToolKindWorkflow && t.WorkflowFunc != nil {
+	for _, e := range r.tools {
+		if t := e.tool; t.Kind == ToolKindWorkflow && t.WorkflowFunc != nil {
 			tools = append(tools, t)
 		}
 	}
 	return tools
 }
 
+// Execute runs a tool. The lock is not held while it runs: a tool removed
+// meanwhile finishes its call.
 func (r *Registry) Execute(ctx context.Context, name string, input json.RawMessage) (string, error) {
-	t, ok := r.tools[name]
+	t, ok := r.Get(name)
 	if !ok {
 		return "", fmt.Errorf("unknown tool: %s", name)
 	}

@@ -354,3 +354,33 @@ func TestRegisterMCPServers_RegistersEveryServer(t *testing.T) {
 		t.Errorf("registered %d tools, want %d", got, servers*perServer)
 	}
 }
+
+// Tools are registered in the configuration's order, whichever server answers
+// first: of two servers giving the same name, the earlier keeps it and the
+// later's tool is reported. Errors come in that order too.
+func TestRegisterMCPServers_RegistersInConfigOrder(t *testing.T) {
+	gate := newBarrier(2)
+	first := newFakeMCP(t, func(f *fakeMCP) { f.gate = gate })
+	first.setTools("b_c")
+	second := newFakeMCP(t, func(f *fakeMCP) { f.gate = gate })
+	second.setTools("c")
+	down := httptest.NewServer(http.NotFoundHandler())
+	down.Close()
+
+	r := NewRegistry()
+	errs := RegisterMCPServers(context.Background(), r, []MCPServerConfig{
+		first.config("a"),
+		{Name: "off1", URL: down.URL},
+		second.config("a_b"),
+		{Name: "off2", URL: down.URL},
+	})
+
+	got, ok := r.Get("a_b_c")
+	if !ok || !strings.HasPrefix(got.Description, "[MCP:a]") {
+		t.Fatalf("a_b_c = %+v, want the earlier server's", got)
+	}
+	if len(errs) != 3 || !strings.Contains(errs[0].Error(), "off1") ||
+		!strings.Contains(errs[1].Error(), "a_b_c (held by MCP server a)") || !strings.Contains(errs[2].Error(), "off2") {
+		t.Errorf("errors = %v, want off1, a_b_c refused, off2", errs)
+	}
+}

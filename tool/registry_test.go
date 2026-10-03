@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"testing"
 )
 
@@ -136,4 +137,118 @@ func TestTool_SchemaHash(t *testing.T) {
 	if a.SchemaHash() == c.SchemaHash() {
 		t.Error("different descriptions must change the hash")
 	}
+}
+
+func names(tools []*Tool) string {
+	var n []string
+	for _, t := range tools {
+		n = append(n, t.Name)
+	}
+	return fmt.Sprint(n)
+}
+
+// A server's tools follow what it gives: added, changed when their contract
+// changes (not when it stays the same), removed when it no longer gives them.
+func TestRegistry_SyncSource(t *testing.T) {
+	r := NewRegistry()
+	r.Register(&Tool{Name: "read_file"})
+
+	c := r.SyncSource("gh", []*Tool{{Name: "gh_a"}, {Name: "gh_b"}})
+	if names(c.Changed) != "[gh_a gh_b]" || len(c.Removed) != 0 || len(c.Refused) != 0 {
+		t.Errorf("first sync: %+v", c)
+	}
+	c = r.SyncSource("gh", []*Tool{{Name: "gh_a"}, {Name: "gh_b", Description: "new"}, {Name: "gh_c"}})
+	if names(c.Changed) != "[gh_b gh_c]" || len(c.Removed) != 0 {
+		t.Errorf("second sync: %+v", c)
+	}
+	c = r.SyncSource("gh", []*Tool{{Name: "gh_c"}})
+	if len(c.Changed) != 0 || fmt.Sprint(c.Removed) != "[gh_a gh_b]" {
+		t.Errorf("third sync: %+v", c)
+	}
+	if got := names(r.All()); got != "[gh_c read_file]" {
+		t.Errorf("registry = %s", got)
+	}
+}
+
+// A name is its holder's: a server cannot take a built-in tool's name, nor
+// another server's, and the refusal says who holds it. Once the holder
+// drops the name, another server may have it.
+func TestRegistry_SyncSourceNeverReplacesAnotherSource(t *testing.T) {
+	r := NewRegistry()
+	r.Register(&Tool{Name: "web_fetch", Description: "built in"})
+	r.SyncSource("a", []*Tool{{Name: "a_b_c", Description: "from a"}})
+
+	c := r.SyncSource("web", []*Tool{{Name: "web_fetch", Description: "from web"}, {Name: "web_x"}})
+	if len(c.Refused) != 1 || c.Refused[0].String() != "web_fetch (a built-in tool)" || names(c.Changed) != "[web_x]" {
+		t.Errorf("built-in name: %+v", c)
+	}
+	c = r.SyncSource("a_b", []*Tool{{Name: "a_b_c", Description: "from a_b"}})
+	if len(c.Refused) != 1 || c.Refused[0].String() != "a_b_c (held by MCP server a)" {
+		t.Errorf("another server's name: %+v", c)
+	}
+	if got, _ := r.Get("web_fetch"); got.Description != "built in" {
+		t.Errorf("web_fetch replaced: %q", got.Description)
+	}
+	if got, _ := r.Get("a_b_c"); got.Description != "from a" {
+		t.Errorf("a_b_c replaced: %q", got.Description)
+	}
+
+	// The refused server's sync removes nothing of the holder's.
+	r.SyncSource("a_b", nil)
+	if _, ok := r.Get("a_b_c"); !ok {
+		t.Error("a server removed a tool it did not hold")
+	}
+
+	r.SyncSource("a", nil)
+	c = r.SyncSource("a_b", []*Tool{{Name: "a_b_c", Description: "from a_b"}})
+	if len(c.Refused) != 0 || names(c.Changed) != "[a_b_c]" {
+		t.Errorf("after a let it go: %+v", c)
+	}
+}
+
+// Activities read the registry while servers' tools come and go (go test
+// -race reports a data race otherwise).
+func TestRegistry_ConcurrentReadsAndWrites(t *testing.T) {
+	r := NewRegistry()
+	r.Register(&Tool{Name: "builtin", Execute: func(context.Context, json.RawMessage) (string, error) { return "ok", nil }})
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				r.List()
+				r.All()
+				r.WorkflowTools()
+				if _, ok := r.Get("builtin"); !ok {
+					t.Error("built-in tool lost")
+					return
+				}
+				if out, err := r.Execute(context.Background(), "builtin", nil); err != nil || out != "ok" {
+					t.Errorf("execute = %q, %v", out, err)
+					return
+				}
+				r.Execute(context.Background(), "s_t1", nil) // there or not
+			}
+		}()
+	}
+	exec := func(context.Context, json.RawMessage) (string, error) { return "", nil }
+	for i := range 500 {
+		var tools []*Tool
+		for j := range i % 7 {
+			tools = append(tools, &Tool{Name: fmt.Sprintf("s_t%d", j), Execute: exec})
+		}
+		r.SyncSource("s", tools)
+		if i%100 == 0 {
+			r.Retain([]string{"*"})
+		}
+	}
+	close(done)
+	wg.Wait()
 }
