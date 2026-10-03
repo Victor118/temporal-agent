@@ -238,7 +238,12 @@ diagnostic.
   parent comme message du membre qui l'envoie, `kind = fork_report`). Le
   rapport n'appelle aucun agent : les membres mentionnent l'agent ensuite s'ils
   veulent sa réaction. Seul le dernier rapport est suivi sur le fork ; pas
-  encore d'historique des rapports côté fork.
+  encore d'historique des rapports côté fork. Un parent de canal Telegram ne
+  voit pas le rapport arriver sur Telegram (il est en base et annoncé en SSE
+  seulement) : à faire si le besoin apparaît. Dans le parent, un rapport dont
+  le fork a été supprimé, ou dont le lecteur n'est pas membre, affiche « Fork
+  inaccessible » : les deux cas ne sont pas distingués (`ListForks` ne rend que
+  les forks dont il est membre).
 - **Comptes** : connexion par email et mot de passe (argon2id), sessions de
   connexion en base. Pas encore d'envoi d'emails (réinitialisation du mot de
   passe par un admin seulement).
