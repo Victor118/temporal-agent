@@ -51,3 +51,17 @@ func TestLoadSkillsForAgent_PromptFollowsAllowlist(t *testing.T) {
 		t.Error("default prompt offers delegating to itself")
 	}
 }
+
+// The agent knows its name and what calls it: in a shared session the
+// messages it answers start with its mention.
+func TestLoadSkillsForAgent_SaysWhatCallsIt(t *testing.T) {
+	c := NewCatalog()
+	c.SetAgents([]AgentCatalogEntry{{ID: "default", Name: "Jarvis", Mention: "jarvis"}})
+	out, err := NewSkillActivities(nil, c).LoadSkillsForAgent(context.Background(), LoadSkillsForAgentInput{AgentID: "default"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.SystemPrompt, "Your name is Jarvis. In a conversation, people address you by writing @jarvis.") {
+		t.Errorf("prompt %q", out.SystemPrompt)
+	}
+}

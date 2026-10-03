@@ -72,6 +72,7 @@ func buildBehaviors(allowed map[string]bool) string {
 type AgentCatalogEntry struct {
 	ID          string   `json:"id"`
 	Name        string   `json:"name"`
+	Mention     string   `json:"mention"` // what calls it in a session; never empty once loaded
 	Description string   `json:"description"`
 	Skills      []string `json:"skills"`
 	Tools       []string `json:"tools"` // Allowed tool name globs; empty = no tool, "*" = all
@@ -127,15 +128,15 @@ func (a *SkillActivities) LoadSkillsForAgent(ctx context.Context, input LoadSkil
 		allowed[name] = true
 	}
 
-	var agentSkills []string
+	var self AgentCatalogEntry
 	for _, e := range catalog {
 		if e.ID == input.AgentID {
-			agentSkills = e.Skills
+			self = e
 			break
 		}
 	}
 	a.mu.RLock()
-	prompt := buildSystemPrompt(matchSkills(a.skills, agentSkills), allowed)
+	prompt := identitySection(self) + buildSystemPrompt(matchSkills(a.skills, self.Skills), allowed)
 	a.mu.RUnlock()
 
 	return LoadSkillsForAgentOutput{SystemPrompt: prompt}, nil
@@ -150,6 +151,16 @@ func matchSkills(byName map[string]skill.Skill, names []string) []skill.Skill {
 		}
 	}
 	return matched
+}
+
+// identitySection tells the agent its name and how members call it: in a
+// shared session the messages it answers carry "@<mention>", which it would
+// otherwise take for someone else.
+func identitySection(self AgentCatalogEntry) string {
+	if self.Name == "" || self.Mention == "" {
+		return ""
+	}
+	return fmt.Sprintf("## Identity\n\nYour name is %s. In a conversation, people address you by writing @%s.\n\n", self.Name, self.Mention)
 }
 
 // buildSystemPrompt builds an agent's base prompt: behaviors for its allowed

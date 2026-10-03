@@ -383,3 +383,35 @@ func TestDeleteTool_OnlyOnItsQueue(t *testing.T) {
 		}
 	}
 }
+
+// A mention calls one agent: two cannot share it, case aside, on create as on
+// update. An empty mention (the ID stands in) is never a clash.
+func TestAgentMentionIsUnique(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	const a, b = "zz-mention-a", "zz-mention-b"
+	for _, id := range []string{a, b} {
+		s.DeleteAgent(ctx, id)
+		t.Cleanup(func() { s.DeleteAgent(ctx, id) })
+	}
+
+	if err := s.CreateAgent(ctx, Agent{ID: a, Name: "A", Mention: "Jarvis"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateAgent(ctx, Agent{ID: b, Name: "B", Mention: "jarvis"}); !errors.Is(err, ErrMentionTaken) {
+		t.Errorf("create with a taken mention: %v, want ErrMentionTaken", err)
+	}
+	if err := s.CreateAgent(ctx, Agent{ID: b, Name: "B"}); err != nil {
+		t.Fatalf("create without a mention: %v", err)
+	}
+	if _, err := s.UpdateAgent(ctx, Agent{ID: b, Name: "B", Mention: "JARVIS"}, 1); !errors.Is(err, ErrMentionTaken) {
+		t.Errorf("update to a taken mention: %v, want ErrMentionTaken", err)
+	}
+	got, _ := s.GetAgent(ctx, a)
+	if got == nil || got.Mention != "Jarvis" || got.MentionName() != "Jarvis" {
+		t.Errorf("agent a %+v", got)
+	}
+	if got, _ := s.GetAgent(ctx, b); got == nil || got.MentionName() != b {
+		t.Errorf("agent b %+v: want its ID as mention", got)
+	}
+}

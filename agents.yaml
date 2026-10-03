@@ -8,6 +8,7 @@
 agents:
   - id: default
     name: Default Agent
+    # mention: jarvis   # what members write to call it (@jarvis); default = the id
     description: General-purpose assistant for everyday tasks.
     skills: []
     tools:

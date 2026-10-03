@@ -16,7 +16,7 @@ func testPage(view string) *Page {
 	p := &Page{
 		Me: NewPerson("u1", "Victor F"), IsAdmin: true, Roots: roots, Node: node, Crumbs: Path(node), View: view,
 		Members:        []Member{{Person: NewPerson("u1", "Victor F"), Email: "v@x.fr"}, {Person: NewPerson("u2", "Bob"), Email: "b@x.fr"}},
-		Agent:          AgentInfo{ID: "default", Name: "Default Agent", Description: "General."},
+		Agent:          AgentInfo{ID: "default", Name: "Default Agent", Mention: "jarvis", Description: "General."},
 		AgentMode:      "auto",
 		AgentOnMention: true,
 		Parent:         &ParentInfo{SessionID: "root", Title: "root", Accessible: true, MessageID: 3},
@@ -62,7 +62,7 @@ func TestRender_Pages(t *testing.T) {
 		`name="workflow_id" value="fork-tool-ask_user-1"`,
 		`href="/s/root#m3"`, // back to the message forked from
 		"L'agent travaille",
-		"@agent pour le solliciter",
+		"@jarvis pour le solliciter",
 		`class="dot waiting"`,
 		"Configuration",
 	} {

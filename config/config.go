@@ -132,8 +132,11 @@ type MCPServer struct {
 // agents.yaml. The DB agents table is the source of truth; this file only seeds
 // agents that don't exist yet.
 type AgentDefinition struct {
-	ID          string   `yaml:"id" json:"id"`
-	Name        string   `yaml:"name" json:"name"`
+	ID   string `yaml:"id" json:"id"`
+	Name string `yaml:"name" json:"name"`
+	// Mention is what members write to call the agent in a session (@jarvis);
+	// empty = the ID.
+	Mention     string   `yaml:"mention" json:"mention"`
 	Description string   `yaml:"description" json:"description"`
 	Skills      []string `yaml:"skills" json:"skills"`
 	Tools       []string `yaml:"tools" json:"tools"` // Allowed tool name globs; omitted = no tool, "*" = all
@@ -206,6 +209,10 @@ var agentIDPattern = regexp.MustCompile(`^[a-z]([a-z0-9-]*[a-z0-9])?$`)
 
 const maxAgentIDLen = 58
 
+// MentionPattern is an agent's mention: what a message's @mention can carry
+// (session.mentionPattern), so any valid one can be written.
+var MentionPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,32}$`)
+
 // LoadAgentDefinitions reads and validates the agents seed file.
 func LoadAgentDefinitions(path string) ([]AgentDefinition, error) {
 	raw, err := os.ReadFile(path)
@@ -250,6 +257,9 @@ func (a AgentDefinition) Validate() error {
 	}
 	if a.Name == "" {
 		return fmt.Errorf("agent %q missing name", a.ID)
+	}
+	if a.Mention != "" && !MentionPattern.MatchString(a.Mention) {
+		return fmt.Errorf("agent %q: invalid mention %q (letters, digits, - and _, at most 32)", a.ID, a.Mention)
 	}
 	for _, g := range a.Tools {
 		if err := CheckToolGlob(g); err != nil {

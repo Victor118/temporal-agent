@@ -51,7 +51,7 @@
 <div class="msg" id="m{{.ID}}">
   <div class="agent-mark"></div>
   <div class="msg-body">
-    <div class="msg-head"><span class="who">agent</span><span class="agent-meta">{{$.Page.Agent.ID}}</span><span class="when">{{clock .Time}}</span></div>
+    <div class="msg-head"><span class="who">{{$.Page.Agent.Name}}</span><span class="agent-meta">@{{$.Page.Agent.Mention}}</span><span class="when">{{clock .Time}}</span></div>
     <div class="agent-card">
       <div class="prose">{{.HTML}}</div>
       {{with .Tools}}<div class="tools">{{range .}}<span class="tool">{{.}}</span>{{end}}</div>{{end}}
@@ -108,7 +108,7 @@
   <form class="composer-box" hx-post="/s/{{$sid}}/messages" hx-target="#thread" hx-swap="outerHTML"
         hx-on::after-request="if (event.detail.successful) this.reset()">
     <textarea name="content" rows="2" required {{if .SummaryPending}}disabled{{end}}
-      placeholder="{{if .AgentOnMention}}Écrire dans ce fil — @agent pour le solliciter{{else}}Écrire à l'agent…{{end}}"
+      placeholder="{{if .AgentOnMention}}Écrire dans ce fil — @{{.Agent.Mention}} pour le solliciter{{else}}Écrire à {{.Agent.Name}}…{{end}}"
       onkeydown="if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); this.form.requestSubmit(); }"></textarea>
     <div class="composer-bar">
       <div>
@@ -117,7 +117,7 @@
                 hx-confirm="Démarrer une nouvelle session à partir du dernier message ?">Forker un fil</button>
         {{end}}
       </div>
-      <span class="hint">{{if .AgentOnMention}}L'agent ne répond qu'à <code>@agent</code>{{else}}Entrée pour envoyer, Maj+Entrée pour aller à la ligne{{end}}</span>
+      <span class="hint">{{if .AgentOnMention}}{{.Agent.Name}} ne répond qu'à <code>@{{.Agent.Mention}}</code>{{else}}Entrée pour envoyer, Maj+Entrée pour aller à la ligne{{end}}</span>
       <button class="btn primary" type="submit" {{if .SummaryPending}}disabled{{end}}>Envoyer</button>
     </div>
   </form>

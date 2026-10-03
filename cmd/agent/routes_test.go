@@ -434,8 +434,12 @@ func TestRoutes_MessagesCallTheAgentOnlyWhenMeant(t *testing.T) {
 		t.Errorf("signals %v", tc.signals)
 	}
 
-	if !send("@agent résume la discussion") {
-		t.Error("@agent did not call the agent")
+	// The default agent has no mention set: its ID calls it.
+	if send("@agent résume la discussion") {
+		t.Error("@agent called an agent whose mention is @default")
+	}
+	if !send("@default résume la discussion") {
+		t.Error("@default did not call the agent")
 	}
 	if len(tc.signals) != 1 {
 		t.Fatalf("signals %v", tc.signals)
@@ -445,8 +449,8 @@ func TestRoutes_MessagesCallTheAgentOnlyWhenMeant(t *testing.T) {
 	if !msg.Stored || msg.UserID != "u-bob" {
 		t.Errorf("signal %+v", msg)
 	}
-	if len(st.appended) != 2 {
-		t.Errorf("%d messages stored, want both", len(st.appended))
+	if len(st.appended) != 3 {
+		t.Errorf("%d messages stored, want all three", len(st.appended))
 	}
 
 	// The session can call the agent on every message.

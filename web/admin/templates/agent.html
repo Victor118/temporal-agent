@@ -3,7 +3,7 @@
 {{with .Data}}
 <div class="crumbs"><a href="/admin/agents">Agents</a> /</div>
 <div class="head">
-<h1>{{.Name}} <span class="id">{{.ID}}</span>
+<h1>{{.Name}} <span class="id">{{.ID}} · @{{.MentionName}}</span>
   {{if .IsDefault}}<span class="badge b-info">défaut</span>{{end}}
   {{template "allowlist_mode" .}}
 </h1>

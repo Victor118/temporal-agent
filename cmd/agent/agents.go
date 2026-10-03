@@ -56,6 +56,7 @@ func seedAgents(st agentSeeder, path string) error {
 		inserted, err := st.InsertAgentIfAbsent(ctx, store.Agent{
 			ID:          def.ID,
 			Name:        def.Name,
+			Mention:     def.Mention,
 			Description: def.Description,
 			Skills:      def.Skills,
 			Tools:       def.Tools,
@@ -82,6 +83,7 @@ func loadAgentsFromDB(ctx context.Context, st catalogSource) ([]activity.AgentCa
 		catalog[i] = activity.AgentCatalogEntry{
 			ID:          a.ID,
 			Name:        a.Name,
+			Mention:     a.MentionName(),
 			Description: a.Description,
 			Skills:      a.Skills,
 			Tools:       a.Tools,

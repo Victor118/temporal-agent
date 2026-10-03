@@ -73,6 +73,7 @@ type Member struct {
 type AgentInfo struct {
 	ID          string
 	Name        string
+	Mention     string // what calls it: @Mention
 	Description string
 }
 

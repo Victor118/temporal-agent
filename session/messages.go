@@ -20,11 +20,14 @@ import (
 // character (so an email address is not one), then a name.
 var mentionPattern = regexp.MustCompile(`(?:^|[^\w@.])@([\w-]+)`)
 
-// mentionsAgent reports whether text calls the session's agent: @agent, or
-// the agent by its ID (@default). Case does not matter.
-func mentionsAgent(text, agentID string) bool {
+// mentionsAgent reports whether text calls the session's agent by its
+// mention (@jarvis), the name the admin gave it. Case does not matter.
+func mentionsAgent(text, mention string) bool {
+	if mention == "" {
+		return false
+	}
 	for _, m := range mentionPattern.FindAllStringSubmatch(text, -1) {
-		if name := m[1]; strings.EqualFold(name, "agent") || (agentID != "" && strings.EqualFold(name, agentID)) {
+		if strings.EqualFold(m[1], mention) {
 			return true
 		}
 	}
@@ -33,16 +36,34 @@ func mentionsAgent(text, agentID string) bool {
 
 // callsAgent decides whether a human message starts an agent turn. Alone in a
 // session, a user talks to the agent; once several share it, they talk to
-// each other and call the agent with @agent. A session can force either.
-func callsAgent(mode string, members int, text, agentID string) bool {
+// each other and call the agent by its mention. A session can force either.
+func callsAgent(mode string, members int, text, mention string) bool {
 	switch mode {
 	case store.AgentModeAlways:
 		return true
 	case store.AgentModeMention:
-		return mentionsAgent(text, agentID)
+		return mentionsAgent(text, mention)
 	default: // auto
-		return members <= 1 || mentionsAgent(text, agentID)
+		return members <= 1 || mentionsAgent(text, mention)
 	}
+}
+
+// agentMention is what calls the session's agent: its mention, or its ID
+// when it has none. The agent is the one a turn would run, the default one
+// when the session's is unset or gone (agentOrDefault).
+func (s *Service) agentMention(ctx context.Context, agentID string) (string, error) {
+	id, err := s.agentOrDefault(ctx, agentID)
+	if err != nil {
+		return "", err
+	}
+	a, err := s.store.GetAgent(ctx, id)
+	if err != nil {
+		return "", fmt.Errorf("load agent %q: %w", id, err)
+	}
+	if a == nil {
+		return id, nil
+	}
+	return a.MentionName(), nil
 }
 
 // Deliver takes a human message into a session, from any channel: it stores
@@ -75,7 +96,11 @@ func (s *Service) Deliver(ctx context.Context, sess *store.Session, author *stor
 	if err != nil {
 		return false, fmt.Errorf("list members: %w", err)
 	}
-	called := callsAgent(sess.AgentMode, len(members), text, sess.AgentID)
+	mention, err := s.agentMention(ctx, sess.AgentID)
+	if err != nil {
+		return false, err
+	}
+	called := callsAgent(sess.AgentMode, len(members), text, mention)
 	msg := workflow.UserMessage{Text: text, UserID: author.ID, UserName: author.Name(), Stored: true}
 	s.publishUserMessage(sess.SessionID, msg, called)
 	if !called {

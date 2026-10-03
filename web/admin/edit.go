@@ -32,6 +32,7 @@ type agentForm struct {
 	New         bool
 	ID          string
 	Name        string
+	Mention     string // empty = the ID
 	Description string
 	Skills      string // one per line
 	// The allowlist, split in two: published tools checked by name, and
@@ -85,6 +86,7 @@ func formFromAgent(a store.Agent, tools []store.ToolRecord, agents []store.Agent
 	f := agentForm{
 		ID:          a.ID,
 		Name:        a.Name,
+		Mention:     a.Mention,
 		Description: a.Description,
 		Skills:      strings.Join(a.Skills, "\n"),
 		Revision:    a.Revision,
@@ -107,6 +109,7 @@ func formFromRequest(r *http.Request) agentForm {
 	return agentForm{
 		ID:          strings.TrimSpace(r.FormValue("id")),
 		Name:        strings.TrimSpace(r.FormValue("name")),
+		Mention:     strings.TrimPrefix(strings.TrimSpace(r.FormValue("mention")), "@"),
 		Description: strings.TrimSpace(r.FormValue("description")),
 		Skills:      r.FormValue("skills"),
 		Picked:      r.Form["tool"],
@@ -125,6 +128,7 @@ func (f agentForm) agent() (store.Agent, error) {
 	def := config.AgentDefinition{
 		ID:          f.ID,
 		Name:        f.Name,
+		Mention:     f.Mention,
 		Description: f.Description,
 		Skills:      lines(f.Skills),
 		Tools:       f.allowlist(),
@@ -132,7 +136,7 @@ func (f agentForm) agent() (store.Agent, error) {
 	if err := def.Validate(); err != nil {
 		return store.Agent{}, err
 	}
-	return store.Agent{ID: def.ID, Name: def.Name, Description: def.Description, Skills: def.Skills, Tools: def.Tools}, nil
+	return store.Agent{ID: def.ID, Name: def.Name, Mention: def.Mention, Description: def.Description, Skills: def.Skills, Tools: def.Tools}, nil
 }
 
 // lines splits a textarea into its non-empty, trimmed, distinct lines. It never
@@ -263,6 +267,8 @@ func (a *Admin) createAgent(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case errors.Is(err, store.ErrAgentExists):
 		f.Error = fmt.Sprintf("L'identifiant %q est déjà pris.", f.ID)
+	case errors.Is(err, store.ErrMentionTaken):
+		f.Error = fmt.Sprintf("La mention @%s est déjà celle d'un autre agent.", f.Mention)
 	case err != nil:
 		f.Error = err.Error()
 	default:
@@ -288,6 +294,8 @@ func (a *Admin) updateAgent(w http.ResponseWriter, r *http.Request) {
 		// The revision is kept stale on purpose: resubmitting as is would
 		// overwrite the other change, so it keeps being refused.
 		f.Error = "Cet agent a été modifié ailleurs depuis l'ouverture du formulaire. Recharge la page pour repartir de la version actuelle, puis refais tes changements."
+	case errors.Is(err, store.ErrMentionTaken):
+		f.Error = fmt.Sprintf("La mention @%s est déjà celle d'un autre agent.", f.Mention)
 	case err != nil:
 		f.Error = err.Error()
 	default:

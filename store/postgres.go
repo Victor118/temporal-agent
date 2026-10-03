@@ -166,6 +166,9 @@ const schema = `
 		-- revision is bumped on every update, so an edit made from a stale copy
 		-- is refused instead of silently overwriting a newer one.
 		ALTER TABLE agents ADD COLUMN IF NOT EXISTS revision BIGINT NOT NULL DEFAULT 1;
+		-- What members write to call the agent (@jarvis); empty = its ID.
+		ALTER TABLE agents ADD COLUMN IF NOT EXISTS mention TEXT NOT NULL DEFAULT '';
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_mention ON agents (lower(mention)) WHERE mention <> '';
 		-- spawn_session gave way to one agent_<id> tool per agent, generated from
 		-- this table. An allowlist that granted it keeps delegating to everyone,
 		-- now spelled agent_*.
@@ -425,7 +428,16 @@ func (s *PostgresStore) UpdateTaskLogStatus(ctx context.Context, scheduleID, sta
 }
 
 // agentColumns is the column list shared by agent queries, in scanAgent order.
-const agentColumns = "agent_id, name, description, skills, tools, revision, created_at, updated_at"
+const agentColumns = "agent_id, name, mention, description, skills, tools, revision, created_at, updated_at"
+
+// mentionErr names the one unique constraint an agent write can break beyond
+// its ID, which ON CONFLICT or the WHERE clause handle: the mention.
+func mentionErr(err error) error {
+	if isUniqueViolation(err) {
+		return ErrMentionTaken
+	}
+	return err
+}
 
 // InsertAgentIfAbsent inserts the agent only if no agent with the same ID exists.
 // Existing rows are never modified. Returns true if the agent was inserted.
@@ -435,12 +447,12 @@ func (s *PostgresStore) InsertAgentIfAbsent(ctx context.Context, agent Agent) (b
 		return false, err
 	}
 	res, err := s.db.ExecContext(ctx, `
-		INSERT INTO agents (agent_id, name, description, skills, tools)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO agents (agent_id, name, mention, description, skills, tools)
+		VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT (agent_id) DO NOTHING`,
-		agent.ID, agent.Name, agent.Description, skillsJSON, toolsJSON)
+		agent.ID, agent.Name, agent.Mention, agent.Description, skillsJSON, toolsJSON)
 	if err != nil {
-		return false, err
+		return false, mentionErr(err)
 	}
 	n, err := res.RowsAffected()
 	return n > 0, err
@@ -496,13 +508,13 @@ func (s *PostgresStore) UpdateAgent(ctx context.Context, agent Agent, expectedRe
 	}
 	var revision int64
 	err = s.db.QueryRowContext(ctx, `
-		UPDATE agents SET name = $2, description = $3, skills = $4, tools = $5,
+		UPDATE agents SET name = $2, mention = $3, description = $4, skills = $5, tools = $6,
 			revision = revision + 1, updated_at = NOW()
-		WHERE agent_id = $1 AND revision = $6
+		WHERE agent_id = $1 AND revision = $7
 		RETURNING revision`,
-		agent.ID, agent.Name, agent.Description, skillsJSON, toolsJSON, expectedRevision).Scan(&revision)
+		agent.ID, agent.Name, agent.Mention, agent.Description, skillsJSON, toolsJSON, expectedRevision).Scan(&revision)
 	if err != sql.ErrNoRows {
-		return revision, err
+		return revision, mentionErr(err)
 	}
 	current, err := s.GetAgent(ctx, agent.ID)
 	if err != nil {
@@ -571,7 +583,7 @@ func marshalAgentLists(agent Agent) (skills, tools string, err error) {
 func scanAgent(row interface{ Scan(...any) error }) (*Agent, error) {
 	var a Agent
 	var skillsJSON, toolsJSON string
-	if err := row.Scan(&a.ID, &a.Name, &a.Description, &skillsJSON, &toolsJSON, &a.Revision, &a.CreatedAt, &a.UpdatedAt); err != nil {
+	if err := row.Scan(&a.ID, &a.Name, &a.Mention, &a.Description, &skillsJSON, &toolsJSON, &a.Revision, &a.CreatedAt, &a.UpdatedAt); err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal([]byte(skillsJSON), &a.Skills); err != nil {

@@ -38,3 +38,18 @@ agents:
 		t.Errorf("err = %v, want invalid tool pattern", err)
 	}
 }
+
+// A mention must be writable as an @mention in a message: no space, no
+// accent, nothing a message's @mention would stop at.
+func TestAgentDefinition_Mention(t *testing.T) {
+	for mention, ok := range map[string]bool{
+		"": true, "jarvis": true, "Jarvis_2": true, "mon-agent": true,
+		"mon agent": false, "élodie": false, "@jarvis": false, "a.b": false,
+		strings.Repeat("x", 33): false,
+	} {
+		err := AgentDefinition{ID: "default", Name: "Default", Mention: mention}.Validate()
+		if (err == nil) != ok {
+			t.Errorf("mention %q: %v, want ok %v", mention, err, ok)
+		}
+	}
+}

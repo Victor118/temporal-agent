@@ -267,7 +267,7 @@ func newCatalog(agents []store.Agent, tools []store.ToolRecord) *activity.Catalo
 }
 
 func catalogEntry(a store.Agent) activity.AgentCatalogEntry {
-	return activity.AgentCatalogEntry{ID: a.ID, Name: a.Name, Description: a.Description, Skills: a.Skills, Tools: a.Tools}
+	return activity.AgentCatalogEntry{ID: a.ID, Name: a.Name, Mention: a.MentionName(), Description: a.Description, Skills: a.Skills, Tools: a.Tools}
 }
 
 // reach returns the published tools agent id can end up using: its own, and

@@ -28,16 +28,16 @@
     <div class="eyebrow">Agent</div>
     <div class="card">
       <div class="ttl">{{.Agent.Name}}</div>
-      <div class="meta"><div>{{.Agent.ID}}</div></div>
+      <div class="meta"><div>@{{.Agent.Mention}}</div></div>
       {{with .Agent.Description}}<div class="note" style="margin-top:6px">{{.}}</div>{{end}}
       <form hx-post="/s/{{$sid}}/agent-mode" hx-trigger="change" hx-target="#rail" hx-swap="outerHTML">
         <select class="input" name="mode" aria-label="Quand l'agent répond">
           <option value="auto" {{if eq .AgentMode "auto"}}selected{{end}}>Répond : auto</option>
           <option value="always" {{if eq .AgentMode "always"}}selected{{end}}>Répond : à chaque message</option>
-          <option value="mention" {{if eq .AgentMode "mention"}}selected{{end}}>Répond : sur @agent</option>
+          <option value="mention" {{if eq .AgentMode "mention"}}selected{{end}}>Répond : sur @{{.Agent.Mention}}</option>
         </select>
       </form>
-      <div class="note" style="margin-top:6px">{{if eq .AgentMode "auto"}}Auto : à chaque message quand tu es seul, sur @agent dès que vous êtes plusieurs.{{else if eq .AgentMode "mention"}}L'agent ne répond qu'aux messages qui le mentionnent.{{else}}L'agent répond à chaque message.{{end}}</div>
+      <div class="note" style="margin-top:6px">{{if eq .AgentMode "auto"}}Auto : à chaque message quand tu es seul, sur @{{.Agent.Mention}} dès que vous êtes plusieurs.{{else if eq .AgentMode "mention"}}L'agent ne répond qu'aux messages qui le mentionnent.{{else}}L'agent répond à chaque message.{{end}}</div>
     </div>
   </section>
 

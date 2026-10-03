@@ -155,9 +155,9 @@ func (u *ui) buildPage(ctx context.Context, me *store.User, sessionID, view stri
 	}
 	p.AgentOnMention = p.AgentMode == store.AgentModeMention || (p.AgentMode == store.AgentModeAuto && len(members) > 1)
 
-	p.Agent = chat.AgentInfo{ID: sess.AgentID, Name: sess.AgentID}
+	p.Agent = chat.AgentInfo{ID: sess.AgentID, Name: sess.AgentID, Mention: sess.AgentID}
 	if a, err := u.store.GetAgent(ctx, sess.AgentID); err == nil && a != nil {
-		p.Agent.Name, p.Agent.Description = a.Name, a.Description
+		p.Agent.Name, p.Agent.Mention, p.Agent.Description = a.Name, a.MentionName(), a.Description
 	}
 
 	if sess.ParentSessionID != "" {

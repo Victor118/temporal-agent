@@ -104,19 +104,31 @@ type ActivityQueueEntry struct {
 
 var (
 	ErrAgentExists   = errors.New("agent already exists")
+	ErrMentionTaken  = errors.New("mention already used by another agent")
 	ErrAgentNotFound = errors.New("agent not found")
 	ErrAgentConflict = errors.New("agent changed since it was read")
 )
 
 type Agent struct {
-	ID          string    `json:"id"`
-	Name        string    `json:"name"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// Mention is what members write to call the agent (@jarvis); empty = the
+	// ID (MentionName). Unique, case aside.
+	Mention     string    `json:"mention"`
 	Description string    `json:"description"`
 	Skills      []string  `json:"skills"`
 	Tools       []string  `json:"tools"`    // Allowed tool name globs; empty = no tool, "*" = all
 	Revision    int64     `json:"revision"` // bumped on every update
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// MentionName is what calls the agent in a session: its mention, or its ID.
+func (a Agent) MentionName() string {
+	if a.Mention != "" {
+		return a.Mention
+	}
+	return a.ID
 }
 
 // ToolRecord is a tool published by a worker: where it runs and its contract.
