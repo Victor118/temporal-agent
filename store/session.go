@@ -55,6 +55,9 @@ type Session struct {
 	ParentSessionID   string `json:"parent_session_id,omitempty"`
 	ForkedAtMessageID int64  `json:"forked_at_message_id,omitempty"`
 	ForkedBy          string `json:"forked_by,omitempty"`
+	// ForkPurpose is what the fork was opened for, in its creator's words;
+	// empty when they gave none. It steers the fork's summary.
+	ForkPurpose string `json:"fork_purpose,omitempty"`
 }
 
 // When a human message calls a session's agent.

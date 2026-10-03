@@ -10,6 +10,7 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/client"
@@ -25,6 +26,7 @@ var (
 	ErrNotCreator      = errors.New("only the session's creator can delete it; leave it instead")
 	ErrNoSuchUser      = errors.New("no active user with this email")
 	ErrBadForkPoint    = errors.New("no such message to fork from in this session")
+	ErrPurposeTooLong  = fmt.Errorf("a fork's purpose is at most %d characters", MaxPurposeRunes)
 	ErrEmptyMessage    = errors.New("message content is required")
 	ErrSummaryPending  = errors.New("the summary of the parent session is still being written")
 	ErrBadMode         = errors.New("mode must be auto, always or mention")

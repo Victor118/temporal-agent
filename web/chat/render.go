@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/victor/temporal-agent/session"
 	"github.com/victor/temporal-agent/store"
 )
 
@@ -125,6 +126,7 @@ var tmpl = template.Must(template.New("").Funcs(template.FuncMap{
 	"plural":      func(n int, word string) string { return pluralize(n, word) },
 	"add":         func(a, b int) int { return a + b },
 	"itemOf":      func(p *Page, it ThreadItem) ItemView { return ItemView{Page: p, Item: it} },
+	"purposeMax":  func() int { return session.MaxPurposeRunes },
 }).ParseFS(templateFS, "templates/*.html"))
 
 // Render writes the named template (a page or a fragment) for data. It

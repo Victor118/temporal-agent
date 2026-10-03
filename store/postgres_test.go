@@ -251,14 +251,18 @@ func TestForks(t *testing.T) {
 	if p, _ := s.GetSession(ctx, "zz-parent"); p.ParentSessionID != "" || p.ForkedAtMessageID != 0 || p.ForkedBy != "" {
 		t.Errorf("plain session %+v", p)
 	}
-	for _, f := range []struct{ id, by string }{{"zz-f-alice", "zz-alice"}, {"zz-f-bob", "zz-bob"}} {
+	for _, f := range []struct{ id, by, purpose string }{{"zz-f-alice", "zz-alice", "Écrire l'export CSV"}, {"zz-f-bob", "zz-bob", ""}} {
 		if err := s.CreateSession(ctx, Session{SessionID: f.id, CreatedBy: f.by, Channel: "web",
-			ParentSessionID: "zz-parent", ForkedAtMessageID: all[1].ID, ForkedBy: f.by}); err != nil {
+			ParentSessionID: "zz-parent", ForkedAtMessageID: all[1].ID, ForkedBy: f.by, ForkPurpose: f.purpose}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if f, _ := s.GetSession(ctx, "zz-f-alice"); f.ParentSessionID != "zz-parent" || f.ForkedAtMessageID != all[1].ID || f.ForkedBy != "zz-alice" {
+	if f, _ := s.GetSession(ctx, "zz-f-alice"); f.ParentSessionID != "zz-parent" || f.ForkedAtMessageID != all[1].ID || f.ForkedBy != "zz-alice" ||
+		f.ForkPurpose != "Écrire l'export CSV" {
 		t.Errorf("fork %+v", f)
+	}
+	if f, _ := s.GetSession(ctx, "zz-f-bob"); f.ForkPurpose != "" {
+		t.Errorf("a fork opened without a purpose: %+v", f)
 	}
 	// Each user sees only the forks they are a member of.
 	if forks, _ := s.ListForks(ctx, "zz-parent", "zz-alice"); len(forks) != 1 || forks[0].SessionID != "zz-f-alice" {

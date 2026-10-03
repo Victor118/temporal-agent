@@ -402,7 +402,8 @@ func (a *api) answerQuestion(w http.ResponseWriter, r *http.Request) {
 // --- Forks ---
 
 type forkRequest struct {
-	MessageID int64 `json:"message_id"`
+	MessageID int64  `json:"message_id"`
+	Purpose   string `json:"purpose,omitempty"` // what the fork is for; optional
 }
 
 // forkSession starts a new session from a message of this one.
@@ -412,12 +413,14 @@ func (a *api) forkSession(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "message_id is required", http.StatusBadRequest)
 		return
 	}
-	f, err := a.sessions.Fork(r.Context(), chi.URLParam(r, "id"), req.MessageID, auth.UserFrom(r.Context()))
+	f, err := a.sessions.Fork(r.Context(), chi.URLParam(r, "id"), req.MessageID, req.Purpose, auth.UserFrom(r.Context()))
 	switch {
 	case errors.Is(err, session.ErrNotFound):
 		http.Error(w, "Session not found", http.StatusNotFound)
 	case errors.Is(err, session.ErrBadForkPoint):
 		http.Error(w, "No such message to fork from in this session", http.StatusBadRequest)
+	case errors.Is(err, session.ErrPurposeTooLong):
+		http.Error(w, err.Error(), http.StatusBadRequest)
 	case err != nil:
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	default:

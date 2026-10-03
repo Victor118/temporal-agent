@@ -8,6 +8,7 @@
   {{with .Parent}}
   <div class="divider"><span>forké depuis {{if .Accessible}}<a href="/s/{{.SessionID}}#m{{.MessageID}}">{{.Title}}</a>{{else}}une session à laquelle tu n'as pas accès{{end}}</span></div>
   {{end}}
+  {{with .Node.Session.ForkPurpose}}<div class="purpose"><span class="eyebrow">But du fork</span>{{.}}</div>{{end}}
   {{if .SummaryPending}}<div class="working-line"><span class="dot"></span>Résumé de la session parente en cours…</div>{{end}}
   {{if .SummaryFailed}}<div class="note">Le résumé de la session parente n'a pas pu être écrit : ce fork démarre sans.</div>{{end}}
 
@@ -91,13 +92,22 @@
 {{with .Forks}}<div class="forks">⑂ {{len .}} fork{{if gt (len .) 1}}s{{end}} : {{range $i, $f := .}}{{if $i}}, {{end}}<a href="/s/{{$f.SessionID}}">{{$f.Title}}</a>{{end}}</div>{{end}}
 {{end}}
 
+{{/* Forking asks what for: the purpose titles the fork and steers its brief.
+     The form survives the thread's reloads (hx-preserve), typing included. */}}
 {{define "fork-action"}}
 {{if not .Page.SummaryPending}}
 <div class="msg-actions">
-  <form hx-post="/s/{{.Page.Node.Session.SessionID}}/fork" hx-confirm="Démarrer une nouvelle session à partir de ce message ? Elle part d'un résumé de la conversation jusqu'ici.">
-    <input type="hidden" name="message_id" value="{{.Item.ID}}">
-    <button class="btn" type="submit" title="Nouvelle session à partir de ce message">⑂ Forker ici</button>
-  </form>
+  <details class="fork-menu" id="fork-m{{.Item.ID}}" hx-preserve="true">
+    <summary class="btn" title="Nouvelle session à partir de ce message">⑂ Forker ici</summary>
+    <form class="fork-form" hx-post="/s/{{.Page.Node.Session.SessionID}}/fork">
+      <input type="hidden" name="message_id" value="{{.Item.ID}}">
+      <label for="fork-purpose-m{{.Item.ID}}">Pour quoi faire ?</label>
+      <input class="input" id="fork-purpose-m{{.Item.ID}}" name="purpose" maxlength="{{purposeMax}}" autocomplete="off"
+             placeholder="Optionnel : le but de ce fil, il oriente son brief">
+      <div class="note">Le fork part d'un résumé de la conversation jusqu'ici, centré sur ce but.</div>
+      <button class="btn primary" type="submit">Forker</button>
+    </form>
+  </details>
 </div>
 {{end}}
 {{end}}
@@ -113,13 +123,26 @@
     <div class="composer-bar">
       <div>
         {{if and .LastMessageID (not .SummaryPending)}}
-        <button class="btn" type="button" hx-post="/s/{{$sid}}/fork" hx-vals='{"message_id": "{{.LastMessageID}}"}'
-                hx-confirm="Démarrer une nouvelle session à partir du dernier message ?">Forker un fil</button>
+        {{/* A form cannot sit in the composer's: the fields belong to
+             fork-last by their form attribute. */}}
+        <details class="fork-menu up" id="fork-last-menu" hx-preserve="true">
+          <summary class="btn">Forker un fil</summary>
+          <div class="fork-form">
+            <label for="fork-purpose-last">Pour quoi faire ?</label>
+            <input class="input" id="fork-purpose-last" name="purpose" form="fork-last" maxlength="{{purposeMax}}" autocomplete="off"
+                   placeholder="Optionnel : le but de ce fil, il oriente son brief">
+            <div class="note">Le fork part d'un résumé de toute la conversation, centré sur ce but.</div>
+            <button class="btn primary" type="submit" form="fork-last">Forker depuis le dernier message</button>
+          </div>
+        </details>
         {{end}}
       </div>
       <span class="hint">{{if .AgentOnMention}}{{.Agent.Name}} ne répond qu'à <code>@{{.Agent.Mention}}</code>{{if .SeveralAgents}}, les autres agents à leur mention{{end}}{{else}}Entrée pour envoyer, Maj+Entrée pour aller à la ligne{{if .SeveralAgents}} · @mention pour appeler un autre agent{{end}}{{end}}</span>
       <button class="btn primary" type="submit" {{if .SummaryPending}}disabled{{end}}>Envoyer</button>
     </div>
   </form>
+  {{if and .LastMessageID (not .SummaryPending)}}
+  <form id="fork-last" hx-post="/s/{{$sid}}/fork" hidden><input type="hidden" name="message_id" value="{{.LastMessageID}}"></form>
+  {{end}}
 </div>
 {{end}}

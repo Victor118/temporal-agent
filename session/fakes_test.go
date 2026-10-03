@@ -87,6 +87,7 @@ type fakeTemporal struct {
 	lists        []string // the queries
 	signals      []string // workflow IDs signalled
 	started      []string
+	inputs       []interface{} // the input of each workflow started
 	signalStarts []signalStart
 	states       map[string]workflow.SessionState // by workflow ID
 	queried      []string                         // workflow IDs queried
@@ -115,8 +116,11 @@ func (e encodedState) Get(v interface{}) error {
 	return nil
 }
 
-func (f *fakeTemporal) ExecuteWorkflow(_ context.Context, o client.StartWorkflowOptions, _ interface{}, _ ...interface{}) (client.WorkflowRun, error) {
+func (f *fakeTemporal) ExecuteWorkflow(_ context.Context, o client.StartWorkflowOptions, _ interface{}, args ...interface{}) (client.WorkflowRun, error) {
 	f.started = append(f.started, o.ID)
+	if len(args) > 0 {
+		f.inputs = append(f.inputs, args[0])
+	}
 	return nil, nil
 }
 func (f *fakeTemporal) SignalWorkflow(_ context.Context, id, _, _ string, _ interface{}) error {

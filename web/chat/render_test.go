@@ -126,3 +126,40 @@ func TestRender_Pages(t *testing.T) {
 	}
 	render(t, "notifications", NotificationsPage{Items: []Notification{{ID: 1, HTML: Markdown("done")}}})
 }
+
+// Forking asks what for, in a form rather than a confirmation; the fork shows
+// its purpose, escaped, in its thread and its rail.
+func TestRender_ForkPurpose(t *testing.T) {
+	p := testPage("thread")
+	page := render(t, "page", p)
+	for _, want := range []string{
+		`<summary class="btn" title="Nouvelle session à partir de ce message">⑂ Forker ici</summary>`,
+		`id="fork-purpose-m9" name="purpose" maxlength="500"`,
+		`Pour quoi faire ?`,
+		// The composer's: its fields belong to a form outside the composer's.
+		`name="purpose" form="fork-last"`,
+		`<form id="fork-last" hx-post="/s/fork/fork" hidden><input type="hidden" name="message_id" value="9"></form>`,
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("page lacks %q", want)
+		}
+	}
+	if strings.Contains(page, "hx-confirm=\"Démarrer") {
+		t.Error("forking still asks a bare confirmation")
+	}
+	if strings.Contains(page, "But du fork") {
+		t.Error("a fork without a purpose shows one")
+	}
+
+	p.Node.Session.ForkPurpose = "Écrire <l'export> CSV"
+	page = render(t, "page", p)
+	if strings.Count(page, "Écrire &lt;l&#39;export&gt; CSV") != 2 || strings.Contains(page, "<l'export>") {
+		t.Errorf("the purpose, in the thread and the rail, escaped: %d", strings.Count(page, "Écrire &lt;l&#39;export&gt; CSV"))
+	}
+
+	// While the brief is written, nothing to fork from.
+	p.SummaryPending = true
+	if out := render(t, "page", p); strings.Contains(out, `name="purpose"`) {
+		t.Error("fork forms while the summary is pending")
+	}
+}

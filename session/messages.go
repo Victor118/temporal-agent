@@ -206,11 +206,16 @@ const maxTitleRunes = 80
 // cut is in characters: cut in bytes, an accented letter can be split, and
 // Postgres refuses the invalid UTF-8.
 func (s *Service) setTitleFrom(sessionID, text string) {
+	if err := s.store.UpdateSessionTitle(context.Background(), sessionID, titleFrom(text)); err != nil {
+		log.Printf("Session %s: set title: %v", sessionID, err)
+	}
+}
+
+// titleFrom is text as a title: trimmed, and cut to maxTitleRunes.
+func titleFrom(text string) string {
 	title := strings.TrimSpace(text)
 	if r := []rune(title); len(r) > maxTitleRunes {
 		title = string(r[:maxTitleRunes]) + "..."
 	}
-	if err := s.store.UpdateSessionTitle(context.Background(), sessionID, title); err != nil {
-		log.Printf("Session %s: set title: %v", sessionID, err)
-	}
+	return title
 }

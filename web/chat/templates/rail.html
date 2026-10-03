@@ -47,6 +47,7 @@
     <div class="eyebrow">Hérité du parent</div>
     <div class="inherited">
       <div class="note">Cette session est née d'une synthèse de {{if .Accessible}}<a href="/s/{{.SessionID}}#m{{.MessageID}}">{{.Title}}</a>{{else}}sa session parente{{end}}, pas d'une copie du fil.</div>
+      {{with $.Node.Session.ForkPurpose}}<div class="note purpose-note"><strong>But :</strong> {{.}}</div>{{end}}
       <a href="#brief" hx-boost="false" onclick="var b = document.getElementById('brief'); if (b) b.open = true;" style="font-size:12px;display:inline-block;margin-top:7px">Voir le brief</a>
     </div>
   </section>

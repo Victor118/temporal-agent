@@ -338,10 +338,14 @@ func (u *ui) sendForm(w http.ResponseWriter, r *http.Request) {
 func (u *ui) forkForm(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "id")
 	messageID, _ := strconv.ParseInt(r.FormValue("message_id"), 10, 64)
-	f, err := u.sessions.Fork(r.Context(), sessionID, messageID, auth.UserFrom(r.Context()))
+	f, err := u.sessions.Fork(r.Context(), sessionID, messageID, r.FormValue("purpose"), auth.UserFrom(r.Context()))
 	if err != nil {
 		log.Printf("ui: fork %s at %d: %v", sessionID, messageID, err)
-		u.renderPage(w, r, sessionID, "thread", "thread", func(p *chat.Page) { p.Error = "Fork impossible : " + err.Error() })
+		msg := "Fork impossible : " + err.Error()
+		if errors.Is(err, session.ErrPurposeTooLong) {
+			msg = "Fork impossible : le but tient en quelques phrases, la spec reste dans la session parente."
+		}
+		u.renderPage(w, r, sessionID, "thread", "thread", func(p *chat.Page) { p.Error = msg })
 		return
 	}
 	goTo(w, r, "/s/"+f.SessionID)

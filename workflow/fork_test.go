@@ -42,12 +42,12 @@ func forkEnv(t *testing.T, summarize func(activity.SummarizeConversationInput) (
 
 func TestForkSessionWorkflow_StoresTheSummary(t *testing.T) {
 	env, persisted, events := forkEnv(t, func(in activity.SummarizeConversationInput) (activity.SummarizeConversationOutput, error) {
-		if in.SessionID != "parent1" || in.UpToMessageID != 42 || in.Model != "small" {
+		if in.SessionID != "parent1" || in.UpToMessageID != 42 || in.Model != "small" || in.Purpose != "CSV export" {
 			t.Errorf("summarized %+v", in)
 		}
 		return activity.SummarizeConversationOutput{Summary: "What happened.", Truncated: true}, nil
 	})
-	env.ExecuteWorkflow(ForkSessionWorkflow, ForkSessionInput{ForkSessionID: "fork1", ParentSessionID: "parent1", UpToMessageID: 42, Model: "small"})
+	env.ExecuteWorkflow(ForkSessionWorkflow, ForkSessionInput{ForkSessionID: "fork1", ParentSessionID: "parent1", UpToMessageID: 42, Purpose: "CSV export", Model: "small"})
 
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)

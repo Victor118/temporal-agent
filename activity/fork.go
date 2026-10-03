@@ -37,6 +37,13 @@ Write the summary in the language of the conversation. Keep:
 
 Drop greetings, small talk and dead ends that led nowhere. Name who said what when several users or assistants take part. Never add anything the conversation does not contain. Write a structured note, not a narrative; no preamble.`
 
+// summaryPurposePrompt is added to summarySystemPrompt when the fork has a
+// purpose. The purpose itself goes with the conversation, in the request: it
+// is a member's words, not instructions.
+const summaryPurposePrompt = `
+
+The new conversation has a goal, stated before the conversation. Summarize for that goal: keep in full what bears on it — the specifications, requirements, decisions and constraints that apply to it, and the questions still open about it — and quote them word for word wherever the wording matters (names, formats, interfaces, figures, acceptance criteria). Cover the rest of the conversation briefly, as context.`
+
 // TranscriptReader reads a conversation up to one of its messages.
 type TranscriptReader interface {
 	LoadMessagesUpTo(ctx context.Context, sessionID string, lastID int64) ([]store.MessageWithID, error)
@@ -54,7 +61,10 @@ type ForkActivities struct {
 type SummarizeConversationInput struct {
 	SessionID     string `json:"session_id"`
 	UpToMessageID int64  `json:"up_to_message_id"`
-	Model         string `json:"model,omitempty"` // empty = the worker's default
+	// Purpose is what the fork is for, in a member's words: the summary
+	// keeps what matters for it. Empty = a general summary.
+	Purpose string `json:"purpose,omitempty"`
+	Model   string `json:"model,omitempty"` // empty = the worker's default
 }
 
 type SummarizeConversationOutput struct {
@@ -78,25 +88,40 @@ func (a *ForkActivities) SummarizeConversation(ctx context.Context, in Summarize
 	}
 
 	transcript, truncated := buildTranscript(msgs, a.Private)
-	content, _ := json.Marshal("Conversation to summarize:\n\n" + transcript)
+	system, request := summarySystemPrompt, "Conversation to summarize:\n\n"+transcript
+	if in.Purpose != "" {
+		system += summaryPurposePrompt
+		request = "Goal of the new conversation: " + in.Purpose + "\n\n" + request
+	}
+	summary, err := a.summarize(ctx, in.Model, system, request)
+	if err != nil {
+		return SummarizeConversationOutput{}, err
+	}
+	return SummarizeConversationOutput{Summary: summary, Truncated: truncated}, nil
+}
+
+// summarize has the model write what system asks of request. A request the
+// API refuses for good is not retried.
+func (a *ForkActivities) summarize(ctx context.Context, model, system, request string) (string, error) {
+	content, _ := json.Marshal(request)
 	resp, err := a.LLM.Chat(ctx, provider.ChatRequest{
-		Model:     in.Model,
-		System:    summarySystemPrompt,
+		Model:     model,
+		System:    system,
 		Messages:  []provider.ChatMessage{{Role: "user", Content: content}},
 		MaxTokens: maxSummaryTokens,
 	})
 	if err != nil {
 		var permErr *provider.PermanentAPIError
 		if errors.As(err, &permErr) {
-			return SummarizeConversationOutput{}, temporal.NewNonRetryableApplicationError(err.Error(), "PermanentAPIError", err)
+			return "", temporal.NewNonRetryableApplicationError(err.Error(), "PermanentAPIError", err)
 		}
-		return SummarizeConversationOutput{}, err
+		return "", err
 	}
 	summary := strings.TrimSpace(resp.Content)
 	if summary == "" {
-		return SummarizeConversationOutput{}, errors.New("the model returned an empty summary")
+		return "", errors.New("the model returned an empty summary")
 	}
-	return SummarizeConversationOutput{Summary: summary, Truncated: truncated}, nil
+	return summary, nil
 }
 
 // buildTranscript renders messages as plain text for the summarizer, keeping

@@ -142,14 +142,14 @@ func (s *PostgresStore) DeleteLoginSession(ctx context.Context, tokenHash string
 // --- Sessions and their members ---
 
 const sessionColumns = "s.session_id, s.created_by, s.title, s.agent_id, s.channel, s.channel_id, s.created_at, " +
-	"s.parent_session_id, s.forked_at_message_id, s.forked_by, s.agent_mode"
+	"s.parent_session_id, s.forked_at_message_id, s.forked_by, s.agent_mode, s.fork_purpose"
 
 func scanSession(row interface{ Scan(...any) error }) (*Session, error) {
 	var sess Session
 	var parent, forkedBy sql.NullString
 	var forkedAt sql.NullInt64
 	err := row.Scan(&sess.SessionID, &sess.CreatedBy, &sess.Title, &sess.AgentID, &sess.Channel, &sess.ChannelID, &sess.CreatedAt,
-		&parent, &forkedAt, &forkedBy, &sess.AgentMode)
+		&parent, &forkedAt, &forkedBy, &sess.AgentMode, &sess.ForkPurpose)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -181,10 +181,10 @@ func (s *PostgresStore) CreateSession(ctx context.Context, session Session) erro
 	return s.inTx(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO sessions (session_id, created_by, title, agent_id, channel, channel_id,
-				parent_session_id, forked_at_message_id, forked_by)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+				parent_session_id, forked_at_message_id, forked_by, fork_purpose)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
 			session.SessionID, session.CreatedBy, session.Title, session.AgentID, session.Channel, session.ChannelID,
-			nullIfEmpty(session.ParentSessionID), nullIfEmpty(session.ForkedAtMessageID), nullIfEmpty(session.ForkedBy)); err != nil {
+			nullIfEmpty(session.ParentSessionID), nullIfEmpty(session.ForkedAtMessageID), nullIfEmpty(session.ForkedBy), session.ForkPurpose); err != nil {
 			return err
 		}
 		_, err := tx.ExecContext(ctx,

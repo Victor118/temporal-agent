@@ -167,3 +167,38 @@ func TestBuildTranscript_HidesInputsWithoutTheCatalog(t *testing.T) {
 		t.Errorf("an input shown without the catalog: %q", got)
 	}
 }
+
+// A fork's purpose steers its summary: the instructions say to keep what
+// bears on it, and the request states it before the conversation.
+func TestSummarizeConversation_SteeredByThePurpose(t *testing.T) {
+	st := &forkStore{msgs: []store.MessageWithID{
+		{ID: 1, Message: store.Message{Role: store.RoleUser, Content: text("spec: the export is CSV, `;` separated")}},
+	}}
+	llm := &fakeLLM{reply: "summary"}
+	a := &ForkActivities{Store: st, LLM: llm, Private: memoryIsPrivate}
+
+	if _, err := a.SummarizeConversation(context.Background(), SummarizeConversationInput{SessionID: "p", UpToMessageID: 1, Purpose: "Implement the CSV export"}); err != nil {
+		t.Fatal(err)
+	}
+	var sent string
+	json.Unmarshal(llm.seen.Messages[0].Content, &sent)
+	if !strings.HasPrefix(sent, "Goal of the new conversation: Implement the CSV export\n\nConversation to summarize:") {
+		t.Errorf("request %q", sent)
+	}
+	if !strings.Contains(llm.seen.System, "word for word") || !strings.HasPrefix(llm.seen.System, summarySystemPrompt) {
+		t.Errorf("instructions %q", llm.seen.System)
+	}
+	// The purpose is a member's words: it stays out of the instructions.
+	if strings.Contains(llm.seen.System, "CSV") {
+		t.Error("the purpose reached the system prompt")
+	}
+
+	// Without a purpose, a general summary.
+	if _, err := a.SummarizeConversation(context.Background(), SummarizeConversationInput{SessionID: "p", UpToMessageID: 1}); err != nil {
+		t.Fatal(err)
+	}
+	json.Unmarshal(llm.seen.Messages[0].Content, &sent)
+	if llm.seen.System != summarySystemPrompt || strings.Contains(sent, "Goal") {
+		t.Errorf("no purpose: system %q, request %q", llm.seen.System, sent)
+	}
+}

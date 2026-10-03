@@ -30,7 +30,8 @@ type ForkSessionInput struct {
 	ForkSessionID   string `json:"fork_session_id"`
 	ParentSessionID string `json:"parent_session_id"`
 	UpToMessageID   int64  `json:"up_to_message_id"`
-	Model           string `json:"model,omitempty"` // summary model; empty = the worker's default
+	Purpose         string `json:"purpose,omitempty"` // what the fork is for: steers the summary
+	Model           string `json:"model,omitempty"`   // summary model; empty = the worker's default
 }
 
 // ForkSessionWorkflow seeds a forked session: it summarizes the parent up to
@@ -52,6 +53,7 @@ func ForkSessionWorkflow(ctx workflow.Context, in ForkSessionInput) error {
 	err := workflow.ExecuteActivity(llmCtx, forkAct.SummarizeConversation, activity.SummarizeConversationInput{
 		SessionID:     in.ParentSessionID,
 		UpToMessageID: in.UpToMessageID,
+		Purpose:       in.Purpose,
 		Model:         in.Model,
 	}).Get(ctx, &out)
 	if err != nil {

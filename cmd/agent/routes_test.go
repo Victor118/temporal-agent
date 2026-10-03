@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -337,6 +338,15 @@ func TestRoutes_Fork(t *testing.T) {
 		t.Errorf("workflows started %v", tc.started)
 	}
 
+	// A purpose titles the fork; one too long is refused.
+	if w := call(t, h, http.MethodPost, "/sessions/s1/fork", `{"message_id":2,"purpose":"  Export CSV  "}`, bob); w.Code != http.StatusCreated ||
+		len(st.created) != 2 || st.created[1].ForkPurpose != "Export CSV" || st.created[1].Title != "Export CSV" {
+		t.Errorf("fork with a purpose: %d, %+v", w.Code, st.created)
+	}
+	if w := call(t, h, http.MethodPost, "/sessions/s1/fork", `{"message_id":2,"purpose":"`+strings.Repeat("x", session.MaxPurposeRunes+1)+`"}`, bob); w.Code != http.StatusBadRequest {
+		t.Errorf("a purpose too long: %d", w.Code)
+	}
+
 	for body, why := range map[string]string{
 		`{"message_id":3}`:  "a tool result",
 		`{"message_id":99}`: "a message of no session",
@@ -496,5 +506,32 @@ func TestRoutes_HistoryListsATurnErrorApart(t *testing.T) {
 	}
 	if e := history[0]; e["type"] != "turn_error" || e["role"] != nil || e["content"] != "call LLM: credit balance is too low" {
 		t.Errorf("entry %v, want a turn_error with no role", e)
+	}
+}
+
+// form posts an htmx form to the interface.
+func form(t *testing.T, h http.Handler, path string, values url.Values, cookie *http.Cookie) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(values.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", "http://example.com")
+	req.Header.Set("HX-Request", "true")
+	req.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	return w
+}
+
+// The interface's fork form carries the purpose; htmx then opens the fork.
+func TestUI_ForkFormTakesAPurpose(t *testing.T) {
+	h, st, _ := newForkTest(t)
+	bob := logIn(t, h, "bob@example.com")
+	w := form(t, h, "/s/s1/fork", url.Values{"message_id": {"2"}, "purpose": {"Écrire l'export CSV"}}, bob)
+	if w.Code != http.StatusOK || len(st.created) != 1 {
+		t.Fatalf("fork form: %d %s", w.Code, w.Body)
+	}
+	f := st.created[0]
+	if f.ForkPurpose != "Écrire l'export CSV" || f.Title != "Écrire l'export CSV" || w.Header().Get("HX-Location") != "/s/"+f.SessionID {
+		t.Errorf("fork %+v, location %q", f, w.Header().Get("HX-Location"))
 	}
 }

@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"go.temporal.io/sdk/client"
@@ -12,11 +14,23 @@ import (
 	"github.com/victor/temporal-agent/workflow"
 )
 
+// MaxPurposeRunes bounds a fork's purpose: a goal in a sentence or a short
+// paragraph, not a specification (that one is in the parent, and the summary
+// quotes it).
+const MaxPurposeRunes = 500
+
 // Fork starts a new session from a message of parentID. The fork gets the
 // same agent, me as its only member, and, as its first message, a summary of
 // the parent up to that message, written by a workflow: the fork exists at
 // once, and takes messages once the summary is in.
-func (s *Service) Fork(ctx context.Context, parentID string, messageID int64, me *store.User) (*store.Session, error) {
+//
+// purpose, optional, is what the fork is for: it titles the fork, and the
+// summary keeps what matters for it.
+func (s *Service) Fork(ctx context.Context, parentID string, messageID int64, purpose string, me *store.User) (*store.Session, error) {
+	purpose = strings.TrimSpace(purpose)
+	if utf8.RuneCountInString(purpose) > MaxPurposeRunes {
+		return nil, ErrPurposeTooLong
+	}
 	defer s.statuses.invalidate()
 	parent, err := s.Get(ctx, parentID)
 	if err != nil {
@@ -39,12 +53,13 @@ func (s *Service) Fork(ctx context.Context, parentID string, messageID int64, me
 	f := store.Session{
 		SessionID:         uuid.New().String(),
 		CreatedBy:         me.ID,
-		Title:             forkTitle(parent.Title),
+		Title:             forkTitle(parent.Title, purpose),
 		AgentID:           agentID,
 		Channel:           ChannelWeb,
 		ParentSessionID:   parentID,
 		ForkedAtMessageID: messageID,
 		ForkedBy:          me.ID,
+		ForkPurpose:       purpose,
 	}
 	if err := s.store.CreateSession(ctx, f); err != nil {
 		return nil, fmt.Errorf("create the fork: %w", err)
@@ -56,6 +71,7 @@ func (s *Service) Fork(ctx context.Context, parentID string, messageID int64, me
 		ForkSessionID:   f.SessionID,
 		ParentSessionID: parentID,
 		UpToMessageID:   messageID,
+		Purpose:         purpose,
 		Model:           s.cfg.SummaryModel,
 	}); err != nil {
 		// Without the workflow, the fork would wait for a summary forever.
@@ -70,7 +86,13 @@ func forkable(m store.Message) bool {
 	return m.ToolResult == nil && (m.Role == store.RoleUser || m.Role == store.RoleAssistant)
 }
 
-func forkTitle(parentTitle string) string {
+// forkTitle is the purpose, the first line of it, when there is one: it
+// tells the forks of one session apart. Otherwise the parent's title.
+func forkTitle(parentTitle, purpose string) string {
+	if purpose != "" {
+		line, _, _ := strings.Cut(purpose, "\n")
+		return titleFrom(line)
+	}
 	if parentTitle == "" {
 		return "Fork"
 	}

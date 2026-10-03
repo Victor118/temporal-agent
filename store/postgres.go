@@ -127,6 +127,9 @@ const schema = `
 		ALTER TABLE sessions ADD COLUMN IF NOT EXISTS forked_at_message_id BIGINT;
 		ALTER TABLE sessions ADD COLUMN IF NOT EXISTS forked_by TEXT;
 		CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
+		-- What the fork is for, as the member who opened it put it ('' = not
+		-- said): it steers the fork's summary.
+		ALTER TABLE sessions ADD COLUMN IF NOT EXISTS fork_purpose TEXT NOT NULL DEFAULT '';
 
 		-- When a human message calls the agent: 'auto' (every message when one
 		-- user is alone in the session, on @agent once several are), 'always',
