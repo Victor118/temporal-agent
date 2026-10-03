@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -493,5 +494,30 @@ func TestMCPClient_RefusesAToolList(t *testing.T) {
 	f.setToolInfos(limits...)
 	if n := len(discover(t, NewMCPClient(f.config("srv")))); n != mcpMaxTools {
 		t.Errorf("%d tools at the limits, want %d", n, mcpMaxTools)
+	}
+}
+
+// A redirect is not followed, on either transport: the request and its API
+// key stay with the configured server, and the status says why it failed.
+func TestMCPClient_DoesNotFollowRedirects(t *testing.T) {
+	var reached atomic.Int32
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached.Add(1)
+	}))
+	defer elsewhere.Close()
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, elsewhere.URL+"/mcp", http.StatusTemporaryRedirect)
+	}))
+	defer redirect.Close()
+
+	for _, transport := range []string{"http", "sse"} {
+		_, err := NewMCPClient(MCPServerConfig{Name: "srv", URL: redirect.URL, APIKey: "k", Transport: transport}).Discover(context.Background())
+		var httpErr *mcpHTTPError
+		if !errors.As(err, &httpErr) || httpErr.Status != http.StatusTemporaryRedirect {
+			t.Errorf("%s: err = %v, want HTTP 307", transport, err)
+		}
+	}
+	if n := reached.Load(); n != 0 {
+		t.Errorf("the redirect was followed %d times", n)
 	}
 }

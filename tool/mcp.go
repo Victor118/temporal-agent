@@ -69,9 +69,14 @@ func NewMCPClient(config MCPServerConfig) *MCPClient {
 	}
 	return &MCPClient{
 		config: config,
-		// No overall timeout: an event stream stays open. Each request
-		// has its own deadline instead.
-		http:      &http.Client{Transport: http.DefaultTransport.(*http.Transport).Clone()},
+		http: &http.Client{
+			// No overall timeout: an event stream stays open. Each
+			// request has its own deadline instead.
+			Transport: http.DefaultTransport.(*http.Transport).Clone(),
+			// The server's URL is configured: a redirect is an error to
+			// read, not a place to send the request (and its API key) to.
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		},
 		timeout:   mcpRequestTimeout,
 		handshake: make(chan struct{}, 1),
 	}
