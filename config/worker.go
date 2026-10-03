@@ -24,7 +24,7 @@ type WorkerMCPServer struct {
 	Name      string `yaml:"name"`
 	URL       string `yaml:"url"`
 	APIKey    string `yaml:"api_key"`
-	Transport string `yaml:"transport"` // "http" (default) or "sse"
+	Transport string `yaml:"transport"` // "http" (Streamable HTTP, default) or "sse" (HTTP+SSE, MCP 2024-11-05)
 }
 
 // LoadWorkerConfig reads and validates a worker config file.
@@ -55,6 +55,9 @@ func LoadWorkerConfig(file string) (*WorkerConfig, error) {
 	for i, m := range wc.MCP {
 		if m.Name == "" || m.URL == "" {
 			return nil, fmt.Errorf("%s: mcp[%d] requires name and url", file, i)
+		}
+		if m.Transport != "" && m.Transport != "http" && m.Transport != "sse" {
+			return nil, fmt.Errorf("%s: mcp %q: transport %q is neither http nor sse", file, m.Name, m.Transport)
 		}
 		if seen[m.Name] {
 			return nil, fmt.Errorf("%s: duplicate mcp name %q", file, m.Name)

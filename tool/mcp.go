@@ -1,13 +1,12 @@
 package tool
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,61 +17,45 @@ import (
 type MCPServerConfig struct {
 	Name      string `json:"name"`      // Prefix for tool names (e.g. "github")
 	URL       string `json:"url"`       // Base URL of the MCP server
-	APIKey    string `json:"api_key"`   // Optional auth token
-	Transport string `json:"transport"` // "http" (default) or "sse"
+	APIKey    string `json:"api_key"`   // Optional auth token, sent as a Bearer token
+	Transport string `json:"transport"` // "http" (Streamable HTTP, default) or "sse" (HTTP+SSE, 2024-11-05)
 }
 
-// MCPClient handles communication with a single MCP server.
+// mcpVersions are the MCP protocol versions this client speaks, latest
+// first: it asks for the first, and accepts any of them in answer.
+var mcpVersions = []string{"2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"}
+
+const (
+	// mcpRequestTimeout bounds a handshake and a tools/list.
+	mcpRequestTimeout = 30 * time.Second
+	// mcpCallTimeout bounds a tools/call whose context has no deadline (an
+	// activity's has one).
+	mcpCallTimeout = 2 * time.Minute
+	// mcpMaxPages bounds a paginated tools/list.
+	mcpMaxPages = 100
+)
+
+// mcpConn is one MCP session over a transport, as MCPClient uses it.
+type mcpConn interface {
+	call(ctx context.Context, method string, params any) (json.RawMessage, error)
+	notify(ctx context.Context, method string, params any) error
+	setVersion(v string) // the negotiated version, before the conn is shared
+	alive() bool         // false once the conn cannot carry a request again
+	close()
+}
+
+// MCPClient talks to one MCP server. It opens a session on first use (the
+// initialize handshake), keeps it for every request after, and opens a new
+// one when the server forgot it. Safe for concurrent use.
 type MCPClient struct {
-	config MCPServerConfig
-	client *http.Client
-	nextID atomic.Int64
-}
+	config  MCPServerConfig
+	http    *http.Client
+	ids     atomic.Int64
+	timeout time.Duration // bounds a handshake and a tools/list
 
-// JSON-RPC types for MCP protocol
-
-type jsonRPCRequest struct {
-	JSONRPC string      `json:"jsonrpc"`
-	ID      int64       `json:"id"`
-	Method  string      `json:"method"`
-	Params  interface{} `json:"params,omitempty"`
-}
-
-type jsonRPCResponse struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      int64           `json:"id"`
-	Result  json.RawMessage `json:"result,omitempty"`
-	Error   *jsonRPCError   `json:"error,omitempty"`
-}
-
-type jsonRPCError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
-}
-
-type mcpToolInfo struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description"`
-	InputSchema json.RawMessage `json:"inputSchema"`
-}
-
-type mcpToolListResult struct {
-	Tools []mcpToolInfo `json:"tools"`
-}
-
-type mcpCallToolParams struct {
-	Name      string          `json:"name"`
-	Arguments json.RawMessage `json:"arguments"`
-}
-
-type mcpCallToolResult struct {
-	Content []mcpContentBlock `json:"content"`
-	IsError bool              `json:"isError,omitempty"`
-}
-
-type mcpContentBlock struct {
-	Type string `json:"type"`
-	Text string `json:"text,omitempty"`
+	handshake chan struct{} // one handshake at a time
+	mu        sync.Mutex
+	conn      mcpConn
 }
 
 // NewMCPClient creates a client for the given MCP server.
@@ -82,13 +65,33 @@ func NewMCPClient(config MCPServerConfig) *MCPClient {
 	}
 	return &MCPClient{
 		config: config,
-		client: &http.Client{Timeout: 30 * time.Second},
+		// No overall timeout: an event stream stays open. Each request
+		// has its own deadline instead.
+		http:      &http.Client{Transport: http.DefaultTransport.(*http.Transport).Clone()},
+		timeout:   mcpRequestTimeout,
+		handshake: make(chan struct{}, 1),
 	}
 }
 
-// Discover connects to the MCP server and returns its tools, named after the
-// server. It registers nothing: a registry is written by one goroutine only.
+// Name is the server's name in the worker config.
+func (c *MCPClient) Name() string { return c.config.Name }
+
+// Close ends the session, if one is open.
+func (c *MCPClient) Close() {
+	c.mu.Lock()
+	conn := c.conn
+	c.conn = nil
+	c.mu.Unlock()
+	if conn != nil {
+		conn.close()
+	}
+}
+
+// Discover asks the server for its tools, named after the server. It
+// registers nothing: what to do with them is the caller's decision.
 func (c *MCPClient) Discover(ctx context.Context) ([]*Tool, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
 	infos, err := c.listTools(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("mcp %s: discover tools: %w", c.config.Name, err)
@@ -96,178 +99,252 @@ func (c *MCPClient) Discover(ctx context.Context) ([]*Tool, error) {
 
 	tools := make([]*Tool, 0, len(infos))
 	for _, info := range infos {
-		mcpTool := info // capture
 		tools = append(tools, &Tool{
-			Name:        c.config.Name + "_" + mcpTool.Name,
-			Description: fmt.Sprintf("[MCP:%s] %s", c.config.Name, mcpTool.Description),
-			InputSchema: mcpTool.InputSchema,
+			Name:        c.config.Name + "_" + info.Name,
+			Description: fmt.Sprintf("[MCP:%s] %s", c.config.Name, info.Description),
+			InputSchema: info.InputSchema,
 			Kind:        ToolKindMCP,
 			Execute: func(ctx context.Context, input json.RawMessage) (string, error) {
-				return c.callTool(ctx, mcpTool.Name, input)
+				return c.callTool(ctx, info.Name, input)
 			},
 		})
 	}
 	return tools, nil
 }
 
+type mcpToolInfo struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	InputSchema json.RawMessage `json:"inputSchema"`
+}
+
+type mcpListParams struct {
+	Cursor string `json:"cursor,omitempty"`
+}
+
+type mcpToolListResult struct {
+	Tools      []mcpToolInfo `json:"tools"`
+	NextCursor string        `json:"nextCursor,omitempty"`
+}
+
 func (c *MCPClient) listTools(ctx context.Context) ([]mcpToolInfo, error) {
-	resp, err := c.rpcCall(ctx, "tools/list", nil)
-	if err != nil {
-		return nil, err
+	var all []mcpToolInfo
+	var params any // the first page takes no cursor
+	for range mcpMaxPages {
+		raw, err := c.request(ctx, "tools/list", params)
+		if err != nil {
+			return nil, err
+		}
+		var page mcpToolListResult
+		if err := json.Unmarshal(raw, &page); err != nil {
+			return nil, fmt.Errorf("parse tools/list result: %w", err)
+		}
+		all = append(all, page.Tools...)
+		if page.NextCursor == "" {
+			return all, nil
+		}
+		params = mcpListParams{Cursor: page.NextCursor}
 	}
+	return nil, fmt.Errorf("tools/list: more than %d pages", mcpMaxPages)
+}
 
-	var result mcpToolListResult
-	if err := json.Unmarshal(resp, &result); err != nil {
-		return nil, fmt.Errorf("parse tools/list result: %w", err)
-	}
+type mcpCallToolParams struct {
+	Name      string          `json:"name"`
+	Arguments json.RawMessage `json:"arguments"`
+}
 
-	return result.Tools, nil
+type mcpCallToolResult struct {
+	Content           []mcpContentBlock `json:"content"`
+	StructuredContent json.RawMessage   `json:"structuredContent,omitempty"`
+	IsError           bool              `json:"isError,omitempty"`
+}
+
+type mcpContentBlock struct {
+	Type     string `json:"type"`
+	Text     string `json:"text,omitempty"`
+	MimeType string `json:"mimeType,omitempty"`
+	URI      string `json:"uri,omitempty"`
+	Resource *struct {
+		URI  string `json:"uri"`
+		Text string `json:"text,omitempty"`
+	} `json:"resource,omitempty"`
 }
 
 func (c *MCPClient) callTool(ctx context.Context, name string, arguments json.RawMessage) (string, error) {
-	params := mcpCallToolParams{
-		Name:      name,
-		Arguments: arguments,
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, mcpCallTimeout)
+		defer cancel()
+	}
+	if len(arguments) == 0 || string(arguments) == "null" {
+		arguments = json.RawMessage(`{}`)
 	}
 
-	resp, err := c.rpcCall(ctx, "tools/call", params)
+	raw, err := c.request(ctx, "tools/call", mcpCallToolParams{Name: name, Arguments: arguments})
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("mcp %s: %w", c.config.Name, err)
 	}
-
 	var result mcpCallToolResult
-	if err := json.Unmarshal(resp, &result); err != nil {
-		return "", fmt.Errorf("parse tools/call result: %w", err)
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return "", fmt.Errorf("mcp %s: parse tools/call result: %w", c.config.Name, err)
 	}
-
-	// Concatenate text content blocks
-	var sb strings.Builder
-	for _, block := range result.Content {
-		if block.Type == "text" {
-			sb.WriteString(block.Text)
-		}
-	}
-
-	text := sb.String()
+	text := result.text()
 	if result.IsError {
 		return "", fmt.Errorf("mcp tool error: %s", text)
 	}
-
 	return text, nil
 }
 
-func (c *MCPClient) rpcCall(ctx context.Context, method string, params interface{}) (json.RawMessage, error) {
-	switch c.config.Transport {
-	case "sse":
-		return c.rpcCallSSE(ctx, method, params)
-	default:
-		return c.rpcCallHTTP(ctx, method, params)
-	}
-}
-
-func (c *MCPClient) rpcCallHTTP(ctx context.Context, method string, params interface{}) (json.RawMessage, error) {
-	reqBody := jsonRPCRequest{
-		JSONRPC: "2.0",
-		ID:      c.nextID.Add(1),
-		Method:  method,
-		Params:  params,
-	}
-
-	body, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, err
-	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.config.URL, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-
-	httpReq.Header.Set("Content-Type", "application/json")
-	if c.config.APIKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.config.APIKey)
-	}
-
-	resp, err := c.client.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("mcp http call: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("mcp read response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("mcp server error (status %d): %s", resp.StatusCode, string(respBody))
-	}
-
-	var rpcResp jsonRPCResponse
-	if err := json.Unmarshal(respBody, &rpcResp); err != nil {
-		return nil, fmt.Errorf("mcp parse response: %w", err)
-	}
-
-	if rpcResp.Error != nil {
-		return nil, fmt.Errorf("mcp rpc error %d: %s", rpcResp.Error.Code, rpcResp.Error.Message)
-	}
-
-	return rpcResp.Result, nil
-}
-
-func (c *MCPClient) rpcCallSSE(ctx context.Context, method string, params interface{}) (json.RawMessage, error) {
-	reqBody := jsonRPCRequest{
-		JSONRPC: "2.0",
-		ID:      c.nextID.Add(1),
-		Method:  method,
-		Params:  params,
-	}
-
-	body, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, err
-	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.config.URL, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Accept", "text/event-stream")
-	if c.config.APIKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.config.APIKey)
-	}
-
-	resp, err := c.client.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("mcp sse call: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// Parse SSE stream, collect the JSON-RPC response from "message" events
-	scanner := bufio.NewScanner(resp.Body)
-	var resultData string
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "data: ") {
-			resultData = strings.TrimPrefix(line, "data: ")
-			// Try to parse — the last valid JSON-RPC response is our answer
-			var rpcResp jsonRPCResponse
-			if json.Unmarshal([]byte(resultData), &rpcResp) == nil && rpcResp.ID == reqBody.ID {
-				if rpcResp.Error != nil {
-					return nil, fmt.Errorf("mcp rpc error %d: %s", rpcResp.Error.Code, rpcResp.Error.Message)
-				}
-				return rpcResp.Result, nil
-			}
+// text is what the model reads of a result: the text blocks, a mention of
+// the others, or the structured content when there is nothing else.
+func (r mcpCallToolResult) text() string {
+	var parts []string
+	for _, b := range r.Content {
+		switch {
+		case b.Type == "text":
+			parts = append(parts, b.Text)
+		case b.Type == "resource" && b.Resource != nil && b.Resource.Text != "":
+			parts = append(parts, b.Resource.Text)
+		case b.Type == "resource_link":
+			parts = append(parts, fmt.Sprintf("[resource: %s]", b.URI))
+		default:
+			parts = append(parts, fmt.Sprintf("[%s content omitted]", b.Type))
 		}
 	}
+	if len(parts) == 0 && len(r.StructuredContent) > 0 {
+		return string(r.StructuredContent)
+	}
+	return strings.Join(parts, "\n")
+}
 
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("mcp sse read: %w", err)
+// request sends a request in the current session, opening one if needed. A
+// server that forgot the session did not process the request: it is sent
+// again, once, in a new session.
+func (c *MCPClient) request(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	for attempt := 0; ; attempt++ {
+		conn, err := c.connect(ctx)
+		if err != nil {
+			return nil, err
+		}
+		res, err := conn.call(ctx, method, params)
+		if errors.Is(err, errSessionExpired) && attempt == 0 {
+			c.drop(conn)
+			continue
+		}
+		return res, err
+	}
+}
+
+// connect returns the open session, or opens one. Concurrent callers wait
+// for a single handshake.
+func (c *MCPClient) connect(ctx context.Context) (mcpConn, error) {
+	if conn := c.current(); conn != nil {
+		return conn, nil
+	}
+	select {
+	case c.handshake <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	defer func() { <-c.handshake }()
+	if conn := c.current(); conn != nil { // opened while this one waited
+		return conn, nil
 	}
 
-	return nil, fmt.Errorf("mcp sse: no valid response received")
+	hctx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+	conn, err := c.initialize(hctx)
+	if err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	c.conn = conn
+	c.mu.Unlock()
+	return conn, nil
+}
+
+func (c *MCPClient) current() mcpConn {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.conn != nil && !c.conn.alive() {
+		c.conn.close()
+		c.conn = nil
+	}
+	return c.conn
+}
+
+// drop forgets conn, unless another session already replaced it.
+func (c *MCPClient) drop(conn mcpConn) {
+	c.mu.Lock()
+	if c.conn == conn {
+		c.conn = nil
+	}
+	c.mu.Unlock()
+	conn.close()
+}
+
+func (c *MCPClient) dial(ctx context.Context) (mcpConn, error) {
+	switch c.config.Transport {
+	case "sse":
+		return dialSSE(ctx, c.http, c.config.URL, c.config.APIKey, &c.ids)
+	case "http":
+		return &streamableConn{http: c.http, url: c.config.URL, apiKey: c.config.APIKey, ids: &c.ids}, nil
+	default:
+		return nil, fmt.Errorf("unknown transport %q (http or sse)", c.config.Transport)
+	}
+}
+
+type mcpImplementation struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+}
+
+type mcpInitializeParams struct {
+	ProtocolVersion string            `json:"protocolVersion"`
+	Capabilities    struct{}          `json:"capabilities"` // none: no sampling, roots or elicitation
+	ClientInfo      mcpImplementation `json:"clientInfo"`
+}
+
+type mcpInitializeResult struct {
+	ProtocolVersion string            `json:"protocolVersion"`
+	ServerInfo      mcpImplementation `json:"serverInfo"`
+}
+
+// initialize opens a session: the initialize request, which negotiates the
+// protocol version, then the initialized notification. Nothing else may be
+// sent before.
+func (c *MCPClient) initialize(ctx context.Context) (mcpConn, error) {
+	conn, err := c.dial(ctx)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := conn.call(ctx, "initialize", mcpInitializeParams{
+		ProtocolVersion: mcpVersions[0],
+		ClientInfo:      mcpImplementation{Name: "temporal-agent", Version: "1"},
+	})
+	if err != nil {
+		conn.close()
+		var httpErr *mcpHTTPError
+		if c.config.Transport == "http" && errors.As(err, &httpErr) && (httpErr.Status == http.StatusNotFound || httpErr.Status == http.StatusMethodNotAllowed) {
+			return nil, fmt.Errorf("initialize: %w (an HTTP+SSE server takes transport: sse)", err)
+		}
+		return nil, fmt.Errorf("initialize: %w", err)
+	}
+	var res mcpInitializeResult
+	if err := json.Unmarshal(raw, &res); err != nil {
+		conn.close()
+		return nil, fmt.Errorf("parse initialize result: %w", err)
+	}
+	if !slices.Contains(mcpVersions, res.ProtocolVersion) {
+		conn.close()
+		return nil, fmt.Errorf("initialize: unsupported protocol version %q (this client speaks %v)", res.ProtocolVersion, mcpVersions)
+	}
+	conn.setVersion(res.ProtocolVersion)
+	if err := conn.notify(ctx, "notifications/initialized", nil); err != nil {
+		conn.close()
+		return nil, fmt.Errorf("notifications/initialized: %w", err)
+	}
+	return conn, nil
 }
 
 // RegisterMCPServers discovers and registers tools from all configured MCP
