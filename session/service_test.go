@@ -259,12 +259,13 @@ func TestDeliver_SignalsWithStartOnTheFixedID(t *testing.T) {
 // run. If it ended since it was listed, the message starts a run instead.
 func TestDeliver_SignalsALegacyRun(t *testing.T) {
 	legacy := "session-" + sid + "-1759400000"
-	st := &memStore{members: []store.SessionMember{{UserID: "u-alice"}}}
+	// A store per delivery: each one titles the session in the background.
+	st := func() *memStore { return &memStore{members: []store.SessionMember{{UserID: "u-alice"}}} }
 	alice := &store.User{ID: "u-alice", Email: "alice@example.com"}
 	sess := &store.Session{SessionID: sid, AgentID: "default"}
 
 	tc := &fakeTemporal{running: []string{legacy}}
-	if _, err := newTest(st, tc).Deliver(context.Background(), sess, alice, "bonjour"); err != nil {
+	if _, err := newTest(st(), tc).Deliver(context.Background(), sess, alice, "bonjour"); err != nil {
 		t.Fatal(err)
 	}
 	if len(tc.signals) != 1 || tc.signals[0] != legacy || len(tc.signalStarts) != 0 {
@@ -275,7 +276,7 @@ func TestDeliver_SignalsALegacyRun(t *testing.T) {
 	}
 
 	tc = &fakeTemporal{running: []string{legacy}, signalErr: serviceerror.NewNotFound("workflow execution already completed")}
-	if _, err := newTest(st, tc).Deliver(context.Background(), sess, alice, "bonjour"); err != nil {
+	if _, err := newTest(st(), tc).Deliver(context.Background(), sess, alice, "bonjour"); err != nil {
 		t.Fatal(err)
 	}
 	if len(tc.signalStarts) != 1 || tc.signalStarts[0].id != "session-"+sid {
@@ -284,7 +285,7 @@ func TestDeliver_SignalsALegacyRun(t *testing.T) {
 
 	// Any other failure is reported: starting a run could make a second one.
 	tc = &fakeTemporal{running: []string{legacy}, signalErr: errors.New("unavailable")}
-	if _, err := newTest(st, tc).Deliver(context.Background(), sess, alice, "bonjour"); err == nil || len(tc.signalStarts) != 0 {
+	if _, err := newTest(st(), tc).Deliver(context.Background(), sess, alice, "bonjour"); err == nil || len(tc.signalStarts) != 0 {
 		t.Errorf("Deliver = %v with %d signal-with-start calls", err, len(tc.signalStarts))
 	}
 }
