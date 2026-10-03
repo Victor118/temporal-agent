@@ -649,3 +649,85 @@ func TestSessionWorkflow_RecordsAConversationTooLong(t *testing.T) {
 		t.Errorf("last message %+v, want the turn error %s", last, want)
 	}
 }
+
+// runTurnEvents runs a session whose AgentWorkflow is agent on msg, with a
+// stop at cancelAt when not zero, and reports the turn events and persists
+// in the order they happened.
+func runTurnEvents(t *testing.T, agent func(sdkworkflow.Context, AgentWorkflowInput) (AgentWorkflowOutput, error), cancelAt time.Duration, msg UserMessage) []string {
+	t.Helper()
+	var mu sync.Mutex
+	var log []string
+	record := func(s string) {
+		mu.Lock()
+		defer mu.Unlock()
+		log = append(log, s)
+	}
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+	registerSnapshot(env)
+	env.RegisterWorkflowWithOptions(agent, sdkworkflow.RegisterOptions{Name: "AgentWorkflow"})
+	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.PersistContextInput) error {
+		record("persisted")
+		return nil
+	}, sdkactivity.RegisterOptions{Name: "PersistContext"})
+	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.NotifyInput) error {
+		if in.Event.Type != EventTurnStarted && in.Event.Type != EventTurnDone {
+			return nil
+		}
+		var e TurnEvent
+		if err := json.Unmarshal(in.Event.Data, &e); err != nil || in.Channel != "" || e.Turn == "" {
+			t.Errorf("turn event %s on channel %q (%v)", in.Event.Data, in.Channel, err)
+		}
+		record(in.Event.Type + " " + e.AgentID + " " + e.AgentName)
+		return nil
+	}, sdkactivity.RegisterOptions{Name: "NotifyStep"})
+	env.RegisterDelayedCallback(func() { env.SignalWorkflow(SignalUserMessage, msg) }, time.Second)
+	if cancelAt > 0 {
+		env.RegisterDelayedCallback(func() { env.SignalWorkflow(SignalCancelAgent, nil) }, cancelAt)
+	}
+	// A Telegram session: the turn events still go to the web.
+	env.ExecuteWorkflow(SessionWorkflow, SessionWorkflowInput{SessionID: "s1", AgentID: "default", Channel: "telegram", ChannelID: "42"})
+	mu.Lock()
+	defer mu.Unlock()
+	return log
+}
+
+// Each turn is announced before it runs and ended after it is persisted, one
+// agent after the other; a failed or stopped turn ends too.
+func TestSessionWorkflow_TurnEvents(t *testing.T) {
+	answered := func(ctx sdkworkflow.Context, in AgentWorkflowInput) (AgentWorkflowOutput, error) {
+		content, _ := json.Marshal("ok")
+		return AgentWorkflowOutput{Response: "ok", NewMessages: []store.Message{{Role: store.RoleAssistant, Content: string(content)}}}, nil
+	}
+	failed := func(ctx sdkworkflow.Context, in AgentWorkflowInput) (AgentWorkflowOutput, error) {
+		return AgentWorkflowOutput{Error: "call LLM: boom"}, nil
+	}
+	slow := func(ctx sdkworkflow.Context, in AgentWorkflowInput) (AgentWorkflowOutput, error) {
+		if err := sdkworkflow.Sleep(ctx, 10*time.Second); err != nil {
+			content, _ := json.Marshal("half")
+			return AgentWorkflowOutput{NewMessages: []store.Message{{Role: store.RoleAssistant, Content: string(content)}}}, nil
+		}
+		return AgentWorkflowOutput{Response: "done"}, nil
+	}
+	for name, c := range map[string]struct {
+		agent    func(sdkworkflow.Context, AgentWorkflowInput) (AgentWorkflowOutput, error)
+		cancelAt time.Duration
+		msg      UserMessage
+		want     string
+	}{
+		"the session's agent": {answered, 0, UserMessage{Text: "hi", UserID: "u-alice"},
+			"turn_started default , persisted, turn_done default "},
+		"two agents in turn": {answered, 0, addressed,
+			"turn_started jarvis Jarvis, persisted, turn_done jarvis Jarvis, turn_started smith Agent Smith, persisted, turn_done smith Agent Smith"},
+		"a failure": {failed, 0, addressed,
+			"turn_started jarvis Jarvis, persisted, turn_done jarvis Jarvis"},
+		"a stop": {slow, 5 * time.Second, addressed,
+			"turn_started jarvis Jarvis, persisted, turn_done jarvis Jarvis"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := strings.Join(runTurnEvents(t, c.agent, c.cancelAt, c.msg), ", "); got != c.want {
+				t.Errorf("events:\n%s\nwant\n%s", got, c.want)
+			}
+		})
+	}
+}

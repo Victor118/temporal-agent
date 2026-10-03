@@ -4,7 +4,7 @@
      it cannot replay. */}}
 {{define "thread-pane"}}
 <div id="thread" hx-get="/s/{{.Node.Session.SessionID}}/thread" hx-swap="morph:innerHTML"
-     hx-trigger="sse:message, sse:user_message, sse:ask_user, sse:fork_ready, sse:fork_failed, sse:fork_report, sse:fork_reported, sse:fork_report_failed, sse:tool_calls, sse:reload">
+     hx-trigger="sse:message, sse:user_message, sse:ask_user, sse:fork_ready, sse:fork_failed, sse:fork_report, sse:fork_reported, sse:fork_report_failed, sse:tool_calls, sse:turn_started, sse:turn_done, sse:reload">
 {{template "thread" .}}
 </div>
 {{end}}
@@ -31,7 +31,7 @@
 
   {{if .Working}}
   <div class="working-line" id="working">
-    <span class="dot"></span>L'agent travaille…
+    <span class="dot"></span>{{with .WorkingAgent}}{{.}} travaille…{{else}}L'agent travaille…{{end}}
     <form hx-post="/s/{{$sid}}/cancel" hx-target="#thread" hx-swap="morph:innerHTML"><button class="btn ghost" type="submit">Arrêter</button></form>
   </div>
   {{end}}

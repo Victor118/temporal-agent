@@ -244,6 +244,11 @@ func (u *ui) buildPage(ctx context.Context, me *store.User, sessionID, view stri
 	// Working is an agent turn: a fork's summary workflow finishing up is not.
 	p.Working = statuses[sessionID] == chat.StatusWorking && !p.SummaryPending &&
 		!(sess.ForkedAtMessageID != 0 && u.sessions.ForkRunning(ctx, sessionID))
+	// Who works, when a turn event said: the session's agent goes unnamed
+	// there, and an agent shows under its name as it is now.
+	if id, name := u.sessions.WorkingAgent(sessionID); p.Working && id != "" {
+		p.WorkingAgent = cmp.Or(directory.ByID[id].Name, name, id)
+	}
 	return p, nil
 }
 

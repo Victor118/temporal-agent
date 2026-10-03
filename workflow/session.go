@@ -54,6 +54,21 @@ type AddressedAgent struct {
 	Mention string `json:"mention"`
 }
 
+// Turn events tell the web members when an agent starts a turn, and when it
+// is over, its transcript persisted: the server knows at once, where the
+// visibility queries lag. They go to the web whatever the session's channel.
+const (
+	EventTurnStarted = "turn_started"
+	EventTurnDone    = "turn_done"
+)
+
+// TurnEvent is the data of a turn event.
+type TurnEvent struct {
+	AgentID   string `json:"agent_id"`
+	AgentName string `json:"agent_name,omitempty"` // empty for the session's agent: the server names it
+	Turn      string `json:"turn"`                 // the turn's key
+}
+
 type SessionWorkflowInput struct {
 	SessionID    string `json:"session_id"`
 	AgentID      string `json:"agent_id,omitempty"` // Logical agent identity. Resolved by handlers when starting a session.
@@ -194,11 +209,12 @@ func processMessage(actCtx, ctx workflow.Context, input SessionWorkflowInput, us
 			return nil
 		}
 		turn := agentTurn{
-			agentID:  a.ID,
-			key:      store.TurnKey(group, i),
-			upTo:     upTo,
-			earlier:  slices.Clone(earlier),
-			partNote: partNote(agents, i, userMessage),
+			agentID:   a.ID,
+			agentName: a.Name,
+			key:       store.TurnKey(group, i),
+			upTo:      upTo,
+			earlier:   slices.Clone(earlier),
+			partNote:  partNote(agents, i, userMessage),
 			// On the channel, an answer that could be taken for another
 			// agent's is signed.
 			signReply: len(agents) > 1 || a.ID != input.AgentID,
@@ -220,6 +236,7 @@ func processMessage(actCtx, ctx workflow.Context, input SessionWorkflowInput, us
 // agentTurn is the agent one turn runs, and what it is told.
 type agentTurn struct {
 	agentID      string
+	agentName    string   // empty for the session's agent
 	key          string   // the turn's key, under which it writes
 	upTo         int64    // the last message it reads besides the turns
 	earlier      []string // the turns that answered the message before it
@@ -274,6 +291,12 @@ func processTurn(actCtx, ctx workflow.Context, input SessionWorkflowInput, userM
 
 	var memAct *activity.MemoryActivities
 	turnKey := turn.key
+
+	// The members see the turn start before it runs, and end once it is
+	// persisted, however it ends: failed, stopped, or its persist failing.
+	event := TurnEvent{AgentID: turn.agentID, AgentName: turn.agentName, Turn: turnKey}
+	notifyTurn(ctx, input.SessionID, EventTurnStarted, event)
+	defer notifyTurn(ctx, input.SessionID, EventTurnDone, event)
 
 	// 1. Launch agent child workflow with a cancellable context. It is given
 	// the conversation by reference: passing it here put a full copy of the
@@ -378,6 +401,13 @@ func processTurn(actCtx, ctx workflow.Context, input SessionWorkflowInput, userM
 	}
 
 	return false, nil
+}
+
+// notifyTurn sends a turn event to the session's web members. Best effort,
+// like any event: a page that misses it falls back on the visibility
+// queries.
+func notifyTurn(ctx workflow.Context, sessionID, eventType string, e TurnEvent) {
+	notifySession(ctx, sessionID, eventType, map[string]string{"agent_id": e.AgentID, "agent_name": e.AgentName, "turn": e.Turn})
 }
 
 // maxTurnErrorBytes bounds the error kept in the conversation: an API error can

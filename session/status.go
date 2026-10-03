@@ -187,10 +187,11 @@ func (c *statusCache) invalidate() {
 	c.loading = nil
 }
 
-// Statuses tells what each session is doing, cached for statusesTTL. The map
-// is shared: read it, never write to it.
+// Statuses tells what each session is doing: from Temporal, cached for
+// statusesTTL, and corrected by the turn events the server heard (turns.go).
+// The map is shared: read it, never write to it.
 func (s *Service) Statuses(ctx context.Context) map[string]Status {
-	return s.statuses.get(ctx, s.loadStatuses)
+	return s.turns.overlay(s.statuses.get(ctx, s.loadStatuses))
 }
 
 // loadStatuses tells what each session is doing, from the workflows running

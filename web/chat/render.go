@@ -49,6 +49,9 @@ type Page struct {
 
 	Thread  []ThreadItem
 	Working bool // the agent is on a turn
+	// WorkingAgent names the agent on the turn; empty when the server has
+	// only the visibility queries to tell (after a restart).
+	WorkingAgent string
 	// The fork's starting summary: still being written, or failed.
 	SummaryPending bool
 	SummaryFailed  bool

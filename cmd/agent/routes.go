@@ -55,6 +55,9 @@ func newServer(cfg *config.Config, st serverStore, tc session.Temporal, hub *sse
 		DefaultAgentID: cfg.DefaultAgentID,
 		SummaryModel:   cfg.SummaryModel,
 	})
+	// Every event the hub publishes, from the workers or from here, goes
+	// through the service first: the turn events feed what it shows.
+	hub.Observe(sessions.Observe)
 	s := &server{
 		auth:     authSvc,
 		sessions: sessions,

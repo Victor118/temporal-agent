@@ -17,6 +17,7 @@ import (
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/converter"
 
+	"github.com/victor/temporal-agent/activity"
 	"github.com/victor/temporal-agent/auth"
 	"github.com/victor/temporal-agent/config"
 	"github.com/victor/temporal-agent/session"
@@ -134,6 +135,14 @@ func newRouteTest(t *testing.T) (http.Handler, *routeStore) {
 // routes that start workflows need one.
 func newRouteTestWith(t *testing.T, tc session.Temporal) (http.Handler, *routeStore) {
 	t.Helper()
+	h, st, _ := newRouteTestHub(t, tc)
+	return h, st
+}
+
+// newRouteTestHub is newRouteTestWith, with the server's hub: what the
+// workers publish goes there.
+func newRouteTestHub(t *testing.T, tc session.Temporal) (http.Handler, *routeStore, *sse.Hub) {
+	t.Helper()
 	auth.LoginFailDelay = 0
 	hash, _ := auth.HashPassword(pw)
 	st := &routeStore{
@@ -147,8 +156,9 @@ func newRouteTestWith(t *testing.T, tc session.Temporal) (http.Handler, *routeSt
 		members: []string{"u-alice", "u-bob"},
 	}
 	svc := &auth.Service{Store: st}
-	srv := newServer(&config.Config{WorkflowQueue: "agent", DefaultAgentID: "default"}, st, tc, sse.NewHub(), svc, admin.New(admin.Config{Auth: svc}).Routes())
-	return srv.routes(), st
+	hub := sse.NewHub()
+	srv := newServer(&config.Config{WorkflowQueue: "agent", DefaultAgentID: "default"}, st, tc, hub, svc, admin.New(admin.Config{Auth: svc}).Routes())
+	return srv.routes(), st, hub
 }
 
 func call(t *testing.T, h http.Handler, method, path, body string, cookie *http.Cookie) *httptest.ResponseRecorder {
@@ -782,5 +792,47 @@ func TestUI_TheStreamStartsWhereThePageStands(t *testing.T) {
 	m := regexp.MustCompile(`sse-connect="/sessions/s1/stream\?last_event_id=([0-9a-z]+-[0-9]+)"`).FindStringSubmatch(body)
 	if m == nil {
 		t.Fatalf("no stream position on the page: %s", body)
+	}
+}
+
+// The thread says who works as soon as a turn starts, and stops as soon as
+// it ends: from the turn events, as a worker apart posts them to the
+// internal API, or as a dev process publishes them on the hub.
+func TestUI_TheThreadNamesWhoWorks(t *testing.T) {
+	h, _, hub := newRouteTestHub(t, &fakeTemporal{})
+	bob := logIn(t, h, "bob@example.com")
+	notify := handleInternalNotify(hub, "k3y")
+	turn := func(typ, agentID, name string) {
+		t.Helper()
+		data, _ := json.Marshal(workflow.TurnEvent{AgentID: agentID, AgentName: name, Turn: "k"})
+		body, _ := json.Marshal(activity.NotifyInput{SessionID: "s1", Event: activity.SSEEvent{Type: typ, Data: data}})
+		if code := post(notify, "/internal/notify", string(body), map[string]string{"Authorization": "Bearer k3y"}); code != http.StatusNoContent {
+			t.Fatalf("notify: %d", code)
+		}
+	}
+	thread := func() string { return get(t, h, "/s/s1/thread", "", bob).Body.String() }
+
+	if out := thread(); strings.Contains(out, "travaille") {
+		t.Fatalf("idle: %s", out)
+	}
+	turn(workflow.EventTurnStarted, "default", "")
+	if out := thread(); !strings.Contains(out, "Default travaille…") {
+		t.Errorf("the session's agent, named from the agents: %s", out)
+	}
+	turn(workflow.EventTurnDone, "default", "")
+	turn(workflow.EventTurnStarted, "gone", "Ancien agent")
+	if out := thread(); !strings.Contains(out, "Ancien agent travaille…") {
+		t.Errorf("an agent the server does not know, by the event's name: %s", out)
+	}
+	turn(workflow.EventTurnDone, "gone", "Ancien agent")
+	if out := thread(); strings.Contains(out, "travaille") {
+		t.Errorf("after the turn: %s", out)
+	}
+
+	// In a dev process, the worker publishes on the hub itself.
+	data, _ := json.Marshal(workflow.TurnEvent{AgentID: "default", Turn: "k2"})
+	activity.HubNotifier{Hub: hub}.Notify(context.Background(), activity.Notification{SessionID: "s1", Event: activity.SSEEvent{Type: workflow.EventTurnStarted, Data: data}})
+	if out := thread(); !strings.Contains(out, "Default travaille…") {
+		t.Errorf("from the hub: %s", out)
 	}
 }

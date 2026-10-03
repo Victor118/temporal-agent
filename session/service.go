@@ -91,6 +91,7 @@ type Service struct {
 	hub      Publisher
 	cfg      Config
 	statuses statusCache
+	turns    turns // what the turn events tell, in memory
 }
 
 func New(st Store, tc Temporal, hub Publisher, cfg Config) *Service {

@@ -354,3 +354,20 @@ func TestRender_FragmentVersions(t *testing.T) {
 		t.Errorf("a changed thread: %d", w.Code)
 	}
 }
+
+// The working line names the agent on the turn when the server knows it,
+// and says "the agent" when only the visibility queries told.
+func TestRender_WorkingLineNamesTheAgent(t *testing.T) {
+	p := testPage("thread")
+	p.WorkingAgent = "Agent <Smith>"
+	if out := render(t, "thread", p); !strings.Contains(out, "Agent &lt;Smith&gt; travaille…") || strings.Contains(out, "L'agent travaille") {
+		t.Errorf("named: %s", out)
+	}
+	p.WorkingAgent = ""
+	if out := render(t, "thread", p); !strings.Contains(out, "L'agent travaille…") {
+		t.Errorf("unnamed: %s", out)
+	}
+	if page := render(t, "page", p); !strings.Contains(page, "sse:turn_started, sse:turn_done") {
+		t.Error("the thread does not reload on the turn events")
+	}
+}
