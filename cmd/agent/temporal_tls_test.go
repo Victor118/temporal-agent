@@ -48,7 +48,7 @@ func TestTemporalTLS(t *testing.T) {
 	notPEM := filepath.Join(t.TempDir(), "ca.pem")
 	os.WriteFile(notPEM, []byte("not a certificate"), 0o600)
 
-	// Neither: plaintext, as before.
+	// Nothing set: plaintext, as before.
 	if got, err := temporalTLS(&config.Config{}); got != nil || err != nil {
 		t.Errorf("no TLS settings = %v, %v; want plaintext", got, err)
 	}
@@ -67,14 +67,26 @@ func TestTemporalTLS(t *testing.T) {
 		t.Errorf("CA alone = %+v, %v", got, err)
 	}
 
+	// TEMPORAL_TLS alone: the system's CAs, and a server name may go with it.
+	if got, err := temporalTLS(&config.Config{TemporalTLS: "true", TemporalTLSServerName: "temporal.example.com"}); err != nil || got == nil ||
+		len(got.Certificates) != 0 || got.RootCAs != nil || got.ServerName != "temporal.example.com" {
+		t.Errorf("TEMPORAL_TLS=true = %+v, %v; want TLS with the system's CAs", got, err)
+	}
+	if got, err := temporalTLS(&config.Config{TemporalTLS: "false"}); got != nil || err != nil {
+		t.Errorf("TEMPORAL_TLS=false = %v, %v; want plaintext", got, err)
+	}
+
 	for name, cfg := range map[string]config.Config{
-		"cert without key":       {TemporalTLSCert: cert},
-		"key without cert":       {TemporalTLSKey: key},
-		"server name alone":      {TemporalTLSServerName: "temporal.internal"},
-		"missing files":          {TemporalTLSCert: cert + ".missing", TemporalTLSKey: key},
-		"CA that is not PEM":     {TemporalTLSCA: notPEM},
-		"cert and key swapped":   {TemporalTLSCert: key, TemporalTLSKey: cert},
-		"CA file that is absent": {TemporalTLSCA: notPEM + ".missing"},
+		"TEMPORAL_TLS not a boolean":   {TemporalTLS: "yes please"},
+		"TEMPORAL_TLS=false with cert": {TemporalTLS: "false", TemporalTLSCert: cert, TemporalTLSKey: key},
+		"TEMPORAL_TLS=false with CA":   {TemporalTLS: "false", TemporalTLSCA: cert},
+		"cert without key":             {TemporalTLSCert: cert},
+		"key without cert":             {TemporalTLSKey: key},
+		"server name alone":            {TemporalTLSServerName: "temporal.internal"},
+		"missing files":                {TemporalTLSCert: cert + ".missing", TemporalTLSKey: key},
+		"CA that is not PEM":           {TemporalTLSCA: notPEM},
+		"cert and key swapped":         {TemporalTLSCert: key, TemporalTLSKey: cert},
+		"CA file that is absent":       {TemporalTLSCA: notPEM + ".missing"},
 	} {
 		if got, err := temporalTLS(&cfg); err == nil {
 			t.Errorf("%s: accepted, %+v", name, got)

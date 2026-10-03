@@ -15,9 +15,13 @@ type Config struct {
 	// Temporal
 	TemporalHost      string
 	TemporalNamespace string
-	TemporalTLSCert   string // client certificate (PEM), with TemporalTLSKey; both or neither
-	TemporalTLSKey    string
-	TemporalTLSCA     string // CA (PEM) the server's certificate is checked against; empty = the system's
+	// TemporalTLS turns TLS on ("true") without a client certificate or a CA
+	// file: the server's certificate is checked against the system's CAs.
+	// Read by temporalTLS, which refuses what is not a boolean.
+	TemporalTLS     string
+	TemporalTLSCert string // client certificate (PEM), with TemporalTLSKey; both or neither
+	TemporalTLSKey  string
+	TemporalTLSCA   string // CA (PEM) the server's certificate is checked against; empty = the system's
 	// TemporalTLSServerName is the name the server's certificate is checked
 	// for; empty = the host of TemporalHost.
 	TemporalTLSServerName string
@@ -135,6 +139,7 @@ func Load() *Config {
 	return &Config{
 		TemporalHost:          envOr("TEMPORAL_HOST", "localhost:7233"),
 		TemporalNamespace:     envOr("TEMPORAL_NAMESPACE", "default"),
+		TemporalTLS:           os.Getenv("TEMPORAL_TLS"),
 		TemporalTLSCert:       os.Getenv("TEMPORAL_TLS_CERT"),
 		TemporalTLSKey:        os.Getenv("TEMPORAL_TLS_KEY"),
 		TemporalTLSCA:         os.Getenv("TEMPORAL_TLS_CA"),

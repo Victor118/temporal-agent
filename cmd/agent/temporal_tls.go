@@ -6,21 +6,35 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 
 	"github.com/victor/temporal-agent/config"
 )
 
 // temporalTLS is the TLS configuration of the connection to Temporal, or nil
-// for plaintext. TLS is on with a client certificate (mTLS) or a CA: a
-// certificate without its key, or the reverse, is a mistake reported here
-// rather than a plaintext connection the server refuses, or worse accepts.
+// for plaintext. TLS is on with TEMPORAL_TLS=true (the system's CAs, for a
+// server with a public certificate), a client certificate (mTLS) or a CA: a
+// certificate without its key, or the reverse, or TLS settings that
+// contradict TEMPORAL_TLS, is a mistake reported here rather than a plaintext
+// connection the server refuses, or worse accepts.
 func temporalTLS(cfg *config.Config) (*tls.Config, error) {
 	if (cfg.TemporalTLSCert == "") != (cfg.TemporalTLSKey == "") {
 		return nil, errors.New("TEMPORAL_TLS_CERT and TEMPORAL_TLS_KEY go together: set both or neither")
 	}
-	if cfg.TemporalTLSCert == "" && cfg.TemporalTLSCA == "" {
+	on, files := false, cfg.TemporalTLSCert != "" || cfg.TemporalTLSCA != ""
+	if cfg.TemporalTLS != "" {
+		v, err := strconv.ParseBool(cfg.TemporalTLS)
+		if err != nil {
+			return nil, fmt.Errorf("TEMPORAL_TLS=%q: want true or false", cfg.TemporalTLS)
+		}
+		if !v && files {
+			return nil, errors.New("TEMPORAL_TLS=false, but TEMPORAL_TLS_CERT or TEMPORAL_TLS_CA is set")
+		}
+		on = v
+	}
+	if !on && !files {
 		if cfg.TemporalTLSServerName != "" {
-			return nil, errors.New("TEMPORAL_TLS_SERVER_NAME needs TLS: set TEMPORAL_TLS_CERT and TEMPORAL_TLS_KEY, or TEMPORAL_TLS_CA")
+			return nil, errors.New("TEMPORAL_TLS_SERVER_NAME needs TLS: set TEMPORAL_TLS=true, TEMPORAL_TLS_CERT and TEMPORAL_TLS_KEY, or TEMPORAL_TLS_CA")
 		}
 		return nil, nil
 	}
