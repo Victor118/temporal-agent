@@ -32,38 +32,54 @@
   </div>
 </div>
 <script>
-// A reload morphs what it changes in place: what the member set on the page
-// stays theirs, an open menu or a half-typed text. Hidden fields follow the
-// server.
-Idiomorph.defaults.callbacks.beforeAttributeUpdated = function (name, el) {
-  if (name === 'open' && el.tagName === 'DETAILS') return false;
-  if (name === 'value' && (el.tagName === 'TEXTAREA' || (el.tagName === 'INPUT' && el.type !== 'hidden'))) return false;
-};
-// A reload says which version of its fragment the page holds: when it has not
-// changed, the server answers 204 and htmx swaps nothing.
-document.body.addEventListener('htmx:configRequest', function (e) {
-  var t = e.detail.target, held = e.detail.verb === 'get' && t && t.querySelector(':scope > [data-version]');
-  if (held) e.detail.headers['X-Fragment-Version'] = held.dataset.version;
-});
-// The thread opens at its end, or on the message a link points to (#m<id>).
-function toHash() {
-  var t = location.hash && document.querySelector(location.hash);
-  if (!t) return false;
-  t.scrollIntoView({block: 'center'});
-  t.classList.add('highlight');
-  setTimeout(function () { t.classList.remove('highlight'); }, 2500);
-  return true;
+// A boosted navigation runs this script again: the listeners are set once.
+if (!window.chatWired) {
+  window.chatWired = true;
+  // A reload morphs what it changes in place: what the member set on the page
+  // stays theirs, an open menu or a half-typed text. Hidden fields follow the
+  // server.
+  Idiomorph.defaults.callbacks.beforeAttributeUpdated = function (name, el) {
+    if (name === 'open' && el.tagName === 'DETAILS') return false;
+    if (name === 'value' && (el.tagName === 'TEXTAREA' || (el.tagName === 'INPUT' && el.type !== 'hidden'))) return false;
+  };
+  // A reload says which version of its fragment the page holds: when it has not
+  // changed, the server answers 204 and htmx swaps nothing.
+  document.body.addEventListener('htmx:configRequest', function (e) {
+    var t = e.detail.target, held = e.detail.verb === 'get' && t && t.querySelector(':scope > [data-version]');
+    if (held) e.detail.headers['X-Fragment-Version'] = held.dataset.version;
+  });
+  // The thread opens at its end, or on the message a link points to (#m<id>).
+  function toHash() {
+    var t = location.hash && document.querySelector(location.hash);
+    if (!t) return false;
+    t.scrollIntoView({block: 'center'});
+    t.classList.add('highlight');
+    setTimeout(function () { t.classList.remove('highlight'); }, 2500);
+    return true;
+  }
+  function toBottom() {
+    var t = document.getElementById('thread');
+    if (t) t.scrollTop = t.scrollHeight;
+  }
+  document.addEventListener('DOMContentLoaded', function () { toHash() || toBottom(); });
+  // A reload follows the conversation only for a member who was at its end, or
+  // who just sent a message: one reading further up stays where they are.
+  var sent = false, follow = false;
+  function fromComposer(e) { return e.detail.elt.closest && e.detail.elt.closest('#composer'); }
+  document.body.addEventListener('htmx:beforeRequest', function (e) { if (fromComposer(e)) sent = true; });
+  document.body.addEventListener('htmx:afterRequest', function (e) { if (fromComposer(e) && !e.detail.successful) sent = false; });
+  document.body.addEventListener('htmx:beforeSwap', function (e) {
+    var t = e.detail.target;
+    if (t && t.id === 'thread' && e.detail.shouldSwap) follow = sent || t.scrollHeight - t.scrollTop - t.clientHeight < 48;
+  });
+  document.body.addEventListener('htmx:afterSettle', function (e) {
+    var target = e.detail.target;
+    if (target && target.id === 'thread') {
+      if (follow) toBottom();
+      sent = follow = false;
+    } else if (target === document.body) toHash() || toBottom();
+  });
 }
-function toBottom() {
-  var t = document.getElementById('thread');
-  if (t) t.scrollTop = t.scrollHeight;
-}
-document.addEventListener('DOMContentLoaded', function () { toHash() || toBottom(); });
-document.body.addEventListener('htmx:afterSettle', function (e) {
-  var target = e.detail.target;
-  if (target && target.id === 'thread') toBottom();
-  else if (target === document.body) toHash() || toBottom();
-});
 </script>
 </body>
 </html>{{end}}
