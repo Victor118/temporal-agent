@@ -29,11 +29,15 @@ type memStore struct {
 	// ID: everyone else is.
 	outsiders map[string][]string
 	members   []store.SessionMember
-	messages  []store.MessageWithID
-	appended  []store.Message
-	title     string
-	agents    []store.Agent // nil: the default agent alone
-	loads     int           // conversations loaded
+	// membersErr fails ListSessionMembers; membersGate, when set, holds it
+	// until closed.
+	membersErr  error
+	membersGate chan struct{}
+	messages    []store.MessageWithID
+	appended    []store.Message
+	title       string
+	agents      []store.Agent // nil: the default agent alone
+	loads       int           // conversations loaded
 }
 
 func (m *memStore) CreateSession(_ context.Context, s store.Session) error {
@@ -59,6 +63,12 @@ func (m *memStore) IsSessionMember(_ context.Context, sessionID, userID string) 
 	return !slices.Contains(m.outsiders[sessionID], userID), nil
 }
 func (m *memStore) ListSessionMembers(context.Context, string) ([]store.SessionMember, error) {
+	if m.membersGate != nil {
+		<-m.membersGate
+	}
+	if m.membersErr != nil {
+		return nil, m.membersErr
+	}
 	return m.members, nil
 }
 func (m *memStore) AddSessionMember(context.Context, string, string, string) error { return nil }

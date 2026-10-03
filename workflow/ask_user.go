@@ -61,7 +61,7 @@ func AskUserWorkflow(ctx workflow.Context, rawInput json.RawMessage) (tool.Resul
 
 	// Notify the client via SSE so it can display the question with agent context
 	payload := map[string]interface{}{
-		"type":        "ask_user",
+		"type":        EventAskUser,
 		"question":    input.Question,
 		"workflow_id": wfID,
 	}
@@ -84,7 +84,7 @@ func AskUserWorkflow(ctx workflow.Context, rawInput json.RawMessage) (tool.Resul
 			Channel:   input.Channel,
 			ChannelID: input.ChannelID,
 			Event: activity.SSEEvent{
-				Type: "ask_user",
+				Type: EventAskUser,
 				Data: data,
 			},
 		},

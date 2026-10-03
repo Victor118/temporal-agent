@@ -109,10 +109,12 @@ func (s *Service) Delete(ctx context.Context, sessionID, by string) error {
 	if err := s.store.DeleteSession(ctx, sessionID); err != nil {
 		return err
 	}
+	s.turns.forget(sessionID)
 	ids := make([]string, len(members))
 	for i, m := range members {
 		ids[i] = m.UserID
 	}
+	s.publishMembersLeft(sessionID, ids...)
 	s.ringTrees(ctx, sessionID, ids...) // the session is gone: it has no members to list
 	return nil
 }
@@ -141,6 +143,7 @@ func (s *Service) Leave(ctx context.Context, sessionID, userID string) error {
 	if err := s.store.RemoveSessionMember(ctx, sessionID, userID); err != nil {
 		return err
 	}
+	s.publishMembersLeft(sessionID, userID)
 	defer s.ringTrees(ctx, sessionID, userID)
 	members, err := s.store.ListSessionMembers(ctx, sessionID)
 	if err == nil && len(members) == 0 {
@@ -150,6 +153,7 @@ func (s *Service) Leave(ctx context.Context, sessionID, userID string) error {
 		if err := s.store.DeleteSession(ctx, sessionID); err != nil {
 			log.Printf("Session %s: delete after last member left: %v", sessionID, err)
 		}
+		s.turns.forget(sessionID)
 	}
 	return nil
 }

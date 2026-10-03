@@ -55,6 +55,13 @@ type AddressedAgent struct {
 	Mention string `json:"mention"`
 }
 
+// Events an agent's turn sends to its session's members.
+const (
+	EventMessage   = "message"    // an answer
+	EventToolCalls = "tool_calls" // the tools a step calls
+	EventAskUser   = "ask_user"   // a question waits for a member's answer
+)
+
 // Turn events tell the web members when an agent starts a turn, and when it
 // is over, its transcript persisted: the server knows at once, where the
 // visibility queries lag. They go to the web whatever the session's channel.

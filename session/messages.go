@@ -102,7 +102,7 @@ func (s *Service) Deliver(ctx context.Context, sess *store.Session, author *stor
 	if err != nil {
 		return false, fmt.Errorf("store message: %w", err)
 	}
-	go s.setTitleFrom(sess.SessionID, text)
+	s.inBackground(func() { s.setTitleFrom(sess.SessionID, text) })
 
 	members, err := s.store.ListSessionMembers(ctx, sess.SessionID)
 	if err != nil {
@@ -170,7 +170,7 @@ func (s *Service) publishUserMessage(sessionID string, msg workflow.UserMessage,
 		"agent_called": len(agents) > 0,
 		"agents":       agents,
 	})
-	s.hub.Publish(sessionID, activity.SSEEvent{Type: "user_message", Data: data})
+	s.hub.Publish(sessionID, activity.SSEEvent{Type: EventUserMessage, Data: data})
 }
 
 // answering names the agents a message calls, in the order they answer: the

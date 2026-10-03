@@ -127,6 +127,11 @@ func (f *routeStore) RemoveSessionMember(_ context.Context, _, userID string) er
 
 const pw = "correct horse battery"
 
+// liveSID is a session ID the server learns from: the hub's observers take
+// only a canonical UUID for a session (session.IsSessionTopic). The tests
+// that need it give it to the store's session in place of "s1".
+const liveSID = "6f1c2a9e-3b4d-4e5f-8a7b-0c1d2e3f4a5b"
+
 func newRouteTest(t *testing.T) (http.Handler, *routeStore) {
 	t.Helper()
 	return newRouteTestWith(t, nil)
@@ -800,18 +805,19 @@ func TestUI_TheStreamStartsWhereThePageStands(t *testing.T) {
 // it ends: from the turn events, as a worker apart posts them to the
 // internal API, or as a dev process publishes them on the hub.
 func TestUI_TheThreadNamesWhoWorks(t *testing.T) {
-	h, _, hub := newRouteTestHub(t, &fakeTemporal{})
+	h, st, hub := newRouteTestHub(t, &fakeTemporal{})
+	st.session.SessionID = liveSID
 	bob := logIn(t, h, "bob@example.com")
 	notify := handleInternalNotify(hub, "k3y")
 	turn := func(typ, agentID, name string) {
 		t.Helper()
 		data, _ := json.Marshal(workflow.TurnEvent{AgentID: agentID, AgentName: name, Turn: "k"})
-		body, _ := json.Marshal(activity.NotifyInput{SessionID: "s1", Event: activity.SSEEvent{Type: typ, Data: data}})
+		body, _ := json.Marshal(activity.NotifyInput{SessionID: liveSID, Event: activity.SSEEvent{Type: typ, Data: data}})
 		if code := post(notify, "/internal/notify", string(body), map[string]string{"Authorization": "Bearer k3y"}); code != http.StatusNoContent {
 			t.Fatalf("notify: %d", code)
 		}
 	}
-	thread := func() string { return get(t, h, "/s/s1/thread", "", bob).Body.String() }
+	thread := func() string { return get(t, h, "/s/"+liveSID+"/thread", "", bob).Body.String() }
 
 	if out := thread(); strings.Contains(out, "travaille") {
 		t.Fatalf("idle: %s", out)
@@ -832,7 +838,7 @@ func TestUI_TheThreadNamesWhoWorks(t *testing.T) {
 
 	// In a dev process, the worker publishes on the hub itself.
 	data, _ := json.Marshal(workflow.TurnEvent{AgentID: "default", Turn: "k2"})
-	activity.HubNotifier{Hub: hub}.Notify(context.Background(), activity.Notification{SessionID: "s1", Event: activity.SSEEvent{Type: workflow.EventTurnStarted, Data: data}})
+	activity.HubNotifier{Hub: hub}.Notify(context.Background(), activity.Notification{SessionID: liveSID, Event: activity.SSEEvent{Type: workflow.EventTurnStarted, Data: data}})
 	if out := thread(); !strings.Contains(out, "Default travaille…") {
 		t.Errorf("from the hub: %s", out)
 	}
@@ -841,7 +847,8 @@ func TestUI_TheThreadNamesWhoWorks(t *testing.T) {
 // A member's tree stream rings when one of their sessions changes, here a
 // turn a worker reports; another user's does not.
 func TestUI_TheTreeStreamRings(t *testing.T) {
-	h, _, hub := newRouteTestHub(t, &fakeTemporal{})
+	h, st, hub := newRouteTestHub(t, &fakeTemporal{})
+	st.session.SessionID = liveSID
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -860,12 +867,12 @@ func TestUI_TheTreeStreamRings(t *testing.T) {
 	bob, carol := open("bob@example.com"), open("carol@example.com")
 
 	data, _ := json.Marshal(workflow.TurnEvent{AgentID: "default", Turn: "k"})
-	hub.Publish("s1", activity.SSEEvent{Type: workflow.EventTurnStarted, Data: data})
+	hub.Publish(liveSID, activity.SSEEvent{Type: workflow.EventTurnStarted, Data: data})
 	if got := nextEvent(t, bob); !strings.HasSuffix(got, " "+session.EventTreeChanged) {
 		t.Errorf("bob's tree: %q", got)
 	}
 	// A session page has one stream: the session's events, and the tree's.
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/s/s1/stream?last_event_id="+from, nil)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/s/"+liveSID+"/stream?last_event_id="+from, nil)
 	req.AddCookie(logIn(t, h, "bob@example.com"))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil || resp.StatusCode != http.StatusOK {
@@ -873,12 +880,18 @@ func TestUI_TheTreeStreamRings(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	page := bufio.NewScanner(resp.Body)
-	if a, b := nextEvent(t, page), nextEvent(t, page); !strings.HasSuffix(a, " "+session.EventTreeChanged) || !strings.HasSuffix(b, " "+workflow.EventTurnStarted) {
-		t.Errorf("session page stream: %q, %q", a, b)
+	// The tree rings in the background: before the session's event or after.
+	got := []string{nextEvent(t, page), nextEvent(t, page)}
+	for i, e := range got {
+		got[i] = e[strings.LastIndex(e, " ")+1:]
+	}
+	slices.Sort(got)
+	if want := []string{session.EventTreeChanged, workflow.EventTurnStarted}; !slices.Equal(got, want) {
+		t.Errorf("session page stream: %q, want %q", got, want)
 	}
 
-	// Carol is no member of s1: the next thing her stream says is what came
-	// to her tree after, not s1's change.
+	// Carol is no member of the session: the next thing her stream says is
+	// what came to her tree after, not the session's change.
 	hub.Publish(session.TreeTopic("u-carol"), activity.SSEEvent{Type: "marker", Data: []byte(`{}`)})
 	if got := nextEvent(t, carol); !strings.HasSuffix(got, " marker") {
 		t.Errorf("carol's tree: %q", got)

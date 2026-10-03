@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 
 	"go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/client"
@@ -92,6 +93,9 @@ type Service struct {
 	cfg      Config
 	statuses statusCache
 	turns    turns // what the turn events tell, in memory
+	// background counts the work started off a caller's way (a title, the
+	// trees' rings): tests wait for it.
+	background sync.WaitGroup
 }
 
 func New(st Store, tc Temporal, hub Publisher, cfg Config) *Service {
