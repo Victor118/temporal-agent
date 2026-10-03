@@ -113,10 +113,12 @@ func TestAgentWorkflow_ToolTimeoutFromTheCatalog(t *testing.T) {
 	schema := json.RawMessage(`{"type":"object"}`)
 	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.ListToolsInput) (activity.ListToolsOutput, error) {
 		return activity.ListToolsOutput{
-			Tools: []provider.ToolDefinition{{Name: "exec", InputSchema: schema}, {Name: "web_search", InputSchema: schema}},
+			Tools: []provider.ToolDefinition{{Name: "exec", InputSchema: schema}, {Name: "web_search", InputSchema: schema}, {Name: "web_fetch", InputSchema: schema}},
 			Resolutions: map[string]activity.ToolResolution{
 				"exec":       {Kind: "activity", TaskQueue: "tools", Timeout: 330 * time.Second},
 				"web_search": {Kind: "activity", TaskQueue: "tools"},
+				// A row edited by hand: not a duration, so the default.
+				"web_fetch": {Kind: "activity", TaskQueue: "tools", Timeout: -time.Second},
 			},
 		}, nil
 	}, sdkactivity.RegisterOptions{Name: "ListTools"})
@@ -144,6 +146,7 @@ func TestAgentWorkflow_ToolTimeoutFromTheCatalog(t *testing.T) {
 			return provider.ChatResponse{ToolCalls: []provider.ToolCallInfo{
 				{ID: "1", Name: "exec", Input: json.RawMessage(`{"command":"make test","timeout_seconds":300}`)},
 				{ID: "2", Name: "web_search", Input: json.RawMessage(`{}`)},
+				{ID: "3", Name: "web_fetch", Input: json.RawMessage(`{}`)},
 			}}, nil
 		}
 		return provider.ChatResponse{Content: "done", StopReason: "end_turn"}, nil
@@ -154,8 +157,8 @@ func TestAgentWorkflow_ToolTimeoutFromTheCatalog(t *testing.T) {
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatalf("workflow error: %v", err)
 	}
-	if timeouts["exec"] != 330*time.Second || timeouts["web_search"] != tool.DefaultTimeout {
-		t.Errorf("timeouts = %v, want exec 5m30s and web_search the default %s", timeouts, tool.DefaultTimeout)
+	if timeouts["exec"] != 330*time.Second || timeouts["web_search"] != tool.DefaultTimeout || timeouts["web_fetch"] != tool.DefaultTimeout {
+		t.Errorf("timeouts = %v, want exec 5m30s, web_search and web_fetch the default %s", timeouts, tool.DefaultTimeout)
 	}
 }
 

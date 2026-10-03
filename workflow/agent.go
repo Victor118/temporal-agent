@@ -430,8 +430,12 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 				opts.TaskQueue = res.TaskQueue
 				// The tool knows how long it may run: exec waits for a
 				// command up to its own limit, which a single default would
-				// cut short.
-				opts.StartToCloseTimeout = cmp.Or(res.Timeout, tool.DefaultTimeout)
+				// cut short. Not a duration (a row edited by hand) is the
+				// default: the SDK would refuse the activity.
+				opts.StartToCloseTimeout = res.Timeout
+				if opts.StartToCloseTimeout <= 0 {
+					opts.StartToCloseTimeout = tool.DefaultTimeout
+				}
 				execCtx := workflow.WithActivityOptions(ctx, opts)
 				d.future = workflow.ExecuteActivity(execCtx, toolAct.ExecuteTool, activity.ExecuteToolInput{
 					Name:      tc.Name,

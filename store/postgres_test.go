@@ -384,6 +384,25 @@ func TestDeleteTool_OnlyOnItsQueue(t *testing.T) {
 	}
 }
 
+// A call's time limit is a duration or the default (0): the table refuses a
+// negative one, which the SDK would refuse at every call.
+func TestUpsertTool_RefusesANegativeTimeout(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	cleanup := func() { s.db.ExecContext(ctx, "DELETE FROM tools WHERE name = 'zz-timeout'") }
+	cleanup()
+	t.Cleanup(cleanup)
+
+	rec := ToolRecord{Name: "zz-timeout", TaskQueue: "q1", InputSchema: []byte(`{}`), Kind: "mcp", SchemaHash: "h", Timeout: -time.Second}
+	if err := s.UpsertTool(ctx, rec); err == nil {
+		t.Error("a negative timeout was stored")
+	}
+	rec.Timeout = 90 * time.Second
+	if err := s.UpsertTool(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // A mention calls one agent: two cannot share it, case aside, on create as on
 // update. An empty mention (the ID stands in) is never a clash.
 func TestAgentMentionIsUnique(t *testing.T) {

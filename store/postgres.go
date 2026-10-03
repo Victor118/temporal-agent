@@ -227,7 +227,8 @@ const schema = `
 		END $$;
 		-- How long one call may run (tool.Tool.Timeout), in seconds; 0 = the
 		-- default.
-		ALTER TABLE tools ADD COLUMN IF NOT EXISTS timeout_seconds INTEGER NOT NULL DEFAULT 0;
+		ALTER TABLE tools ADD COLUMN IF NOT EXISTS timeout_seconds INTEGER NOT NULL DEFAULT 0
+			CHECK (timeout_seconds >= 0);
 		-- The spawn_session row the workers published: nothing else deletes from
 		-- tools, and no worker publishes it any more.
 		DELETE FROM tools WHERE name = 'spawn_session';
