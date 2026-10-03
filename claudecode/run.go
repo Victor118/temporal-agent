@@ -80,9 +80,14 @@ type Result struct {
 	Subtype   string `json:"subtype"`  // success, error_max_turns, error_during_execution…
 	SessionID string `json:"session_id"`
 	Model     string `json:"model,omitempty"`
-	// APIKeySource is the CLI's own word on what paid the run: "none" for a
-	// subscription, else where its API key came from. Empty if it never said.
+	// APIKeySource is the CLI's own word on where its API key came from:
+	// "none" when it used none. Empty if it never said.
 	APIKeySource string `json:"api_key_source,omitempty"`
+	// Auth is the worker's way of authenticating the run, and PaidBy what
+	// paid it (Payer), both set by the caller that knows the worker's choice:
+	// the CLI's word alone does not say who pays.
+	Auth   Auth `json:"auth,omitempty"`
+	PaidBy Auth `json:"paid_by,omitempty"`
 
 	NumTurns       int     `json:"num_turns"`
 	DurationMS     int64   `json:"duration_ms"`

@@ -439,7 +439,7 @@ func (a *ClaudeCodeActivities) RunClaudeCode(ctx context.Context, in RunClaudeCo
 	if a.Runs != nil {
 		runner.Runs = a.Runs
 	}
-	return runner.Run(ctx, claudecode.Params{
+	res, err := runner.Run(ctx, claudecode.Params{
 		ConfigDir:          configDir,
 		Cwd:                in.Dir,
 		Task:               in.Task,
@@ -454,6 +454,18 @@ func (a *ClaudeCodeActivities) RunClaudeCode(ctx context.Context, in RunClaudeCo
 		// disk would only outlive the tree it talks about.
 		NoSessionPersistence: true,
 	})
+	if err != nil {
+		return res, err
+	}
+	// What paid the run is the worker's choice, checked against the CLI's
+	// word: the summary the agent reads names a payer only when both agree.
+	res.Auth = a.Auth
+	paid, perr := res.Payer()
+	if perr != nil {
+		log.Printf("Warning: claude code: %v", perr)
+	}
+	res.PaidBy = paid
+	return res, nil
 }
 
 // lowerCap is the smaller of two budget caps, where zero means none.

@@ -69,7 +69,7 @@ func TestAnalyzeRepoWorkflow_HappyPath(t *testing.T) {
 	a := newAnalyzeEnv(t, nil, claudeCodeResult{
 		Report: "The entrypoint is cmd/agent.", Subtype: "success",
 		NumTurns: 2, DurationMS: 7498, CostUSD: 0.0561,
-		ToolUses: map[string]int{"Bash": 1},
+		ToolUses: map[string]int{"Bash": 1}, PaidBy: "subscription",
 	}, nil)
 
 	out := a.run_(t, AnalyzeRepoInput{Repo: "/src/repo", Task: "where is the entrypoint?", Ref: "main"})
@@ -82,6 +82,9 @@ func TestAnalyzeRepoWorkflow_HappyPath(t *testing.T) {
 	}
 	if out.Commit != "1234567890abcdef" || out.CostUSD != 0.0561 || out.NumTurns != 2 {
 		t.Errorf("commit/cost/turns = %q/%v/%d", out.Commit, out.CostUSD, out.NumTurns)
+	}
+	if out.PaidBy != "subscription" || !strings.Contains(out.Content, "paid by a Claude subscription") {
+		t.Errorf("PaidBy = %q, content:\n%s", out.PaidBy, out.Content)
 	}
 	if a.prepared.Repo != "/src/repo" || a.prepared.Ref != "main" {
 		t.Errorf("prepared = %+v", a.prepared)
@@ -207,8 +210,8 @@ func TestClaudeCodeOutputSummary(t *testing.T) {
 		t.Error("summary should shorten the commit")
 	}
 
-	// What paid the run, as the CLI said: an agent must not take a
-	// subscription's estimate for a bill, nor the other way round.
+	// What paid the run, as the activity settled it: an agent must not take
+	// a subscription's estimate for a bill, nor the other way round.
 	for paidBy, want := range map[string]string{
 		"subscription": "paid by a Claude subscription, not billed",
 		"api":          "billed to the Anthropic API",
@@ -221,11 +224,6 @@ func TestClaudeCodeOutputSummary(t *testing.T) {
 	}
 	if strings.Contains(s, "billed") {
 		t.Error("an unknown payer should not be named")
-	}
-	for source, want := range map[string]string{"none": "subscription", "ANTHROPIC_API_KEY": "api", "": ""} {
-		if got := paidBy(source); got != want {
-			t.Errorf("paidBy(%q) = %q, want %q", source, got, want)
-		}
 	}
 
 	failed := ClaudeCodeOutput{Error: "the run reported a failure (error_max_turns)"}

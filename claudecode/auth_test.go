@@ -77,3 +77,29 @@ func TestAuthCostNote(t *testing.T) {
 		t.Errorf("notes: %q / %q / %q", AuthSubscription.CostNote(), AuthAPI.CostNote(), Auth("").CostNote())
 	}
 }
+
+// A payer is named only when the worker's choice and the CLI's word agree:
+// "none" is a subscription only on a worker that runs subscriptions, and an
+// API key only bills on a worker that runs the API.
+func TestResultPayer(t *testing.T) {
+	for _, c := range []struct {
+		auth     Auth
+		source   string
+		want     Auth
+		disagree bool
+	}{
+		{AuthSubscription, "none", AuthSubscription, false},
+		{AuthAPI, "ANTHROPIC_API_KEY", AuthAPI, false},
+		{AuthAPI, "apiKeyHelper", AuthAPI, false},
+		{AuthSubscription, "", "", false},    // the CLI never said
+		{"", "none", "", false},              // no worker's choice
+		{"", "ANTHROPIC_API_KEY", "", false}, // idem
+		{AuthAPI, "none", "", true},          // a bearer token, a cloud provider…
+		{AuthSubscription, "ANTHROPIC_API_KEY", "", true},
+	} {
+		got, err := Result{Auth: c.auth, APIKeySource: c.source}.Payer()
+		if got != c.want || (err != nil) != c.disagree {
+			t.Errorf("auth %q, apiKeySource %q: Payer() = %q, %v; want %q, disagreement %v", c.auth, c.source, got, err, c.want, c.disagree)
+		}
+	}
+}

@@ -104,6 +104,25 @@ func (a Auth) CostNote() string {
 	return ""
 }
 
+// Payer says what paid the run: the worker's Auth, when the CLI's
+// apiKeySource agrees with it. A subscription run uses no API key ("none");
+// an API run names where its key came from. "none" alone is not a
+// subscription — the CLI also says it of a bearer token or a third-party cloud
+// provider — so without the worker's Auth, or without the CLI's word, nothing
+// is claimed. A disagreement claims nothing either, and is the error, for the
+// log.
+func (r Result) Payer() (Auth, error) {
+	switch {
+	case r.Auth == "" || r.APIKeySource == "":
+		return "", nil
+	case r.Auth == AuthSubscription && r.APIKeySource == "none":
+		return AuthSubscription, nil
+	case r.Auth == AuthAPI && r.APIKeySource != "none":
+		return AuthAPI, nil
+	}
+	return "", fmt.Errorf("the worker authenticates runs as %q, but the CLI reports apiKeySource %q: what paid the run is not said", r.Auth, r.APIKeySource)
+}
+
 // envValue is name's value in environ, the last one winning as os/exec has it.
 func envValue(environ []string, name string) string {
 	value := ""

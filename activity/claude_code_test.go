@@ -912,6 +912,49 @@ printf '{"type":"result","subtype":"success","is_error":false,"result":"model=%s
 	}
 }
 
+// The payer the activity reports is the worker's choice, confirmed by the
+// CLI's apiKeySource; when they disagree, it names none.
+func TestRunClaudeCode_SaysWhatPaid(t *testing.T) {
+	id := subproctest.Identity(t)
+	if os.Geteuid() == 0 && id == nil {
+		t.Skip("no identity to run as")
+	}
+	bin := filepath.Join(subproctest.Dir(t, nil), "fake-claude")
+	script := `#!/bin/sh
+printf '{"type":"system","subtype":"init","session_id":"s","apiKeySource":"none"}\n'
+printf '{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"s"}\n'
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a := &ClaudeCodeActivities{
+		AllowedRepos: testRepos, Root: subproctest.Dir(t, nil), RunAs: id, Runner: &claudecode.Runner{Binary: bin},
+	}
+	if id != nil {
+		a.Runs = subproc.NewRuns(id)
+	}
+	dir := filepath.Join(a.Root, "run-1")
+	os.Mkdir(dir, 0o755)
+	if id != nil {
+		if err := id.Give(dir); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for auth, want := range map[claudecode.Auth]claudecode.Auth{
+		claudecode.AuthSubscription: claudecode.AuthSubscription,
+		claudecode.AuthAPI:          "", // "none" on an API worker: a bearer token, a cloud provider…
+	} {
+		a.Auth = auth
+		res, err := a.RunClaudeCode(context.Background(), RunClaudeCodeInput{Dir: dir, Task: "x"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Auth != auth || res.PaidBy != want {
+			t.Errorf("%s worker: Auth = %q, PaidBy = %q; want PaidBy %q", auth, res.Auth, res.PaidBy, want)
+		}
+	}
+}
+
 // Each run gets a CLI configuration of its own, seeded from the operator's:
 // a hook one run plants in its settings is never read by the next, and the
 // operator's stay as they were. A renewed login alone comes back.
