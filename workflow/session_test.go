@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -350,7 +351,15 @@ func TestSessionWorkflow_ACancelStopsTheRest(t *testing.T) {
 // what it produced, and the session persists it and reports the
 // interruption only once the agent has ended.
 func TestSessionWorkflow_ACancelWaitsForTheTurnToEnd(t *testing.T) {
+	// The child and the activities run on goroutines of their own: if the
+	// order regressed, they would overlap.
+	var mu sync.Mutex
 	var events []string
+	record := func(event string) {
+		mu.Lock()
+		defer mu.Unlock()
+		events = append(events, event)
+	}
 	stopping := func(ctx sdkworkflow.Context, in AgentWorkflowInput) (AgentWorkflowOutput, error) {
 		if err := sdkworkflow.Sleep(ctx, 10*time.Second); err == nil {
 			return AgentWorkflowOutput{Response: "done"}, nil
@@ -359,7 +368,7 @@ func TestSessionWorkflow_ACancelWaitsForTheTurnToEnd(t *testing.T) {
 		dctx, cancel := sdkworkflow.NewDisconnectedContext(ctx)
 		defer cancel()
 		_ = sdkworkflow.Sleep(dctx, 3*time.Second)
-		events = append(events, "agent ended")
+		record("agent ended")
 		content, _ := json.Marshal("half an answer")
 		return AgentWorkflowOutput{
 			Response:    "Agent cancelled.",
@@ -372,13 +381,15 @@ func TestSessionWorkflow_ACancelWaitsForTheTurnToEnd(t *testing.T) {
 	env.RegisterWorkflowWithOptions(stopping, sdkworkflow.RegisterOptions{Name: "AgentWorkflow"})
 	var persisted []activity.PersistContextInput
 	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.PersistContextInput) error {
+		mu.Lock()
+		defer mu.Unlock()
 		events = append(events, "persisted")
 		persisted = append(persisted, in)
 		return nil
 	}, sdkactivity.RegisterOptions{Name: "PersistContext"})
 	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.NotifyInput) error {
 		if strings.Contains(string(in.Event.Data), "interrupted") {
-			events = append(events, "interrupted")
+			record("interrupted")
 		}
 		return nil
 	}, sdkactivity.RegisterOptions{Name: "NotifyStep"})
@@ -386,6 +397,8 @@ func TestSessionWorkflow_ACancelWaitsForTheTurnToEnd(t *testing.T) {
 	env.RegisterDelayedCallback(func() { env.SignalWorkflow(SignalCancelAgent, nil) }, 5*time.Second)
 	env.ExecuteWorkflow(SessionWorkflow, SessionWorkflowInput{SessionID: "s1", AgentID: "default"})
 
+	mu.Lock()
+	defer mu.Unlock()
 	if got := strings.Join(events, ", "); got != "agent ended, persisted, interrupted" {
 		t.Errorf("events: %s; want the agent ended before the session persists and reports", got)
 	}
