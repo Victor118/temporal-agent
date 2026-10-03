@@ -151,6 +151,18 @@ tools: [github_*]
 4. Boucle ReAct : `CallLLM` → appels d'outils → résultats → `CallLLM`…
 5. Réponse finale → `SessionWorkflow` persiste l'historique → SSE.
 
+### Plusieurs agents dans une session
+
+Un message appelle les agents qu'il mentionne (`@<mention>`, au plus trois),
+résolus par le serveur ; sans mention, l'agent de la session selon son mode.
+`SessionWorkflow` lance un tour par agent, l'un après l'autre : chacun recharge
+l'historique et voit donc les réponses des précédents. Un échec ou un arrêt
+coupe la suite. Chaque agent lit les tours des autres comme du texte signé
+(`[agent Nom (@mention)]`, appels d'outils et résultats tronqués compris),
+jamais comme ses propres messages ni comme des blocs d'outils. Une note en fin
+de prompt cite le message et dit à chacun sa part. Toute l'installation peut
+être appelée : restreindre les agents d'une session est à venir.
+
 ### Appel d'un outil
 
 1. Le LLM appelle `github_list_issues`.
