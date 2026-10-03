@@ -85,7 +85,9 @@ sequenceDiagram
   `tool_calls` (le générique a appelé deux agents), `ask_user`
   (du sous-agent), `message` (la synthèse finale), puis `turn_done` une fois
   le tour persisté. Chaque event porte un `id:` ; un client qui se reconnecte
-  reçoit ceux qu'il a manqués, ou `reload`.
+  reçoit ceux qu'il a manqués, ou `reload`. `turn_started` et `turn_done`
+  sont au mieux : une tentative de 3 s, qui ne retient pas le tour ; perdus,
+  les requêtes de visibilité prennent le relais.
 - La persistance est faite **uniquement par `SessionWorkflow`** après chaque
   turn, pas par les `AgentWorkflow` enfants. Les sous-agents n'ont pas de
   mémoire propre — leur historique meurt avec leur exécution.
