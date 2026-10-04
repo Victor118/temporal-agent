@@ -270,7 +270,17 @@ func whyEnded(err error, limit time.Duration) string {
 		}
 		return fmt.Sprintf("it reached its time limit (%s)", limit)
 	case errors.As(err, &appErr):
-		return strings.TrimPrefix(appErr.Message(), "claudecode: ")
+		// The runner's words are the cause of the activity's error, when it
+		// has one: its message only names the kind of failure.
+		msg := appErr.Message()
+		var cause *temporal.ApplicationError
+		if errors.As(errors.Unwrap(appErr), &cause) {
+			msg = cause.Message()
+		}
+		for _, prefix := range []string{"claude code: ", "claudecode: "} {
+			msg = strings.TrimPrefix(msg, prefix)
+		}
+		return msg
 	case errors.As(err, &canceled):
 		return "it was cancelled"
 	}

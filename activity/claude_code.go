@@ -589,12 +589,12 @@ func (a *ClaudeCodeActivities) RunClaudeCode(ctx context.Context, in RunClaudeCo
 			"claude code: the worker stopped during the run", ErrWorkerStopping, err, res.Progress)
 	}
 	if err != nil {
-		typ := ErrRunFailed
+		typ, msg := ErrRunFailed, "claude code: the run ended without the CLI's result"
 		var stall *claudecode.StallError
 		if errors.As(err, &stall) {
-			typ = ErrRunStalled
+			typ, msg = ErrRunStalled, "claude code: the run was ended as stuck"
 		}
-		return res, temporal.NewNonRetryableApplicationError(err.Error(), typ, nil, res.Progress)
+		return res, temporal.NewNonRetryableApplicationError(msg, typ, err, res.Progress)
 	}
 	// What paid the run is the worker's choice, checked against the CLI's
 	// word: the summary the agent reads names a payer only when both agree.

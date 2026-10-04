@@ -260,8 +260,12 @@ func TestAnalyzeRepoWorkflow_InterruptedRunSaysWhatItDid(t *testing.T) {
 		{"heartbeat timeout", "its worker stopped answering (no heartbeat for 2m0s)",
 			temporal.NewTimeoutError(enumspb.TIMEOUT_TYPE_HEARTBEAT, nil, progress)},
 		{"stalled", "the CLI wrote nothing for 12m0s (stuck?), so the run was ended",
-			temporal.NewNonRetryableApplicationError("claudecode: the CLI wrote nothing for 12m0s (stuck?), so the run was ended",
-				activity.ErrRunStalled, nil, progress)},
+			// As the activity has it: the runner's error is the cause.
+			temporal.NewNonRetryableApplicationError("claude code: the run was ended as stuck", activity.ErrRunStalled,
+				errors.New("claudecode: the CLI wrote nothing for 12m0s (stuck?), so the run was ended"), progress)},
+		{"no result", "CLI exited with exit status 137 and reported nothing: out of memory",
+			temporal.NewNonRetryableApplicationError("claude code: the run ended without the CLI's result", activity.ErrRunFailed,
+				errors.New("claudecode: CLI exited with exit status 137 and reported nothing: out of memory"), progress)},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			a := newAnalyzeEnv(t, nil, claudeCodeResult{}, nil)

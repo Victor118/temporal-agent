@@ -1202,10 +1202,10 @@ func TestRunClaudeCode_AFailedRunSaysHowFarItGot(t *testing.T) {
 printf '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu_1","name":"Bash","input":{"command":"go test ./..."}}]},"session_id":"s"}\n'
 `
 	for _, c := range []struct {
-		name, script, typ string
+		name, script, typ, why string
 	}{
-		{"stalled", started + "exec sleep 60\n", ErrRunStalled},
-		{"no result", started + "echo 'out of memory' >&2\nexit 137\n", ErrRunFailed},
+		{"stalled", started + "exec sleep 60\n", ErrRunStalled, "wrote nothing for 500ms"},
+		{"no result", started + "echo 'out of memory' >&2\nexit 137\n", ErrRunFailed, "out of memory"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			bin := filepath.Join(subproctest.Dir(t, nil), "fake-claude")
@@ -1231,6 +1231,10 @@ printf '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu_1"
 			var appErr *temporal.ApplicationError
 			if !errors.As(err, &appErr) || appErr.Type() != c.typ || !appErr.NonRetryable() {
 				t.Fatalf("err = %v, want a non-retryable %s", err, c.typ)
+			}
+			// The runner's own words, as the cause.
+			if cause := errors.Unwrap(appErr); cause == nil || !strings.Contains(cause.Error(), c.why) {
+				t.Errorf("cause = %v, want it to say %q", cause, c.why)
 			}
 			var p claudecode.Progress
 			if err := appErr.Details(&p); err != nil {
