@@ -116,7 +116,10 @@ func goTo(w http.ResponseWriter, r *http.Request, path string) {
 
 // buildPage gathers what the interface shows for a session (or for none: the
 // welcome page), as the user may see it.
-func (u *ui) buildPage(ctx context.Context, me *store.User, sessionID, view string) (*chat.Page, error) {
+//
+// block is what will be rendered of it: the session's files are read only
+// for the thread ("page", "thread").
+func (u *ui) buildPage(ctx context.Context, me *store.User, sessionID, view, block string) (*chat.Page, error) {
 	// Before anything is read: an event published while the page loads is
 	// sent again when its stream connects, never lost.
 	streamFrom := u.hub.Position(pageTopics(me, sessionID)...)
@@ -222,11 +225,13 @@ func (u *ui) buildPage(ctx context.Context, me *store.User, sessionID, view stri
 		byMessage[f.ForkedAtMessageID] = append(byMessage[f.ForkedAtMessageID], chat.ForkLink{SessionID: f.SessionID, Title: title})
 	}
 	p.Thread = chat.BuildThread(msgs, me.ID, byMessage, u.sessions.PendingQuestions(ctx, sessionID), directory)
-	files, err := u.store.ListSessionFiles(ctx, sessionID)
-	if err != nil {
-		return nil, err
+	if block == "page" || block == "thread" {
+		files, err := u.store.ListSessionFiles(ctx, sessionID)
+		if err != nil {
+			return nil, err
+		}
+		p.Thread = chat.AttachFiles(p.Thread, files, directory)
 	}
-	p.Thread = chat.AttachFiles(p.Thread, files, directory)
 	if p.Report != nil {
 		p.Thread = chat.MarkReported(p.Thread, sess, p.Report.Refused == nil)
 	}
@@ -289,7 +294,7 @@ func (u *ui) renderAgents(w http.ResponseWriter, r *http.Request, failed string)
 // renderPage renders a page or one of its fragments, or the error that kept
 // it from being built.
 func (u *ui) renderPage(w http.ResponseWriter, r *http.Request, sessionID, view, block string, adjust func(*chat.Page)) {
-	p, err := u.buildPage(r.Context(), auth.UserFrom(r.Context()), sessionID, view)
+	p, err := u.buildPage(r.Context(), auth.UserFrom(r.Context()), sessionID, view, block)
 	if errors.Is(err, session.ErrNotFound) {
 		http.NotFound(w, r)
 		return

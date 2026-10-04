@@ -547,6 +547,9 @@ type FileLink struct {
 	ID   string
 	Name string
 	Size string // « 12,4 Ko »
+	// Via names the agent that published it when it is not the turn's: a
+	// sub-agent the turn launched. Empty otherwise.
+	Via string
 }
 
 // FileHref is where a file is downloaded.
@@ -557,13 +560,21 @@ func (f FileLink) Href() string { return "/files/" + f.ID }
 // its error. A turn the thread does not show yet — it published from its
 // first step, or from a sub-agent, before writing anything — gets an item
 // of its own at the thread's end, before the questions, until it shows.
+// A file a turn published twice, same name and same content (the model
+// called again), shows once.
 func AttachFiles(items []ThreadItem, files []store.File, agents AgentDirectory) []ThreadItem {
 	if len(files) == 0 {
 		return items
 	}
 	var order []string // turns, in the order of their first file
 	byTurn := map[string][]store.File{}
+	seen := map[[3]string]bool{}
 	for _, f := range files {
+		k := [3]string{f.TurnKey, f.Name, f.SHA256}
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
 		if _, ok := byTurn[f.TurnKey]; !ok {
 			order = append(order, f.TurnKey)
 		}
@@ -581,7 +592,7 @@ func AttachFiles(items []ThreadItem, files []store.File, agents AgentDirectory) 
 	}
 	var orphans []ThreadItem
 	for _, turn := range order {
-		links := fileLinks(byTurn[turn])
+		links := fileLinks(byTurn[turn], agents)
 		if i, ok := agentAt[turn]; ok {
 			items[i].Files = links
 		} else if i, ok := errorAt[turn]; ok {
@@ -602,10 +613,13 @@ func AttachFiles(items []ThreadItem, files []store.File, agents AgentDirectory) 
 	return slices.Concat(items[:at:at], orphans, items[at:])
 }
 
-func fileLinks(files []store.File) []FileLink {
+func fileLinks(files []store.File, agents AgentDirectory) []FileLink {
 	links := make([]FileLink, len(files))
 	for i, f := range files {
 		links[i] = FileLink{ID: f.ID, Name: f.Name, Size: FileSize(f.Size)}
+		if f.AgentID != "" && f.AgentID != store.TurnParticipant(f.TurnKey) {
+			links[i].Via = agents.Signer(store.Message{AgentID: f.AgentID}).Name
+		}
 	}
 	return links
 }

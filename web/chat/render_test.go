@@ -579,7 +579,8 @@ func TestRender_Files(t *testing.T) {
 		{ID: 9, Key: store.TurnMessageKey(turn, 0), Message: store.Message{Role: store.RoleAssistant, Content: j("Done.")}},
 		{ID: 10, Key: store.TurnEndKey(turn), Message: store.TurnEnd("default", "")},
 	}, "u1", nil, nil, AgentDirectory{Session: p.Agent})
-	p.Thread = AttachFiles(p.Thread, []store.File{{ID: "f1", TurnKey: turn, Name: `<b>x</b>.html`, Size: 10}}, AgentDirectory{})
+	p.Thread = AttachFiles(p.Thread, []store.File{{ID: "f1", TurnKey: turn, Name: `<b>x</b>.html`, Size: 10},
+		{ID: "f2", TurnKey: turn, AgentID: "smith", Name: "chart.svg", Size: 5}}, AgentDirectory{ByID: map[string]AgentInfo{"smith": smith}})
 	out := render(t, "thread-inner", p)
 	link := `href="/files/f1" download="&lt;b&gt;x&lt;/b&gt;.html"`
 	if !strings.Contains(out, link) || !strings.Contains(out, "10 o") {
@@ -587,6 +588,9 @@ func TestRender_Files(t *testing.T) {
 	}
 	if i, j := strings.Index(out, `id="m9"`), strings.Index(out, link); !(i >= 0 && i < j) {
 		t.Errorf("the file is not under the answer: %d, %d", i, j)
+	}
+	if !strings.Contains(out, "5 o · via Agent Smith") {
+		t.Error("a sub-agent's file does not name it")
 	}
 	if strings.Contains(out, "<b>x</b>") {
 		t.Error("the file name is not escaped")

@@ -122,3 +122,29 @@ func TestAttachment(t *testing.T) {
 		}
 	}
 }
+
+// The files are read for the thread only, not for the other panels a
+// page reloads.
+func TestFiles_ReadForTheThreadOnly(t *testing.T) {
+	h, st := newRouteTestWith(t, &fakeTemporal{})
+	withFiles(st)
+	bob := logIn(t, h, "bob@example.com")
+	for _, c := range []struct {
+		path  string
+		reads int
+	}{
+		{"/s/s1/", 1},
+		{"/s/s1/thread", 1},
+		{"/s/s1/report", 0},
+	} {
+		st.fileLists = 0
+		w := call(t, h, http.MethodGet, c.path, "", bob)
+		if w.Code != http.StatusOK || st.fileLists != c.reads {
+			t.Errorf("%s: %d, %d reads of the files, want %d", c.path, w.Code, st.fileLists, c.reads)
+		}
+	}
+	// The page shows them, under the turn they belong to or on their own.
+	if w := call(t, h, http.MethodGet, "/s/s1/", "", bob); !strings.Contains(w.Body.String(), `href="/files/f-csv"`) {
+		t.Errorf("the page does not link the files")
+	}
+}

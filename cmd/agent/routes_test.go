@@ -51,6 +51,8 @@ type routeStore struct {
 	// Published files, and their content by ID.
 	files    []store.File
 	contents map[string][]byte
+	// fileLists counts the reads of a session's files.
+	fileLists int
 }
 
 func (f *routeStore) user(match func(store.User) bool) *store.User {

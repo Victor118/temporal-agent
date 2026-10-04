@@ -985,7 +985,13 @@ func TestAttachFiles(t *testing.T) {
 		{ID: "f1", TurnKey: answered, AgentID: "jarvis", Name: "rapport.md", Size: 1536},
 		{ID: "f2", TurnKey: failed, AgentID: "smith", Name: "partial.csv", Size: 12},
 		{ID: "f3", TurnKey: silent, AgentID: "writer", Name: "draft.md", Size: 3 << 20, CreatedAt: t0},
-		{ID: "f4", TurnKey: answered, AgentID: "jarvis", Name: "data.json", Size: 2},
+		{ID: "f4", TurnKey: answered, AgentID: "jarvis", Name: "data.json", Size: 2, SHA256: "d1"},
+		// Published again by the model, same name and content: shown once.
+		{ID: "f5", TurnKey: answered, AgentID: "jarvis", Name: "data.json", Size: 2, SHA256: "d1"},
+		// Same name, new content: shown.
+		{ID: "f6", TurnKey: answered, AgentID: "jarvis", Name: "data.json", Size: 3, SHA256: "d2"},
+		// By a sub-agent of the turn: says so.
+		{ID: "f7", TurnKey: answered, AgentID: "smith", Name: "chart.svg", Size: 5},
 	}
 	items = AttachFiles(items, files, directory)
 
@@ -996,7 +1002,8 @@ func TestAttachFiles(t *testing.T) {
 	if got := strings.Join(kinds, ","); got != "human,agent,error,files,question" {
 		t.Fatalf("kinds %s", got)
 	}
-	want := []FileLink{{ID: "f1", Name: "rapport.md", Size: "1,5 Ko"}, {ID: "f4", Name: "data.json", Size: "2 o"}}
+	want := []FileLink{{ID: "f1", Name: "rapport.md", Size: "1,5 Ko"}, {ID: "f4", Name: "data.json", Size: "2 o"},
+		{ID: "f6", Name: "data.json", Size: "3 o"}, {ID: "f7", Name: "chart.svg", Size: "5 o", Via: "Agent Smith"}}
 	if !reflect.DeepEqual(items[1].Files, want) {
 		t.Errorf("answer's files %+v", items[1].Files)
 	}

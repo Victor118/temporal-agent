@@ -57,6 +57,7 @@ func (f *routeStore) ReadFileContent(_ context.Context, id string) ([]byte, erro
 	return f.contents[id], nil
 }
 func (f *routeStore) ListSessionFiles(_ context.Context, sessionID string) ([]store.File, error) {
+	f.fileLists++
 	var out []store.File
 	for _, file := range f.files {
 		if file.SessionID == sessionID {
