@@ -2,10 +2,12 @@ package workflow
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
@@ -86,6 +88,21 @@ type ClaudeCodeOutput struct {
 	DurationMS int64          `json:"duration_ms,omitempty"`
 	NumTurns   int            `json:"num_turns,omitempty"`
 	ToolUses   map[string]int `json:"tool_uses,omitempty"`
+
+	// Interrupted: the run ended without the CLI's account of it (stuck, its
+	// worker lost, out of time, stopped). What it cost is unknown, DurationMS
+	// is the workflow's measure, and Progress, when its error said, is how
+	// far it got.
+	Interrupted bool         `json:"interrupted,omitempty"`
+	Progress    *runProgress `json:"progress,omitempty"`
+}
+
+// runProgress mirrors the fields of claudecode.Progress this package reads:
+// how far a run got, as the runner's heartbeats and errors say it.
+type runProgress struct {
+	Events    int    `json:"events"`
+	ToolCalls int    `json:"tool_calls"`
+	LastTool  string `json:"last_tool,omitempty"`
 }
 
 // AnalyzeRepoWorkflow reads a repository and answers a question about it. It
@@ -154,6 +171,7 @@ func analyzeRepo(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCodeOutp
 	defer r.cleanup(prepared.Dir)
 
 	var result claudeCodeResult
+	runStarted := workflow.Now(ctx)
 	err = workflow.ExecuteActivity(
 		r.step(workflow.ActivityOptions{
 			StartToCloseTimeout: analyzeTimeout,
@@ -174,8 +192,9 @@ func analyzeRepo(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCodeOutp
 		if r.failed(err) {
 			out.Error = r.lostAt("before the analysis finished", "there is no report")
 		} else {
-			out.Error = fmt.Sprintf("the analysis did not complete: %v", err)
+			out.Error = "the analysis did not complete: " + whyEnded(err, analyzeTimeout)
 		}
+		out.interrupted(err, workflow.Now(ctx).Sub(runStarted))
 		return out, nil
 	}
 
@@ -205,6 +224,54 @@ type claudeCodeResult struct {
 	// PaidBy is "subscription" or "api" when the worker's way of
 	// authenticating and the CLI's word agree (claudecode.Result.Payer).
 	PaidBy string `json:"paid_by"`
+}
+
+// interrupted records a run that ended with err, without the CLI's result:
+// how long it ran, and how far it got when err says.
+func (o *ClaudeCodeOutput) interrupted(err error, ran time.Duration) {
+	o.Interrupted = true
+	o.DurationMS = ran.Milliseconds()
+	if p, ok := progressOf(err); ok {
+		o.Progress = &p
+	}
+}
+
+// progressOf reads how far a run that failed with err got: the last
+// heartbeat's details of a run that timed out, or those of the runner's
+// error (activity.ErrRunStalled, ErrRunFailed, ErrWorkerStopping). A run
+// cancelled with its session (a lost worker) has neither.
+func progressOf(err error) (runProgress, bool) {
+	var p runProgress
+	var timeoutErr *temporal.TimeoutError
+	if errors.As(err, &timeoutErr) {
+		return p, timeoutErr.HasLastHeartbeatDetails() && timeoutErr.LastHeartbeatDetails(&p) == nil
+	}
+	var appErr *temporal.ApplicationError
+	if errors.As(err, &appErr) {
+		return p, appErr.HasDetails() && appErr.Details(&p) == nil
+	}
+	return p, false
+}
+
+// whyEnded says, for the calling agent, why a run ended without its result:
+// in words, not the SDK's chain ("activity error (type: …)"). limit is the
+// run's own (StartToCloseTimeout).
+func whyEnded(err error, limit time.Duration) string {
+	var timeoutErr *temporal.TimeoutError
+	var appErr *temporal.ApplicationError
+	var canceled *temporal.CanceledError
+	switch {
+	case errors.As(err, &timeoutErr):
+		if timeoutErr.TimeoutType() == enumspb.TIMEOUT_TYPE_HEARTBEAT {
+			return fmt.Sprintf("its worker stopped answering (no heartbeat for %s): lost or stuck", claudeCodeHeartbeat)
+		}
+		return fmt.Sprintf("it reached its time limit (%s)", limit)
+	case errors.As(err, &appErr):
+		return strings.TrimPrefix(appErr.Message(), "claudecode: ")
+	case errors.As(err, &canceled):
+		return "it was cancelled"
+	}
+	return err.Error()
 }
 
 // Summary renders the output for the calling agent: the report, then the facts
@@ -240,8 +307,26 @@ func (o ClaudeCodeOutput) Summary() string {
 	if o.Dirty {
 		sb.WriteString("note: the run left uncommitted changes, which were discarded with the clone\n")
 	}
-	fmt.Fprintf(&sb, "run: %d turns, %s, $%.4f",
-		o.NumTurns, (time.Duration(o.DurationMS) * time.Millisecond).Round(time.Second), o.CostUSD)
+	ran := (time.Duration(o.DurationMS) * time.Millisecond).Round(time.Second)
+	if o.Interrupted {
+		// Neither turns nor cost: the CLI reports them on its result line,
+		// which an interrupted run never writes. Zeros would say it did
+		// nothing and cost nothing.
+		fmt.Fprintf(&sb, "run: interrupted after %s; ", ran)
+		if p := o.Progress; p != nil {
+			fmt.Fprintf(&sb, "%d tool calls", p.ToolCalls)
+			if p.LastTool != "" {
+				fmt.Fprintf(&sb, " (last: %s)", p.LastTool)
+			}
+			fmt.Fprintf(&sb, ", %d events", p.Events)
+		} else {
+			sb.WriteString("progress unknown")
+		}
+		sb.WriteString("; cost unknown (run interrupted)\n")
+		sb.WriteString("note: a run cannot be resumed: running it again starts over from scratch, and is paid again")
+		return sb.String()
+	}
+	fmt.Fprintf(&sb, "run: %d turns, %s, $%.4f", o.NumTurns, ran, o.CostUSD)
 	switch o.PaidBy {
 	case "subscription":
 		sb.WriteString(" (an estimate: paid by a Claude subscription, not billed)")

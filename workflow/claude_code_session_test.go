@@ -437,6 +437,11 @@ func TestAnalyzeRepoWorkflow_WorkerLostMidRun(t *testing.T) {
 	if !strings.Contains(out.Error, "the worker that held the run stopped before the analysis finished") {
 		t.Errorf("Error = %q", out.Error)
 	}
+	// Cancelled with its session, the run says nothing of how far it got:
+	// not that it did nothing, nor that it cost nothing.
+	if !out.Interrupted || !strings.Contains(out.Content, "progress unknown; cost unknown (run interrupted)") {
+		t.Errorf("content:\n%s", out.Content)
+	}
 	if len(a.cleaned) != 0 {
 		t.Errorf("cleaned %v on another worker than the clone's", a.cleaned)
 	}
@@ -547,7 +552,8 @@ func TestRun_SessionExpiryIsNotALostWorker(t *testing.T) {
 func TestImplementFeatureWorkflow_WorkerStoppingEndsTheRun(t *testing.T) {
 	e := newImplementEnv(t, claudeCodeResult{}, nil, oneCommit(), nil)
 	e.duringRun = func(context.Context) error {
-		return temporal.NewNonRetryableApplicationError("the worker stopped during the run", activity.ErrWorkerStopping, nil)
+		return temporal.NewNonRetryableApplicationError("the worker stopped during the run", activity.ErrWorkerStopping, nil,
+			runProgress{Events: 12, ToolCalls: 4, LastTool: "Read"})
 	}
 
 	out := e.run_(t, ImplementFeatureInput{Repo: "/src/repo", Task: "do it"})
@@ -557,6 +563,10 @@ func TestImplementFeatureWorkflow_WorkerStoppingEndsTheRun(t *testing.T) {
 	}
 	if !strings.Contains(out.Error, "the worker that held the run stopped before the run finished") {
 		t.Errorf("Error = %q", out.Error)
+	}
+	// What the run did before its worker stopped, as the worker said.
+	if want := "4 tool calls (last: Read), 12 events; cost unknown (run interrupted)"; !strings.Contains(out.Content, want) {
+		t.Errorf("content lacks %q:\n%s", want, out.Content)
 	}
 }
 

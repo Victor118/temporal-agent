@@ -6,8 +6,12 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/stretchr/testify/mock"
+	enumspb "go.temporal.io/api/enums/v1"
 	sdkactivity "go.temporal.io/sdk/activity"
+	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 
 	"github.com/victor/temporal-agent/activity"
@@ -290,5 +294,35 @@ func TestImplementFeatureWorkflow_PushesTheNewestInspectedCommit(t *testing.T) {
 
 	if !out.Pushed || e.pushed == nil || e.pushed.Commit != "newest" {
 		t.Errorf("Pushed = %v, push = %+v, want the newest commit", out.Pushed, e.pushed)
+	}
+}
+
+// An implementation that ends without the CLI's result still has its commits
+// checked and pushed, and tells the agent what it did and that its cost is
+// unknown.
+func TestImplementFeatureWorkflow_InterruptedRunSaysWhatItDid(t *testing.T) {
+	e := newImplementEnv(t, claudeCodeResult{}, nil, oneCommit(), nil)
+	progress := runProgress{Events: 80, ToolCalls: 21, LastTool: "Edit"}
+	e.env.OnActivity("RunClaudeCode", mock.Anything, mock.Anything).After(7*time.Minute).
+		Return(claudeCodeResult{}, temporal.NewTimeoutError(enumspb.TIMEOUT_TYPE_HEARTBEAT, nil, progress))
+
+	out := e.run_(t, ImplementFeatureInput{Repo: "/src/repo", Task: "do it"})
+
+	if want := "the run did not complete: its worker stopped answering (no heartbeat for 1m0s)"; !strings.HasPrefix(out.Error, want) {
+		t.Errorf("Error = %q, want %q", out.Error, want)
+	}
+	if !out.Pushed {
+		t.Error("the commits of an interrupted run should still reach their branch")
+	}
+	for _, want := range []string{
+		"run: interrupted after 7m0s; 21 tool calls (last: Edit), 80 events; cost unknown (run interrupted)",
+		"running it again starts over from scratch, and is paid again",
+	} {
+		if !strings.Contains(out.Content, want) {
+			t.Errorf("content lacks %q:\n%s", want, out.Content)
+		}
+	}
+	if strings.Contains(out.Content, "0 turns") || strings.Contains(out.Content, "activity error") {
+		t.Errorf("content:\n%s", out.Content)
 	}
 }

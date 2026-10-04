@@ -130,6 +130,7 @@ func implementFeature(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCod
 	defer r.cleanup(prepared.Dir)
 
 	var result claudeCodeResult
+	runStarted := workflow.Now(ctx)
 	runErr := workflow.ExecuteActivity(
 		r.step(workflow.ActivityOptions{
 			StartToCloseTimeout: implementTimeout,
@@ -146,27 +147,31 @@ func implementFeature(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCod
 			MaxBudgetUSD:    input.MaxBudgetUSD,
 		},
 	).Get(r.ctx, &result)
+	ran := workflow.Now(ctx).Sub(runStarted)
 
 	// The commits are in the clone, on the lost worker's disk: no other
 	// worker can inspect or push them.
 	if r.failed(runErr) {
 		out.Error = r.lostAt("before the run finished", "nothing was pushed")
+		out.interrupted(runErr, ran)
 		return out, nil
 	}
-
-	out.Report = result.Report
-	out.CostUSD = result.CostUSD
-	out.PaidBy = result.PaidBy
-	out.DurationMS = result.DurationMS
-	out.NumTurns = result.NumTurns
-	out.ToolUses = result.ToolUses
 
 	// A run that failed may still have committed something worth keeping, so
 	// inspect the tree either way and let the commits decide.
 	if runErr != nil {
-		out.Error = fmt.Sprintf("the run did not complete: %v", runErr)
-	} else if result.IsError {
-		out.Error = fmt.Sprintf("the run reported a failure (%s)", result.Subtype)
+		out.Error = "the run did not complete: " + whyEnded(runErr, implementTimeout)
+		out.interrupted(runErr, ran)
+	} else {
+		out.Report = result.Report
+		out.CostUSD = result.CostUSD
+		out.PaidBy = result.PaidBy
+		out.DurationMS = result.DurationMS
+		out.NumTurns = result.NumTurns
+		out.ToolUses = result.ToolUses
+		if result.IsError {
+			out.Error = fmt.Sprintf("the run reported a failure (%s)", result.Subtype)
+		}
 	}
 
 	var inspected activity.InspectWorkspaceOutput

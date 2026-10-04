@@ -6,8 +6,12 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/stretchr/testify/mock"
+	enumspb "go.temporal.io/api/enums/v1"
 	sdkactivity "go.temporal.io/sdk/activity"
+	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 
 	"github.com/victor/temporal-agent/activity"
@@ -236,5 +240,72 @@ func TestClaudeCodeOutputSummary(t *testing.T) {
 	failed := ClaudeCodeOutput{Error: "the run reported a failure (error_max_turns)"}
 	if !strings.Contains(failed.Summary(), "error_max_turns") {
 		t.Error("a failed run's summary should lead with the failure")
+	}
+}
+
+// interruptedAfter makes the run end with err after it has run for d.
+func (a *analyzeEnv) interruptedAfter(d time.Duration, err error) {
+	a.env.OnActivity("RunClaudeCode", mock.Anything, mock.Anything).After(d).Return(claudeCodeResult{}, err)
+}
+
+// A run that ends without the CLI's result tells the agent what it did and
+// that its cost is unknown, never "0 turns, $0": it ran, and was paid for.
+// And that a new run starts over, paid again: nothing resumes it.
+func TestAnalyzeRepoWorkflow_InterruptedRunSaysWhatItDid(t *testing.T) {
+	progress := runProgress{Events: 134, ToolCalls: 34, LastTool: "Bash"}
+	for _, c := range []struct {
+		name, why string
+		err       error
+	}{
+		{"heartbeat timeout", "its worker stopped answering (no heartbeat for 1m0s)",
+			temporal.NewTimeoutError(enumspb.TIMEOUT_TYPE_HEARTBEAT, nil, progress)},
+		{"stalled", "the CLI wrote nothing for 12m0s (stuck?), so the run was ended",
+			temporal.NewNonRetryableApplicationError("claudecode: the CLI wrote nothing for 12m0s (stuck?), so the run was ended",
+				activity.ErrRunStalled, nil, progress)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			a := newAnalyzeEnv(t, nil, claudeCodeResult{}, nil)
+			a.interruptedAfter(5*time.Minute, c.err)
+
+			out := a.run_(t, AnalyzeRepoInput{Repo: "/src/repo", Task: "look"})
+
+			if want := "the analysis did not complete: " + c.why; !strings.HasPrefix(out.Error, want) {
+				t.Errorf("Error = %q, want %q", out.Error, want)
+			}
+			if !out.Interrupted || out.Progress == nil || *out.Progress != progress {
+				t.Errorf("Interrupted = %v, Progress = %+v, want %+v", out.Interrupted, out.Progress, progress)
+			}
+			for _, want := range []string{
+				"run: interrupted after 5m0s; 34 tool calls (last: Bash), 134 events; cost unknown (run interrupted)",
+				"running it again starts over from scratch, and is paid again",
+			} {
+				if !strings.Contains(out.Content, want) {
+					t.Errorf("content lacks %q:\n%s", want, out.Content)
+				}
+			}
+			for _, wrong := range []string{"0 turns", "$0.0000", "activity error"} {
+				if strings.Contains(out.Content, wrong) {
+					t.Errorf("content says %q:\n%s", wrong, out.Content)
+				}
+			}
+			if len(a.cleaned) != 1 {
+				t.Errorf("cleaned %v, want the workspace deleted", a.cleaned)
+			}
+		})
+	}
+}
+
+// A run that reached its own bound says so, in words.
+func TestAnalyzeRepoWorkflow_RunOutOfTime(t *testing.T) {
+	a := newAnalyzeEnv(t, nil, claudeCodeResult{}, nil)
+	a.interruptedAfter(time.Minute, temporal.NewTimeoutError(enumspb.TIMEOUT_TYPE_START_TO_CLOSE, nil))
+
+	out := a.run_(t, AnalyzeRepoInput{Repo: "/src/repo", Task: "look"})
+
+	if want := "the analysis did not complete: it reached its time limit (45m0s)"; out.Error != want {
+		t.Errorf("Error = %q, want %q", out.Error, want)
+	}
+	if !strings.Contains(out.Content, "progress unknown; cost unknown (run interrupted)") {
+		t.Errorf("content:\n%s", out.Content)
 	}
 }
