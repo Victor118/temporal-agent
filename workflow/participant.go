@@ -23,7 +23,8 @@ const (
 	// SignalMessage delivers a message to a participant (ParticipantMessage),
 	// by SignalWithStart: the participant starts if it does not run.
 	SignalMessage = "message"
-	// SignalStopTurn stops the turn running, not the messages waiting.
+	// SignalStopTurn stops the turn running, not the messages waiting
+	// (StopTurn).
 	SignalStopTurn = "stop-turn"
 	// SignalClear stops the turn running and drops the messages waiting.
 	SignalClear = "clear"
@@ -129,6 +130,15 @@ type AddressedAgent struct {
 	Mention string `json:"mention"`
 }
 
+// StopTurn is the stop-turn signal's: the turn it stops. A stop for
+// another turn than the one running is ignored: the turn aimed at is over,
+// and the one running now may be another member's, whom the sender has no
+// right to stop. Empty, it stops the turn running, whichever it is: only
+// the session's creator, who may stop any, sends one.
+type StopTurn struct {
+	TurnKey string `json:"turn_key,omitempty"`
+}
+
 // ParticipantState is what the state query answers: the message the
 // participant answers, how many wait, and its background tasks (none yet).
 type ParticipantState struct {
@@ -137,9 +147,12 @@ type ParticipantState struct {
 	Background []string        `json:"background"`
 }
 
-// CurrentMessage is the message a participant answers.
+// CurrentMessage is the message a participant answers: its turn, and its
+// author, who may stop it.
 type CurrentMessage struct {
 	MessageID int64     `json:"message_id"`
+	Turn      string    `json:"turn"`
+	UserID    string    `json:"user_id,omitempty"`
 	UserName  string    `json:"user_name,omitempty"`
 	Since     time.Time `json:"since"`
 }
@@ -155,11 +168,14 @@ const (
 )
 
 // TurnEvent is the data of a turn event. The turn's key names the message
-// and the participant (store.TurnAnchor, store.TurnParticipant).
+// and the participant (store.TurnAnchor, store.TurnParticipant); UserID and
+// UserName are the message's author, whom the turn answers.
 type TurnEvent struct {
 	AgentID   string `json:"agent_id"`
 	AgentName string `json:"agent_name,omitempty"`
 	Turn      string `json:"turn"`
+	UserID    string `json:"user_id,omitempty"`
+	UserName  string `json:"user_name,omitempty"`
 }
 
 // Thresholds for continuing a participant as a new run: a participant lives
@@ -344,9 +360,9 @@ func (p *participant) answer(ctx workflow.Context, msg ParticipantMessage, messa
 	if msg.Channel != "" {
 		channel, channelID = msg.Channel, msg.ChannelID
 	}
-	p.current = &CurrentMessage{MessageID: msg.MessageID, UserName: msg.UserName, Since: workflow.Now(ctx)}
+	p.current = &CurrentMessage{MessageID: msg.MessageID, Turn: turnKey, UserID: msg.UserID, UserName: msg.UserName, Since: workflow.Now(ctx)}
 	defer func() { p.current = nil }()
-	event := TurnEvent{AgentID: p.in.AgentID, Turn: turnKey}
+	event := TurnEvent{AgentID: p.in.AgentID, Turn: turnKey, UserID: msg.UserID, UserName: msg.UserName}
 	// Done with the message, however: the server counts it out.
 	defer func() { notifyTurn(ctx, p.in.SessionID, EventTurnDone, event) }()
 	// With several agents answering, every word on the channel is signed,
@@ -450,17 +466,25 @@ func (p *participant) runTurn(ctx workflow.Context, msg ParticipantMessage, turn
 		agentErr = f.Get(ctx, &result)
 		done = true
 	})
-	stop := func(clear bool) func(workflow.ReceiveChannel, bool) {
-		return func(ch workflow.ReceiveChannel, _ bool) {
-			ch.Receive(ctx, nil)
-			if !stopped {
-				cancel()
-			}
-			stopped, cleared = true, cleared || clear
+	stop := func(clear bool) {
+		if !stopped {
+			cancel()
 		}
+		stopped, cleared = true, cleared || clear
 	}
-	sel.AddReceive(stops, stop(false))
-	sel.AddReceive(clears, stop(true))
+	sel.AddReceive(stops, func(ch workflow.ReceiveChannel, _ bool) {
+		var req StopTurn
+		ch.Receive(ctx, &req)
+		if req.TurnKey != "" && req.TurnKey != turnKey {
+			workflow.GetLogger(ctx).Info("Stop for another turn: ignored", "participant", p.id, "turn", turnKey, "aimed_at", req.TurnKey)
+			return
+		}
+		stop(false)
+	})
+	sel.AddReceive(clears, func(ch workflow.ReceiveChannel, _ bool) {
+		ch.Receive(ctx, nil)
+		stop(true)
+	})
 	sel.AddReceive(messages, func(ch workflow.ReceiveChannel, _ bool) {
 		var m ParticipantMessage
 		ch.Receive(ctx, &m)
@@ -602,5 +626,7 @@ var turnNotifyOptions = workflow.ActivityOptions{
 // notifyTurn sends a turn event to the session's web members. Best effort:
 // its failure neither fails nor holds the turn.
 func notifyTurn(ctx workflow.Context, sessionID, eventType string, e TurnEvent) {
-	notifySessionWith(ctx, turnNotifyOptions, sessionID, eventType, map[string]string{"agent_id": e.AgentID, "agent_name": e.AgentName, "turn": e.Turn})
+	notifySessionWith(ctx, turnNotifyOptions, sessionID, eventType, map[string]string{
+		"agent_id": e.AgentID, "agent_name": e.AgentName, "turn": e.Turn, "user_id": e.UserID, "user_name": e.UserName,
+	})
 }

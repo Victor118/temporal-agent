@@ -556,6 +556,31 @@ func TestParticipant_AStaleStopIsDropped(t *testing.T) {
 	}
 }
 
+// A stop names the turn it stops: one for another turn (the turn aimed at
+// ended, and this one may be another member's) leaves the turn running; one
+// for this turn stops it.
+func TestParticipant_AStopForAnotherTurnIsIgnored(t *testing.T) {
+	for name, c := range map[string]struct {
+		turn    string
+		stopped bool
+	}{
+		"another turn": {"m9.jarvis", false},
+		"this turn":    {"m1.jarvis", true},
+		"any turn":     {"", true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, nil, slowAgent)
+			h.env.RegisterDelayedCallback(func() { h.env.SignalWorkflow(SignalStopTurn, StopTurn{TurnKey: c.turn}) }, 5*time.Second)
+			if err := h.run("jarvis", h.human("M1", "Alice")); err != nil {
+				t.Fatal(err)
+			}
+			if got := slices.Contains(h.events(), "message Agent interrupted by user."); got != c.stopped {
+				t.Errorf("stopped %v, want %v: events %q", got, c.stopped, h.events())
+			}
+		})
+	}
+}
+
 // A stop that comes while the next message is checked is not for it: a
 // stop is for a turn whose start was told. Here the check waits a second
 // for a store away, and the stop comes meanwhile.
@@ -733,7 +758,7 @@ func TestParticipant_State(t *testing.T) {
 	if err := h.run("jarvis", m1, m2); err != nil {
 		t.Fatal(err)
 	}
-	if state.Current == nil || state.Current.MessageID != m1.MessageID || state.Current.UserName != "Alice" || state.Queued != 2 || state.Background == nil {
+	if state.Current == nil || state.Current.MessageID != m1.MessageID || state.Current.UserName != "Alice" || state.Current.UserID != "u-Alice" || state.Current.Turn != "m1.jarvis" || state.Queued != 2 || state.Background == nil {
 		t.Errorf("state %+v (current %+v), want M1 answered, 2 waiting", state, state.Current)
 	}
 	if len(h.turns) != 3 {
