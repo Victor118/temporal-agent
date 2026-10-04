@@ -182,6 +182,19 @@ La méthode `signalSession`, le repli sur les anciens identifiants et le démarr
 - Durée de vie : « Congédier », expiration après inactivité, renaissance (reclone) si le worker disparaît.
 - Les règles d'accès (qui peut l'interroger, selon la clé ou l'abonnement de son créateur) sont celles du cas entre particuliers.
 
+## 9 bis. Idée pour plus tard : cloner un participant
+
+Proposée le 4 octobre 2026. Quand Jarvis est occupé (tâche longue, tour long), un membre peut demander « un autre Jarvis ».
+- **Ce que c'est** : une instance (§4.1, `<session>:i:<id>`) dont l'agent de base est Jarvis. Même persona et mêmes outils, mais **sa propre file** ; mention `@jarvis-2`, réponses signées « Jarvis (2) ».
+- **Contexte** : il lit la même conversation jusqu'au message auquel il répond, et ignore le tour de Jarvis en cours (§5).
+- **Différence avec `/btw`** : c'est un participant complet (outils, file, plusieurs demandes), pas un aparté sans outils.
+- **Interface** : quand un message part dans la file d'un participant occupé, le fil propose « [Attendre] [Demander à un autre Jarvis] ». Le second bouton crée le clone et y déplace le message. On peut aussi créer un clone depuis le panneau « Agents ».
+- **Points à surveiller** :
+  - effets en parallèle : la mémoire est protégée (verrou optimiste), mais l'espace de travail des outils fichiers et `exec` est partagé sur le worker. Il faut au minimum le signaler, et à terme un espace de travail par participant ;
+  - durée de vie éphémère : congédié à la main, ou retiré après inactivité ;
+  - coût : plus de tours en parallèle, payés par l'auteur de chaque message.
+- Le besoin diminue avec la phase 4 (tâches longues asynchrones), mais reste utile pour les tours longs et pour mener deux sujets de front.
+
 ## 10. Découpage en phases
 
 | Phase | Contenu | Résultat |
