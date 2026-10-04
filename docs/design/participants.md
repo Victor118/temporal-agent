@@ -95,7 +95,8 @@ boucle :
     si la boîte est vide (ReceiveAsync) : terminer
     msg := message suivant
     si msg.ID a déjà son turn_end pour ce participant : ignorer (relivraison, §8)
-    vider un stop-turn périmé                     (garde actuelle de la session)
+    vider un stop-turn périmé, juste avant turn_started : un stop ne vise
+    qu'un tour annoncé (pas celui dont on vérifie encore le message)
     tour := AgentWorkflow enfant <participant>:m<msg.ID>
     attendre la fin du tour, ou stop-turn / clear
     responsabilités de fin de tour (§4.6)
@@ -169,7 +170,7 @@ Ce que le participant **abandonne** de la session : `GoalAchieved` (jamais utili
 | `earlier_turns` | Les clés des tours précédents du même message |
 | `sign_reply` | Signer la réponse sur le canal |
 | `channel`, `channel_id` | Le canal de réponse de ce message |
-| `aside` | Aparté (§4.5) |
+| `aside` | Aparté (§4.5) ; **phase 3**, pas encore dans le contrat |
 
 La citation du message dans la note multi-agents (`partNote`) est chargée par le tour avec la conversation, ou clippée dans le signal.
 
@@ -179,9 +180,9 @@ La citation du message dans la note multi-agents (`partNote`) est chargée par l
 
 | Étape | Relance |
 |---|---|
-| Vérification de l'agent (`store.GetAgent`) | 3 essais ; agent absent = non retentable |
+| Vérification du tour (`CheckTurn` : session, `turn_end`, `store.GetAgent`) | Sur une durée, pas un nombre d'essais : `ScheduleToCloseTimeout` 2 min, intervalle 1 s doublé jusqu'à 15 s, pas de `MaximumAttempts`. Une base absente un instant (redémarrage, bascule) ne perd aucun message. Seules erreurs définitives : agent absent (`AgentNotFound`) et session supprimée (`SessionGone`), non retentables |
 | Relais | Bornée, environ 5 essais sur 1 min ; échec final selon §4.4 |
-| `turn_end` | 5 essais ; échec final selon §4.6 |
+| `turn_end` | Comme la vérification : 2 min ; échec final selon §4.6 |
 | `turn_started` / `turn_done` | Les options courtes actuelles (une tentative de 3 s) |
 
 ## 5. La règle de lecture de l'historique

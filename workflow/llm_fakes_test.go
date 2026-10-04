@@ -31,6 +31,9 @@ type memSession struct {
 	// deleted says the session is gone. For the participant's turn checks.
 	agents  map[string]string
 	deleted bool
+	// checkFails and endFails make the next n session reads (the first
+	// step of a turn's check) and turn end writes fail: the store away.
+	checkFails, endFails int
 }
 
 // persistCall records one PersistContext activity call.
@@ -112,6 +115,10 @@ func (s *memSession) LoadConversation(_ context.Context, _ string, scope store.T
 func (s *memSession) GetSession(_ context.Context, sessionID string) (*store.Session, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.checkFails > 0 {
+		s.checkFails--
+		return nil, errors.New("database unavailable")
+	}
 	if s.deleted {
 		return nil, nil
 	}
@@ -142,6 +149,10 @@ func (s *memSession) HasTurnEnd(_ context.Context, _ string, turnKey string) (bo
 func (s *memSession) AppendTurnEnd(_ context.Context, _ string, turnKey string, msg store.Message) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.endFails > 0 {
+		s.endFails--
+		return 0, errors.New("database unavailable")
+	}
 	return s.addLocked(store.TurnEndKey(turnKey), msg), nil
 }
 

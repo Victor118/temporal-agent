@@ -173,17 +173,24 @@ const (
 
 // Activity options of a participant's steps.
 var (
-	// checkTurnOptions: three attempts; a missing agent or session is
-	// final.
-	checkTurnOptions = workflow.ActivityOptions{
-		StartToCloseTimeout: 10 * time.Second,
-		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 3},
-	}
-	// endTurnOptions: five attempts; past them the turn has no end (it stays
+	// checkTurnOptions: retried for about two minutes, so that a store
+	// away for a moment (a restart, a failover) loses no message; only a
+	// missing agent or session is final (activity.ErrTypeAgentNotFound,
+	// activity.ErrTypeSessionGone, never retried).
+	checkTurnOptions = storeStepOptions
+	// endTurnOptions: the same; past them the turn has no end (it stays
 	// unread by the others, and answered again if delivered again).
-	endTurnOptions = workflow.ActivityOptions{
-		StartToCloseTimeout: 10 * time.Second,
-		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 5},
+	endTurnOptions = storeStepOptions
+	// storeStepOptions are those of a step that only reads or writes the
+	// store: retried over a duration, not a number of attempts.
+	storeStepOptions = workflow.ActivityOptions{
+		StartToCloseTimeout:    10 * time.Second,
+		ScheduleToCloseTimeout: 2 * time.Minute,
+		RetryPolicy: &temporal.RetryPolicy{
+			InitialInterval:    time.Second,
+			BackoffCoefficient: 2,
+			MaximumInterval:    15 * time.Second,
+		},
 	}
 	// relayOptions: about five attempts over a minute; past them the relay
 	// fails (relay).
@@ -327,10 +334,6 @@ func (p *participant) answer(ctx workflow.Context, msg ParticipantMessage, messa
 		logger.Warn("Ignoring a message with no ID", "participant", p.id)
 		return
 	}
-	// A stop sent while no turn ran (the button clicked as the last turn
-	// ended) is about that turn, not this message.
-	drained(stops)
-
 	turnKey := store.TurnKey(msg.MessageID, p.in.AgentID)
 	// The message's channel, or the session's: a pair, never mixed.
 	channel, channelID := p.in.Channel, p.in.ChannelID
@@ -342,6 +345,12 @@ func (p *participant) answer(ctx workflow.Context, msg ParticipantMessage, messa
 	event := TurnEvent{AgentID: p.in.AgentID, Turn: turnKey}
 	// Done with the message, however: the server counts it out.
 	defer func() { notifyTurn(ctx, p.in.SessionID, EventTurnDone, event) }()
+	// With several agents answering, every word on the channel is signed,
+	// its errors too: by the agent's ID until its name is read.
+	signer := ""
+	if msg.SignReply {
+		signer = p.in.AgentID
+	}
 
 	var turnAct *activity.TurnActivities
 	var check activity.CheckTurnOutput
@@ -350,18 +359,27 @@ func (p *participant) answer(ctx workflow.Context, msg ParticipantMessage, messa
 	}).Get(ctx, &check)
 	switch {
 	case hasErrorType(err, activity.ErrTypeSessionGone):
+		// The messages left in the inbox get no turn_done: the server
+		// forgot the session when it deleted it, its counts included.
 		logger.Info("Session deleted: the participant ends", "participant", p.id)
 		p.gone = true
 		return
 	case err != nil:
 		reason := fmt.Sprintf("the agent could not answer: %s", failureText(err))
 		p.endTurn(ctx, turnKey, store.TurnEnd(p.in.AgentID, reason))
-		p.notifyError(ctx, msg, channel, channelID, "", reason)
+		p.notifyError(ctx, msg, channel, channelID, signer, reason)
 		return
 	case check.Answered:
 		logger.Info("Message answered already: not again", "participant", p.id, "message_id", msg.MessageID)
 		return
 	}
+	if msg.SignReply {
+		signer = cmp.Or(check.AgentName, p.in.AgentID)
+	}
+	// A stop is for a turn whose start was told: one sent before (the
+	// button clicked as the last turn ended, or during the check) is about
+	// another turn, not this one.
+	drained(stops)
 	event.AgentName = check.AgentName
 	notifyTurn(ctx, p.in.SessionID, EventTurnStarted, event)
 
@@ -381,17 +399,13 @@ func (p *participant) answer(ctx workflow.Context, msg ParticipantMessage, messa
 	// read the turn from there, and a second delivery is not answered.
 	p.endTurn(ctx, turnKey, store.TurnEnd(p.in.AgentID, reason))
 
-	signer := ""
-	if msg.SignReply {
-		signer = cmp.Or(check.AgentName, p.in.AgentID)
-	}
 	switch {
 	case stopped:
 		notifyResponse(ctx, p.in.SessionID, channel, channelID, signer, "Agent interrupted by user.")
 	case reason != "":
 		p.notifyError(ctx, msg, channel, channelID, signer, reason)
 	case len(msg.Next) > 0:
-		p.relay(ctx, msg, turnKey, channel, channelID)
+		p.relay(ctx, msg, turnKey, channel, channelID, signer)
 	}
 	if cleared {
 		p.clear(ctx, messages)
@@ -488,7 +502,10 @@ func (p *participant) notifyError(ctx workflow.Context, msg ParticipantMessage, 
 // another one by signal. When it fails for good, the next participant's turn
 // gets an end saying so, so that a late delivery is not answered; this
 // participant goes on with its own messages either way.
-func (p *participant) relay(ctx workflow.Context, msg ParticipantMessage, turnKey, channel, channelID string) {
+//
+// A failure is told signed by signer, the relaying agent: it is the one
+// that speaks.
+func (p *participant) relay(ctx workflow.Context, msg ParticipantMessage, turnKey, channel, channelID, signer string) {
 	next := msg.Next[0]
 	relayed := msg
 	relayed.Next = slices.Clone(msg.Next[1:])
@@ -510,7 +527,7 @@ func (p *participant) relay(ctx workflow.Context, msg ParticipantMessage, turnKe
 	}
 	reason := fmt.Sprintf("le relais vers @%s a échoué : %s", cmp.Or(next.Mention, next.ID), failureText(err))
 	p.endTurn(ctx, store.TurnKey(msg.MessageID, next.ID), store.TurnEnd(next.ID, reason))
-	p.notifyError(ctx, msg, channel, channelID, "", reason)
+	p.notifyError(ctx, msg, channel, channelID, signer, reason)
 }
 
 // maxQuotedMessageBytes bounds the quote of the message a part note is about.

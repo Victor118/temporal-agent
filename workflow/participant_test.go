@@ -437,12 +437,13 @@ func slowAgent(ctx sdkworkflow.Context, in AgentWorkflowInput) (AgentWorkflowOut
 }
 
 // A relay that fails for good: Smith's turn on the message gets an end
-// saying so, the channel is told, and Jarvis goes on with his next message.
+// saying so, the channel is told, signed by Jarvis, who relayed, and Jarvis
+// goes on with his next message.
 func TestParticipant_RelayFailsForGood(t *testing.T) {
 	h := newHarness(t, nil, answer)
 	h.relayErr = temporal.NewNonRetryableApplicationError("server away", "Unavailable", nil)
 	msg := h.human("@jarvis then @smith", "Alice")
-	msg.Next = []AddressedAgent{{ID: "smith", Mention: "smith"}}
+	msg.Next, msg.SignReply = []AddressedAgent{{ID: "smith", Mention: "smith"}}, true
 	next := h.human("@jarvis again", "Alice")
 	if err := h.run("jarvis", msg, next); err != nil {
 		t.Fatal(err)
@@ -456,6 +457,9 @@ func TestParticipant_RelayFailsForGood(t *testing.T) {
 	}
 	if !slices.ContainsFunc(h.events(), func(e string) bool { return strings.Contains(e, "le relais vers @smith a échoué") }) {
 		t.Errorf("the channel was not told: %q", h.events())
+	}
+	if got := h.signerOf("Error processing message: le relais"); got != "Jarvis" {
+		t.Errorf("the relay's failure signed %q, want the relaying agent", got)
 	}
 
 	// Delivered after all, late: Smith does not answer it.
@@ -550,6 +554,73 @@ func TestParticipant_AStaleStopIsDropped(t *testing.T) {
 	if slices.Contains(h.events(), "message Agent interrupted by user.") {
 		t.Errorf("events %q: a stop sent before the turn interrupted it", h.events())
 	}
+}
+
+// A stop that comes while the next message is checked is not for it: a
+// stop is for a turn whose start was told. Here the check waits a second
+// for a store away, and the stop comes meanwhile.
+func TestParticipant_AStopDuringTheCheckIsNotForTheTurn(t *testing.T) {
+	h := newHarness(t, nil, answer)
+	h.f.session.checkFails = 1
+	m1 := h.human("M1", "Alice")
+	h.env.RegisterDelayedCallback(func() { h.env.SignalWorkflow(SignalStopTurn, nil) }, 500*time.Millisecond)
+	if err := h.run("jarvis", m1); err != nil {
+		t.Fatal(err)
+	}
+	if len(h.turns) != 1 || slices.Contains(h.events(), "message Agent interrupted by user.") {
+		t.Errorf("turns %d, events %q: the stop interrupted a turn not started yet", len(h.turns), h.events())
+	}
+	if reason, ok := h.ends()["m1.jarvis"]; !ok || reason != "" {
+		t.Errorf("end %q %v", reason, ok)
+	}
+}
+
+// The store away for a while (a restart, a failover): the check and the
+// end are retried for about two minutes, and no message is lost. Away for
+// longer, the message gets an end saying why, written once the store is
+// back, and its error is told, signed when several agents answer.
+func TestParticipant_TheStoreAwayForAWhile(t *testing.T) {
+	h := newHarness(t, nil, answer)
+	h.f.session.checkFails, h.f.session.endFails = 6, 6 // ~45 s each
+	if err := h.run("jarvis", h.human("M1", "Alice")); err != nil {
+		t.Fatal(err)
+	}
+	if reason, ok := h.ends()["m1.jarvis"]; len(h.turns) != 1 || !ok || reason != "" {
+		t.Errorf("turns %d, end %q %v: want the message answered and ended", len(h.turns), reason, ok)
+	}
+
+	h = newHarness(t, nil, answer)
+	h.f.session.checkFails = 1000
+	msg := h.human("@jarvis @smith", "Alice")
+	msg.SignReply = true
+	start := h.env.Now()
+	if err := h.run("jarvis", msg); err != nil {
+		t.Fatal(err)
+	}
+	// The last retry that fits in the two minutes, not one more.
+	if took := h.env.Now().Sub(start); took < time.Minute || took > 2*time.Minute {
+		t.Errorf("gave up after %s, want about two minutes", took)
+	}
+	if reason := h.ends()["m1.jarvis"]; len(h.turns) != 0 || !strings.Contains(reason, "database unavailable") {
+		t.Errorf("turns %d, end %q", len(h.turns), reason)
+	}
+	if got := h.signerOf("Error processing message"); got != "jarvis" {
+		t.Errorf("the error signed %q, want the agent's ID (its name unread)", got)
+	}
+}
+
+// signerOf is who signed the first channel message starting with prefix.
+func (h *harness) signerOf(prefix string) string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, n := range h.notified {
+		var e map[string]string
+		json.Unmarshal(n.Event.Data, &e)
+		if n.Event.Type == activity.EventMessage && strings.HasPrefix(e["content"], prefix) {
+			return e["agent"]
+		}
+	}
+	return "<none>"
 }
 
 // An agent deleted with messages waiting: no turn, an end saying why, and
