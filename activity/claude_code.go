@@ -73,6 +73,9 @@ type ClaudeCodeActivities struct {
 	// Stopper ends the runs under way when the worker stops (RunStop.Stop);
 	// nil = never.
 	Stopper *RunStop
+	// RunEndWait bounds the wait of a step after a run for the run to be
+	// gone (awaitRunEnd); zero = DefaultRunEndWait.
+	RunEndWait time.Duration
 }
 
 // DefaultRunQueueWait is how long a run waits for a worker with a run to
@@ -189,11 +192,85 @@ func (a *ClaudeCodeActivities) endOnStop(ctx context.Context) (context.Context, 
 }
 
 // RunCounter is what the coding activities need of subproc.Runs: a run
-// counted while the CLI works, and the processes a run left behind ended
-// before a clone is taken back, when no run is under way.
+// counted while the CLI works, the processes a run left behind ended before
+// a clone is taken back, when no run is under way, and a wait for none to be
+// (awaitRunEnd).
 type RunCounter interface {
 	Hold() (release func())
 	KillStrays()
+	Idle(ctx context.Context) bool
+}
+
+// DefaultRunEndWait bounds how long a step after a run waits for the run's
+// CLI to be gone (awaitRunEnd), when ClaudeCodeActivities.RunEndWait is zero.
+// A run the workflow gave up on (its heartbeat timed out) still runs on its
+// worker until the worker learns it, in the answer to its next heartbeat
+// (one a minute at most, the SDK's throttle), then ends the CLI within the
+// runner's grace (10s); the rest is margin.
+const DefaultRunEndWait = 150 * time.Second
+
+// ErrRunStillActive is the type of the error of a step that found a command
+// of the run still running on its worker past the wait (awaitRunEnd): the
+// clone is not the worker's to read, push or delete.
+const ErrRunStillActive = "RunStillActive"
+
+// awaitRunEnd waits, heartbeating, until no command runs as RunAs on this
+// worker (Runs.Idle): the CLI of a run the workflow gave up on, which its
+// worker has yet to end, must not be writing the clone as it is inspected,
+// pushed or deleted. A run that ended normally is gone already: no wait. Past
+// RunEndWait, an ErrRunStillActive, never retried.
+func (a *ClaudeCodeActivities) awaitRunEnd(ctx context.Context) error {
+	if a.Runs == nil {
+		return nil
+	}
+	limit := a.RunEndWait
+	if limit <= 0 {
+		limit = DefaultRunEndWait
+	}
+	wait, cancel := context.WithTimeout(ctx, limit)
+	defer cancel()
+	defer heartbeatWhile(ctx, "waiting for the run to end")()
+	if a.Runs.Idle(wait) {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return temporal.NewNonRetryableApplicationError(
+		fmt.Sprintf("a command of the run still runs on this worker after %s", limit), ErrRunStillActive, nil)
+}
+
+// hasType tells whether err is an application error of type typ.
+func hasType(err error, typ string) bool {
+	var appErr *temporal.ApplicationError
+	return errors.As(err, &appErr) && appErr.Type() == typ
+}
+
+// heartbeatWhile heartbeats every gitHeartbeat, inside an activity, until
+// stop is called.
+func heartbeatWhile(ctx context.Context, details any) (stop func()) {
+	if !activity.IsActivity(ctx) {
+		return func() {}
+	}
+	done := make(chan struct{})
+	ended := make(chan struct{})
+	go func() {
+		defer close(ended)
+		ticker := time.NewTicker(gitHeartbeat)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				activity.RecordHeartbeat(ctx, details)
+			}
+		}
+	}()
+	return func() {
+		close(done)
+		<-ended
+	}
 }
 
 type PrepareWorkspaceInput struct {
@@ -488,6 +565,13 @@ func (a *ClaudeCodeActivities) CleanupWorkspace(ctx context.Context, in CleanupW
 	if filepath.Clean(in.Dir) != want {
 		return fmt.Errorf("cleanup: refusing to delete %q, which is not a workspace under %q", in.Dir, a.Root)
 	}
+	if err := a.awaitRunEnd(ctx); err != nil {
+		if hasType(err, ErrRunStillActive) {
+			log.Printf("Warning: claude code: %s is not deleted, a command of its run still runs: "+
+				"it goes at this worker's next start (RootClaim.Sweep)", want)
+		}
+		return fmt.Errorf("cleanup: %w", err)
+	}
 	return removeWorkspace(want)
 }
 
@@ -671,22 +755,7 @@ func (a *ClaudeCodeActivities) gitEnv(ctx context.Context, dir string, env []str
 	cmd.Env = append(subproc.Env(os.Environ(), nil, nil), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
 	cmd.Env = append(cmd.Env, env...)
 
-	if activity.IsActivity(ctx) {
-		stop := make(chan struct{})
-		defer close(stop)
-		go func() {
-			ticker := time.NewTicker(gitHeartbeat)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-stop:
-					return
-				case <-ticker.C:
-					activity.RecordHeartbeat(ctx, strings.Join(args, " "))
-				}
-			}
-		}()
-	}
+	defer heartbeatWhile(ctx, strings.Join(args, " "))()
 
 	out, err := cmd.CombinedOutput()
 	return string(out), err
@@ -728,6 +797,9 @@ func (a *ClaudeCodeActivities) InspectWorkspace(ctx context.Context, in InspectW
 		return InspectWorkspaceOutput{}, fmt.Errorf("inspect workspace: dir and base are required")
 	}
 	if _, err := a.workspaceDir(in.Dir); err != nil {
+		return InspectWorkspaceOutput{}, fmt.Errorf("inspect workspace: %w", err)
+	}
+	if err := a.awaitRunEnd(ctx); err != nil {
 		return InspectWorkspaceOutput{}, fmt.Errorf("inspect workspace: %w", err)
 	}
 	var out InspectWorkspaceOutput
@@ -801,6 +873,9 @@ func (a *ClaudeCodeActivities) PushBranch(ctx context.Context, in PushBranchInpu
 		return temporal.NewNonRetryableApplicationError(fmt.Sprintf("push: %q is not a full commit SHA", in.Commit), "InvalidInput", nil)
 	}
 	if _, err := a.workspaceDir(in.Dir); err != nil {
+		return fmt.Errorf("push: %w", err)
+	}
+	if err := a.awaitRunEnd(ctx); err != nil {
 		return fmt.Errorf("push: %w", err)
 	}
 	// InspectWorkspace restored the configuration already: a change now was

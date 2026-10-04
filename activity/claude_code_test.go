@@ -1246,3 +1246,52 @@ printf '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu_1"
 		})
 	}
 }
+
+// A run the workflow gave up on may still run on its worker until the worker
+// learns it: the steps after it wait for no command of the run to run, and
+// past the wait refuse, for good, to read, push or delete the clone.
+func TestStepsAfterARunWaitForItToEnd(t *testing.T) {
+	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: t.TempDir(), Runs: subproc.NewRuns(nil),
+		RunEndWait: 300 * time.Millisecond}
+	dir := filepath.Join(a.Root, "run-1")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	release := a.Runs.Hold()
+	steps := map[string]func() error{
+		"inspect": func() error {
+			_, err := a.InspectWorkspace(ctx, InspectWorkspaceInput{Dir: dir, Base: "HEAD"})
+			return err
+		},
+		"push": func() error {
+			return a.PushBranch(ctx, PushBranchInput{Dir: dir, Remote: filepath.Join(t.TempDir(), "remote"),
+				Branch: "agent/x", Commit: strings.Repeat("a", 40)})
+		},
+		"cleanup": func() error { return a.CleanupWorkspace(ctx, CleanupWorkspaceInput{Dir: dir}) },
+	}
+	for name, step := range steps {
+		err := step()
+		var appErr *temporal.ApplicationError
+		if !errors.As(err, &appErr) || appErr.Type() != ErrRunStillActive || !appErr.NonRetryable() {
+			t.Errorf("%s with the run still running: %v, want a non-retryable %s", name, err, ErrRunStillActive)
+		}
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("the clone of a run still running was deleted: %v", err)
+	}
+
+	// The run ends during the wait: the step goes on.
+	a.RunEndWait = 10 * time.Second
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		release()
+	}()
+	if err := a.CleanupWorkspace(ctx, CleanupWorkspaceInput{Dir: dir}); err != nil {
+		t.Fatalf("cleanup once the run ended: %v", err)
+	}
+	if _, err := os.Stat(dir); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the clone is still there: %v", err)
+	}
+}

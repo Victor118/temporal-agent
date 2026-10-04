@@ -18,8 +18,8 @@ const (
 	// implementTimeout bounds one coding run. Writing takes longer than
 	// reading: the run builds, tests, and comes back from its own mistakes.
 	implementTimeout = 2 * time.Hour
-	inspectTimeout   = 2 * time.Minute
-	pushTimeout      = 10 * time.Minute
+	inspectTimeout   = 2*time.Minute + activity.DefaultRunEndWait
+	pushTimeout      = 10*time.Minute + activity.DefaultRunEndWait
 	inspectAttempts  = 2
 	pushAttempts     = 2
 
@@ -186,6 +186,8 @@ func implementFeature(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCod
 	).Get(r.ctx, &inspected); err != nil {
 		if r.failed(err) {
 			out.Error = joinErrors(out.Error, r.lostAt("before the commits were checked", "nothing was pushed"))
+		} else if hasErrorType(err, activity.ErrRunStillActive) {
+			out.Error = joinErrors(out.Error, stillActive)
 		} else {
 			out.Error = joinErrors(out.Error, fmt.Sprintf("could not inspect the workspace: %v", err))
 		}
@@ -237,6 +239,8 @@ func implementFeature(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCod
 			// The push may have reached the remote before the worker went.
 			out.Error = joinErrors(out.Error, r.lostAt("during the push",
 				fmt.Sprintf("the branch may or may not have been published; check %s on the remote", branch)))
+		} else if hasErrorType(err, activity.ErrRunStillActive) {
+			out.Error = joinErrors(out.Error, stillActive)
 		} else {
 			out.Error = joinErrors(out.Error, fmt.Sprintf("the commits were not pushed: %v", err))
 		}
@@ -245,6 +249,11 @@ func implementFeature(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCod
 	out.Pushed = true
 	return out, nil
 }
+
+// stillActive is what the output says of a run whose CLI still ran on its
+// worker when its commits were to be checked or pushed, past the wait for it
+// (activity.ErrRunStillActive): what it would still write is unknown.
+const stillActive = "the run was still active on its worker after it was given up on, so nothing was pushed"
 
 func joinErrors(existing, add string) string {
 	if existing == "" {

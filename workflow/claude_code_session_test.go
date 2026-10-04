@@ -628,13 +628,13 @@ func TestCodingRuns_CleanupAfterCancel(t *testing.T) {
 // SDK fails the session under a run still going. The values are written out:
 // changing a step's timeout or attempts must come with a look at these.
 func TestRunSessionTimeouts(t *testing.T) {
-	if want := 91 * time.Minute; analyzeSessionTimeout != want {
+	if want := 98*time.Minute + 30*time.Second; analyzeSessionTimeout != want {
 		t.Errorf("analyze session %s, want %s", analyzeSessionTimeout, want)
 	}
-	if want := 190 * time.Minute; implementSessionTimeout != want {
+	if want := 207*time.Minute + 30*time.Second; implementSessionTimeout != want {
 		t.Errorf("implement session %s, want %s", implementSessionTimeout, want)
 	}
-	if want := 205 * time.Minute; RunWorkspaceLifetime != want {
+	if want := 222*time.Minute + 30*time.Second; RunWorkspaceLifetime != want {
 		t.Errorf("RunWorkspaceLifetime %s, want %s", RunWorkspaceLifetime, want)
 	}
 }

@@ -33,7 +33,10 @@ const (
 	prepareTimeout = 15 * time.Minute
 	// gitHeartbeatTimeout must exceed the interval the git activity beats at.
 	gitHeartbeatTimeout = 60 * time.Second
-	cleanupTimeout      = 2 * time.Minute
+	// cleanupTimeout covers the wait for a run given up on to be gone from
+	// its worker (activity.DefaultRunEndWait), as inspectTimeout and
+	// pushTimeout do.
+	cleanupTimeout = 2*time.Minute + activity.DefaultRunEndWait
 
 	// analyzePermissionMode is what makes this workflow read-only. It is set
 	// here and never taken from the input: an agent asking for an analysis

@@ -298,31 +298,49 @@ func TestImplementFeatureWorkflow_PushesTheNewestInspectedCommit(t *testing.T) {
 }
 
 // An implementation that ends without the CLI's result still has its commits
-// checked and pushed, and tells the agent what it did and that its cost is
-// unknown.
+// checked and pushed, once its CLI is gone from its worker, and tells the
+// agent what it did and that its cost is unknown. A CLI still there past the
+// wait (activity.ErrRunStillActive) gets nothing pushed.
 func TestImplementFeatureWorkflow_InterruptedRunSaysWhatItDid(t *testing.T) {
-	e := newImplementEnv(t, claudeCodeResult{}, nil, oneCommit(), nil)
 	progress := runProgress{Events: 80, ToolCalls: 21, LastTool: "Edit"}
-	e.env.OnActivity("RunClaudeCode", mock.Anything, mock.Anything).After(7*time.Minute).
-		Return(claudeCodeResult{}, temporal.NewTimeoutError(enumspb.TIMEOUT_TYPE_HEARTBEAT, nil, progress))
-
-	out := e.run_(t, ImplementFeatureInput{Repo: "/src/repo", Task: "do it"})
-
-	if want := "the run did not complete: its worker stopped answering (no heartbeat for 2m0s)"; !strings.HasPrefix(out.Error, want) {
-		t.Errorf("Error = %q, want %q", out.Error, want)
-	}
-	if !out.Pushed {
-		t.Error("the commits of an interrupted run should still reach their branch")
-	}
-	for _, want := range []string{
-		"run: interrupted after 7m0s; 21 tool calls (last: Edit), 80 events; cost unknown (run interrupted)",
-		"running it again starts over from scratch, and is paid again",
+	for _, c := range []struct {
+		name       string
+		inspectErr error
+		pushed     bool
+		why        string
+	}{
+		{"run gone", nil, true, ""},
+		{"run still active", temporal.NewNonRetryableApplicationError("a command of the run still runs",
+			activity.ErrRunStillActive, nil), false, stillActive},
 	} {
-		if !strings.Contains(out.Content, want) {
-			t.Errorf("content lacks %q:\n%s", want, out.Content)
-		}
-	}
-	if strings.Contains(out.Content, "0 turns") || strings.Contains(out.Content, "activity error") {
-		t.Errorf("content:\n%s", out.Content)
+		t.Run(c.name, func(t *testing.T) {
+			e := newImplementEnv(t, claudeCodeResult{}, nil, oneCommit(), nil)
+			e.inspectErr = c.inspectErr
+			e.env.OnActivity("RunClaudeCode", mock.Anything, mock.Anything).After(7*time.Minute).
+				Return(claudeCodeResult{}, temporal.NewTimeoutError(enumspb.TIMEOUT_TYPE_HEARTBEAT, nil, progress))
+
+			out := e.run_(t, ImplementFeatureInput{Repo: "/src/repo", Task: "do it"})
+
+			if want := "the run did not complete: its worker stopped answering (no heartbeat for 2m0s)"; !strings.HasPrefix(out.Error, want) {
+				t.Errorf("Error = %q, want %q", out.Error, want)
+			}
+			if !strings.Contains(out.Error, c.why) {
+				t.Errorf("Error = %q, want %q", out.Error, c.why)
+			}
+			if out.Pushed != c.pushed || (e.pushed != nil) != c.pushed {
+				t.Errorf("Pushed = %v, push %+v; want pushed %v", out.Pushed, e.pushed, c.pushed)
+			}
+			for _, want := range []string{
+				"run: interrupted after 7m0s; 21 tool calls (last: Edit), 80 events; cost unknown (run interrupted)",
+				"running it again starts over from scratch, and is paid again",
+			} {
+				if !strings.Contains(out.Content, want) {
+					t.Errorf("content lacks %q:\n%s", want, out.Content)
+				}
+			}
+			if strings.Contains(out.Content, "0 turns") || strings.Contains(out.Content, "activity error") {
+				t.Errorf("content:\n%s", out.Content)
+			}
+		})
 	}
 }
