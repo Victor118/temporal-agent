@@ -222,26 +222,34 @@ func (w *watch) silentFor() time.Duration {
 //
 // The heartbeat goes on a timer, not on the CLI's lines: the CLI is silent
 // for minutes on end and fine — a Bash command writes nothing until it ends
-// (up to 10 min), an assistant message only comes out whole. Beating on its
+// (up to 10 min by default), an assistant message only comes out whole, nor
+// do an MCP call, a WebFetch or the CLI's own backoff on an overloaded API
+// write anything while they last. Beating on its
 // lines alone, such a run was taken for a lost worker. The heartbeat now
 // only says the worker is alive, and carries the progress; a CLI that is
 // alive but stuck is this function's to notice, at stallTimeout.
 //
 // It beats only inside an activity (beat), which is what lets the same
-// runner serve the CLI subcommand; the stall check runs either way.
+// runner serve the CLI subcommand; the stall check runs either way, unless
+// StallTimeout is negative.
 func (r *Runner) monitor(ctx context.Context, w *watch, stall context.CancelCauseFunc, done <-chan struct{}) {
 	beats := time.NewTicker(r.heartbeatEvery())
 	defer beats.Stop()
 	limit := r.stallTimeout()
-	check := time.NewTimer(limit)
-	defer check.Stop()
+	var checks <-chan time.Time // nil, never ready: no stall check
+	var check *time.Timer
+	if limit > 0 {
+		check = time.NewTimer(limit)
+		defer check.Stop()
+		checks = check.C
+	}
 	for {
 		select {
 		case <-done:
 			return
 		case <-beats.C:
 			r.beat(ctx, w.progress())
-		case <-check.C:
+		case <-checks:
 			silent := w.silentFor()
 			if silent >= limit {
 				stall(&StallError{Silence: limit, Progress: w.progress()})
@@ -269,8 +277,9 @@ func (r *Runner) heartbeatEvery() time.Duration {
 	return DefaultHeartbeatEvery
 }
 
+// stallTimeout is StallTimeout, or its default; negative means none.
 func (r *Runner) stallTimeout() time.Duration {
-	if r.StallTimeout > 0 {
+	if r.StallTimeout != 0 {
 		return r.StallTimeout
 	}
 	return DefaultStallTimeout

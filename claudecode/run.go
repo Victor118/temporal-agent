@@ -37,8 +37,9 @@ const DefaultHeartbeatEvery = 20 * time.Second
 
 // DefaultStallTimeout is how long the CLI may write nothing before its run
 // is taken for stuck and ended, when Runner.StallTimeout is zero. Longer than
-// anything the CLI is silent for while it works: a Bash command runs 10 min
-// at most, and the CLI writes nothing until it ends.
+// what the CLI is silent for while it works: a Bash command runs 10 min at
+// most (unless BASH_MAX_TIMEOUT_MS raises it), and the CLI writes nothing
+// until it ends. A worker that allows longer sets CLAUDE_CODE_STALL_TIMEOUT.
 const DefaultStallTimeout = 12 * time.Minute
 
 // killGrace is how long the CLI gets to exit after SIGTERM before the process
@@ -120,10 +121,16 @@ type Result struct {
 type StallError struct {
 	Silence  time.Duration
 	Progress Progress
+	// Stderr is the tail of the CLI's stderr, where it may have said why.
+	Stderr string
 }
 
 func (e *StallError) Error() string {
-	return fmt.Sprintf("claudecode: the CLI wrote nothing for %s (stuck?), so the run was ended", e.Silence)
+	msg := fmt.Sprintf("claudecode: the CLI wrote nothing for %s (stuck?), so the run was ended", e.Silence)
+	if e.Stderr != "" {
+		msg += "; its stderr: " + e.Stderr
+	}
+	return msg
 }
 
 // Progress is the heartbeat payload. It stays small on purpose: Temporal
@@ -174,7 +181,8 @@ type Runner struct {
 	// DefaultHeartbeatEvery.
 	HeartbeatEvery time.Duration
 	// StallTimeout is how long the CLI may write nothing before the run is
-	// ended as stuck (StallError). Zero means DefaultStallTimeout.
+	// ended as stuck (StallError). Zero means DefaultStallTimeout; negative,
+	// never.
 	StallTimeout time.Duration
 	// RunAs is the user the CLI runs as; nil = this process's. Whether that
 	// is acceptable is the caller's decision (subproc.CheckRunAs).
@@ -267,8 +275,11 @@ func (r *Runner) Run(ctx context.Context, p Params) (Result, error) {
 	}
 
 	w := newWatch(start)
-	watching := make(chan struct{})
-	go r.monitor(ctx, w, stall, watching)
+	watching, monitored := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(monitored)
+		r.monitor(ctx, w, stall, watching)
+	}()
 
 	var res Result
 	var parseErr error
@@ -286,7 +297,9 @@ func (r *Runner) Run(ctx context.Context, p Params) (Result, error) {
 	waitErr := cmd.Wait()
 	stdoutW.Close()
 	<-parsed
+	// No heartbeat once Run has returned: the activity may be over by then.
 	close(watching)
+	<-monitored
 	// What the CLI's shells left running dies with the run, not only with a
 	// cancelled one: a dev server, a watcher.
 	subproc.KillGroup(cmd)
@@ -304,9 +317,11 @@ func (r *Runner) Run(ctx context.Context, p Params) (Result, error) {
 		return res, fmt.Errorf("claudecode: run interrupted after %s: %w",
 			time.Since(start).Round(time.Second), ctxErr)
 	}
-	// Ended as stuck, whatever the CLI said as it died.
+	// Ended as stuck, unless the CLI had reported its result by then: the
+	// stall check fired as it exited, and the run is whole.
 	var stalled *StallError
-	if errors.As(context.Cause(runCtx), &stalled) {
+	if errors.As(context.Cause(runCtx), &stalled) && res.Subtype == "" {
+		stalled.Stderr = res.Stderr
 		return res, stalled
 	}
 	if parseErr != nil {

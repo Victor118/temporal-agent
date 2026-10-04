@@ -552,6 +552,7 @@ echo '{"type":"system","subtype":"init","session_id":"s"}'
 echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu_1","name":"Bash","input":{"command":"sleep 60"}}]},"session_id":"s"}'
 sleep 60 &
 echo $! > %q
+echo 'API overloaded, retrying' >&2
 wait
 `, pidFile)
 	r := &Runner{Binary: fakeCLI(t, script), StallTimeout: 700 * time.Millisecond}
@@ -565,7 +566,8 @@ wait
 	if took := time.Since(start); took > 10*time.Second {
 		t.Errorf("the stalled run took %s to end", took.Round(time.Millisecond))
 	}
-	if stall.Silence != 700*time.Millisecond || !strings.Contains(err.Error(), "wrote nothing for 700ms") {
+	if stall.Silence != 700*time.Millisecond || !strings.Contains(err.Error(), "wrote nothing for 700ms") ||
+		!strings.Contains(err.Error(), "API overloaded, retrying") {
 		t.Errorf("err = %v (silence %s)", err, stall.Silence)
 	}
 	for _, p := range []Progress{stall.Progress, res.Progress} {
@@ -605,5 +607,59 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"done","ses
 	}
 	if res.Report != "done" || res.Progress.Events != 7 {
 		t.Errorf("Report = %q, Progress = %+v", res.Report, res.Progress)
+	}
+}
+
+// A CLI that went silent after its result line is not stuck: the run is
+// whole, whatever the stall check did as the CLI exited.
+func TestRunWithAResultIsNotStalled(t *testing.T) {
+	defer func(d time.Duration) { killGrace = d }(killGrace)
+	killGrace = 500 * time.Millisecond
+	script := `
+echo '{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"s"}'
+sleep 30
+`
+	r := &Runner{Binary: fakeCLI(t, script), StallTimeout: 300 * time.Millisecond}
+	start := time.Now()
+	res, err := r.Run(context.Background(), Params{Cwd: t.TempDir(), Task: "x"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Report != "done" {
+		t.Errorf("Report = %q", res.Report)
+	}
+	// The silent CLI was ended all the same.
+	if took := time.Since(start); took > 10*time.Second {
+		t.Errorf("Run took %s", took.Round(time.Millisecond))
+	}
+}
+
+// A negative StallTimeout turns the stall check off; a positive one fires
+// on a CLI silent that long.
+func TestMonitorStallCheck(t *testing.T) {
+	for _, c := range []struct {
+		timeout time.Duration
+		stalls  bool
+	}{{-1, false}, {50 * time.Millisecond, true}} {
+		r := &Runner{StallTimeout: c.timeout}
+		w := newWatch(time.Now().Add(-time.Hour))
+		stalled := make(chan error, 1)
+		done, returned := make(chan struct{}), make(chan struct{})
+		go func() {
+			defer close(returned)
+			r.monitor(context.Background(), w, func(err error) { stalled <- err }, done)
+		}()
+		select {
+		case err := <-stalled:
+			if !c.stalls {
+				t.Errorf("timeout %s: stalled (%v)", c.timeout, err)
+			}
+		case <-time.After(300 * time.Millisecond):
+			if c.stalls {
+				t.Errorf("timeout %s: no stall", c.timeout)
+			}
+		}
+		close(done)
+		<-returned
 	}
 }
