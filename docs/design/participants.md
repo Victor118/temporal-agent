@@ -55,6 +55,11 @@ Les identifiants de workflow aujourd'hui commencent par `<session>-` (`<session>
 
 Toutes les requêtes « dans cette session » deviennent `WorkflowId STARTS_WITH '<session>:'`.
 
+**Unicité.** Le nommage repose sur des identifiants uniques et stables :
+- **Agent défini** : son `agent_id`, clé primaire de la table `agents`, immuable, de forme `[a-z0-9-]`, donc jamais de `:`. On utilise l'identifiant, **pas la mention** : la mention (`@jarvis`) peut changer dans `/admin` sans toucher aux identifiants de workflow. Elle est déjà unique sans tenir compte de la casse, et ne peut pas égaler l'identifiant d'un autre agent.
+- **Instance née d'une tâche** (§9) : un espace de noms à part, `<session>:i:<instance>`, pour qu'une instance ne puisse jamais prendre l'identifiant d'un agent défini créé plus tard. L'identifiant est généré, unique par construction (l'ID de sa ligne en base), jamais dérivé du nom du dépôt. Sa mention lisible (`@analyste-temporal-agent`) est unique dans la session et ne peut pas entrer en collision avec celle d'un agent défini ; en cas de doublon, on ajoute un suffixe `-2`.
+- **Agent supprimé puis recréé avec le même identifiant** : Temporal permet de réutiliser un identifiant une fois le workflow précédent terminé. Les messages encore en file d'un agent supprimé échouent proprement (§8).
+
 ### 4.2 `ParticipantWorkflow`
 
 **Démarrage et livraison.** Le serveur ne démarre jamais un participant directement. Pour chaque message, il fait un `SignalWithStart` sur `<session>:p:<agent>` (politique de conflit `USE_EXISTING`), avec le signal `message` :
@@ -171,7 +176,7 @@ La méthode `signalSession`, le repli sur les anciens identifiants et le démarr
 
 ## 9. Agents nés de la discussion (phase ultérieure)
 
-- Une tâche (une analyse de dépôt) crée une **instance** : un participant `<session>:p:<instance>`, avec son état (clone au commit analysé, session Claude Code reprise par `--resume`) sur un worker.
+- Une tâche (une analyse de dépôt) crée une **instance** : un participant `<session>:i:<instance>` (§4.1), avec son état (clone au commit analysé, session Claude Code reprise par `--resume`) sur un worker.
 - Elle apparaît dans le panneau « Agents » avec une mention générée (`@analyste-temporal-agent`) et son origine.
 - Chaque question est un court run qui reprend sa session sur son worker. Il faut une file propre au worker, puisqu'une session Temporal ne peut pas rester ouverte des jours.
 - Durée de vie : « Congédier », expiration après inactivité, renaissance (reclone) si le worker disparaît.
