@@ -1,6 +1,6 @@
 # Conception : des participants à la place du workflow de session
 
-Statut : **proposition, version 2**, à relire avant tout code. Version 1 le 4 octobre 2026, révisée le même jour après une relecture contre le code et le SDK Temporal (v1.33, API v1.44.1). Les points issus de cette relecture sont marqués *[rev. B1…]*.
+Statut : **proposition, version 3**, prête pour la phase 1. Version 1 le 4 octobre 2026, révisée deux fois le même jour après deux relectures contre le code et le SDK Temporal (v1.33, API v1.44.1), la seconde avec un prototype de la règle de lecture et de l'ordre. Les points issus de la première relecture sont marqués *[rev. B1…]*, ceux de la seconde *[rev2 N1…]*.
 
 ## 1. Pourquoi
 
@@ -71,7 +71,8 @@ Les workflows `fork-<session>` et `report-<fork>-<from>` ne commencent pas par l
 - `workflow/claude_code_session.go` : `toolCallSession`, qui retrouve la session en coupant à `-tool-` ;
 - `workflow/ask_user.go` et `workflow/agent.go` (`childWorkflowID`) ;
 - `tool/query_workflow.go` et sa requête par défaut `session-state` ;
-- `cmd/agent/api.go` (état, flux) ;
+- `cmd/agent/api.go` (état, flux), `cmd/agent/ui.go`, `web/chat/render.go` (états, `Active`) ;
+- le commentaire de `maxAgentsPerMessage` (`session/messages.go`), qui décrit le traitement séquentiel *[rev2 N14]* ;
 - la documentation : `docs/session-flow.md`, `docs/architecture.md`, `README.md`, `CLAUDE.md`.
 
 ### 4.2 `ParticipantWorkflow`
@@ -82,7 +83,9 @@ Les workflows `fork-<session>` et `report-<fork>-<from>` ne commencent pas par l
 
 Le serveur reste sans état : un seul appel, toujours le même. L'opération est atomique côté serveur.
 
-**Entrée de démarrage** : la session, l'agent, le canal et `ChannelID` de la session. Comme l'entrée est figée au démarrage (`USE_EXISTING`), **tout ce qui varie d'un message à l'autre voyage dans le message** : auteur, `EarlierTurns`, `Next`, `SignReply`, canal de réponse.
+**Entrée de démarrage** : la session, l'agent, le canal et `ChannelID` de la session. Comme l'entrée est figée au démarrage (`USE_EXISTING`), **tout ce qui varie d'un message à l'autre voyage dans le message** (§4.7).
+
+**Le signal ne porte pas le texte** *[rev2 N5]* : tout message est déjà en base avant d'être livré. Le signal porte son identifiant et ce qui l'accompagne (§4.7) ; le tour charge le texte avec la conversation. Ainsi, ni un signal, ni la boîte emportée par une remise à neuf ne peuvent approcher la limite de 2 Mo par donnée, même avec des relais (exemptés du plafond) ou des résultats de tâches en continu (phase 4). Le repli actuel sur `LastMessageID` pour un message non enregistré disparaît : il n'y en a plus.
 
 **Boucle.**
 
@@ -91,8 +94,7 @@ démarrage(entrée)
 boucle :
     si la boîte est vide (ReceiveAsync) : terminer
     msg := message suivant
-    si msg vide : ignorer                         (garde actuelle de la session)
-    si msg.ID a déjà son turn_end en base : ignorer (relivraison, §8)
+    si msg.ID a déjà son turn_end pour ce participant : ignorer (relivraison, §8)
     vider un stop-turn périmé                     (garde actuelle de la session)
     tour := AgentWorkflow enfant <participant>:m<msg.ID>
     attendre la fin du tour, ou stop-turn / clear
@@ -109,17 +111,19 @@ boucle :
 |---|---|
 | `message` | Ajoute un message à la boîte |
 | `stop-turn` | Annule le tour en cours, pas les messages en attente |
-| `clear` | Annule le tour en cours et vide la boîte (bouton « tout arrêter ») |
+| `clear` | Annule le tour en cours et vide la boîte (bouton « tout arrêter ») ; chaque message jeté reçoit un `turn_end` « annulé », pour qu'une relivraison tardive ne le rejoue pas *[rev2 N8]* |
 
 **Requête `state`** (remplace `session-state`) : le message en cours (ID, auteur, depuis quand), le nombre de messages en attente, l'éventuelle tâche de fond. C'est la source du panneau « Agents ».
 
-**Remise à neuf** *[rev. I10]*. Un participant ne vit que le temps de vider sa boîte, donc son historique reste court en général. Mais une file jamais vide (la phase 4 peut l'alimenter en continu) ne se remettrait jamais à neuf si on attendait une boîte vide. On applique donc la garde de taille après chaque tour, et le `continue-as-new` **emporte les messages encore dans la boîte** dans son entrée. Un signal arrivé pendant la décision est protégé par le même mécanisme que la fin (refus du serveur).
+**Remise à neuf** *[rev. I10]*. Un participant ne vit que le temps de vider sa boîte, donc son historique reste court en général. Mais une file jamais vide (la phase 4 peut l'alimenter en continu) ne se remettrait jamais à neuf si on attendait une boîte vide. On applique donc la garde de taille après chaque tour, et le `continue-as-new` **emporte les messages encore dans la boîte** dans son entrée : la boîte est vidée par `ReceiveAsync`, puis `NewContinueAsNewError` dans la même tâche. Un signal arrivé pendant la décision est protégé par le même mécanisme que la fin (le refus `UNHANDLED_COMMAND` vaut pour toute commande de clôture). Une assertion `GetUnhandledSignalNames(ctx)` vide avant de retourner coûte une ligne. Les messages ne portant pas de texte, l'entrée reste petite.
 
 ### 4.3 `AgentWorkflow` (le tour)
 
 Il reste presque tel quel. Ce qui change :
-- **Sa clé de tour nomme le participant** *[rev. B1]* : `m<id>@<id>.<participant>`, où `<participant>` est l'`agent_id` (ou `i=<instance>` pour une instance). Le préfixe `m<id>@<id>` est le groupe (tous les participants qui répondent au même message, y compris par relais) ; `TurnSnapshot` lit l'ancre après `@` ; un nouveau `store.TurnParticipant` lit ce qui suit le dernier `.`. Le rang de la version 1 disparaît : l'ordre du relais est porté par `EarlierTurns`. `TurnOf` doit renvoyer `false` pour le résumé de fork (`fork-summary:0`).
+- **Sa clé de tour nomme le participant** *[rev. B1]* : `m<id>@<id>.<participant>`, où `<participant>` est l'`agent_id` (ou `i=<instance>` pour une instance). Le préfixe `m<id>@<id>` est le groupe (tous les participants qui répondent au même message, y compris par relais) ; `TurnSnapshot` lit l'ancre après `@` ; un nouveau `store.TurnParticipant` lit ce qui suit le dernier `.`. Le rang de la version 1 disparaît : l'ordre du relais est porté par `EarlierTurns`. `TurnOf` doit renvoyer `false` pour le résumé de fork (`fork-summary:0`). **Toute clé de tour porte une ancre** : il n'existe plus de groupe sans ancre *[rev2 N13]*.
+- **Le `turn_end` a sa propre clé**, `<clé du tour>:end` *[rev2 N1]*, écrite par un `store.AppendTurnEnd` après la réécriture du tour. Il ne peut pas prendre un index de message du tour : `AppendMessages` ignore une clé déjà prise (`ON CONFLICT DO NOTHING`), et un `turn_end` écrit à l'index 0 après un échec, alors que le tour avait déjà écrit son message 0, serait silencieusement absorbé. `TurnOf` attribue `<clé>:end` au tour.
 - **Ses identifiants dérivés** (outils, `ask_user`) partent de son propre identifiant de tour.
+- **`AgentWorkflowInput.Model` reste** : il sert aux sous-agents (`agent.go`), même si l'API de session ne le propose plus *[rev2 N10]*.
 - Il continue d'écrire ses messages au fil de l'eau. Ce qu'il faisait faire à la session passe au **participant**, pas au tour (§4.6) *[rev. I4]* : le participant sait quand l'enfant meurt, le tour lui-même pas toujours (un tour qui échoue avant d'écrire, ou terminé de l'extérieur, n'écrit rien).
 
 ### 4.4 Un message adressé à plusieurs participants : le relais
@@ -128,7 +132,8 @@ Il reste presque tel quel. Ce qui change :
 - Le serveur ne sonne que chez le **premier** participant, avec `Next = [smith]` et `EarlierTurns = []`.
 - Quand le tour de Jarvis se termine **sans échec ni arrêt**, le participant de Jarvis relaie le message à Smith avec `Next = []` et `EarlierTurns = [clé du tour de Jarvis]`.
 - **Le relais est une activity**, pas un appel du workflow *[rev. I1]* : un workflow ne peut pas faire de `SignalWithStart` (`SignalExternalWorkflow` ne démarre rien, et un workflow enfant n'a pas de politique de conflit). L'activity utilise le client Temporal, comme `tool/schedule.go`. Ses relances génèrent un nouveau `RequestId` : c'est la vérification « déjà traité » chez Smith (§8) qui empêche le doublon.
-- Si le relais échoue définitivement, les membres en sont **notifiés** (`turn_error` sur le message pour Smith), ce n'est jamais silencieux.
+- **Contrat d'échec** *[rev2 N6]* : l'activity a une politique de relance bornée (par exemple 5 essais, 1 min au plus). Après le dernier échec, le relayeur écrit un **`turn_end` d'erreur sous la clé du tour du destinataire** (« le relais vers @smith a échoué »), puis notifie le canal. La déduplication ignorera ensuite toute relivraison tardive de ce message chez Smith, ce qui est voulu. L'échec du relais ne fait **jamais** échouer le participant qui relaie : il passe à son message suivant.
+- **Plusieurs relais** : le destinataire reçoit `Next` = le reste de la liste, et `EarlierTurns` = les clés des tours précédents, cumulées.
 - Si le tour de Jarvis échoue ou est arrêté, le relais s'arrête, comme aujourd'hui.
 - Pendant ce temps, Smith peut traiter d'autres messages : le relais n'est qu'un message de plus dans sa boîte.
 
@@ -144,13 +149,40 @@ C'est un trigger implicite (« quand Jarvis aura fini ce message, à Smith »).
 ### 4.6 Ce que le participant fait à chaque tour *[rev. I2, I4]*
 
 Le participant reprend toutes les responsabilités de fin de tour de l'actuel `SessionWorkflow` (`workflow/session.go`), plus une vérification :
-1. **Avant le tour : l'agent existe-t-il ?** Une activity interroge le catalogue (`catalog.Agents()`). Aujourd'hui, `LoadSkillsForAgent` (`activity/skill.go`) ne renvoie aucune erreur pour un agent inconnu : le tour répondrait avec un prompt générique sans outils. Agent inconnu = erreur non retentée, `turn_end` d'erreur, message suivant.
+1. **Avant le tour : l'agent existe-t-il ?** Une activity interroge **la base** (`store.GetAgent`), pas le catalogue en mémoire, rafraîchi toutes les 30 s, qui refuserait un agent tout juste créé *[rev2 N7]*. Aujourd'hui, `LoadSkillsForAgent` (`activity/skill.go`) ne renvoie aucune erreur pour un agent inconnu : le tour répondrait avec un prompt générique sans outils. Agent inconnu = erreur non retentée, `turn_end` d'erreur, message suivant.
 2. **`turn_started`** au démarrage du tour, **`turn_done`** quand il est fini, quoi qu'il arrive.
 3. **Réécriture idempotente** des messages du tour à la fin, comme aujourd'hui : c'est le dernier filet si la dernière écriture du tour a échoué.
-4. **`turn_end`** : un dernier message de fin de tour, dans tous les cas (succès, erreur, arrêt), jamais montré au modèle. Il **unifie l'actuel `turn_error`** : `turn_end` porte l'éventuelle erreur, affichée dans le fil comme aujourd'hui. Il sert à la règle de lecture (§5) et à la déduplication (§8).
+4. **`turn_end`** : un dernier message de fin de tour, sous la clé `<tour>:end` (§4.3), dans tous les cas (succès, erreur, arrêt, échec avant toute écriture), jamais montré au modèle. Il **unifie l'actuel `turn_error`** : `turn_end` porte l'éventuelle erreur, affichée dans le fil comme aujourd'hui. Il couvre au passage un cas que le code actuel rate : un échec dur du tour n'écrit aujourd'hui rien. Il sert à la règle de lecture (§5) et à la déduplication (§8). Un `turn_end` **sans** erreur n'est affiché nulle part : `conversation.Convert`, la vue du fil (`web/chat/views.go`) et l'historique de l'API (`cmd/agent/api.go`) doivent l'ignorer *[rev2 N9]*. Si son écriture échoue définitivement, le participant le journalise et passe au message suivant : le tour reste invisible aux autres participants, et serait rejoué par une relivraison (§8).
 5. **Notification d'erreur** sur le canal, comme aujourd'hui (`session.go`, « Error processing message »).
 
 Ce que le participant **abandonne** de la session : `GoalAchieved` (jamais utilisé), et le compteur de tours (remplacé par l'ID du message).
+
+### 4.7 Contrats *[rev2]*
+
+**Signal `message`** (aucun texte) :
+
+| Champ | Rôle |
+|---|---|
+| `message_id` | Le message, déjà en base ; c'est aussi l'ancre (`upTo`) |
+| `user_id`, `user_name` | L'auteur, dont la mémoire est chargée et pour qui les outils agissent |
+| `next` | Les participants suivants du relais |
+| `earlier_turns` | Les clés des tours précédents du même message |
+| `sign_reply` | Signer la réponse sur le canal |
+| `channel`, `channel_id` | Le canal de réponse de ce message |
+| `aside` | Aparté (§4.5) |
+
+La citation du message dans la note multi-agents (`partNote`) est chargée par le tour avec la conversation, ou clippée dans le signal.
+
+**Requête `state`** : `{current: {message_id, user_name, since} | null, queued: N, background: [...]}`.
+
+**Politiques de relance** :
+
+| Étape | Relance |
+|---|---|
+| Vérification de l'agent (`store.GetAgent`) | 3 essais ; agent absent = non retentable |
+| Relais | Bornée, environ 5 essais sur 1 min ; échec final selon §4.4 |
+| `turn_end` | 5 essais ; échec final selon §4.6 |
+| `turn_started` / `turn_done` | Les options courtes actuelles (une tentative de 3 s) |
 
 ## 5. La règle de lecture de l'historique
 
@@ -163,29 +195,31 @@ Avec des participants en parallèle, la règle 3 ne tient plus, et la règle 1 n
 
 **Nouvelle règle.** Un tour du participant P, pour le message M (`upTo = id(M)`), lit :
 1. tout message **qui n'est pas d'un tour** et dont l'ID est ≤ `upTo` (messages humains, résumé de fork, rapports, résultats planifiés) ;
-2. son propre groupe : les tours de `EarlierTurns` (le relais), **entiers** ;
-3. les tours **de P** pour les messages précédents, **entiers**, même écrits après `upTo` : P les a traités avant M, c'est son ordre à lui ;
+2. **sa propre clé** et les tours de `EarlierTurns` (le relais), **entiers** *[rev2 N2]* : un tour relit ses propres appels et résultats déjà en base ;
+3. les tours **de P** dont l'**ancre est ≤ `upTo`**, **entiers**, même écrits après `upTo` *[rev2 N3]*. On raisonne par l'ancre, pas par l'ordre de traitement : avec le relais, Smith peut traiter le message 12 puis recevoir le message 10, et son tour sur le 10 ne doit pas lire son tour sur le 12 ;
 4. les tours d'un **autre** participant Q, **entiers ou pas du tout** : lus si et seulement si leur `turn_end` a un ID ≤ `upTo`, c'est-à-dire s'ils étaient **terminés avant M**.
 
 Le prédicat est monotone et figé pour toute la durée du tour : le début de la conversation ne change pas d'un appel LLM à l'autre, sans rien ajouter à l'entrée de l'activity. Il faut que `TurnOf` donne le participant d'un message de tour (§4.3), et que le chargement connaisse l'ID des `turn_end`.
 
+**Un participant mort sans `turn_end`** (participant terminé de l'extérieur, base en panne au moment de l'écrire ; un crash de worker, lui, est rejoué par Temporal) : son tour reste **invisible aux autres participants pour toujours**, mais lu par ses propres tours suivants. C'est acceptable : il n'a jamais été « terminé » pour les autres.
+
 **L'ordre de présentation au modèle change aussi** *[rev. B3]*. `conversation.Order` repousse aujourd'hui tout message hors tour qui tombe dans l'étendue d'un groupe, en supposant les tours contigus dans le temps. En parallèle, Jarvis (message 10, IDs 11 à 40) et Smith (message 12, IDs 13 à 20) se chevauchent : le message 12 serait relâché après 40, et la réponse de Smith resterait à 13-20, avant sa question. Nouvel ordre, **par ancre** :
-- chaque tour est placé juste après le message auquel il répond (son ancre, lue par `TurnSnapshot`) ;
+- chaque tour est placé juste après son ancre, c'est-à-dire **après le dernier message hors tour d'ID ≤ son ancre** (lue par `TurnSnapshot`) *[rev2 N13]* ;
 - les tours d'une même ancre sont rangés par leur premier ID (le relais garde son ordre) ;
 - les messages hors tour sont rangés par ID ;
 - le tour courant vient en dernier, puis la queue non encore écrite (`Tail`).
 
-L'appariement appel/résultat d'outil est conservé (un tour reste un bloc), une question précède toujours sa réponse, et la conversation ne finit jamais sur un message assistant d'un autre participant. En traitement séquentiel, cet ordre est **identique** à l'ordre actuel. Seul appelant : `activity/llm.go`.
+L'appariement appel/résultat d'outil est conservé (un tour reste un bloc), une question précède toujours sa réponse, et la conversation ne finit jamais sur un message assistant d'un autre participant : le tour courant est dernier par construction (son ancre est le plus grand ID hors tour qu'il lit, et un tour d'un autre participant ancré au même message aurait un `turn_end` après cette ancre, donc ne serait pas lu). En traitement séquentiel, cet ordre est **identique** à l'ordre actuel : vérifié par un prototype sur 3000 historiques aléatoires, sans aucun écart. Seul appelant : `activity/llm.go`.
 
 La course documentée sur `TurnReads` (IDs pas dans l'ordre des commits) subsiste, un peu plus fréquente avec du parallélisme, avec la même conséquence bénigne *[rev. m9]*.
 
 ## 6. Côté serveur
 
-**`Deliver`** :
-1. enregistre le message (inchangé) ;
-2. résout les participants (inchangé, `agentOrDefault` pour l'agent par défaut) ;
-3. **contrôle la file** : si le premier participant a déjà 5 messages en attente, refus (429) avec un message clair. Le relais en est exempté ;
-4. fait un `SignalWithStart` chez le premier, avec `Next`, le canal de réponse et `SignReply`.
+**`Deliver`**, dans cet ordre *[rev2 N4]* :
+1. résout les participants (inchangé, `agentOrDefault` pour l'agent par défaut) : la résolution ne dépend que du texte ;
+2. **contrôle la file** : si le premier participant a déjà 5 messages en attente, refus (429, et sur Telegram une réponse en texte), **sans rien enregistrer**. Le compte vient de l'état en mémoire du serveur (§6, alimenté par les événements), pas d'une requête Temporal sur le chemin de la requête ; en cas de doute, on laisse passer. Le relais en est exempté ;
+3. enregistre le message (inchangé) ;
+4. fait un `SignalWithStart` chez le premier (§4.7).
 
 `signalSession` et le démarrage de session à l'ouverture (`Open`) disparaissent *[rev. m1]*.
 
@@ -195,12 +229,13 @@ La course documentée sur `TurnReads` (IDs pas dans l'ordre des commits) subsist
 - **Phase 1** : le bouton actuel « Arrêter » (`Cancel(sessionID)`, appelé par `cmd/agent/ui.go` et `cmd/agent/api.go`) envoie `stop-turn` à **tous** les participants en cours de la session.
 - **Phase 2** : un bouton par participant, autorisé à l'auteur du message en cours ou au créateur de la session.
 
-**Supprimer ou quitter une session** *[rev. I7]* : `Delete` et le `Leave` du dernier membre **terminent tous les participants** de la session et leurs tours (aujourd'hui, ils ne terminent que le workflow de session). Sinon, un tour écrirait dans une session supprimée, et une question `ask_user` attendrait 72 h.
+**Supprimer ou quitter une session** *[rev. I7]* : `Delete` et le `Leave` du dernier membre **terminent tous les participants** de la session et leurs tours (aujourd'hui, ils ne terminent que le workflow de session). Sinon, un tour écrirait dans une session supprimée, et une question `ask_user` attendrait 72 h. La liste vient de la visibilité, qui a un léger retard : un participant démarré à l'instant peut survivre. Ses écritures échouent alors sur la clé étrangère de la session, sans dégât *[rev2 N15]*.
 
 **Qui travaille** *[rev. I8]* :
 - `WorkflowId STARTS_WITH '<session>:p:'` (et `:i:`) + `ExecutionStatus = 'Running'` donne les participants actifs. La requête `state` de chacun donne le détail.
 - L'état des tours en mémoire (`session/turns.go`, alimenté par `turn_started` et `turn_done`) devient **indexé par participant**, et l'état d'une session est l'**agrégat** de ses participants : sinon, le `turn_done` d'un participant masquerait le travail d'un autre. Les points de l'arbre et la ligne « … travaille… » en dérivent ; elle peut nommer plusieurs agents.
 - `StatusActive` (l'état « session ouverte » du workflow de session) disparaît, et `Active` est retiré de `/api/sessions`.
+- `GET /api/sessions/{id}/state` renvoie l'**agrégat des états des participants** (la liste des requêtes `state`), et l'outil `query_workflow` prend `state` comme requête par défaut *[rev2 N11]*.
 - Questions en attente (`ask_user`) : la même requête qu'aujourd'hui, avec le nouveau préfixe. Avec plusieurs questions ouvertes, une réponse Telegram va à **la plus ancienne** (aujourd'hui `PageSize: 1`, au hasard) *[rev. m5]*.
 
 **Panneau « Agents »** (phase 2) dans le panneau de détails, une ligne par participant : disponible, répond (à qui, depuis quand), N messages en file, tâche de fond, attend une réponse, attend un worker. Avec « Arrêter » et « tout arrêter » selon les droits.
@@ -218,7 +253,7 @@ La course documentée sur `TurnReads` (IDs pas dans l'ordre des commits) subsist
 
 ## 8. Fiabilité
 
-- **Relivraison** *[rev. I9]*. Un `SignalWithStart` relancé par le serveur, ou par l'activity de relais, peut livrer deux fois le même message, y compris **après** la fin du participant (une nouvelle exécution démarre alors). Une déduplication en mémoire ne suffirait pas : le tour serait rejoué, le LLM payé deux fois et la réponse Telegram envoyée en double. Avant chaque tour, le participant vérifie donc **en base** que le message n'a pas déjà son `turn_end` pour ce participant.
+- **Relivraison** *[rev. I9]*. Un `SignalWithStart` relancé par le serveur, ou par l'activity de relais, peut livrer deux fois le même message, y compris **après** la fin du participant (une nouvelle exécution démarre alors). Une déduplication en mémoire ne suffirait pas : le tour serait rejoué, le LLM payé deux fois et la réponse Telegram envoyée en double. Avant chaque tour, le participant vérifie donc **en base** que le message n'a pas déjà son `turn_end` pour ce participant. La garantie est **« au moins une fois »** : un tour dont le `turn_end` n'a jamais été écrit (§4.6) serait rejoué par une relivraison *[rev2 N12]*.
 - **Agent supprimé** avec des messages en file : refusé avant le tour (§4.6).
 - **Membre retiré** : ses messages déjà en file sont traités. Ils sont en base et visibles de tous.
 - **Ordre entre participants** : il n'est **pas** garanti, et c'est voulu. Une dépendance passe par le relais (même message) ou par un trigger (messages différents).
@@ -260,7 +295,7 @@ Chaque phase est livrable seule. **Le risque de la phase 1 est dans l'ordre des 
 
 **Purs (`store`, `conversation`)**
 - `TurnReads` et `TurnParticipant` sur les nouvelles clés : un autre participant lu entier si terminé avant `upTo`, pas du tout sinon ; ses propres tours lus entiers ; le relais.
-- `Order` par ancre : participants qui se chevauchent (le cas Jarvis 10 / Smith 12), relais, résumé de fork, rapport, résultat planifié, `Tail` ; jamais de réponse avant sa question ; appariement d'outil intact ; jamais de fin sur un assistant d'un autre participant ; identique à l'ordre actuel en séquentiel.
+- `Order` par ancre : un test aléatoire « ordre par ancre ≡ `Order` actuel » sur des historiques séquentiels (reprendre le prototype de la seconde relecture) ; participants qui se chevauchent (le cas Jarvis 10 / Smith 12), relais, résumé de fork, rapport, résultat planifié, `Tail` ; jamais de réponse avant sa question ; appariement d'outil intact ; jamais de fin sur un assistant d'un autre participant ; identique à l'ordre actuel en séquentiel.
 
 **Workflows (environnement de test)**
 - Un participant traite deux messages dans l'ordre, et le second tour voit la réponse au premier.
@@ -268,13 +303,18 @@ Chaque phase est livrable seule. **Le risque de la phase 1 est dans l'ordre des 
 - Relais : Smith voit la réponse de Jarvis au même message ; le relais s'arrête sur un échec ou un arrêt ; un relais livré deux fois n'est traité qu'une fois.
 - `stop-turn` arrête le tour sans vider la boîte ; `clear` vide la boîte.
 - Agent supprimé : refus avant le tour, `turn_end` d'erreur, message suivant traité.
-- Continue-as-new avec une boîte non vide : aucun message perdu.
+- Continue-as-new avec une boîte de 20 messages : aucun message perdu, `GetUnhandledSignalNames` vide.
+- `turn_end` sous `:end` après un flush partiel et après un échec dur ; jamais rendu au modèle, au fil ni dans un résumé de fork.
+- Relais vers un participant qui a déjà répondu à un message plus récent : son tour sur l'ancien message ne lit pas son tour sur le récent.
+- Relais en échec final : `turn_end` d'erreur chez le destinataire, notification, le relayeur continue.
+- Agent créé il y a moins de 30 s : accepté (lecture en base).
+- `clear` puis relivraison tardive d'un message jeté : pas de tour.
 - `turn_end` écrit dans tous les cas (succès, erreur, arrêt, échec avant la première écriture).
 
 **Serveur**
 - États agrégés : le `turn_done` d'un participant ne masque pas un autre participant au travail.
 - `Delete` et `Leave` terminent tous les participants.
-- Plafond de file : 429 au-delà de 5, relais exempté.
+- Plafond de file : 429 au-delà de 5, **sans message enregistré**, relais exempté.
 - Relivraison après la fin d'un participant : pas de second tour.
 
 **Contre un vrai serveur Temporal**
