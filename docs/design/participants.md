@@ -180,7 +180,7 @@ La citation du message dans la note multi-agents (`partNote`) est chargée par l
 
 | Étape | Relance |
 |---|---|
-| Vérification du tour (`CheckTurn` : session, `turn_end`, `store.GetAgent`) | Sur une durée, pas un nombre d'essais : `ScheduleToCloseTimeout` 2 min, intervalle 1 s doublé jusqu'à 15 s, pas de `MaximumAttempts`. Une base absente un instant (redémarrage, bascule) ne perd aucun message. Seules erreurs définitives : agent absent (`AgentNotFound`) et session supprimée (`SessionGone`), non retentables |
+| Vérification du tour (`CheckTurn` : session, `turn_end`, `store.GetAgent`) | Sur une durée, pas un nombre d'essais : `ScheduleToCloseTimeout` 2 min, intervalle 1 s doublé jusqu'à 15 s, pas de `MaximumAttempts`. Une base absente un instant (redémarrage, bascule) ne perd aucun message. Seules erreurs définitives : agent absent (`AgentNotFound`) et session supprimée (`SessionGone`), non retentables. Le délai court dès la planification : un worker absent plus de 2 min fait aussi échouer la vérification, avec un `turn_end` d'erreur visible (le message est à renvoyer), jamais en silence |
 | Relais | Bornée, environ 5 essais sur 1 min ; échec final selon §4.4 |
 | `turn_end` | Comme la vérification : 2 min ; échec final selon §4.6 |
 | `turn_started` / `turn_done` | Les options courtes actuelles (une tentative de 3 s) |
