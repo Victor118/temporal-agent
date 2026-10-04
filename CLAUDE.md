@@ -6,6 +6,9 @@
   - `cd /home/victor/dev/temporal-agent && docker compose up -d`
   - `docker compose exec agent go build ./...`
   - `docker compose exec agent go test ./...`
+  - Tests du store sur une base jetable, jamais `agent` : `docker compose exec -T postgres createdb -U agent agent_dev_tmp`, puis `docker compose exec -T -e TEST_DATABASE_URL='postgres://agent:agent@postgres:5432/agent_dev_tmp?sslmode=disable' agent go test ./store/`, puis `dropdb -U agent agent_dev_tmp` de la même façon
+  - Contre le vrai serveur Temporal (fin d'un participant sans perte de signal, `UNHANDLED_COMMAND`, continue-as-new ; sauté sans `TEMPORAL_SMOKE_HOST`) : `docker compose exec -T -e TEMPORAL_SMOKE_HOST=temporal:7233 agent go test -count=1 -timeout 20m -run RealServer -v ./workflow/`. Environ 4 min ; queue `smoke-signals-<rand>` à lui, tour et activities simulés, aucune base ; `TEMPORAL_SMOKE_MESSAGES` (200 par défaut). À relancer après tout changement de la boucle du participant ou une montée de version du SDK ou du serveur
+  - Lancement réel du binaire : `agent/scripts/smoke.sh` (depuis l'hôte, compose démarré) : `agent dev` construit dans `/tmp/smoke-<rand>` du conteneur, queue `smoke-<rand>`, base `agent_smoke_<rand>`, clé LLM invalide exprès ; deux messages, état, historique (deux `turn_error`), arrêt, suppression. Base supprimée et dossier effacé à la sortie, échec compris
 - Pas de hot-reload : le `CMD` du Dockerfile compile une fois au démarrage → `docker compose restart agent` après une modification
 - Port 8888 exposé pour l'API HTTP
 

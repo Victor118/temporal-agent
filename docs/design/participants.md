@@ -324,6 +324,8 @@ Chaque phase est livrable seule. **Le risque de la phase 1 est dans l'ordre des 
 - **Fin sans perte** : un signal arrivé pendant la fin du participant est traité par une nouvelle tâche du même workflow (la garantie `UNHANDLED_COMMAND`, que l'environnement de test ne simule pas).
 - Démarrage réel du worker (enregistrement des workflows et activités), comme pour les sessions Claude Code.
 
+Les deux sont dans le dépôt : `TestParticipant_NoSignalLostOnExit_RealServer` (`workflow/participant_server_test.go`, sauté sans `TEMPORAL_SMOKE_HOST`) et `scripts/smoke.sh` ; commandes dans `CLAUDE.md`.
+
 ## 12. Questions tranchées
 
 Les questions ouvertes de la version 1, avec les réponses retenues :
