@@ -234,6 +234,11 @@ var (
 // thread, and what keeps a late delivery of it from being answered.
 const clearedReason = "Annulé avant d'être traité : la file de l'agent a été vidée."
 
+// stoppedBeforeReason is the end of a turn stopped before it started: a
+// stop naming it came during its check. Shown in the thread, it says why
+// the message got no answer.
+const stoppedBeforeReason = "Interrompu avant de commencer : un membre a arrêté ce tour."
+
 // ParticipantWorkflow answers a participant's messages, in order, one at a
 // time, then ends: with nothing left in its inbox there is nothing to keep.
 // The server delivers each message by SignalWithStart, which starts it
@@ -306,6 +311,18 @@ func drained(ch workflow.ReceiveChannel) bool {
 		held = true
 	}
 	return held
+}
+
+// stopsFor empties the stops received and reports whether one of them names
+// turnKey. A stop with no key, or another turn's, is dropped.
+func stopsFor(stops workflow.ReceiveChannel, turnKey string) bool {
+	found := false
+	var req StopTurn
+	for stops.ReceiveAsync(&req) {
+		found = found || req.TurnKey == turnKey
+		req = StopTurn{}
+	}
+	return found
 }
 
 // close ends the run with err, once every signal is handled: none is left
@@ -396,10 +413,17 @@ func (p *participant) answer(ctx workflow.Context, msg ParticipantMessage, messa
 	if msg.SignReply {
 		signer = cmp.Or(check.AgentName, p.in.AgentID)
 	}
-	// A stop is for a turn whose start was told: one sent before (the
-	// button clicked as the last turn ended, or during the check) is about
-	// another turn, not this one.
-	drained(stops)
+	// A stop sent before the turn was told is about another one (the
+	// button clicked as the last turn ended), unless it names this turn:
+	// the state query names it from the check on, and a member may stop it
+	// then. Stopped before it starts, it runs no child, gets an end saying
+	// so, and relays nothing; its turn_done alone tells the server.
+	if stopsFor(stops, turnKey) {
+		logger.Info("Turn stopped before it started", "participant", p.id, "turn", turnKey)
+		p.endTurn(ctx, turnKey, store.TurnEnd(p.in.AgentID, stoppedBeforeReason))
+		notifyResponse(ctx, p.in.SessionID, channel, channelID, signer, "Agent interrupted by user.")
+		return
+	}
 	event.AgentName = check.AgentName
 	notifyTurn(ctx, p.in.SessionID, EventTurnStarted, event)
 

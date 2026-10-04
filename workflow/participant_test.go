@@ -581,22 +581,47 @@ func TestParticipant_AStopForAnotherTurnIsIgnored(t *testing.T) {
 	}
 }
 
-// A stop that comes while the next message is checked is not for it: a
-// stop is for a turn whose start was told. Here the check waits a second
-// for a store away, and the stop comes meanwhile.
-func TestParticipant_AStopDuringTheCheckIsNotForTheTurn(t *testing.T) {
-	h := newHarness(t, nil, answer)
-	h.f.session.checkFails = 1
-	m1 := h.human("M1", "Alice")
-	h.env.RegisterDelayedCallback(func() { h.env.SignalWorkflow(SignalStopTurn, nil) }, 500*time.Millisecond)
-	if err := h.run("jarvis", m1); err != nil {
-		t.Fatal(err)
-	}
-	if len(h.turns) != 1 || slices.Contains(h.events(), "message Agent interrupted by user.") {
-		t.Errorf("turns %d, events %q: the stop interrupted a turn not started yet", len(h.turns), h.events())
-	}
-	if reason, ok := h.ends()["m1.jarvis"]; !ok || reason != "" {
-		t.Errorf("end %q %v", reason, ok)
+// A stop that comes while the next message is checked is not for it, unless
+// it names its turn: a stop is for a turn whose start was told, or one the
+// state query named. Here the check waits a second for a store away, and
+// the stop comes meanwhile. Stopped before it starts, the turn runs no
+// child, gets an end saying so, tells the channel, and relays nothing.
+func TestParticipant_AStopDuringTheCheck(t *testing.T) {
+	for name, c := range map[string]struct {
+		stop    StopTurn
+		stopped bool
+	}{
+		"no key":       {StopTurn{}, false},
+		"another turn": {StopTurn{TurnKey: "m9.jarvis"}, false},
+		"this turn":    {StopTurn{TurnKey: "m1.jarvis"}, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, nil, answer)
+			h.f.session.checkFails = 1
+			m1 := h.human("M1", "Alice")
+			m1.Next = []AddressedAgent{{ID: "smith"}}
+			h.env.RegisterDelayedCallback(func() { h.env.SignalWorkflow(SignalStopTurn, c.stop) }, 500*time.Millisecond)
+			if err := h.run("jarvis", m1); err != nil {
+				t.Fatal(err)
+			}
+			interrupted := slices.Contains(h.events(), "message Agent interrupted by user.")
+			if interrupted != c.stopped || (len(h.turns) == 0) != c.stopped {
+				t.Errorf("turns %d, events %q: stopped %v, want %v", len(h.turns), h.events(), interrupted, c.stopped)
+			}
+			want := ""
+			if c.stopped {
+				want = stoppedBeforeReason
+			}
+			if reason, ok := h.ends()["m1.jarvis"]; !ok || reason != want {
+				t.Errorf("end %q %v, want %q", reason, ok, want)
+			}
+			if (len(h.relays) == 0) != c.stopped {
+				t.Errorf("relays %+v", h.relays)
+			}
+			if c.stopped && !slices.Equal(h.events(), []string{"message Agent interrupted by user.", "turn_done m1.jarvis"}) {
+				t.Errorf("events %q, want the interruption then the message done, no start", h.events())
+			}
+		})
 	}
 }
 
