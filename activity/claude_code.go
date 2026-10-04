@@ -76,6 +76,8 @@ type ClaudeCodeActivities struct {
 	// RunEndWait bounds the wait of a step after a run for the run to be
 	// gone (awaitRunEnd); zero = DefaultRunEndWait.
 	RunEndWait time.Duration
+
+	live cliRuns
 }
 
 // DefaultRunQueueWait is how long a run waits for a worker with a run to
@@ -192,13 +194,11 @@ func (a *ClaudeCodeActivities) endOnStop(ctx context.Context) (context.Context, 
 }
 
 // RunCounter is what the coding activities need of subproc.Runs: a run
-// counted while the CLI works, the processes a run left behind ended before
-// a clone is taken back, when no run is under way, and a wait for none to be
-// (awaitRunEnd).
+// counted while the CLI works, and the processes a run left behind ended
+// before a clone is taken back, when no run is under way.
 type RunCounter interface {
 	Hold() (release func())
 	KillStrays()
-	Idle(ctx context.Context) bool
 }
 
 // DefaultRunEndWait bounds how long a step after a run waits for the run's
@@ -209,20 +209,77 @@ type RunCounter interface {
 // runner's grace (10s); the rest is margin.
 const DefaultRunEndWait = 150 * time.Second
 
-// ErrRunStillActive is the type of the error of a step that found a command
-// of the run still running on its worker past the wait (awaitRunEnd): the
-// clone is not the worker's to read, push or delete.
+// ErrRunStillActive is the type of the error of a step that found the run's
+// CLI still running on its worker past the wait (awaitRunEnd): the clone is
+// not the worker's to read, push or delete.
 const ErrRunStillActive = "RunStillActive"
 
-// awaitRunEnd waits, heartbeating, until no command runs as RunAs on this
-// worker (Runs.Idle): the CLI of a run the workflow gave up on, which its
-// worker has yet to end, must not be writing the clone as it is inspected,
-// pushed or deleted. A run that ended normally is gone already: no wait. Past
-// RunEndWait, an ErrRunStillActive, never retried.
-func (a *ClaudeCodeActivities) awaitRunEnd(ctx context.Context) error {
-	if a.Runs == nil {
-		return nil
+// cliRuns counts the CLIs running, per workspace: RunClaudeCode holds its
+// workspace's while the runner runs, and the steps after it wait for none
+// (awaitRunEnd). A count of its own, not subproc.Runs: that one counts every
+// command run as RunAs, exec's included, which have nothing to do with a
+// clone. The zero value is ready.
+type cliRuns struct {
+	mu sync.Mutex
+	n  map[string]int
+	// changed is closed, and dropped, at every release: a waiter then reads
+	// the count again, under mu.
+	changed chan struct{}
+}
+
+// hold counts a CLI running in dir until release is called.
+func (c *cliRuns) hold(dir string) (release func()) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.n == nil {
+		c.n = map[string]int{}
 	}
+	c.n[dir]++
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			if c.n[dir]--; c.n[dir] == 0 {
+				delete(c.n, dir)
+			}
+			if c.changed != nil {
+				close(c.changed)
+				c.changed = nil
+			}
+		})
+	}
+}
+
+// idle waits until no CLI runs in dir, or until ctx is done, and tells
+// which: true when none runs.
+func (c *cliRuns) idle(ctx context.Context, dir string) bool {
+	for {
+		c.mu.Lock()
+		if c.n[dir] == 0 {
+			c.mu.Unlock()
+			return true
+		}
+		if c.changed == nil {
+			c.changed = make(chan struct{})
+		}
+		changed := c.changed
+		c.mu.Unlock()
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return false
+		}
+	}
+}
+
+// awaitRunEnd waits, heartbeating, until the CLI of the run in dir is gone
+// from this worker (cliRuns): the CLI of a run the workflow gave up on, which
+// its worker has yet to end, must not be writing the clone as it is
+// inspected, pushed or deleted. A run that ended normally is gone already: no
+// wait. Past RunEndWait, an ErrRunStillActive, never retried. The step
+// cancelled meanwhile: a cancellation, which the workflow reads as such.
+func (a *ClaudeCodeActivities) awaitRunEnd(ctx context.Context, dir string) error {
 	limit := a.RunEndWait
 	if limit <= 0 {
 		limit = DefaultRunEndWait
@@ -230,14 +287,16 @@ func (a *ClaudeCodeActivities) awaitRunEnd(ctx context.Context) error {
 	wait, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
 	defer heartbeatWhile(ctx, "waiting for the run to end")()
-	if a.Runs.Idle(wait) {
+	if a.live.idle(wait, dir) {
 		return nil
 	}
-	if err := ctx.Err(); err != nil {
+	if err := ctx.Err(); errors.Is(err, context.Canceled) {
+		return temporal.NewCanceledError()
+	} else if err != nil {
 		return err
 	}
 	return temporal.NewNonRetryableApplicationError(
-		fmt.Sprintf("a command of the run still runs on this worker after %s", limit), ErrRunStillActive, nil)
+		fmt.Sprintf("the run's CLI still runs on this worker after %s", limit), ErrRunStillActive, nil)
 }
 
 // hasType tells whether err is an application error of type typ.
@@ -565,7 +624,7 @@ func (a *ClaudeCodeActivities) CleanupWorkspace(ctx context.Context, in CleanupW
 	if filepath.Clean(in.Dir) != want {
 		return fmt.Errorf("cleanup: refusing to delete %q, which is not a workspace under %q", in.Dir, a.Root)
 	}
-	if err := a.awaitRunEnd(ctx); err != nil {
+	if err := a.awaitRunEnd(ctx, want); err != nil {
 		if hasType(err, ErrRunStillActive) {
 			log.Printf("Warning: claude code: %s is not deleted, a command of its run still runs: "+
 				"it goes at this worker's next start (RootClaim.Sweep)", want)
@@ -647,6 +706,8 @@ func (a *ClaudeCodeActivities) RunClaudeCode(ctx context.Context, in RunClaudeCo
 	if a.Runs != nil {
 		runner.Runs = a.Runs
 	}
+	// Until the CLI is gone, the steps after the run wait (awaitRunEnd).
+	defer a.live.hold(dir)()
 	ctx, stopped, cancel := a.endOnStop(ctx)
 	defer cancel()
 	res, err := runner.Run(ctx, claudecode.Params{
@@ -796,10 +857,11 @@ func (a *ClaudeCodeActivities) InspectWorkspace(ctx context.Context, in InspectW
 	if in.Dir == "" || in.Base == "" {
 		return InspectWorkspaceOutput{}, fmt.Errorf("inspect workspace: dir and base are required")
 	}
-	if _, err := a.workspaceDir(in.Dir); err != nil {
+	dir, err := a.workspaceDir(in.Dir)
+	if err != nil {
 		return InspectWorkspaceOutput{}, fmt.Errorf("inspect workspace: %w", err)
 	}
-	if err := a.awaitRunEnd(ctx); err != nil {
+	if err := a.awaitRunEnd(ctx, dir); err != nil {
 		return InspectWorkspaceOutput{}, fmt.Errorf("inspect workspace: %w", err)
 	}
 	var out InspectWorkspaceOutput
@@ -872,10 +934,11 @@ func (a *ClaudeCodeActivities) PushBranch(ctx context.Context, in PushBranchInpu
 	if !isFullSHA(in.Commit) {
 		return temporal.NewNonRetryableApplicationError(fmt.Sprintf("push: %q is not a full commit SHA", in.Commit), "InvalidInput", nil)
 	}
-	if _, err := a.workspaceDir(in.Dir); err != nil {
+	dir, err := a.workspaceDir(in.Dir)
+	if err != nil {
 		return fmt.Errorf("push: %w", err)
 	}
-	if err := a.awaitRunEnd(ctx); err != nil {
+	if err := a.awaitRunEnd(ctx, dir); err != nil {
 		return fmt.Errorf("push: %w", err)
 	}
 	// InspectWorkspace restored the configuration already: a change now was

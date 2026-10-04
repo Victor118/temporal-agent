@@ -1,7 +1,6 @@
 package subproc
 
 import (
-	"context"
 	"os"
 	"testing"
 	"time"
@@ -56,45 +55,6 @@ func TestRuns_WithoutAnIdentityDoesNothing(t *testing.T) {
 	r.KillStrays()
 	if *sweeps != 0 {
 		t.Errorf("%d sweeps without an identity", *sweeps)
-	}
-}
-
-// Idle waits for the last command held to be released, swept, whether or
-// not there is an identity to run as; a nil Runs is always idle.
-func TestRuns_Idle(t *testing.T) {
-	var none *Runs
-	if !none.Idle(context.Background()) {
-		t.Error("a nil Runs is not idle")
-	}
-	for _, id := range []*Identity{nil, {UID: 10001, GID: 10001}} {
-		r, sweeps := countingRuns(id)
-		if !r.Idle(context.Background()) {
-			t.Fatal("a Runs that never held a command is not idle")
-		}
-		first, second := r.Hold(), r.Hold()
-		first()
-		first() // released twice: counted once
-		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-		if r.Idle(ctx) {
-			t.Errorf("identity %v: idle while a command still runs", id)
-		}
-		cancel()
-
-		idle := make(chan bool, 1)
-		go func() { idle <- r.Idle(context.Background()) }()
-		time.Sleep(20 * time.Millisecond)
-		second()
-		select {
-		case ok := <-idle:
-			if !ok {
-				t.Errorf("identity %v: not idle once the last command was done", id)
-			}
-		case <-time.After(5 * time.Second):
-			t.Fatalf("identity %v: Idle did not return once the last command was done", id)
-		}
-		if want := map[bool]int{true: 1, false: 0}[id != nil]; *sweeps != want {
-			t.Errorf("identity %v: %d sweeps, want %d", id, *sweeps, want)
-		}
 	}
 }
 

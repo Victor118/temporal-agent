@@ -1248,18 +1248,28 @@ printf '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu_1"
 }
 
 // A run the workflow gave up on may still run on its worker until the worker
-// learns it: the steps after it wait for no command of the run to run, and
-// past the wait refuse, for good, to read, push or delete the clone.
-func TestStepsAfterARunWaitForItToEnd(t *testing.T) {
-	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: t.TempDir(), Runs: subproc.NewRuns(nil),
-		RunEndWait: 300 * time.Millisecond}
-	dir := filepath.Join(a.Root, "run-1")
-	if err := os.Mkdir(dir, 0o755); err != nil {
+// learns it: the steps after it wait for the run's CLI to be gone, and past
+// the wait refuse, for good, to read, push or delete the clone. A command of
+// exec's, though it runs as the same user, is no reason to wait.
+func TestStepsAfterARunWaitForItsCLI(t *testing.T) {
+	id := subproctest.Identity(t)
+	if os.Geteuid() == 0 && id == nil {
+		t.Skip("no identity to run as")
+	}
+	bin := filepath.Join(subproctest.Dir(t, nil), "fake-claude")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexec sleep 60\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: subproctest.Dir(t, nil), RunAs: id,
+		Runner: &claudecode.Runner{Binary: bin}, Runs: subproc.NewRuns(id), RunEndWait: 300 * time.Millisecond}
+	dir := filepath.Join(a.Root, "run-1")
+	os.Mkdir(dir, 0o755)
+	if id != nil {
+		if err := id.Give(dir); err != nil {
+			t.Fatal(err)
+		}
+	}
 	ctx := context.Background()
-
-	release := a.Runs.Hold()
 	steps := map[string]func() error{
 		"inspect": func() error {
 			_, err := a.InspectWorkspace(ctx, InspectWorkspaceInput{Dir: dir, Base: "HEAD"})
@@ -1269,29 +1279,73 @@ func TestStepsAfterARunWaitForItToEnd(t *testing.T) {
 			return a.PushBranch(ctx, PushBranchInput{Dir: dir, Remote: filepath.Join(t.TempDir(), "remote"),
 				Branch: "agent/x", Commit: strings.Repeat("a", 40)})
 		},
-		"cleanup": func() error { return a.CleanupWorkspace(ctx, CleanupWorkspaceInput{Dir: dir}) },
 	}
-	for name, step := range steps {
-		err := step()
+	stillActive := func(err error) bool {
 		var appErr *temporal.ApplicationError
-		if !errors.As(err, &appErr) || appErr.Type() != ErrRunStillActive || !appErr.NonRetryable() {
-			t.Errorf("%s with the run still running: %v, want a non-retryable %s", name, err, ErrRunStillActive)
+		return errors.As(err, &appErr) && appErr.Type() == ErrRunStillActive && appErr.NonRetryable()
+	}
+
+	// An exec command under way: the steps go on at once (and fail later,
+	// on a directory that is no clone).
+	release := a.Runs.Hold()
+	for name, step := range steps {
+		if err := step(); stillActive(err) {
+			t.Errorf("%s waited for an exec command: %v", name, err)
+		}
+	}
+	release()
+
+	// The run's CLI under way: they wait, and refuse.
+	runCtx, stopRun := context.WithCancel(ctx)
+	ran := make(chan error, 1)
+	go func() {
+		_, err := a.RunClaudeCode(runCtx, RunClaudeCodeInput{Dir: dir, Task: "x"})
+		ran <- err
+	}()
+	deadline := time.Now().Add(10 * time.Second)
+	for a.live.idle(expired(), dir) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	steps["cleanup"] = func() error { return a.CleanupWorkspace(ctx, CleanupWorkspaceInput{Dir: dir}) }
+	for name, step := range steps {
+		if err := step(); !stillActive(err) {
+			t.Errorf("%s with the run's CLI running: %v, want a non-retryable %s", name, err, ErrRunStillActive)
 		}
 	}
 	if _, err := os.Stat(dir); err != nil {
 		t.Fatalf("the clone of a run still running was deleted: %v", err)
 	}
 
-	// The run ends during the wait: the step goes on.
-	a.RunEndWait = 10 * time.Second
+	// The CLI ends during the wait: the step goes on.
+	a.RunEndWait = 20 * time.Second
 	go func() {
 		time.Sleep(200 * time.Millisecond)
-		release()
+		stopRun()
 	}()
 	if err := a.CleanupWorkspace(ctx, CleanupWorkspaceInput{Dir: dir}); err != nil {
 		t.Fatalf("cleanup once the run ended: %v", err)
 	}
 	if _, err := os.Stat(dir); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("the clone is still there: %v", err)
+	}
+	<-ran
+}
+
+// expired is a context already done: idle then only reads the count.
+func expired() context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	return ctx
+}
+
+// A step cancelled while it waits for the run says so as a cancellation:
+// the workflow reads it as such (a lost worker), not as a failure.
+func TestAwaitRunEndCancelled(t *testing.T) {
+	a := &ClaudeCodeActivities{}
+	defer a.live.hold("/w/run-1")()
+	err := a.awaitRunEnd(expired(), "/w/run-1")
+	var canceled *temporal.CanceledError
+	if !errors.As(err, &canceled) {
+		t.Errorf("err = %v, want a cancellation", err)
 	}
 }

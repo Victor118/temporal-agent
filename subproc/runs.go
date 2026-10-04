@@ -25,8 +25,7 @@ const sweepTimeout = 5 * time.Second
 // running as it in this pid namespace is ended, another worker process's
 // commands with the same identity included.
 //
-// A nil Runs counts and ends nothing; one with no identity counts (Idle)
-// and ends nothing.
+// A nil Runs, or one with no identity, counts and ends nothing.
 type Runs struct {
 	id *Identity
 	// sweep ends every process of id's; replaced by the tests.
@@ -34,9 +33,6 @@ type Runs struct {
 
 	mu sync.Mutex
 	n  int
-	// idle is closed while no command runs (n == 0, the strays swept), and
-	// replaced by an open one when one starts; nil reads as closed.
-	idle chan struct{}
 }
 
 // NewRuns returns the count of the commands run as id. A nil id gets a Runs
@@ -51,50 +47,18 @@ func NewRuns(id *Identity) *Runs {
 // called, once it has been waited for. release then ends every process of
 // the identity's if no other command runs as it.
 func (r *Runs) Hold() (release func()) {
-	if r == nil {
+	if r == nil || r.id == nil {
 		return func() {}
 	}
 	r.mu.Lock()
-	if r.n == 0 {
-		r.idle = make(chan struct{})
-	}
 	r.n++
 	r.mu.Unlock()
-	var once sync.Once
 	return func() {
-		once.Do(func() {
-			r.mu.Lock()
-			defer r.mu.Unlock()
-			if r.n--; r.n == 0 {
-				if r.id != nil {
-					r.sweep()
-				}
-				close(r.idle)
-			}
-		})
-	}
-}
-
-// Idle waits until no command runs as the identity, the strays of the last
-// one swept, or until ctx is done, and tells which: true when none runs. It
-// is how a step that must not run beside a command — one a run was given up
-// on, which its worker has yet to end — waits for it to be gone. A nil Runs
-// is always idle.
-func (r *Runs) Idle(ctx context.Context) bool {
-	if r == nil {
-		return true
-	}
-	r.mu.Lock()
-	idle := r.idle
-	r.mu.Unlock()
-	if idle == nil {
-		return true
-	}
-	select {
-	case <-idle:
-		return true
-	case <-ctx.Done():
-		return false
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if r.n--; r.n == 0 {
+			r.sweep()
+		}
 	}
 }
 

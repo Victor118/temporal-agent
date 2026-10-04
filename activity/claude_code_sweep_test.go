@@ -1,7 +1,6 @@
 package activity
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"slices"
@@ -15,9 +14,8 @@ import (
 // countingRuns is a RunCounter that counts the sweeps of strays.
 type countingRuns struct{ kills int }
 
-func (r *countingRuns) Hold() func()              { return func() {} }
-func (r *countingRuns) KillStrays()               { r.kills++ }
-func (r *countingRuns) Idle(context.Context) bool { return true }
+func (r *countingRuns) Hold() func() { return func() {} }
+func (r *countingRuns) KillStrays()  { r.kills++ }
 
 // sweepFixture lays out a root as a crashed worker leaves it, with what is
 // not a run's next to it.
