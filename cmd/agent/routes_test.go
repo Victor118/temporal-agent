@@ -807,6 +807,31 @@ func TestUI_UnchangedFragmentsAreNoContent(t *testing.T) {
 	}
 }
 
+// The thread shows each answer under the message it answers, and "Forker
+// un fil" forks from the latest message, which is no longer the last one
+// shown: Jarvis answered Alice (3) after Smith answered Bob (2, then 4).
+func TestUI_TheThreadInTheOrderOfTheAnchors(t *testing.T) {
+	h, st := newRouteTestWith(t, &fakeTemporal{})
+	st.messages = map[string][]store.MessageWithID{"s1": {
+		{ID: 1, Key: "msg:a", Message: store.Message{Role: store.RoleUser, Content: `"Question d'Alice"`, UserID: "u-alice", Author: "Alice"}},
+		{ID: 2, Key: "msg:b", Message: store.Message{Role: store.RoleUser, Content: `"Question de Bob"`, UserID: "u-bob", Author: "Bob"}},
+		{ID: 3, Key: "m2.smith:0", Message: store.Message{Role: store.RoleAssistant, Content: `"Réponse à Bob"`, AgentID: "smith"}},
+		{ID: 4, Key: "m1.default:0", Message: store.Message{Role: store.RoleAssistant, Content: `"Réponse à Alice"`, AgentID: "default"}},
+	}}
+	bob := logIn(t, h, "bob@example.com")
+	body := get(t, h, "/s/s1/thread", "", bob).Body.String()
+	order := []int{}
+	for _, s := range []string{"Question d&#39;Alice", "Réponse à Alice", "Question de Bob", "Réponse à Bob"} {
+		order = append(order, strings.Index(body, s))
+	}
+	if !slices.IsSorted(order) || order[0] < 0 {
+		t.Errorf("positions %v, want each answer under its question: %s", order, body)
+	}
+	if !strings.Contains(body, `name="message_id" value="4"`) {
+		t.Errorf("forks from another message than the latest: %s", body)
+	}
+}
+
 // A page's stream starts where the page was rendered: what is published
 // while it loads is sent again when the stream connects.
 func TestUI_TheStreamStartsWhereThePageStands(t *testing.T) {

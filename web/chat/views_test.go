@@ -3,6 +3,7 @@ package chat
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -184,6 +185,109 @@ func TestBuildThread_SignsEachAgent(t *testing.T) {
 	}
 }
 
+// parallel is two participants answering at once, as stored: Jarvis
+// answers Alice's message 1 with a tool, Bob writes message 4 meanwhile,
+// Smith answers it and is done before Jarvis is. With done, Jarvis's
+// answer and its end follow.
+func parallel(done bool) []store.MessageWithID {
+	jarvis := func(id int64, i string, m store.Message) store.MessageWithID {
+		m.AgentID = "default"
+		return store.MessageWithID{ID: id, Key: "m1.default:" + i, Message: m}
+	}
+	smith := func(id int64, i string, m store.Message) store.MessageWithID {
+		m.AgentID = "smith"
+		return store.MessageWithID{ID: id, Key: "m4.smith:" + i, Message: m}
+	}
+	msgs := []store.MessageWithID{
+		{ID: 1, Key: "msg:a", Message: store.Message{Role: store.RoleUser, Content: j("Jarvis, cherche"), UserID: "u-alice", Author: "Alice"}},
+		jarvis(2, "0", store.Message{Role: store.RoleAssistant, Content: j("Je cherche."), ToolCalls: []store.ToolCall{{ID: "t1", Name: "web_fetch"}}}),
+		jarvis(3, "1", store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "t1", Content: "page"}}),
+		{ID: 4, Key: "msg:b", Message: store.Message{Role: store.RoleUser, Content: j("@smith juge"), UserID: "u-bob", Author: "Bob"}},
+		smith(5, "0", store.Message{Role: store.RoleAssistant, ToolCalls: []store.ToolCall{{ID: "t2", Name: "grep"}}}),
+		smith(6, "1", store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "t2"}}),
+		smith(7, "2", store.Message{Role: store.RoleAssistant, Content: j("Verdict.")}),
+		{ID: 8, Key: "m4.smith:end", Message: store.TurnEnd("smith", "")},
+	}
+	if done {
+		msgs = append(msgs,
+			jarvis(9, "2", store.Message{Role: store.RoleAssistant, Content: j("Trouvé.")}),
+			store.MessageWithID{ID: 10, Key: "m1.default:end", Message: store.TurnEnd("default", "")})
+	}
+	return msgs
+}
+
+// Two participants answer at once: each answer shows whole under the
+// message it answers, signed by its agent, a turn still running included;
+// in the order of the IDs, Jarvis's would be cut by Bob's message and
+// Smith's answer.
+func TestBuildThread_TwoParticipantsInParallel(t *testing.T) {
+	jarvis := AgentInfo{ID: "default", Name: "Jarvis", Mention: "jarvis"}
+	smith := AgentInfo{ID: "smith", Name: "Agent Smith", Mention: "smith"}
+	dir := AgentDirectory{ByID: map[string]AgentInfo{"default": jarvis, "smith": smith}, Session: jarvis}
+	type want struct {
+		kind  string
+		id    int64
+		who   AgentInfo
+		text  string
+		tools string
+	}
+	for name, c := range map[string]struct {
+		done bool
+		want []want
+	}{
+		"jarvis running": {false, []want{
+			{ItemHuman, 1, AgentInfo{}, "", ""},
+			{ItemAgent, 2, jarvis, "Je cherche.", "web_fetch"},
+			{ItemHuman, 4, AgentInfo{}, "", ""},
+			{ItemAgent, 7, smith, "Verdict.", "grep"},
+		}},
+		"both done": {true, []want{
+			{ItemHuman, 1, AgentInfo{}, "", ""},
+			{ItemAgent, 9, jarvis, "Je cherche.\n\nTrouvé.", "web_fetch"},
+			{ItemHuman, 4, AgentInfo{}, "", ""},
+			{ItemAgent, 7, smith, "Verdict.", "grep"},
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			items := BuildThread(parallel(c.done), "u-alice", nil, nil, dir)
+			if len(items) != len(c.want) {
+				t.Fatalf("%d items, want %d: %+v", len(items), len(c.want), items)
+			}
+			for i, w := range c.want {
+				it := items[i]
+				if it.Kind != w.kind || it.ID != w.id || it.Agent != w.who || strings.Join(it.Tools, ",") != w.tools {
+					t.Errorf("item %d: %s #%d by %+v with %v, want %s #%d by %+v with %s", i, it.Kind, it.ID, it.Agent, it.Tools, w.kind, w.id, w.who, w.tools)
+				}
+				if w.kind == ItemAgent && string(it.HTML) != string(Markdown(w.text)) {
+					t.Errorf("item %d: %s, want %q whole", i, it.HTML, w.text)
+				}
+			}
+			if got := LastMessageID(items); got != map[bool]int64{false: 7, true: 9}[c.done] {
+				t.Errorf("last message %d, want the highest ID, not the last item's", got)
+			}
+		})
+	}
+}
+
+// A turn is an item of its own, even next to an answer of the same agent
+// that is not of it: a scheduled task's result stored while the turn runs.
+func TestBuildThread_AnItemPerTurn(t *testing.T) {
+	msgs := []store.MessageWithID{
+		{ID: 1, Key: "msg:a", Message: store.Message{Role: store.RoleUser, Content: j("M1"), UserID: "u-me"}},
+		{ID: 2, Key: "m1.default:0", Message: store.Message{Role: store.RoleAssistant, Content: j("R1"), AgentID: "default"}},
+		{ID: 3, Key: "sched:t1:1", Message: store.Message{Role: store.RoleAssistant, Content: j("Rappel"), AgentID: "default"}},
+		{ID: 4, Key: "m1.default:1", Message: store.Message{Role: store.RoleAssistant, Content: j("R1 bis"), AgentID: "default"}},
+	}
+	items := BuildThread(msgs, "u-me", nil, nil, AgentDirectory{Session: AgentInfo{ID: "default"}})
+	var got []string
+	for _, it := range items {
+		got = append(got, fmt.Sprint(it.Kind, it.ID))
+	}
+	if want := "human1 agent4 agent3"; strings.Join(got, " ") != want {
+		t.Errorf("items %v, want %s: the turn whole, then the task's result", got, want)
+	}
+}
+
 // The agent's text comes from a model: HTML in it must not reach the page.
 // A fork's report is an item of its own: its sender, its Markdown rendered
 // and escaped, its fork linked only for a viewer who is a member of it.
@@ -236,6 +340,26 @@ func TestMarkReported(t *testing.T) {
 	// The items handed in are left as they were.
 	if items[3].Kind != ItemHuman {
 		t.Error("MarkReported changed its input")
+	}
+}
+
+// In the order of the anchors, the mark still goes after the last item the
+// report covers: a report made while Jarvis's turn ran, after Smith had
+// answered Bob, comes after Smith's answer; one made before Bob wrote,
+// right after Alice's message, Jarvis's answer having gone on since.
+func TestMarkReported_InTheOrderOfTheAnchors(t *testing.T) {
+	items := BuildThread(parallel(true), "u-alice", nil, nil, AgentDirectory{})
+	at := t0
+	for _, c := range []struct {
+		upTo  int64
+		after int64 // the item the mark follows
+	}{{8, 7}, {3, 1}, {10, 7}} {
+		fork := store.Session{SessionID: "f", ParentSessionID: "p", LastReportedMessageID: c.upTo, LastReportID: 40, LastReportedAt: &at}
+		got := MarkReported(append([]ThreadItem(nil), items...), fork, true)
+		i := slices.IndexFunc(got, func(it ThreadItem) bool { return it.Kind == ItemReported })
+		if i < 1 || got[i-1].ID != c.after {
+			t.Errorf("reported up to %d: mark at %d in %+v, want after item #%d", c.upTo, i, got, c.after)
+		}
 	}
 }
 

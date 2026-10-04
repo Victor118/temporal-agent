@@ -232,11 +232,7 @@ func (u *ui) buildPage(ctx context.Context, me *store.User, sessionID, view stri
 	if p.Report != nil {
 		p.Thread = chat.MarkReported(p.Thread, sess, p.Report.Refused == nil)
 	}
-	for _, it := range p.Thread {
-		if it.Kind == chat.ItemHuman || it.Kind == chat.ItemAgent || it.Kind == chat.ItemReport {
-			p.LastMessageID = it.ID
-		}
-	}
+	p.LastMessageID = chat.LastMessageID(p.Thread)
 	// Who works: the participants at work, several at once, each under its
 	// agent's name as it is now, and what its turn waits for when its
 	// workflow said (a coding run waiting for a free worker). A fork's

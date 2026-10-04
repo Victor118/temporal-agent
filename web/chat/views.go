@@ -13,6 +13,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/victor/temporal-agent/conversation"
 	"github.com/victor/temporal-agent/session"
 	"github.com/victor/temporal-agent/store"
 )
@@ -258,6 +259,13 @@ func (d AgentDirectory) Signer(m store.Message) AgentInfo {
 // signed by its agent: when several agents answer one after another, each has
 // its own.
 //
+// The thread shows the messages as the model reads them, in the order of
+// their anchors (conversation.Order): participants answer in parallel, and
+// in the order of the IDs one's answer would be cut by another's, and shown
+// after a message it does not answer. Each turn shows whole under the
+// message it answers, a turn still running included. A message written
+// meanwhile shows after it, with its own answer.
+//
 // forks are the session's forks the viewer is a member of, by the message they
 // started from: a report links to its fork only if it is one of them.
 func BuildThread(msgs []store.MessageWithID, viewerID string, forks map[int64][]ForkLink, questions []Question, agents AgentDirectory) []ThreadItem {
@@ -269,6 +277,7 @@ func BuildThread(msgs []store.MessageWithID, viewerID string, forks map[int64][]
 	}
 	var items []ThreadItem
 	var agent *ThreadItem // the agent item being assembled
+	var agentTurn string  // its turn ("" for messages no turn wrote)
 	var agentText []string
 	closeAgent := func() {
 		if agent == nil {
@@ -276,17 +285,18 @@ func BuildThread(msgs []store.MessageWithID, viewerID string, forks map[int64][]
 		}
 		agent.HTML = Markdown(strings.Join(agentText, "\n\n"))
 		items = append(items, *agent)
-		agent, agentText = nil, nil
+		agent, agentTurn, agentText = nil, "", nil
 	}
 
-	for _, m := range msgs {
+	for _, m := range conversation.Order(msgs) {
 		switch {
 		case m.Kind == store.KindForkSummary:
 			closeAgent()
 			items = append(items, ThreadItem{Kind: ItemBrief, ID: m.ID, Time: m.CreatedAt, HTML: Markdown(text(m.Content))})
 		case m.Kind == store.KindTurnEnd:
 			// A turn's end shows only when it says why the turn failed; it
-			// still closes the turn's item.
+			// still closes the turn's item, which is its own: by anchor, a
+			// turn's end is the last of its block.
 			closeAgent()
 			if reason := store.TurnEndError(m.Message); reason != "" {
 				items = append(items, ThreadItem{Kind: ItemError, ID: m.ID, Time: m.CreatedAt, Text: reason, Agent: agents.Signer(m.Message)})
@@ -307,11 +317,12 @@ func BuildThread(msgs []store.MessageWithID, viewerID string, forks map[int64][]
 			})
 		case m.Role == store.RoleAssistant:
 			signer := agents.Signer(m.Message)
-			if agent != nil && agent.Agent.ID != signer.ID {
+			turn, _ := store.TurnOf(m.Key)
+			if agent != nil && (agent.Agent.ID != signer.ID || agentTurn != turn) {
 				closeAgent()
 			}
 			if agent == nil {
-				agent = &ThreadItem{Kind: ItemAgent, Time: m.CreatedAt, Agent: signer}
+				agent, agentTurn = &ThreadItem{Kind: ItemAgent, Time: m.CreatedAt, Agent: signer}, turn
 			}
 			for _, tc := range m.ToolCalls {
 				if !contains(agent.Tools, tc.Name) {
@@ -352,9 +363,15 @@ func reportSource(f *store.ForkRef, visible map[string]bool) ReportLink {
 }
 
 // MarkReported shows, in a fork's thread, where its latest report stopped:
-// after the last item it covers, before the questions waiting. The parent is
-// linked when the viewer is a member of it. A fork that never reported is
-// left as it is.
+// after the last item it covers (ID up to the report's last message), before
+// the questions waiting. The parent is linked when the viewer is a member of
+// it. A fork that never reported is left as it is.
+//
+// The thread is in the order of the anchors (BuildThread), and a report
+// covers the messages up to an ID: an answer that went on after the report
+// (a turn running then, ending later, its item's ID past the report) shows
+// whole above the mark when a message it does not answer was reported
+// after it.
 func MarkReported(items []ThreadItem, fork store.Session, parentVisible bool) []ThreadItem {
 	if fork.LastReportedMessageID == 0 || fork.LastReportedAt == nil {
 		return items
@@ -369,6 +386,19 @@ func MarkReported(items []ThreadItem, fork store.Session, parentVisible bool) []
 		SessionID: fork.ParentSessionID, MessageID: fork.LastReportID, Accessible: parentVisible && fork.ParentSessionID != "",
 	}}
 	return append(items[:at:at], append([]ThreadItem{mark}, items[at:]...)...)
+}
+
+// LastMessageID is the last message of the thread to fork from: the highest
+// ID of its messages, answers and reports. The thread is in the order of the
+// anchors, not of the IDs: its last item need not be its latest message.
+func LastMessageID(items []ThreadItem) int64 {
+	var last int64
+	for _, it := range items {
+		if it.Kind == ItemHuman || it.Kind == ItemAgent || it.Kind == ItemReport {
+			last = max(last, it.ID)
+		}
+	}
+	return last
 }
 
 func authorName(m store.MessageWithID) string {
