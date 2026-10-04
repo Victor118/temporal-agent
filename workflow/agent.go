@@ -64,6 +64,11 @@ type AgentWorkflowInput struct {
 	// reach the user; only the session's own turn sends its answer there.
 	Channel   string `json:"channel,omitempty"`
 	ChannelID string `json:"channel_id,omitempty"`
+	// SessionTurn is the session turn a sub-agent works for, inherited from
+	// its parent: what it publishes (publish_file) is attached there, a
+	// sub-agent having no turn of its own. Nil on a session turn (SessionID
+	// and TurnKey name it) and on a run outside any session.
+	SessionTurn *tool.TurnRef `json:"session_turn,omitempty"`
 	// PartNote ends the system prompt of a run that answers a message
 	// addressed to several agents: which part is its own (see partNote).
 	PartNote string `json:"part_note,omitempty"`
@@ -437,6 +442,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 		}
 
 		// Collect results
+		var published []tool.FileRef
 		for j, d := range dispatches {
 			var content string
 			var isError bool
@@ -469,6 +475,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 				} else {
 					content = result.Content
 					isError = result.IsError
+					published = append(published, result.Files...)
 				}
 			}
 
@@ -485,6 +492,12 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 		// Flush the assistant message and its tool results together: a stored
 		// tool call with no result would break the next turn.
 		cancelSafeFlush()
+
+		// Once the step is written, the members' thread shows the files
+		// under it.
+		if len(published) > 0 && call.Turn != nil {
+			notifyFiles(ctx, *call.Turn, currentAgentID, published)
+		}
 	}
 
 	cancelSafeFlush()
@@ -595,7 +608,7 @@ func notifyResponse(ctx workflow.Context, sessionID, channel, channelID, agent, 
 // its input. Any other gets the raw input.
 func buildChildInput(rawInput json.RawMessage, parent AgentWorkflowInput, childID string, res *activity.ToolResolution, call tool.CallContext, currentAgentID string, currentQueue string) (childWorkflow interface{}, input interface{}, err error) {
 	if res.AgentID != "" {
-		return subAgentInput(rawInput, parent, childID, res, call.AgentChain, currentAgentID, currentQueue)
+		return subAgentInput(rawInput, parent, childID, res, call, currentAgentID, currentQueue)
 	}
 	if res.NeedsCallContext {
 		in, err := tool.WithCallContext(rawInput, call)
@@ -613,19 +626,24 @@ func buildChildInput(rawInput json.RawMessage, parent AgentWorkflowInput, childI
 // channels' notifiers are. A workflow tool gets it in its input, an activity
 // tool in its context (tool.CallFromContext).
 func callContext(input AgentWorkflowInput, chain []string, signer, queue string) tool.CallContext {
+	turn := input.SessionTurn
+	if input.TurnKey != "" {
+		turn = &tool.TurnRef{SessionID: input.SessionID, TurnKey: input.TurnKey}
+	}
 	return tool.CallContext{
 		AgentChain:  chain,
 		Channel:     input.Channel,
 		ChannelID:   input.ChannelID,
 		Agent:       signer,
 		NotifyQueue: queue,
+		Turn:        turn,
 	}
 }
 
 // subAgentInput starts res.AgentID as a one-shot sub-agent: no session history,
 // its own prompt, skills and allowlist, and the parent's model unless the call
 // names one.
-func subAgentInput(rawInput json.RawMessage, parent AgentWorkflowInput, childID string, res *activity.ToolResolution, agentChain []string, currentAgentID string, currentQueue string) (interface{}, interface{}, error) {
+func subAgentInput(rawInput json.RawMessage, parent AgentWorkflowInput, childID string, res *activity.ToolResolution, parentCall tool.CallContext, currentAgentID string, currentQueue string) (interface{}, interface{}, error) {
 	var call struct {
 		Task  string `json:"task"`
 		Model string `json:"model,omitempty"`
@@ -655,7 +673,7 @@ func subAgentInput(rawInput json.RawMessage, parent AgentWorkflowInput, childID 
 		AgentID:     res.AgentID,
 		UserMessage: call.Task,
 		Model:       model,
-		AgentChain:  agentChain,
+		AgentChain:  parentCall.AgentChain,
 		// The sub-agent acts for the same user: its tools save that user's
 		// memory, deliver to that user.
 		UserID: parent.UserID,
@@ -665,6 +683,8 @@ func subAgentInput(rawInput json.RawMessage, parent AgentWorkflowInput, childID 
 		Channel:   parent.Channel,
 		ChannelID: parent.ChannelID,
 		SignReply: parent.SignReply,
+		// And publishes its files under the session turn it works for.
+		SessionTurn: parentCall.Turn,
 	}, nil
 }
 
@@ -712,6 +732,31 @@ func notifyToolCalls(ctx workflow.Context, sessionID, channel, channelID string,
 				Type: activity.EventToolCalls,
 				Data: data,
 			},
+		},
+	).Get(ctx, nil)
+}
+
+// notifyFiles tells the session's web members that a step published files,
+// under turn: their thread shows them. Best effort, as a turn event: the
+// files are stored, and the thread shows them at its next reload anyway.
+func notifyFiles(ctx workflow.Context, turn tool.TurnRef, agentID string, files []tool.FileRef) {
+	ids := make([]string, len(files))
+	for i, f := range files {
+		ids[i] = f.ID
+	}
+	data, _ := json.Marshal(map[string]any{
+		"type":     activity.EventFilePublished,
+		"turn":     turn.TurnKey,
+		"agent_id": agentID,
+		"files":    ids,
+	})
+	var notifAct *activity.NotificationActivities
+	_ = workflow.ExecuteActivity(
+		workflow.WithActivityOptions(ctx, turnNotifyOptions),
+		notifAct.NotifyStep,
+		activity.NotifyInput{
+			SessionID: turn.SessionID,
+			Event:     activity.SSEEvent{Type: activity.EventFilePublished, Data: data},
 		},
 	).Get(ctx, nil)
 }

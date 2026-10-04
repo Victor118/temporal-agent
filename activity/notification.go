@@ -27,6 +27,9 @@ const (
 	EventToolCalls = "tool_calls" // the tools a step calls
 	EventAskUser   = "ask_user"   // a question waits for a member's answer
 	EventNotice    = "notice"     // a word on what the turn waits for ({"text", "agent"})
+	// EventFilePublished: a step published files ({"turn", "agent_id",
+	// "files": their IDs}), on the web only.
+	EventFilePublished = "file_published"
 )
 
 // ChannelWeb is the web interface's channel, and the one a session without a
