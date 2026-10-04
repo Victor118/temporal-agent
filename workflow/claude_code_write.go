@@ -133,7 +133,7 @@ func implementFeature(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCod
 	runErr := workflow.ExecuteActivity(
 		r.step(workflow.ActivityOptions{
 			StartToCloseTimeout: implementTimeout,
-			HeartbeatTimeout:    analyzeHeartbeat,
+			HeartbeatTimeout:    claudeCodeHeartbeat,
 			RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 1},
 		}),
 		ccAct.RunClaudeCode,

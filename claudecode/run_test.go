@@ -2,6 +2,7 @@ package claudecode
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +10,10 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"go.temporal.io/sdk/activity"
+	"go.temporal.io/sdk/converter"
+	"go.temporal.io/sdk/testsuite"
 
 	"github.com/victor/temporal-agent/subproc"
 	"github.com/victor/temporal-agent/subproc/subproctest"
@@ -478,5 +483,127 @@ func TestRunRefusesAnIdentityWithoutRuns(t *testing.T) {
 	r := &Runner{Binary: fakeCLI(t, successStream), RunAs: &subproc.Identity{UID: 10001, GID: 10001}}
 	if _, err := r.Run(context.Background(), Params{Cwd: t.TempDir(), Task: "x"}); err == nil || !strings.Contains(err.Error(), "Runner.Runs") {
 		t.Errorf("err = %v, want a refusal", err)
+	}
+}
+
+// A CLI may write nothing for minutes and be fine: a long Bash command, a
+// long message being written. The run heartbeats on a timer all the same,
+// with how far it got. Here the CLI waits for that heartbeat, with its tool
+// call in it, before it writes anything more: beating on its lines alone,
+// the run would wait in vain.
+func TestRunHeartbeatsWhileTheCLIIsSilent(t *testing.T) {
+	dir := t.TempDir()
+	flag := filepath.Join(dir, "beaten")
+	script := fmt.Sprintf(`
+echo '{"type":"system","subtype":"init","session_id":"s"}'
+echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu_1","name":"Bash","input":{"command":"make"}}]},"session_id":"s"}'
+i=0
+while [ ! -e %q ]; do
+  i=$((i+1)); [ $i -gt 400 ] && exit 3
+  sleep 0.05
+done
+echo '{"type":"result","subtype":"success","is_error":false,"result":"built","session_id":"s"}'
+`, flag)
+	r := &Runner{Binary: fakeCLI(t, script), HeartbeatEvery: time.Second}
+
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestActivityEnvironment()
+	runCLI := func(ctx context.Context) (Result, error) {
+		return r.Run(ctx, Params{Cwd: dir, Task: "build it"})
+	}
+	env.RegisterActivity(runCLI)
+	env.SetOnActivityHeartbeatListener(func(_ *activity.Info, details converter.EncodedValues) {
+		var p Progress
+		if err := details.Get(&p); err != nil {
+			t.Errorf("heartbeat details: %v", err)
+			return
+		}
+		if p.ToolCalls == 1 && p.LastTool == "Bash" {
+			os.WriteFile(flag, nil, 0o644)
+		}
+	})
+
+	val, err := env.ExecuteActivity(runCLI)
+	if err != nil {
+		t.Fatalf("run: %v (no heartbeat while the CLI was silent?)", err)
+	}
+	var res Result
+	if err := val.Get(&res); err != nil {
+		t.Fatal(err)
+	}
+	if res.Report != "built" {
+		t.Errorf("Report = %q", res.Report)
+	}
+	if res.Progress.ToolCalls != 1 || res.Progress.LastTool != "Bash" || res.Progress.Events != 3 {
+		t.Errorf("Progress = %+v, want 3 events, 1 tool call, Bash last", res.Progress)
+	}
+}
+
+// A CLI that writes nothing for StallTimeout is stuck, or waits on what
+// never comes: its process group is ended, as on a cancellation, and the run
+// says so, with how far it got.
+func TestRunEndsAStalledCLI(t *testing.T) {
+	defer func(d time.Duration) { killGrace = d }(killGrace)
+	killGrace = 500 * time.Millisecond
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "child.pid")
+	script := fmt.Sprintf(`
+echo '{"type":"system","subtype":"init","session_id":"s"}'
+echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu_1","name":"Bash","input":{"command":"sleep 60"}}]},"session_id":"s"}'
+sleep 60 &
+echo $! > %q
+wait
+`, pidFile)
+	r := &Runner{Binary: fakeCLI(t, script), StallTimeout: 700 * time.Millisecond}
+
+	start := time.Now()
+	res, err := r.Run(context.Background(), Params{Cwd: dir, Task: "x"})
+	var stall *StallError
+	if !errors.As(err, &stall) {
+		t.Fatalf("err = %v, want a StallError", err)
+	}
+	if took := time.Since(start); took > 10*time.Second {
+		t.Errorf("the stalled run took %s to end", took.Round(time.Millisecond))
+	}
+	if stall.Silence != 700*time.Millisecond || !strings.Contains(err.Error(), "wrote nothing for 700ms") {
+		t.Errorf("err = %v (silence %s)", err, stall.Silence)
+	}
+	for _, p := range []Progress{stall.Progress, res.Progress} {
+		if p.Events != 2 || p.ToolCalls != 1 || p.LastTool != "Bash" || p.SessionID != "s" {
+			t.Errorf("Progress = %+v, want 2 events, 1 tool call, Bash last", p)
+		}
+	}
+	if res.DurationMS < 700 {
+		t.Errorf("DurationMS = %d, want the time the run lasted", res.DurationMS)
+	}
+
+	pid := readPID(t, pidFile)
+	deadline := time.Now().Add(5 * time.Second)
+	for processRunning(pid) && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if processRunning(pid) {
+		syscall.Kill(pid, syscall.SIGKILL)
+		t.Errorf("process %d of the stalled CLI outlived the run", pid)
+	}
+}
+
+// Silence is counted from the CLI's last line, not from the start: a run
+// longer than StallTimeout that keeps writing is never taken for stuck.
+func TestRunThatKeepsWritingIsNotStalled(t *testing.T) {
+	script := `
+for i in 1 2 3 4 5 6; do
+  echo '{"type":"rate_limit_event","session_id":"s"}'
+  sleep 0.2
+done
+echo '{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"s"}'
+`
+	r := &Runner{Binary: fakeCLI(t, script), StallTimeout: 600 * time.Millisecond}
+	res, err := r.Run(context.Background(), Params{Cwd: t.TempDir(), Task: "x"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Report != "done" || res.Progress.Events != 7 {
+		t.Errorf("Report = %q, Progress = %+v", res.Report, res.Progress)
 	}
 }

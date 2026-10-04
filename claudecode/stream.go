@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -63,12 +64,13 @@ type contentBlock struct {
 // consume reads the CLI's stream to EOF, building the Result as it goes and
 // emitting events. A line it cannot parse is skipped rather than fatal: the
 // CLI may add line types, and losing one is no reason to lose a 20-minute run.
-func (r *Runner) consume(ctx context.Context, stdout io.Reader) (Result, error) {
+//
+// What it reads also goes to w: how far the run got, and when the CLI last
+// wrote, which the heartbeat and the stall check read (Runner.monitor).
+func (r *Runner) consume(stdout io.Reader, w *watch) (Result, error) {
 	res := Result{ToolUses: map[string]int{}}
 	var report strings.Builder
-	var prog Progress
 	toolNames := map[string]string{} // tool_use_id → name, to name tool results
-	lastBeat := time.Time{}
 
 	// A bufio.Reader rather than a Scanner: one line carries a whole tool
 	// result, which routinely passes Scanner's 64 KiB token limit, and a
@@ -77,12 +79,12 @@ func (r *Runner) consume(ctx context.Context, stdout io.Reader) (Result, error) 
 	for {
 		line, err := readLine(br)
 		if len(line) > 0 {
+			w.wrote()
 			for _, ev := range r.parseLine(line, &res, &report, toolNames) {
 				if r.OnEvent != nil {
 					r.OnEvent(ev)
 				}
-				prog.observe(ev, res.SessionID)
-				lastBeat = r.beat(ctx, prog, lastBeat)
+				w.observe(ev, res.SessionID)
 			}
 		}
 		if err != nil {
@@ -178,21 +180,100 @@ func (r *Runner) parseLine(line []byte, res *Result, report *strings.Builder, to
 	return []Event{{Kind: EventOther, Raw: raw}}
 }
 
+// watch is what the CLI's stream says of a run while it lasts: how far it
+// got, and when the CLI last wrote a line. consume writes it; the heartbeat
+// and the stall check (Runner.monitor) read it from another goroutine.
+type watch struct {
+	mu       sync.Mutex
+	prog     Progress
+	lastLine time.Time
+}
+
+func newWatch(start time.Time) *watch { return &watch{lastLine: start} }
+
+// wrote records that the CLI just wrote a line, whatever it was.
+func (w *watch) wrote() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.lastLine = time.Now()
+}
+
+func (w *watch) observe(ev Event, sessionID string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.prog.observe(ev, sessionID)
+}
+
+func (w *watch) progress() Progress {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.prog
+}
+
+// silentFor is how long the CLI has written nothing.
+func (w *watch) silentFor() time.Duration {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return time.Since(w.lastLine)
+}
+
+// monitor heartbeats while the CLI lives, and ends the run (stall) once the
+// CLI has written nothing for stallTimeout, until done is closed.
+//
+// The heartbeat goes on a timer, not on the CLI's lines: the CLI is silent
+// for minutes on end and fine — a Bash command writes nothing until it ends
+// (up to 10 min), an assistant message only comes out whole. Beating on its
+// lines alone, such a run was taken for a lost worker. The heartbeat now
+// only says the worker is alive, and carries the progress; a CLI that is
+// alive but stuck is this function's to notice, at stallTimeout.
+//
+// It beats only inside an activity (beat), which is what lets the same
+// runner serve the CLI subcommand; the stall check runs either way.
+func (r *Runner) monitor(ctx context.Context, w *watch, stall context.CancelCauseFunc, done <-chan struct{}) {
+	beats := time.NewTicker(r.heartbeatEvery())
+	defer beats.Stop()
+	limit := r.stallTimeout()
+	check := time.NewTimer(limit)
+	defer check.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case <-beats.C:
+			r.beat(ctx, w.progress())
+		case <-check.C:
+			silent := w.silentFor()
+			if silent >= limit {
+				stall(&StallError{Silence: limit, Progress: w.progress()})
+				return
+			}
+			check.Reset(limit - silent)
+		}
+	}
+}
+
 // beat records a Temporal heartbeat when this code runs inside an activity,
-// and does nothing otherwise — which is what lets the same function serve the
-// CLI subcommand. The heartbeat is also what lets a stuck run be cancelled at
-// all: without it Temporal only notices at the StartToClose timeout, by which
-// point the worker is still holding a live CLI process.
-func (r *Runner) beat(ctx context.Context, prog Progress, last time.Time) time.Time {
-	if !activity.IsActivity(ctx) {
-		return last
+// and does nothing otherwise. The heartbeat is also what lets a run be
+// cancelled at all: the SDK learns of a cancellation, or of a timeout the
+// server saw, in a heartbeat's answer.
+func (r *Runner) beat(ctx context.Context, prog Progress) {
+	if activity.IsActivity(ctx) {
+		activity.RecordHeartbeat(ctx, prog)
 	}
-	now := time.Now()
-	if r.HeartbeatEvery > 0 && !last.IsZero() && now.Sub(last) < r.HeartbeatEvery {
-		return last
+}
+
+func (r *Runner) heartbeatEvery() time.Duration {
+	if r.HeartbeatEvery > 0 {
+		return r.HeartbeatEvery
 	}
-	activity.RecordHeartbeat(ctx, prog)
-	return now
+	return DefaultHeartbeatEvery
+}
+
+func (r *Runner) stallTimeout() time.Duration {
+	if r.StallTimeout > 0 {
+		return r.StallTimeout
+	}
+	return DefaultStallTimeout
 }
 
 func (p *Progress) observe(ev Event, sessionID string) {

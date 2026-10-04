@@ -18,9 +18,12 @@ const (
 	// is measured in minutes, not seconds — the point of running it as a
 	// workflow rather than a plain tool activity, which is capped at 120s.
 	analyzeTimeout = 45 * time.Minute
-	// analyzeHeartbeat is what turns a stuck run into a failure in two minutes
-	// instead of forty-five. The runner beats on every event it parses.
-	analyzeHeartbeat = 2 * time.Minute
+	// claudeCodeHeartbeat is how long a run (analysis or implementation) may
+	// go without a heartbeat: what tells a lost worker, as the session's
+	// does (runHeartbeatTimeout). The runner beats every 20s while the CLI
+	// lives, writing or not (claudecode.DefaultHeartbeatEvery); a CLI alive
+	// but stuck is the runner's to end (claudecode.DefaultStallTimeout).
+	claudeCodeHeartbeat = time.Minute
 	// prepareTimeout bounds the clone.
 	prepareTimeout = 15 * time.Minute
 	// gitHeartbeatTimeout must exceed the interval the git activity beats at.
@@ -154,7 +157,7 @@ func analyzeRepo(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCodeOutp
 	err = workflow.ExecuteActivity(
 		r.step(workflow.ActivityOptions{
 			StartToCloseTimeout: analyzeTimeout,
-			HeartbeatTimeout:    analyzeHeartbeat,
+			HeartbeatTimeout:    claudeCodeHeartbeat,
 			// Never retried: a run costs real money and has already changed
 			// the workspace by the time it fails.
 			RetryPolicy: &temporal.RetryPolicy{MaximumAttempts: 1},
