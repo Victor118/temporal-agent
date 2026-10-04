@@ -153,7 +153,7 @@ A worker that stops ends its coding runs first, then gives the tasks under way 3
 | `AGENT_DEFINITIONS_FILE` | Agents seed file (default `./agents.yaml`) |
 | `WORKER_CONFIG` | Worker config: tool queue, exposed tools, MCP servers (default `./worker.yaml`, see `worker.example.yaml`) |
 | `MCP_SERVERS` | JSON array of MCP servers (`name`, `url`, `api_key`, `transport`), used only without a worker config |
-| `FILES_MAX_BYTES` | Worker: largest file `exec` may publish (its `publish` parameter), in bytes (default `20971520`, 20 MiB); `publish_file`, for a short text the model writes, has its own bound (1 MiB). Files are stored in PostgreSQL. Not a positive number = the worker does not start |
+| `FILES_MAX_BYTES` | Worker: largest file `exec` may publish (its `publish` parameter), and largest document `render_pdf` and `make_slides` render (and the most their `files` may weigh together), in bytes (default `20971520`, 20 MiB); `publish_file`, for a short text the model writes, has its own bound (1 MiB). Files are stored in PostgreSQL. Not a positive number = the worker does not start |
 | `TYPST_PACKAGES` | Worker: directory of the typst packages a rendered document may import (default `/usr/local/share/typst/packages`, where the agent image puts touying). Typst never downloads one |
 | `RUN_AS_UID`, `RUN_AS_GID` | User (and group, default: the uid) that `exec`, the document tools and coding runs run as. Set to `10001` (`agent-run`) by both images. Empty on a worker running as root = `exec`, documents and coding runs are refused. Must be a uid of its own, used by one worker process per pid namespace (one container): its processes are killed whenever no command runs, and at the startup of a coding worker |
 | `CLAUDE_CODE_REPOS` | Comma-separated globs of the repositories a coding worker (`analyze_repo`, `implement_feature`) may clone and push to, e.g. `git@github.com:acme/*,https://github.com/acme/*` (`*` stops at a `/`). Empty = every repository is refused |
@@ -242,13 +242,18 @@ agent/
 - **Documents** (`render_pdf`, `make_slides`) run pandoc and typst on a
   source the model wrote, as `RUN_AS_UID`, through the same `subproc` path as
   `exec`. Each call has a directory of its own, the worker's (the files it
-  uses, copied from the store; the run's user cannot change it), removed
-  afterwards; the programs read their input on stdin and write the document on
-  stdout, bounded by `FILES_MAX_BYTES`, in 60 s at most. pandoc runs with
-  `--sandbox` (it reads no file but those on its command line) and a bounded
-  heap; typst with `--root` on the directory, the image's packages as its
-  package path and cache, an unreachable proxy (`127.0.0.1:0`: a package it
-  lacks is never even requested) and a bounded address space. A source can
+  uses, copied from the store; the run's user cannot change it, but any
+  process of that user can read them meanwhile, as it can the workspace),
+  removed afterwards, and swept at startup when a killed worker left it. The
+  programs read their input on stdin and write the document on stdout; the
+  document, and the `files` it uses taken together, are bounded by
+  `FILES_MAX_BYTES`; 60 s per rendering, two at a time per worker. pandoc
+  runs with `--sandbox` (it reads no file but those on its command line; a
+  Lua filter of the tool's reads the images, bare file names in the call's
+  directory, for a pptx) and a bounded heap; typst with `--root` on the
+  directory, the image's packages as its package path and cache, an
+  unreachable proxy (`127.0.0.1:0`: a package it lacks is never even
+  requested), two threads and a bounded address space. A source can
   therefore read nothing outside its own files, and reach no network.
 
 - **`web_fetch`** fetches a URL the model chose, so it only connects to public

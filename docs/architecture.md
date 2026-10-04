@@ -260,9 +260,12 @@ worker, effacé ensuite ; pandoc et typst tournent sous `RUN_AS_UID` par
 `--sandbox` (un filtre Lua met les images de l'appel dans sa médiathèque pour
 le pptx), tas borné ; typst en `--root` sur le dossier, paquets de l'image
 seulement (chemin et cache en lecture seule, proxy `127.0.0.1:0` : aucun
-téléchargement, même tenté), mémoire bornée. 60 s par rendu. La date du
-document est l'heure à laquelle l'appel a été planifié (`SOURCE_DATE_EPOCH`) :
-un appel rejoué rend les mêmes octets et retrouve son fichier.
+téléchargement, même tenté), mémoire bornée, deux threads. 60 s par rendu, deux rendus à la fois par worker (un
+appel attend un créneau 30 s au plus, puis est refusé : « occupé, réessaie »).
+Les dossiers laissés par un worker tué sont balayés à son redémarrage.
+Pendant un rendu, les fichiers copiés sont lisibles par tout processus du
+même `RUN_AS_UID` (un `exec` d'une autre session) : la même posture que le
+workspace partagé.
 
 ### Workflow déterministe : Claude Code
 
