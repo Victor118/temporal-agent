@@ -44,6 +44,7 @@ happens to answer has locally.
 - **Persistent memory** — PostgreSQL-backed storage for conversation history, key-value memory (user/project/session scoped), and task logs
 - **Real-time streaming** — SSE (Server-Sent Events) hub for live updates to connected clients
 - **Built-in tools** — File system operations, web access, shell execution, user interaction, workflow queries, scheduling
+- **Published files** — An agent hands the members a file (`publish_file` for a text it writes, `exec`'s `publish` for a file a command made), attached to its answer and downloaded by the session's members only
 - **Remote MCP servers** — A worker declares MCP servers in its `worker.yaml` (Streamable HTTP, or the older HTTP+SSE) and publishes their tools; a server that is down is retried in the background, and tools it adds or removes are picked up within 30 s
 
 ## Architecture
@@ -147,6 +148,7 @@ A worker that stops ends its coding runs first, then gives the tasks under way 3
 | `AGENT_DEFINITIONS_FILE` | Agents seed file (default `./agents.yaml`) |
 | `WORKER_CONFIG` | Worker config: tool queue, exposed tools, MCP servers (default `./worker.yaml`, see `worker.example.yaml`) |
 | `MCP_SERVERS` | JSON array of MCP servers (`name`, `url`, `api_key`, `transport`), used only without a worker config |
+| `FILES_MAX_BYTES` | Worker: largest file an agent may publish (`publish_file`, `exec`'s `publish`), in bytes (default `20971520`, 20 MiB). Files are stored in PostgreSQL. Not a positive number = the worker does not start |
 | `RUN_AS_UID`, `RUN_AS_GID` | User (and group, default: the uid) that `exec` and coding runs run as. Set to `10001` (`agent-run`) by both images. Empty on a worker running as root = `exec` and coding runs are refused. Must be a uid of its own, used by one worker process per pid namespace (one container): its processes are killed whenever no command runs, and at the startup of a coding worker |
 | `CLAUDE_CODE_REPOS` | Comma-separated globs of the repositories a coding worker (`analyze_repo`, `implement_feature`) may clone and push to, e.g. `git@github.com:acme/*,https://github.com/acme/*` (`*` stops at a `/`). Empty = every repository is refused |
 | `CLAUDE_CODE_MODEL` | Model of a coding worker's runs, e.g. `sonnet`. The calling model cannot choose it. Empty = the CLI's default |
@@ -221,6 +223,15 @@ agent/
   pushed. A file of `.git` another path shares (a hard link the run made to
   keep rewriting it) stops the run as tampered. What is pushed is the commit
   the inspection listed, not whatever the branch's ref says by then.
+
+- **Published files** are written by a model, and may be made to attack their
+  reader (an HTML page, an SVG with a script). `/files/{id}` serves one to the
+  members of its session only (404 to anyone else), always as an attachment,
+  with `X-Content-Type-Options: nosniff` and `Content-Security-Policy:
+  sandbox`, and any type a browser could run (HTML, SVG, XML…) as
+  `application/octet-stream`. `exec` reads the files to publish through the
+  workspace's `os.Root`: no absolute path, no link leading out, regular files
+  only.
 
 - **`web_fetch`** fetches a URL the model chose, so it only connects to public
   addresses: loopback, private, link-local (cloud metadata), CGNAT and reserved
