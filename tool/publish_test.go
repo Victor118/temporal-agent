@@ -29,6 +29,15 @@ func (s *fileSaver) SaveFile(_ context.Context, f store.File, content []byte) (s
 	if s.gone {
 		return store.File{}, store.ErrFileSessionGone
 	}
+	// One file per call and name, as the store keeps them.
+	for _, stored := range s.files {
+		if stored.TurnKey == f.TurnKey && stored.CallID == f.CallID && stored.Name == f.Name {
+			if stored.SHA256 != f.SHA256 {
+				return store.File{}, store.ErrFileExists
+			}
+			return stored, nil
+		}
+	}
 	if s.contents == nil {
 		s.contents = map[string][]byte{}
 	}
@@ -92,7 +101,8 @@ func TestPublishFile_Refusals(t *testing.T) {
 		saver               *fileSaver
 		want                string
 	}{
-		{name: "no session turn", file: "a.txt", cc: CallContext{}, want: "no session turn"},
+		// A scheduled task's call: an ID, no session turn.
+		{name: "no session turn", file: "a.txt", cc: CallContext{CallID: "toolu_1"}, want: "no session turn"},
 		{name: "a path", file: "../etc/passwd", cc: turnCall, want: "is a path"},
 		{name: "a backslash", file: `a\b.txt`, cc: turnCall, want: "is a path"},
 		{name: "dot dot", file: "..", cc: turnCall, want: "not a file name"},
@@ -229,7 +239,7 @@ func TestExec_PublishAfterAFailure(t *testing.T) {
 func TestExec_PublishWithoutATurn(t *testing.T) {
 	_, r, saver := setupPublishingExec(t, 0)
 	input, _ := json.Marshal(map[string]any{"command": "echo x > a.txt && echo ran", "publish": []string{"a.txt"}})
-	ctx, _ := callCtx(CallContext{})
+	ctx, _ := callCtx(CallContext{CallID: "toolu_1"})
 	out, err := r.Execute(ctx, "exec", input)
 	if err != nil || !strings.HasSuffix(out, "ran") || !strings.Contains(out, "no session turn") || len(saver.files) != 0 {
 		t.Errorf("result %q, %v, saved %+v", out, err, saver.files)
@@ -292,5 +302,44 @@ func TestExec_PublishWithoutACallContext(t *testing.T) {
 	out, err := r.Execute(context.Background(), "exec", input)
 	if err != nil || !strings.HasSuffix(out, "ran") || !strings.Contains(out, "could not tell which turn") || len(saver.files) != 0 {
 		t.Errorf("result %q, %v, saved %+v", out, err, saver.files)
+	}
+}
+
+// A call publishing a name twice: the same content is one file; other
+// content is refused, never lost behind the first.
+func TestPublishFile_OneNamePerCall(t *testing.T) {
+	saver := &fileSaver{}
+	p := &Publisher{Store: saver}
+	if _, err, _ := publishFile(t, p, turnCall, "a.md", "one"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err, _ := publishFile(t, p, turnCall, "a.md", "one"); err != nil || len(saver.files) != 1 {
+		t.Errorf("same content again: %v, saved %d", err, len(saver.files))
+	}
+	_, err, _ := publishFile(t, p, turnCall, "a.md", "two")
+	if err == nil || !strings.Contains(err.Error(), "a file named a.md was already published by this call with different content: rename one of them") {
+		t.Errorf("other content: %v", err)
+	}
+	// A call with no ID is refused, as one with no context.
+	noID := turnCall
+	noID.CallID = ""
+	if _, err, _ := publishFile(t, p, noID, "b.md", "x"); err == nil || !strings.Contains(err.Error(), "could not tell which turn") {
+		t.Errorf("no call ID: %v", err)
+	}
+}
+
+// Two paths with one base name: the first is published, the second refused
+// before it is read.
+func TestExec_PublishTwoPathsOneName(t *testing.T) {
+	_, r, saver := setupPublishingExec(t, 0)
+	out, err, _ := execPublishing(t, r, "mkdir -p out tmp && echo 1 > out/a.csv && echo 22 > tmp/a.csv && echo ran", "out/a.csv", "tmp/a.csv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(saver.files) != 1 || string(saver.contents[saver.files[0].ID]) != "1\n" {
+		t.Errorf("saved %+v", saver.files)
+	}
+	if !strings.Contains(out, "- tmp/a.csv: a file named a.csv was already published by this call with different content: rename one of them") {
+		t.Errorf("the second path is not refused: %q", out)
 	}
 }

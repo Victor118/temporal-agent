@@ -119,6 +119,12 @@ func recordPublished(ctx context.Context, f FileRef) {
 // scheduled task, for one. Its members could not see it anywhere.
 var errNoTurn = errors.New("Cannot publish: this run belongs to no session turn (a scheduled task, for instance), so there is no session to attach a file to. Put the content in your answer instead.")
 
+// nameTaken refuses a second file of one call under one name, with other
+// content: it would replace the first in the members' eyes.
+func nameTaken(name string) error {
+	return fmt.Errorf("a file named %s was already published by this call with different content: rename one of them", name)
+}
+
 // errNoCall refuses a file from a call given no call context: the workflow
 // read a catalog that did not yet say the tool needs one. The next call
 // reads it again.
@@ -138,6 +144,9 @@ func (p *Publisher) publish(ctx context.Context, name string, content []byte, ma
 	}
 	if call.Turn == nil || call.Turn.SessionID == "" || call.Turn.TurnKey == "" {
 		return store.File{}, errNoTurn
+	}
+	if call.CallID == "" {
+		return store.File{}, errNoCall // the file could not be told from a retry's
 	}
 	name, err := CleanFileName(name)
 	if err != nil {
@@ -161,6 +170,9 @@ func (p *Publisher) publish(ctx context.Context, name string, content []byte, ma
 	}, content)
 	if errors.Is(err, store.ErrFileSessionGone) {
 		return store.File{}, errors.New("Cannot publish: the session was deleted")
+	}
+	if errors.Is(err, store.ErrFileExists) {
+		return store.File{}, nameTaken(name)
 	}
 	if err != nil {
 		return store.File{}, fmt.Errorf("publish %s: %w", name, err)
@@ -323,17 +335,29 @@ func (p *Publisher) publishFromWorkspace(ctx context.Context, ws workspace, path
 		return publishReport(done, failed)
 	}
 	defer root.Close()
+	// A file is published under its base name: out/a.csv and tmp/a.csv
+	// would be one name. The first goes, the others are refused unread.
+	names := map[string]bool{}
 	for _, path := range paths {
 		if ctx.Err() != nil {
 			fail(path, outOfTime)
 			continue
 		}
-		content, err := p.readPublished(root, path)
+		name := filepath.Base(filepath.Clean(path))
+		if names[name] {
+			fail(path, nameTaken(name))
+			continue
+		}
+		names[name] = true
+		content, err := p.readPublished(ctx, root, path)
+		if err != nil && ctx.Err() != nil {
+			err = outOfTime
+		}
 		if err != nil {
 			fail(path, err)
 			continue
 		}
-		f, err := p.publish(ctx, filepath.Base(filepath.Clean(path)), content, p.maxBytes())
+		f, err := p.publish(ctx, name, content, p.maxBytes())
 		if err != nil && ctx.Err() != nil {
 			// Cut short: the store wrote nothing of it (one transaction).
 			err = outOfTime
@@ -351,8 +375,9 @@ func (p *Publisher) publishFromWorkspace(ctx context.Context, ws workspace, path
 // one byte past the largest size: enough to refuse a larger one without
 // reading it whole. An absolute path is refused, not taken relative to the
 // workspace as the file tools do: a command's /tmp/out.csv is not the
-// workspace's tmp/out.csv.
-func (p *Publisher) readPublished(root *os.Root, path string) ([]byte, error) {
+// workspace's tmp/out.csv. The read stops when ctx ends: the budget of
+// publishing covers it.
+func (p *Publisher) readPublished(ctx context.Context, root *os.Root, path string) ([]byte, error) {
 	if filepath.IsAbs(path) {
 		return nil, errors.New("absolute path: give a path relative to the workspace")
 	}
@@ -366,7 +391,7 @@ func (p *Publisher) readPublished(root *os.Root, path string) ([]byte, error) {
 	}
 	defer f.Close()
 	max := p.maxBytes()
-	content, err := io.ReadAll(io.LimitReader(f, max+1))
+	content, err := io.ReadAll(io.LimitReader(ctxReader{ctx, f}, max+1))
 	if err != nil {
 		return nil, err
 	}
@@ -374,6 +399,19 @@ func (p *Publisher) readPublished(root *os.Root, path string) ([]byte, error) {
 		return nil, fmt.Errorf("too large: at most %s may be published", FormatSize(max))
 	}
 	return content, nil
+}
+
+// ctxReader reads r until ctx ends, checked before each read.
+type ctxReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (c ctxReader) Read(b []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return c.r.Read(b)
 }
 
 func publishReport(done, failed []string) string {
