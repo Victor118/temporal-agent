@@ -1,9 +1,6 @@
 package tool
 
-import (
-	"context"
-	"time"
-)
+import "context"
 
 type contextKey string
 
@@ -12,7 +9,6 @@ const (
 	agentIDKey   contextKey = "agent_id"
 	userIDKey    contextKey = "user_id"
 	callKey      contextKey = "call"
-	callTimeKey  contextKey = "call_time"
 )
 
 // WithSessionID injects the session ID into the context.
@@ -60,18 +56,4 @@ func WithCall(ctx context.Context, cc CallContext) context.Context {
 func CallFromContext(ctx context.Context) (CallContext, bool) {
 	cc, ok := ctx.Value(callKey).(CallContext)
 	return cc, ok
-}
-
-// WithCallTime injects when the call was scheduled: the same for every
-// attempt of it, so that a retry dates what it makes as the first attempt
-// did (a rendered document, which it publishes again under the call's ID).
-func WithCallTime(ctx context.Context, t time.Time) context.Context {
-	return context.WithValue(ctx, callTimeKey, t)
-}
-
-// CallTimeFromContext retrieves when the call was scheduled; the zero time
-// when it was not given.
-func CallTimeFromContext(ctx context.Context) time.Time {
-	t, _ := ctx.Value(callTimeKey).(time.Time)
-	return t
 }

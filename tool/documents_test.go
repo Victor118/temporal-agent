@@ -71,9 +71,6 @@ func documentsFor(t *testing.T, pandoc, typst string) (*Documents, *Registry, *f
 	return d, r, saver, shelf
 }
 
-// callAt is turnCall's context, scheduled at a fixed time.
-var callAt = time.Date(2026, 10, 5, 9, 30, 0, 0, time.UTC)
-
 func renderDoc(t *testing.T, r *Registry, tool string, params map[string]any) (string, error) {
 	t.Helper()
 	return renderDocIn(t, r, turnCall, tool, params)
@@ -83,7 +80,7 @@ func renderDocIn(t *testing.T, r *Registry, cc CallContext, tool string, params 
 	t.Helper()
 	input, _ := json.Marshal(params)
 	ctx, _ := callCtx(cc)
-	return r.Execute(WithCallTime(ctx, callAt), tool, input)
+	return r.Execute(ctx, tool, input)
 }
 
 // fakeProgram writes a shell script standing for pandoc or typst, that
@@ -152,6 +149,7 @@ func TestDocuments_Publishes(t *testing.T) {
 	typst := fakeProgram(t, `cat; echo; ls; echo "HOME=$HOME"; echo "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH"; echo "HTTPS_PROXY=$HTTPS_PROXY"; echo "uid=$(id -u)"; echo careful >&2`)
 	d, r, saver, shelf := documentsFor(t, "/nonexistent/pandoc", typst)
 	shelf.shelve("f-logo", "s1", "logo.png", []byte("logo"))
+	start := time.Now().Unix()
 	out, err := renderDoc(t, r, "render_pdf", map[string]any{"source": "#lorem(3)", "format": "typst", "name": "rapport", "files": []string{"f-logo"}})
 	if err != nil {
 		t.Fatal(err)
@@ -160,10 +158,16 @@ func TestDocuments_Publishes(t *testing.T) {
 		t.Fatalf("published %+v", saver.files)
 	}
 	doc := string(saver.contents[saver.files[0].ID])
-	for _, want := range []string{"#lorem(3)\n", "logo.png\n", "HOME=" + d.Dir + "/document-", "SOURCE_DATE_EPOCH=" + strconv.FormatInt(callAt.Unix(), 10), "HTTPS_PROXY=" + noProxy} {
+	for _, want := range []string{"#lorem(3)\n", "logo.png\n", "HOME=" + d.Dir + "/document-", "HTTPS_PROXY=" + noProxy} {
 		if !strings.Contains(doc, want) {
 			t.Errorf("document %q, want %q in it", doc, want)
 		}
+	}
+	// The document is dated when the call is made.
+	_, epoch, _ := strings.Cut(doc, "SOURCE_DATE_EPOCH=")
+	epoch, _, _ = strings.Cut(epoch, "\n")
+	if at, err := strconv.ParseInt(epoch, 10, 64); err != nil || at < start || at > time.Now().Unix() {
+		t.Errorf("SOURCE_DATE_EPOCH=%q, want the call's time", epoch)
 	}
 	if os.Geteuid() == 0 && !strings.Contains(doc, "uid="+strconv.Itoa(int(subproctest.UID))) {
 		t.Errorf("document %q: typst did not run as nobody", doc)
@@ -334,14 +338,6 @@ func TestDocuments_Render(t *testing.T) {
 				t.Fatalf("published %+v: %s", f, out)
 			}
 			c.check(t, saver.contents[f.ID])
-
-			// A retry renders the same bytes, and so publishes nothing more.
-			if _, err := renderDocIn(t, r, cc, c.tool, c.params); err != nil {
-				t.Errorf("retry: %v", err)
-			}
-			if saver.files[len(saver.files)-1].ID != f.ID {
-				t.Errorf("a retry published a second file")
-			}
 		})
 	}
 }

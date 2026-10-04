@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"time"
 
-	"go.temporal.io/sdk/activity"
-
 	"github.com/victor/temporal-agent/provider"
 	"github.com/victor/temporal-agent/tool"
 )
@@ -81,10 +79,6 @@ func (a *ToolActivities) ExecuteTool(ctx context.Context, input ExecuteToolInput
 	}
 	if input.Call != nil {
 		ctx = tool.WithCall(ctx, *input.Call)
-	}
-	// When the workflow scheduled the call: the same for each attempt.
-	if activity.IsActivity(ctx) {
-		ctx = tool.WithCallTime(ctx, activity.GetInfo(ctx).ScheduledTime)
 	}
 	ctx, published := tool.WithPublished(ctx)
 	result, err := a.Registry.Execute(ctx, input.Name, input.Input)

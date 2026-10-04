@@ -431,7 +431,7 @@ func writeNew(path string, content []byte) error {
 func (d *Documents) run(ctx context.Context, dir callDir, input []byte, steps []renderStep) ([]byte, string, error) {
 	ctx, cancel := context.WithTimeout(ctx, d.limit())
 	defer cancel()
-	env := documentEnv(dir.root, CallTimeFromContext(ctx))
+	env := documentEnv(dir.root)
 	var warnings []string
 	for _, step := range steps {
 		max := d.Pub.maxBytes()
@@ -496,13 +496,9 @@ func (d *Documents) limit() time.Duration {
 // documentEnv is pandoc's and typst's environment: the worker's, filtered,
 // with home the call's directory (theirs, in their user's home, could hold
 // what exec left there: a font, pandoc's data), no proxy that leads
-// anywhere, and the call's time as the document's date, so that a retry of
-// the call renders the bytes it rendered first (its file is published again
-// under the call's ID). A call with no time takes the current one.
-func documentEnv(home string, at time.Time) []string {
-	if at.IsZero() {
-		at = time.Now()
-	}
+// anywhere, and the time of the call as the document's date, one date for
+// all of its steps.
+func documentEnv(home string) []string {
 	drop := map[string]bool{"HOME": true, "TMPDIR": true}
 	for _, n := range proxyNames {
 		drop[n] = true
@@ -513,7 +509,7 @@ func documentEnv(home string, at time.Time) []string {
 			env = append(env, kv)
 		}
 	}
-	env = append(env, "HOME="+home, "TMPDIR="+home, "SOURCE_DATE_EPOCH="+strconv.FormatInt(at.Unix(), 10))
+	env = append(env, "HOME="+home, "TMPDIR="+home, "SOURCE_DATE_EPOCH="+strconv.FormatInt(time.Now().Unix(), 10))
 	for _, n := range proxyNames {
 		if !strings.EqualFold(n, "no_proxy") {
 			env = append(env, n+"="+noProxy)
