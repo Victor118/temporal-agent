@@ -1,0 +1,3 @@
+# render_pdf's defaults for a Markdown document, which its own metadata
+# overrides.
+papersize: a4

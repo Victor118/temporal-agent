@@ -1,0 +1,43 @@
+// make_slides' pandoc template: the Markdown, as typst, on touying's
+// metropolis theme. A level-1 heading is a section's slide, a level-2 one a
+// slide, a horizontal rule (---) a new slide under the same title.
+#import "@preview/touying:0.8.0": *
+#import themes.metropolis: *
+
+$if(highlighting-definitions)$
+$highlighting-definitions$
+
+$endif$
+#let divider(..args) = pagebreak()
+#let horizontalRule = pagebreak()
+// touying reads every figure's caption, which typst 0.15 only knows when it
+// is set.
+#let figure(..args) = std.figure(caption: none, ..args)
+
+#show: metropolis-theme.with(
+  aspect-ratio: "16-9",
+  footer: self => self.info.title,
+  config-info(
+$if(title)$
+    title: [$title$],
+$endif$
+$if(subtitle)$
+    subtitle: [$subtitle$],
+$endif$
+$if(author)$
+    author: [$for(author)$$author$$sep$, $endfor$],
+$endif$
+$if(date)$
+    date: [$date$],
+$endif$
+  ),
+)
+#set text(font: ("Open Sans", "Libertinus Serif"), lang: "$if(lang)$$lang$$else$en$endif$")
+#show raw: set text(font: "DejaVu Sans Mono")
+#show std.figure.caption: set text(size: 0.8em)
+
+$if(title)$
+#title-slide()
+
+$endif$
+$body$

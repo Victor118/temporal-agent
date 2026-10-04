@@ -110,6 +110,10 @@ type Config struct {
 	// (tool.DefaultMaxFileBytes when empty). Read by the workers, which
 	// refuse to start on what is not a positive number.
 	FilesMaxBytes string
+	// TypstPackages is where the typst packages a rendered document may
+	// import are (TYPST_PACKAGES; empty = tool.DefaultTypstPackages, where
+	// the image puts them).
+	TypstPackages string
 	// SSH identity a coding worker uses for git: cloning a private repository,
 	// and pushing when the identity allows it. What the worker can do is a
 	// property of the identity it is given, not of the code — the read-only
@@ -201,6 +205,7 @@ func Load() *Config {
 		RunAsUID:            os.Getenv("RUN_AS_UID"),
 		RunAsGID:            os.Getenv("RUN_AS_GID"),
 		FilesMaxBytes:       os.Getenv("FILES_MAX_BYTES"),
+		TypstPackages:       os.Getenv("TYPST_PACKAGES"),
 		ClaudeCodeRepos:     splitList(os.Getenv("CLAUDE_CODE_REPOS")),
 
 		ClaudeCodeModel:             os.Getenv("CLAUDE_CODE_MODEL"),

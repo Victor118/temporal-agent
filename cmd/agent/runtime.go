@@ -327,6 +327,14 @@ func buildRegistry(cfg *config.Config, st store.Store, tc client.Client, runAs *
 	tool.RegisterQueryWorkflowTool(registry, tc)
 	tool.RegisterScheduleTools(registry, tc.ScheduleClient(), st, workflow.ScheduledAgentWorkflow, cfg.WorkflowQueue)
 
+	// The document tools only where pandoc and typst are installed. Each
+	// call renders in a directory of its own under the temporary directory,
+	// never the workspace.
+	if tool.DocumentToolsAvailable() {
+		tool.RegisterDocumentTools(registry, &tool.Documents{Dir: os.TempDir(), Packages: cfg.TypstPackages, RunAs: runAs, Runs: runs, Pub: pub, Files: st})
+		log.Println("Documents: pandoc and typst are installed, render_pdf and make_slides offered")
+	}
+
 	// The coding tools only where the CLI is installed: a worker that cannot
 	// run a coding session has none to offer.
 	if (&claudecode.Runner{}).Available() {
@@ -491,7 +499,7 @@ func parseFileBytes(raw string) (int64, error) {
 // says in the log why those commands will be refused.
 func prepareRunAs(cfg *config.Config, runAs *subproc.Identity) error {
 	if err := subproc.CheckRunAs(runAs); err != nil {
-		log.Printf("ERROR: exec and coding runs are refused on this worker: %v", err)
+		log.Printf("ERROR: exec, documents and coding runs are refused on this worker: %v", err)
 		return nil
 	}
 	if runAs == nil {
@@ -516,7 +524,7 @@ func prepareRunAs(cfg *config.Config, runAs *subproc.Identity) error {
 			}
 		}
 	}
-	log.Printf("exec and coding runs run as uid %d, gid %d", runAs.UID, runAs.GID)
+	log.Printf("exec, documents and coding runs run as uid %d, gid %d", runAs.UID, runAs.GID)
 	return nil
 }
 

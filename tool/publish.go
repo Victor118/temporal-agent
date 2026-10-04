@@ -135,20 +135,11 @@ var errNoCall = errors.New("Cannot publish: the worker could not tell which turn
 // call already published under that name is returned as it was stored
 // (store.FileStore.SaveFile).
 func (p *Publisher) publish(ctx context.Context, name string, content []byte, max int64) (store.File, error) {
-	if p == nil || p.Store == nil {
-		return store.File{}, errors.New("Cannot publish: this worker has no file store")
+	call, err := p.call(ctx)
+	if err != nil {
+		return store.File{}, err
 	}
-	call, ok := CallFromContext(ctx)
-	if !ok {
-		return store.File{}, errNoCall
-	}
-	if call.Turn == nil || call.Turn.SessionID == "" || call.Turn.TurnKey == "" {
-		return store.File{}, errNoTurn
-	}
-	if call.CallID == "" {
-		return store.File{}, errNoCall // the file could not be told from a retry's
-	}
-	name, err := CleanFileName(name)
+	name, err = CleanFileName(name)
 	if err != nil {
 		return store.File{}, err
 	}
@@ -179,6 +170,26 @@ func (p *Publisher) publish(ctx context.Context, name string, content []byte, ma
 	}
 	recordPublished(ctx, FileRef{ID: f.ID, Name: f.Name, ContentType: f.ContentType, Size: f.Size, SHA256: f.SHA256})
 	return f, nil
+}
+
+// call is the context of a call that may publish: one of a session turn
+// (call.Turn), with its ID. Any other is refused, before it makes anything
+// to publish.
+func (p *Publisher) call(ctx context.Context) (CallContext, error) {
+	if p == nil || p.Store == nil {
+		return CallContext{}, errors.New("Cannot publish: this worker has no file store")
+	}
+	call, ok := CallFromContext(ctx)
+	if !ok {
+		return CallContext{}, errNoCall
+	}
+	if call.Turn == nil || call.Turn.SessionID == "" || call.Turn.TurnKey == "" {
+		return CallContext{}, errNoTurn
+	}
+	if call.CallID == "" {
+		return CallContext{}, errNoCall // the file could not be told from a retry's
+	}
+	return call, nil
 }
 
 // published is how the model reads a file it published.

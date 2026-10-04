@@ -21,6 +21,8 @@ agents:
       - ask_user
       - save_user_memory
       - publish_file
+      - render_pdf
+      - make_slides
       - schedule_task
       - list_schedules
       - cancel_schedule
