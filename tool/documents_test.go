@@ -298,11 +298,13 @@ func TestDocuments_Sweep(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	os.Symlink("/etc", filepath.Join(dir, "document-link"))
+	target := t.TempDir()
+	os.Symlink(target, filepath.Join(dir, "document-link"))
 	for _, name := range []string{"document-old", "other"} {
 		os.Chtimes(filepath.Join(dir, name), old, old)
 	}
-	os.Chtimes(filepath.Join(dir, "document-link"), old, old) // the link's target's time: not old
+	// Antedates the target, not the link: the link is not old.
+	os.Chtimes(filepath.Join(dir, "document-link"), old, old)
 	removed, err := (&Documents{Dir: dir}).Sweep()
 	if err != nil || removed != 1 {
 		t.Errorf("removed %d, %v", removed, err)
@@ -315,8 +317,17 @@ func TestDocuments_Sweep(t *testing.T) {
 	if strings.Join(left, " ") != "document-link document-new other" {
 		t.Errorf("left %v", left)
 	}
-	if _, err := os.Stat("/etc/passwd"); err != nil {
-		t.Errorf("/etc: %v", err)
+	if _, err := os.Stat(target); err != nil {
+		t.Errorf("the link's target: %v", err)
+	}
+}
+
+// Documents that RegisterDocumentTools did not set up refuse at once,
+// rather than wait for a slot that never comes.
+func TestDocuments_NoSlots(t *testing.T) {
+	start := time.Now()
+	if _, err := (&Documents{}).acquire(context.Background()); err == nil || !strings.Contains(err.Error(), "RegisterDocumentTools") || time.Since(start) > time.Second {
+		t.Errorf("error %v after %s", err, time.Since(start))
 	}
 }
 

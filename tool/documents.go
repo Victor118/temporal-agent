@@ -355,6 +355,11 @@ func (d *Documents) render(ctx context.Context, source, name, ext string, fileID
 // most renderWait: past it, the call is refused, and the model may try
 // again later.
 func (d *Documents) acquire(ctx context.Context) (release func(), err error) {
+	if d.slots == nil {
+		// A send on a nil channel would wait for ever: past renderWait,
+		// every call would be refused as busy.
+		return nil, errors.New("documents: no rendering slots (set up by RegisterDocumentTools)")
+	}
 	wait := renderWait
 	if d.wait > 0 {
 		wait = d.wait
