@@ -238,6 +238,32 @@ session, toujours en pièce jointe. Un fork n'hérite pas des fichiers du
 parent : ses membres n'y accèdent que s'ils sont membres du parent. Supprimer
 la session supprime ses fichiers.
 
+### Documents
+
+`render_pdf(source, format, name, files?)` rend un PDF depuis du Markdown
+(pandoc vers typst, puis typst) ou du typst ; `make_slides(markdown, name,
+format, files?)` des diapositives en pptx modifiable (pandoc) ou en PDF 16:9
+(pandoc vers typst, sur le thème metropolis du paquet touying). `#` = une
+section, `##` = une diapositive, `---` = une diapositive de plus sous le même
+titre, `::: notes` = notes de l'orateur (gardées en pptx, absentes du PDF).
+Le document est publié comme par `publish_file`, dans la même activity ;
+`files` = des fichiers déjà publiés dans la même session (une autre session =
+un ID inconnu), copiés sous leur nom à côté de la source.
+
+Les deux outils vivent sur le worker principal (pandoc et typst sont dans son
+image) et ne sont enregistrés que là où les deux binaires sont installés :
+`worker.yaml` peut les déplacer sur une autre queue sans code. Chaque appel a
+son dossier sous le dossier temporaire du worker (jamais le workspace), au
+worker, effacé ensuite ; pandoc et typst tournent sous `RUN_AS_UID` par
+`subproc`, lisent la source sur stdin et écrivent le document sur stdout
+(borné par `FILES_MAX_BYTES`) : ils n'écrivent rien sur disque. pandoc en
+`--sandbox` (un filtre Lua met les images de l'appel dans sa médiathèque pour
+le pptx), tas borné ; typst en `--root` sur le dossier, paquets de l'image
+seulement (chemin et cache en lecture seule, proxy `127.0.0.1:0` : aucun
+téléchargement, même tenté), mémoire bornée. 60 s par rendu. La date du
+document est l'heure à laquelle l'appel a été planifié (`SOURCE_DATE_EPOCH`) :
+un appel rejoué rend les mêmes octets et retrouve son fichier.
+
 ### Workflow déterministe : Claude Code
 
 Outil `claude_code {repo, base, task, mode: dev|debug, title}` →
@@ -289,6 +315,11 @@ diagnostic.
   pas d'aperçu dans la page (toujours téléchargés) ; rien n'est envoyé sur
   Telegram. Les runs Claude Code ne publient pas encore (pas de dossier
   `outputs/`, pas de pont MCP vers `publish_file`).
+- **Documents** : `render_pdf` et `make_slides` sur le worker principal ; un
+  seul thème de diapositives (metropolis), pas de modèle pptx propre (celui de
+  pandoc), pas de HTML vers PDF ni de LaTeX. Seuls les paquets typst de
+  l'image (touying 0.8.0 et sa dépendance) s'importent ; en ajouter un =
+  l'image. Pas encore d'aperçu des pages dans le fil.
 - **Comptes** : connexion par email et mot de passe (argon2id), sessions de
   connexion en base. Pas encore d'envoi d'emails (réinitialisation du mot de
   passe par un admin seulement).

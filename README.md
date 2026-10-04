@@ -45,6 +45,7 @@ happens to answer has locally.
 - **Real-time streaming** — SSE (Server-Sent Events) hub for live updates to connected clients
 - **Built-in tools** — File system operations, web access, shell execution, user interaction, workflow queries, scheduling
 - **Published files** — An agent hands the members a file (`publish_file` for a text it writes, `exec`'s `publish` for a file a command made), attached to its answer and downloaded by the session's members only
+- **Documents** — `render_pdf` (Markdown or typst to PDF) and `make_slides` (Markdown to an editable pptx or a PDF deck), rendered by pandoc and typst on the main worker and published like any file
 - **Remote MCP servers** — A worker declares MCP servers in its `worker.yaml` (Streamable HTTP, or the older HTTP+SSE) and publishes their tools; a server that is down is retried in the background, and tools it adds or removes are picked up within 30 s
 
 ## Architecture
@@ -114,6 +115,10 @@ docker compose exec agent ./agent dev
 
 The API will be available at `http://localhost:8888`.
 
+The agent image holds pandoc, typst and the typst packages the document tools
+use (pinned by version and SHA256 in the `Dockerfile`): after a change there,
+`docker compose build agent` before restarting it.
+
 Create the first account, an admin, before logging in:
 
 ```bash
@@ -149,7 +154,8 @@ A worker that stops ends its coding runs first, then gives the tasks under way 3
 | `WORKER_CONFIG` | Worker config: tool queue, exposed tools, MCP servers (default `./worker.yaml`, see `worker.example.yaml`) |
 | `MCP_SERVERS` | JSON array of MCP servers (`name`, `url`, `api_key`, `transport`), used only without a worker config |
 | `FILES_MAX_BYTES` | Worker: largest file `exec` may publish (its `publish` parameter), in bytes (default `20971520`, 20 MiB); `publish_file`, for a short text the model writes, has its own bound (1 MiB). Files are stored in PostgreSQL. Not a positive number = the worker does not start |
-| `RUN_AS_UID`, `RUN_AS_GID` | User (and group, default: the uid) that `exec` and coding runs run as. Set to `10001` (`agent-run`) by both images. Empty on a worker running as root = `exec` and coding runs are refused. Must be a uid of its own, used by one worker process per pid namespace (one container): its processes are killed whenever no command runs, and at the startup of a coding worker |
+| `TYPST_PACKAGES` | Worker: directory of the typst packages a rendered document may import (default `/usr/local/share/typst/packages`, where the agent image puts touying). Typst never downloads one |
+| `RUN_AS_UID`, `RUN_AS_GID` | User (and group, default: the uid) that `exec`, the document tools and coding runs run as. Set to `10001` (`agent-run`) by both images. Empty on a worker running as root = `exec`, documents and coding runs are refused. Must be a uid of its own, used by one worker process per pid namespace (one container): its processes are killed whenever no command runs, and at the startup of a coding worker |
 | `CLAUDE_CODE_REPOS` | Comma-separated globs of the repositories a coding worker (`analyze_repo`, `implement_feature`) may clone and push to, e.g. `git@github.com:acme/*,https://github.com/acme/*` (`*` stops at a `/`). Empty = every repository is refused |
 | `CLAUDE_CODE_MODEL` | Model of a coding worker's runs, e.g. `sonnet`. The calling model cannot choose it. Empty = the CLI's default |
 | `CLAUDE_CODE_MAX_BUDGET_USD` | Spending cap of each coding run, in US dollars; `implement_feature`'s `max_budget_usd` can only lower it. Empty = no cap; not a positive number = the worker does not start |
@@ -182,7 +188,7 @@ agent/
 ├── skill/          # Skill loading (Git, filesystem)
 ├── sse/            # Server-Sent Events hub
 ├── store/          # PostgreSQL persistence (messages, memory, task logs)
-├── tool/           # Tool implementations (fs, web, exec, spawn, schedule)
+├── tool/           # Tool implementations (fs, web, exec, documents, schedule)
 ├── web/            # Web UI: chat (web/chat) and back-office (web/admin)
 └── workflow/       # Temporal workflows (participant, agent, scheduled)
 ```
@@ -232,6 +238,18 @@ agent/
   `application/octet-stream`. `exec` reads the files to publish through the
   workspace's `os.Root`: no absolute path, no link leading out, regular files
   only.
+
+- **Documents** (`render_pdf`, `make_slides`) run pandoc and typst on a
+  source the model wrote, as `RUN_AS_UID`, through the same `subproc` path as
+  `exec`. Each call has a directory of its own, the worker's (the files it
+  uses, copied from the store; the run's user cannot change it), removed
+  afterwards; the programs read their input on stdin and write the document on
+  stdout, bounded by `FILES_MAX_BYTES`, in 60 s at most. pandoc runs with
+  `--sandbox` (it reads no file but those on its command line) and a bounded
+  heap; typst with `--root` on the directory, the image's packages as its
+  package path and cache, an unreachable proxy (`127.0.0.1:0`: a package it
+  lacks is never even requested) and a bounded address space. A source can
+  therefore read nothing outside its own files, and reach no network.
 
 - **`web_fetch`** fetches a URL the model chose, so it only connects to public
   addresses: loopback, private, link-local (cloud metadata), CGNAT and reserved
