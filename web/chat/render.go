@@ -332,6 +332,11 @@ func renderVersioned(name string, p *Page) ([][]byte, string, error) {
 // version already (have, from VersionHeader), it answers 204 No Content:
 // htmx swaps nothing, and nothing on the page moves.
 func RenderFragment(w http.ResponseWriter, name string, p *Page, have string) {
+	if err := prerender(p, nested[name]); err != nil {
+		log.Printf("chat: render %s: %v", name, err)
+		http.Error(w, "Erreur de rendu", http.StatusInternalServerError)
+		return
+	}
 	parts, version, err := renderVersioned(name, p)
 	if err != nil {
 		log.Printf("chat: render %s: %v", name, err)
@@ -352,28 +357,47 @@ func RenderFragment(w http.ResponseWriter, name string, p *Page, have string) {
 // thread, the tree, a fork's report section, the Agents panel.
 var reloaded = []string{"thread", "tree-items", "report", "agents"}
 
-// RenderPage writes a whole page, its fragments carrying the versions their
-// reloads would get: the first reload of an unchanged one swaps nothing.
-// Each fragment is rendered once, as its reload renders it; the page shows
-// its first part (the thread without the composer, which the page has in
-// its place).
-func RenderPage(w http.ResponseWriter, name string, p *Page) {
+// nested are the fragments a fragment holds that reload on their own: the
+// rail, swapped whole after an invitation, holds the report section and the
+// Agents panel. It shows them with their versions, so that their next
+// reloads, unchanged, are 204s.
+var nested = map[string][]string{"rail": {"report", "agents"}}
+
+// prerender renders the fragments names of p, each as its reload renders
+// it, to learn its version: the page or fragment holding them shows these
+// bytes (Rendered). A fragment p has no place for is skipped.
+func prerender(p *Page, names []string) error {
 	fragment := p.Fragment
-	p.Rendered = map[string]template.HTML{}
-	for _, f := range reloaded {
+	defer func() { p.Fragment = fragment }()
+	if p.Rendered == nil {
+		p.Rendered = map[string]template.HTML{}
+	}
+	for _, f := range names {
 		if f == "thread" && (p.Node == nil || p.View == "map") || f == "report" && p.Report == nil || f == "agents" && p.Node == nil {
 			continue
 		}
 		p.Fragment = f == "thread" // as its reload renders it, the composer along
 		parts, _, err := renderVersioned(f, p)
 		if err != nil {
-			log.Printf("chat: render %s: %v", f, err)
-			http.Error(w, "Erreur de rendu", http.StatusInternalServerError)
-			return
+			return fmt.Errorf("render %s: %w", f, err)
 		}
 		p.Rendered[f] = template.HTML(parts[0]) // our own template's output, escaped
 	}
-	p.Fragment = fragment
+	return nil
+}
+
+// RenderPage writes a whole page, its fragments carrying the versions their
+// reloads would get: the first reload of an unchanged one swaps nothing.
+// Each fragment is rendered once, as its reload renders it; the page shows
+// its first part (the thread without the composer, which the page has in
+// its place).
+func RenderPage(w http.ResponseWriter, name string, p *Page) {
+	p.Rendered = map[string]template.HTML{}
+	if err := prerender(p, reloaded); err != nil {
+		log.Printf("chat: %v", err)
+		http.Error(w, "Erreur de rendu", http.StatusInternalServerError)
+		return
+	}
 	Render(w, name, p)
 }
 

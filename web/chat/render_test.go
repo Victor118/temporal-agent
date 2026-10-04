@@ -417,6 +417,33 @@ func TestRender_FragmentVersions(t *testing.T) {
 	}
 }
 
+// The rail, swapped whole (after an invitation), holds the report section
+// and the Agents panel as their reloads render them: their next reloads,
+// unchanged, are 204s.
+func TestRender_RailKeepsItsFragmentsVersions(t *testing.T) {
+	p := testPage("thread")
+	p.Report = &ReportView{ReportState: session.ReportState{ParentSessionID: "root"}}
+	rail := httptest.NewRecorder()
+	RenderFragment(rail, "rail", p, "")
+	if rail.Code != 200 {
+		t.Fatalf("rail: %d", rail.Code)
+	}
+	for _, name := range []string{"report", "agents"} {
+		v := p.Versions[name]
+		if v == "" || !strings.Contains(rail.Body.String(), `data-version="`+v+`"`) {
+			t.Errorf("%s: version %q not in the rail", name, v)
+			continue
+		}
+		frag := testPage("thread")
+		frag.Report = p.Report
+		w := httptest.NewRecorder()
+		RenderFragment(w, name, frag, v)
+		if w.Code != 204 {
+			t.Errorf("%s reloaded after the rail: %d", name, w.Code)
+		}
+	}
+}
+
 // The working line names the agents at work, several at once, and what
 // each waits for, escaped.
 func TestRender_WorkingLineNamesTheAgents(t *testing.T) {
