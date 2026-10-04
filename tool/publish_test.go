@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -18,14 +19,17 @@ import (
 	"github.com/victor/temporal-agent/subproc/subproctest"
 )
 
-// fileSaver keeps what is published in memory.
+// fileSaver keeps what is published in memory; safe for concurrent calls.
 type fileSaver struct {
+	mu       sync.Mutex
 	files    []store.File
 	contents map[string][]byte
 	gone     bool // the session was deleted
 }
 
 func (s *fileSaver) SaveFile(_ context.Context, f store.File, content []byte) (store.File, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.gone {
 		return store.File{}, store.ErrFileSessionGone
 	}

@@ -32,6 +32,20 @@ const (
 	// documentFilesBudget bounds the reading of the files a document uses
 	// from the store.
 	documentFilesBudget = 30 * time.Second
+	// maxConcurrentRenders bounds the renderings one worker runs at once:
+	// they share the machine with the workflows the main worker serves.
+	maxConcurrentRenders = 2
+	// renderWait bounds how long a call waits for a rendering to end
+	// before it is refused as busy: renderings take a second or two, so a
+	// burst is absorbed; a queue that does not move is said.
+	renderWait = 30 * time.Second
+	// typstJobs bounds the threads typst compiles with.
+	typstJobs = 2
+	// documentTimeout bounds one call: a slot, the files, the rendering,
+	// publishing, and the margin to return.
+	documentTimeout = renderWait + documentFilesBudget + renderTimeout + publishBudget + TimeoutMargin
+	// documentDirPrefix names a call's directory under Documents.Dir.
+	documentDirPrefix = "document-"
 	// maxDocumentFiles bounds the files one document uses.
 	maxDocumentFiles = 20
 	// maxTypstSource bounds the typst pandoc writes from a Markdown source
@@ -99,8 +113,12 @@ type Documents struct {
 
 	// pandoc and typst are the binaries' paths (DocumentToolsAvailable).
 	pandoc, typst string
-	// timeout replaces renderTimeout, shorter, in tests.
-	timeout time.Duration
+	// slots bounds the renderings under way (maxConcurrentRenders);
+	// made by RegisterDocumentTools, shared by both tools.
+	slots chan struct{}
+	// timeout and wait replace renderTimeout and renderWait, shorter, in
+	// tests.
+	timeout, wait time.Duration
 }
 
 // DocumentToolsAvailable reports whether pandoc and typst are installed: a
@@ -120,6 +138,9 @@ type documentFile struct {
 // RegisterDocumentTools registers render_pdf and make_slides, which render
 // a document with d and publish it to the session.
 func RegisterDocumentTools(r *Registry, d *Documents) {
+	if d.slots == nil {
+		d.slots = make(chan struct{}, maxConcurrentRenders)
+	}
 	if d.pandoc == "" {
 		d.pandoc, _ = exec.LookPath("pandoc")
 	}
@@ -127,7 +148,7 @@ func RegisterDocumentTools(r *Registry, d *Documents) {
 		d.typst, _ = exec.LookPath("typst")
 	}
 	filesParam := `"files": {"type": "array", "items": {"type": "string"}, "description": "IDs of files already published in this session (at most ` + strconv.Itoa(maxDocumentFiles) + `, together within the worker's size limit) that the document uses, such as images: each is put next to the document under its published name, which the source refers to as is (image(\"chart.png\"), ![](chart.png))."}`
-	timeout := documentFilesBudget + renderTimeout + publishBudget + TimeoutMargin
+	timeout := documentTimeout
 
 	r.Register(&Tool{
 		Name: "render_pdf",
@@ -244,7 +265,7 @@ func (d *Documents) pandocStep(format string, args ...string) renderStep {
 func (d *Documents) typstStep() renderStep {
 	return renderStep{program: "typst", path: "/bin/sh", args: func(c callDir) []string {
 		return []string{"-c", `ulimit -c 0 && ulimit -v "$1" && shift && exec "$@"`, "sh", strconv.Itoa(typstMemory),
-			d.typst, "compile", "--root", c.src, "--package-path", d.packages(), "--package-cache-path", d.packages(), "-", "-"}
+			d.typst, "compile", "--jobs", strconv.Itoa(typstJobs), "--root", c.src, "--package-path", d.packages(), "--package-cache-path", d.packages(), "-", "-"}
 	}}
 }
 
@@ -294,6 +315,14 @@ func (d *Documents) render(ctx context.Context, source, name, ext string, fileID
 		return "", err
 	}
 
+	// A slot before the files are read: a call waiting for one holds
+	// none of them in memory.
+	release, err := d.acquire(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer release()
+
 	files, err := d.loadFiles(ctx, call.Turn.SessionID, fileIDs)
 	if err != nil {
 		return "", err
@@ -320,6 +349,26 @@ func (d *Documents) render(ctx context.Context, source, name, ext string, fileID
 		result += "\n\nWarnings:\n" + warnings
 	}
 	return result, nil
+}
+
+// acquire takes one of the worker's rendering slots, waiting for one at
+// most renderWait: past it, the call is refused, and the model may try
+// again later.
+func (d *Documents) acquire(ctx context.Context) (release func(), err error) {
+	wait := renderWait
+	if d.wait > 0 {
+		wait = d.wait
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case d.slots <- struct{}{}:
+		return func() { <-d.slots }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-timer.C:
+		return nil, fmt.Errorf("this worker is busy rendering other documents (at most %d at a time): try again in a moment", maxConcurrentRenders)
+	}
 }
 
 // loadFiles reads the files of ids from the store: each one published in
@@ -373,7 +422,7 @@ func (d *Documents) loadFiles(ctx context.Context, sessionID string, ids []strin
 // makeDir makes the call's directory, with the files in src and the assets
 // in data: the worker's, which RunAs reads and cannot change.
 func (d *Documents) makeDir(files []documentFile) (callDir, error) {
-	root, err := os.MkdirTemp(d.Dir, "document-")
+	root, err := os.MkdirTemp(d.Dir, documentDirPrefix+"*")
 	if err != nil {
 		return callDir{}, err
 	}
@@ -412,6 +461,34 @@ func (d *Documents) makeDir(files []documentFile) (callDir, error) {
 	return dir, nil
 }
 
+// Sweep removes the directories of calls under Dir that a worker killed
+// mid-call left there: those older than a call may last (documentTimeout),
+// so that another worker process rendering in the same Dir keeps its own.
+// A link is removed, never followed.
+func (d *Documents) Sweep() (removed int, err error) {
+	entries, err := os.ReadDir(d.Dir)
+	if err != nil {
+		return 0, err
+	}
+	var errs []error
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), documentDirPrefix) {
+			continue
+		}
+		path := filepath.Join(d.Dir, e.Name())
+		fi, err := os.Lstat(path)
+		if err != nil || time.Since(fi.ModTime()) < documentTimeout {
+			continue
+		}
+		if err := os.RemoveAll(path); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		removed++
+	}
+	return removed, errors.Join(errs...)
+}
+
 // writeNew writes a file that must not exist yet, readable by all.
 func writeNew(path string, content []byte) error {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
@@ -429,7 +506,7 @@ func writeNew(path string, content []byte) error {
 // the document and what the programs said along the way. An error is the
 // model's to read: the end of what the failed program said.
 func (d *Documents) run(ctx context.Context, dir callDir, input []byte, steps []renderStep) ([]byte, string, error) {
-	ctx, cancel := context.WithTimeout(ctx, d.limit())
+	renderCtx, cancel := context.WithTimeout(ctx, d.limit())
 	defer cancel()
 	env := documentEnv(dir.root)
 	var warnings []string
@@ -438,8 +515,15 @@ func (d *Documents) run(ctx context.Context, dir callDir, input []byte, steps []
 		if step.intermediate {
 			max = maxTypstSource
 		}
-		out, said, err := d.runStep(ctx, dir, env, step, input, max)
-		if err != nil {
+		out, said, err := d.runStep(renderCtx, dir, env, step, input, max)
+		switch {
+		case err != nil && ctx.Err() != nil:
+			// The call itself ended (cancelled, its worker stopping):
+			// the program was killed for it, and said nothing of use.
+			return nil, "", ctx.Err()
+		case err != nil && renderCtx.Err() != nil:
+			return nil, "", fmt.Errorf("the rendering took longer than %s, the most it may take: make the document simpler, or split it", d.limit())
+		case err != nil:
 			return nil, "", err
 		}
 		if said != "" {
@@ -469,8 +553,8 @@ func (d *Documents) runStep(ctx context.Context, dir callDir, env []string, step
 
 	said := strings.TrimSpace(stderr.String())
 	switch {
-	case ctx.Err() == context.DeadlineExceeded:
-		return nil, "", fmt.Errorf("the rendering took longer than %s, the most it may take: make the document simpler, or split it", d.limit())
+	case err != nil && ctx.Err() != nil:
+		return nil, "", ctx.Err() // run says why
 	case stdout.exceeded:
 		if step.intermediate {
 			return nil, "", fmt.Errorf("%s wrote more than %s from the source: make the document simpler", step.program, FormatSize(max))
@@ -497,7 +581,9 @@ func (d *Documents) limit() time.Duration {
 // with home the call's directory (theirs, in their user's home, could hold
 // what exec left there: a font, pandoc's data), no proxy that leads
 // anywhere, and the time of the call as the document's date, one date for
-// all of its steps.
+// all of its steps. TMPDIR is the call's directory too, which they cannot
+// write: neither writes a temporary file, and one that tried would fail
+// rather than leave it in the shared /tmp.
 func documentEnv(home string) []string {
 	drop := map[string]bool{"HOME": true, "TMPDIR": true}
 	for _, n := range proxyNames {

@@ -11,6 +11,7 @@ import (
 	"image/color"
 	"image/draw"
 	"image/png"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -221,6 +222,104 @@ func TestDocuments_Bounds(t *testing.T) {
 	})
 }
 
+// A worker renders at most maxConcurrentRenders documents at once; a call
+// waits for a slot, and past the wait is refused as busy, rendering nothing.
+func TestDocuments_Concurrency(t *testing.T) {
+	id := subproctest.Identity(t)
+	marks := subproctest.Dir(t, id)
+	// Counts the renderings under way, keeps the most it saw.
+	pandoc := fakeProgram(t, `d=`+marks+`; touch $d/run.$$; ls $d | grep -c '^run' >> $d/seen; sleep 0.3; rm $d/run.$$; echo deck`)
+	d, r, saver, _ := documentsFor(t, pandoc, "/nonexistent/typst")
+
+	const calls = 5
+	errs := make(chan error, calls)
+	for i := range calls {
+		go func() {
+			cc := turnCall
+			cc.CallID = fmt.Sprint("toolu_", i)
+			_, err := renderDocIn(t, r, cc, "make_slides", map[string]any{"markdown": "## A", "format": "pptx", "name": "a"})
+			errs <- err
+		}()
+	}
+	for range calls {
+		if err := <-errs; err != nil {
+			t.Error(err)
+		}
+	}
+	seen, _ := os.ReadFile(filepath.Join(marks, "seen"))
+	for _, n := range strings.Fields(string(seen)) {
+		if n != "1" && n != "2" {
+			t.Errorf("%s renderings at once, want at most %d (%q)", n, maxConcurrentRenders, seen)
+		}
+	}
+	if !strings.Contains(string(seen), "2") {
+		t.Errorf("never two renderings at once (%q)", seen)
+	}
+	if len(saver.files) != calls {
+		t.Errorf("published %d files", len(saver.files))
+	}
+
+	// Both slots taken for longer than a call waits: refused.
+	d.wait = 50 * time.Millisecond
+	release1, _ := d.acquire(context.Background())
+	release2, _ := d.acquire(context.Background())
+	_, err := renderDoc(t, r, "make_slides", map[string]any{"markdown": "## A", "format": "pptx", "name": "b"})
+	if err == nil || !strings.Contains(err.Error(), "busy") || len(saver.files) != calls {
+		t.Errorf("error %v, published %d", err, len(saver.files))
+	}
+	release1()
+	release2()
+}
+
+// A call that ends (cancelled, its worker stopping) says so, not that the
+// program it killed failed.
+func TestDocuments_Cancelled(t *testing.T) {
+	d, r, saver, _ := documentsFor(t, fakeProgram(t, "sleep 30"), "/nonexistent/typst")
+	input, _ := json.Marshal(map[string]any{"markdown": "## A", "format": "pptx", "name": "a"})
+	ctx, _ := callCtx(turnCall)
+	ctx, cancel := context.WithCancel(ctx)
+	time.AfterFunc(200*time.Millisecond, cancel)
+	_, err := r.Execute(ctx, "make_slides", input)
+	if !errors.Is(err, context.Canceled) || len(saver.files) != 0 {
+		t.Errorf("error %v, published %+v", err, saver.files)
+	}
+	if left, _ := os.ReadDir(d.Dir); len(left) != 0 {
+		t.Errorf("left behind: %v", left)
+	}
+}
+
+// At startup, what calls left when their worker was killed goes; a
+// directory a call may still be using stays, and so does anything else.
+func TestDocuments_Sweep(t *testing.T) {
+	dir := t.TempDir()
+	old := time.Now().Add(-2 * documentTimeout)
+	for _, name := range []string{"document-old", "document-new", "other"} {
+		if err := os.MkdirAll(filepath.Join(dir, name, "src"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	os.Symlink("/etc", filepath.Join(dir, "document-link"))
+	for _, name := range []string{"document-old", "other"} {
+		os.Chtimes(filepath.Join(dir, name), old, old)
+	}
+	os.Chtimes(filepath.Join(dir, "document-link"), old, old) // the link's target's time: not old
+	removed, err := (&Documents{Dir: dir}).Sweep()
+	if err != nil || removed != 1 {
+		t.Errorf("removed %d, %v", removed, err)
+	}
+	var left []string
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		left = append(left, e.Name())
+	}
+	if strings.Join(left, " ") != "document-link document-new other" {
+		t.Errorf("left %v", left)
+	}
+	if _, err := os.Stat("/etc/passwd"); err != nil {
+		t.Errorf("/etc: %v", err)
+	}
+}
+
 // A worker running as root without an identity renders nothing: pandoc and
 // typst would run as root.
 func TestDocuments_RefusesToRunAsRoot(t *testing.T) {
@@ -349,34 +448,72 @@ func isPDF(t *testing.T, doc []byte) {
 	}
 }
 
+// docText is what a document holds as text: a pptx's entries unzipped.
+func docText(t *testing.T, doc []byte) string {
+	t.Helper()
+	z, err := zip.NewReader(bytes.NewReader(doc), int64(len(doc)))
+	if err != nil {
+		return string(doc)
+	}
+	var b strings.Builder
+	for _, f := range z.File {
+		rc, err := f.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(&b, rc)
+		rc.Close()
+	}
+	return b.String()
+}
+
 // A document reads nothing but its source and its files: no file outside
-// its directory, no URL, and typst downloads no package — it does not even
-// try (the proxy is refused before any request leaves).
+// its directory (the assets pandoc reads next to it included), no URL, and
+// typst downloads no package — it does not even try (the proxy is refused
+// before any request leaves).
 func TestDocuments_Confined(t *testing.T) {
-	r, saver, _ := realDocuments(t)
-	for _, c := range []struct {
+	r, saver, shelf := realDocuments(t)
+	shelf.shelve("f-chart", "s1", "chart.png", pngImage(t))
+	for i, c := range []struct {
 		name, tool string
 		params     map[string]any
-		want       []string
+		want       []string // nil: may render, but must hold nothing it read
 	}{
 		{"typst reads /etc/passwd", "render_pdf", map[string]any{"format": "typst", "source": `#read("/etc/passwd")`}, []string{"typst could not render", "file not found"}},
 		{"typst climbs out", "render_pdf", map[string]any{"format": "typst", "source": `#read("../../../../etc/passwd")`}, []string{"escape the project root"}},
+		{"typst reads the assets", "render_pdf", map[string]any{"format": "typst", "source": `#read("../data/filter.lua")`}, []string{"escape the project root"}},
 		{"raw typst in Markdown", "render_pdf", map[string]any{"format": "markdown", "source": "```{=typst}\n#read(\"/etc/passwd\")\n```\n"}, []string{"file not found"}},
 		{"a Markdown image out of the directory", "render_pdf", map[string]any{"format": "markdown", "source": "![x](../../../../etc/hostname)\n"}, []string{"escape the project root"}},
 		{"pandoc reads /etc/passwd", "make_slides", map[string]any{"format": "pptx", "markdown": "## A\n\n![x](/etc/passwd)\n"}, []string{"pandoc could not render", "/etc/passwd' not found"}},
-		{"pandoc include", "make_slides", map[string]any{"format": "pptx", "markdown": "## A\n\n\\input{/etc/passwd}\n"}, nil},
+		{"pandoc include", "make_slides", map[string]any{"format": "pptx", "markdown": "## A\n\n\\input{/etc/passwd}\n\n\\include{/etc/passwd}\n"}, nil},
+		// The filter reads a bare name only; anything else is pandoc's,
+		// which --sandbox refuses.
+		{"the filter and ..", "make_slides", map[string]any{"format": "pptx", "markdown": "## A\n\n![x](..)\n"}, []string{"pandoc could not render", "not found"}},
+		{"the filter and ../chart.png", "make_slides", map[string]any{"format": "pptx", "markdown": "## A\n\n![x](../chart.png)\n"}, []string{"pandoc could not render", "not found"}},
+		{"the filter and ../src/chart.png", "make_slides", map[string]any{"format": "pptx", "markdown": "## A\n\n![x](../src/chart.png)\n"}, []string{"pandoc could not render", "not found"}},
+		{"the filter and the assets", "make_slides", map[string]any{"format": "pptx", "markdown": "## A\n\n![x](../data/filter.lua)\n\n![y](data/filter.lua)\n"}, []string{"pandoc could not render", "not found"}},
 		{"pandoc fetches a URL", "make_slides", map[string]any{"format": "pptx", "markdown": "## A\n\n![x](https://example.com/x.png)\n"}, []string{"pandoc could not render", "not found"}},
 		{"typst downloads a package", "render_pdf", map[string]any{"format": "typst", "source": `#import "@preview/cetz:0.4.2"`}, []string{"failed to download package", "Connection refused"}},
+		{"typst imports a local package", "render_pdf", map[string]any{"format": "typst", "source": `#import "@local/secret:0.1.0"`}, []string{"typst could not render", "package not found"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			c.params["name"] = "a"
-			out, err := renderDoc(t, r, c.tool, c.params)
+			c.params["files"] = []string{"f-chart"}
+			cc := turnCall
+			cc.CallID = fmt.Sprint("toolu_", i)
+			published := len(saver.files)
+			out, err := renderDocIn(t, r, cc, c.tool, c.params)
+			if err != nil && (strings.Contains(err.Error(), "root:x:0:0") || strings.Contains(err.Error(), "local function local_name")) {
+				t.Errorf("the error holds what it read: %v", err)
+			}
 			if c.want == nil {
-				// pandoc leaves what it cannot read out: it must not be in
-				// the document.
+				// pandoc leaves out what it cannot read: rendered or not,
+				// nothing of /etc/passwd.
 				if err == nil {
-					doc := saver.contents[saver.files[len(saver.files)-1].ID]
-					if bytes.Contains(doc, []byte("root:")) {
+					if len(saver.files) != published+1 {
+						t.Fatalf("rendered, but published %d files", len(saver.files)-published)
+					}
+					if text := docText(t, saver.contents[saver.files[published].ID]); strings.Contains(text, "root:x:0:0") {
 						t.Errorf("the document holds /etc/passwd")
 					}
 				}
@@ -390,14 +527,41 @@ func TestDocuments_Confined(t *testing.T) {
 					t.Errorf("error %v, want %q", err, want)
 				}
 			}
-			if strings.Contains(err.Error(), "downloading") || strings.Contains(err.Error(), "root:x:0:0") {
-				t.Errorf("error %v", err)
+			if strings.Contains(err.Error(), "downloading") {
+				t.Errorf("typst tried a download: %v", err)
+			}
+			if len(saver.files) != published {
+				t.Errorf("published %+v", saver.files[published:])
 			}
 		})
 	}
-	for _, f := range saver.files {
-		if bytes.Contains(saver.contents[f.ID], []byte("root:x:0:0")) {
-			t.Errorf("%s holds /etc/passwd", f.Name)
+}
+
+// A file of the session named as an asset is the document's, beside the
+// assets: it neither replaces the template, the filter or the metadata,
+// nor is read as one.
+func TestDocuments_FilesNamedAsAssets(t *testing.T) {
+	r, saver, shelf := realDocuments(t)
+	shelf.shelve("f-tpl", "s1", "slides.typst", []byte(`#panic("the call's template")`))
+	shelf.shelve("f-lua", "s1", "filter.lua", []byte(`error("the call's filter")`))
+	shelf.shelve("f-meta", "s1", "metadata.yaml", []byte(": not : yaml : ["))
+	files := []string{"f-tpl", "f-lua", "f-meta"}
+	for i, c := range []struct {
+		tool   string
+		params map[string]any
+	}{
+		{"make_slides", map[string]any{"format": "pdf", "markdown": "## A\n\nB\n"}},
+		{"make_slides", map[string]any{"format": "pptx", "markdown": "## A\n\nB\n"}},
+		{"render_pdf", map[string]any{"format": "markdown", "source": "# A\n\nB\n"}},
+	} {
+		c.params["name"], c.params["files"] = "a", files
+		cc := turnCall
+		cc.CallID = fmt.Sprint("toolu_", i)
+		if _, err := renderDocIn(t, r, cc, c.tool, c.params); err != nil {
+			t.Errorf("%s %s: %v", c.tool, c.params["format"], err)
 		}
+	}
+	if len(saver.files) != 3 {
+		t.Errorf("published %d files", len(saver.files))
 	}
 }

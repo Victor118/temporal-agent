@@ -331,8 +331,17 @@ func buildRegistry(cfg *config.Config, st store.Store, tc client.Client, runAs *
 	// call renders in a directory of its own under the temporary directory,
 	// never the workspace.
 	if tool.DocumentToolsAvailable() {
-		tool.RegisterDocumentTools(registry, &tool.Documents{Dir: os.TempDir(), Packages: cfg.TypstPackages, RunAs: runAs, Runs: runs, Pub: pub, Files: st})
+		docs := &tool.Documents{Dir: os.TempDir(), Packages: cfg.TypstPackages, RunAs: runAs, Runs: runs, Pub: pub, Files: st}
+		tool.RegisterDocumentTools(registry, docs)
 		log.Println("Documents: pandoc and typst are installed, render_pdf and make_slides offered")
+		// What calls left there when their worker was killed.
+		removed, err := docs.Sweep()
+		if removed > 0 {
+			log.Printf("Removed %d directories of document renderings that are over from %s", removed, docs.Dir)
+		}
+		if err != nil {
+			log.Printf("Warning: sweeping the document renderings' directories: %v", err)
+		}
 	}
 
 	// The coding tools only where the CLI is installed: a worker that cannot
