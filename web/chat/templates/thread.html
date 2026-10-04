@@ -60,10 +60,11 @@
 </div>
 
 {{else if eq .Kind "agent"}}
-<div class="msg" id="m{{.ID}}">
+<div class="msg{{if .Running}} running{{end}}" id="m{{.ID}}">
   <div class="agent-mark"></div>
   <div class="msg-body">
-    <div class="msg-head"><span class="who">{{.Agent.Name}}</span>{{with .Agent.Mention}}<span class="agent-meta">@{{.}}</span>{{end}}<span class="when">{{clock .Time}}</span></div>
+    <div class="msg-head"><span class="who">{{.Agent.Name}}</span>{{with .Agent.Mention}}<span class="agent-meta">@{{.}}</span>{{end}}<span class="when">{{clock .Time}}{{if .Running}} · en cours{{end}}</span></div>
+    {{template "quote" .Quote}}
     <div class="agent-card">
       <div class="prose">{{.HTML}}</div>
       {{with .Tools}}<div class="tools">{{range .}}<span class="tool">{{.}}</span>{{end}}</div>{{end}}
@@ -95,6 +96,7 @@
   <div class="arrow">!</div>
   <div style="flex-grow:1;min-width:0">
     <div class="ttl">{{.Agent.Name}} s'est arrêté sur une erreur <span class="when">{{clock .Time}}</span></div>
+    {{template "quote" .Quote}}
     <div class="txt">{{.Text}}</div>
   </div>
 </div>
@@ -114,6 +116,13 @@
 </div>
 {{end}}
 {{end}}
+{{end}}
+
+{{/* What a turn answers, when the thread shows something else between
+     them: a link to it, whom it is from, its start on one line. A click
+     scrolls to it and highlights it (page.html). */}}
+{{define "quote"}}
+{{with .}}<a class="quote" href="#{{.Target}}"><span class="quote-to">↩ {{.Label}}</span>{{with .Text}} : <span class="quote-text">{{.}}</span>{{end}}</a>{{end}}
 {{end}}
 
 {{define "forks"}}

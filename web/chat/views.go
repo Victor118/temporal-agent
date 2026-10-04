@@ -5,15 +5,16 @@
 package chat
 
 import (
+	"cmp"
 	"fmt"
 	"hash/fnv"
 	"html/template"
+	"slices"
 	"sort"
 	"strings"
 	"time"
 	"unicode"
 
-	"github.com/victor/temporal-agent/conversation"
 	"github.com/victor/temporal-agent/session"
 	"github.com/victor/temporal-agent/store"
 )
@@ -214,7 +215,9 @@ type ReportLink struct {
 type ThreadItem struct {
 	Kind string
 	// ID is the message to fork from: for an agent answer, its last message.
-	ID   int64
+	ID int64
+	// Time is when the item was written: for an agent's finished turn, when
+	// it ended, where the thread shows it.
 	Time time.Time
 
 	Author Person // human, report: who wrote or sent it
@@ -226,11 +229,30 @@ type ThreadItem struct {
 	Tools  []string      // agent: the tools the answer used, in order, once each
 	Agent  AgentInfo     // agent answer, error: the agent that wrote it
 
+	// Running: an agent's turn not ended yet, shown at the thread's end.
+	Running bool
+	// Quote: the message an agent's turn answers, when the thread shows
+	// something else between them; nil when the turn follows it.
+	Quote *Quote
+
 	Forks []ForkLink // forks started from this item
 
 	WorkflowID string   // question
 	AgentChain []string // question: the agents that led to it
+
+	turn string // agent answer, error: the turn it shows ("" for none)
 }
+
+// Quote is the message a turn answers, as its item recalls it: a link to
+// it, whom it is from, and its text on one line.
+type Quote struct {
+	Target string // the element of the quoted message: "m<id>", "brief"
+	Label  string // "en réponse à Victor", "en réponse au brief"
+	Text   string // clipped to maxQuoteRunes, on one line; may be empty
+}
+
+// maxQuoteRunes bounds a quote's text: one line, the start of the question.
+const maxQuoteRunes = 120
 
 // AgentDirectory names the agents of a thread.
 type AgentDirectory struct {
@@ -259,12 +281,13 @@ func (d AgentDirectory) Signer(m store.Message) AgentInfo {
 // signed by its agent: when several agents answer one after another, each has
 // its own.
 //
-// The thread shows the messages as the model reads them, in the order of
-// their anchors (conversation.Order): participants answer in parallel, and
-// in the order of the IDs one's answer would be cut by another's, and shown
-// after a message it does not answer. Each turn shows whole under the
-// message it answers, a turn still running included. A message written
-// meanwhile shows after it, with its own answer.
+// The thread is chronological (chronological): the messages no turn wrote
+// in the order of their IDs, each turn whole where it ended, the turns
+// still running at the end. Participants answer in parallel: Smith's
+// review, started before Victor asked Jarvis and ended after Jarvis
+// answered, shows below Jarvis's answer. A turn shown away from the message
+// it answers quotes it (Quote). The model still reads the conversation in
+// the order of the anchors (conversation.Order).
 //
 // forks are the session's forks the viewer is a member of, by the message they
 // started from: a report links to its fork only if it is one of them.
@@ -275,9 +298,105 @@ func BuildThread(msgs []store.MessageWithID, viewerID string, forks map[int64][]
 			visible[f.SessionID] = true
 		}
 	}
+	ordered, running := chronological(msgs)
+	items := threadItems(ordered, running, viewerID, visible, agents)
+	for i := range items {
+		items[i].Forks = forks[items[i].ID]
+	}
+	for _, q := range questions {
+		items = append(items, ThreadItem{Kind: ItemQuestion, Text: q.Text, WorkflowID: q.WorkflowID, AgentChain: q.AgentChain})
+	}
+	return items
+}
+
+// chronological orders a session's messages as its thread shows them, and
+// tells which turns still run:
+//   - a message no turn wrote (a member's, a fork's summary or report, a
+//     scheduled result) at its ID;
+//   - a turn, as one block in the order it wrote, at the ID of its end
+//     (store.TurnEndKey): where it was finished;
+//   - a turn without an end at the thread's end, in the order of their
+//     first message: it still runs.
+//
+// A participant answers one message at a time: a turn without an end
+// followed by another turn of its participant will never end (its
+// participant was stopped from outside before writing it). It shows where
+// it stopped, at its last message, and does not run.
+//
+// When each message is written once the answers to the previous one have
+// ended, this is the order of the anchors (conversation.Order).
+func chronological(msgs []store.MessageWithID) ([]store.MessageWithID, map[string]bool) {
+	type block struct {
+		at, first, last int64
+		ended           bool
+		msgs            []store.MessageWithID
+	}
+	byTurn := map[string]*block{}
+	var blocks []*block
+	latest := map[string]string{} // participant: its latest turn
+	for _, m := range msgs {
+		turn, ok := store.TurnOf(m.Key)
+		if !ok {
+			blocks = append(blocks, &block{at: m.ID, ended: true, msgs: []store.MessageWithID{m}})
+			continue
+		}
+		b := byTurn[turn]
+		if b == nil {
+			b = &block{first: m.ID, last: m.ID}
+			byTurn[turn] = b
+			blocks = append(blocks, b)
+		}
+		b.first, b.last = min(b.first, m.ID), max(b.last, m.ID)
+		if store.IsTurnEnd(m.Key) {
+			b.at, b.ended = m.ID, true
+		}
+		b.msgs = append(b.msgs, m)
+	}
+	for turn, b := range byTurn {
+		p := store.TurnParticipant(turn)
+		if prev, ok := latest[p]; !ok || byTurn[prev].first < b.first {
+			latest[p] = turn
+		}
+	}
+	running := map[string]bool{}
+	for turn, b := range byTurn {
+		switch {
+		case b.ended:
+		case latest[store.TurnParticipant(turn)] == turn:
+			running[turn] = true
+		default:
+			b.at, b.ended = b.last, true // stopped for good
+		}
+	}
+	slices.SortStableFunc(blocks, func(a, b *block) int {
+		switch {
+		case a.ended != b.ended:
+			if a.ended {
+				return -1
+			}
+			return 1
+		case a.ended:
+			return cmp.Compare(a.at, b.at)
+		}
+		return cmp.Compare(a.first, b.first)
+	})
+	out := make([]store.MessageWithID, 0, len(msgs))
+	for _, b := range blocks {
+		slices.SortStableFunc(b.msgs, func(x, y store.MessageWithID) int { return cmp.Compare(x.ID, y.ID) })
+		out = append(out, b.msgs...)
+	}
+	return out, running
+}
+
+// threadItems turns messages, in the order the thread shows them, into its
+// items: a turn's messages, contiguous, make one answer, and its end the
+// error it failed on, if any. A turn's first item quotes the message it
+// answers when that is not the item before.
+func threadItems(ordered []store.MessageWithID, running map[string]bool, viewerID string, visible map[string]bool, agents AgentDirectory) []ThreadItem {
 	var items []ThreadItem
-	var agent *ThreadItem // the agent item being assembled
-	var agentTurn string  // its turn ("" for messages no turn wrote)
+	at := map[int64]int{}                    // a message no turn wrote: its item
+	plain := map[int64]store.MessageWithID{} // those messages, to quote them
+	var agent *ThreadItem                    // the agent item being assembled
 	var agentText []string
 	closeAgent := func() {
 		if agent == nil {
@@ -285,44 +404,50 @@ func BuildThread(msgs []store.MessageWithID, viewerID string, forks map[int64][]
 		}
 		agent.HTML = Markdown(strings.Join(agentText, "\n\n"))
 		items = append(items, *agent)
-		agent, agentTurn, agentText = nil, "", nil
+		agent, agentText = nil, nil
+	}
+	add := func(m store.MessageWithID, it ThreadItem) {
+		closeAgent()
+		at[m.ID] = len(items)
+		plain[m.ID] = m
+		items = append(items, it)
 	}
 
-	for _, m := range conversation.Order(msgs) {
+	for _, m := range ordered {
+		turn, _ := store.TurnOf(m.Key)
 		switch {
 		case m.Kind == store.KindForkSummary:
-			closeAgent()
-			items = append(items, ThreadItem{Kind: ItemBrief, ID: m.ID, Time: m.CreatedAt, HTML: Markdown(text(m.Content))})
+			add(m, ThreadItem{Kind: ItemBrief, ID: m.ID, Time: m.CreatedAt, HTML: Markdown(text(m.Content))})
 		case m.Kind == store.KindTurnEnd:
 			// A turn's end shows only when it says why the turn failed; it
-			// still closes the turn's item, which is its own: by anchor, a
-			// turn's end is the last of its block.
+			// still closes the turn's item, which is its own: a turn's end
+			// is the last of its block. The answer shows when it ended.
+			if agent != nil && agent.turn == turn && turn != "" {
+				agent.Time = m.CreatedAt
+			}
 			closeAgent()
 			if reason := store.TurnEndError(m.Message); reason != "" {
-				items = append(items, ThreadItem{Kind: ItemError, ID: m.ID, Time: m.CreatedAt, Text: reason, Agent: agents.Signer(m.Message)})
+				items = append(items, ThreadItem{Kind: ItemError, ID: m.ID, Time: m.CreatedAt, Text: reason, Agent: agents.Signer(m.Message), turn: turn})
 			}
 		case m.Kind == store.KindForkReport:
-			closeAgent()
-			items = append(items, ThreadItem{
+			add(m, ThreadItem{
 				Kind: ItemReport, ID: m.ID, Time: m.CreatedAt,
 				Author: NewPerson(m.UserID, authorName(m)), Mine: m.UserID != "" && m.UserID == viewerID,
 				HTML: Markdown(text(m.Content)), Report: reportSource(m.Fork, visible),
 			})
 		case m.Role == store.RoleUser:
-			closeAgent()
-			items = append(items, ThreadItem{
+			add(m, ThreadItem{
 				Kind: ItemHuman, ID: m.ID, Time: m.CreatedAt,
 				Author: NewPerson(m.UserID, authorName(m)), Mine: m.UserID != "" && m.UserID == viewerID,
 				Text: text(m.Content),
 			})
 		case m.Role == store.RoleAssistant:
 			signer := agents.Signer(m.Message)
-			turn, _ := store.TurnOf(m.Key)
-			if agent != nil && (agent.Agent.ID != signer.ID || agentTurn != turn) {
+			if agent != nil && (agent.Agent.ID != signer.ID || agent.turn != turn) {
 				closeAgent()
 			}
 			if agent == nil {
-				agent, agentTurn = &ThreadItem{Kind: ItemAgent, Time: m.CreatedAt, Agent: signer}, turn
+				agent = &ThreadItem{Kind: ItemAgent, Time: m.CreatedAt, Agent: signer, Running: running[turn], turn: turn}
 			}
 			for _, tc := range m.ToolCalls {
 				if !contains(agent.Tools, tc.Name) {
@@ -336,18 +461,55 @@ func BuildThread(msgs []store.MessageWithID, viewerID string, forks map[int64][]
 			if agent.ID == 0 {
 				agent.ID = m.ID
 			}
+			if turn == "" {
+				// A message no turn wrote (a scheduled result) can be
+				// answered: it is quoted as its item.
+				at[m.ID] = len(items)
+				plain[m.ID] = m
+			}
 		}
 		// Tool results are not shown: the tools appear on the answer.
 	}
 	closeAgent()
 
 	for i := range items {
-		items[i].Forks = forks[items[i].ID]
-	}
-	for _, q := range questions {
-		items = append(items, ThreadItem{Kind: ItemQuestion, Text: q.Text, WorkflowID: q.WorkflowID, AgentChain: q.AgentChain})
+		turn := items[i].turn
+		if turn == "" || i > 0 && items[i-1].turn == turn {
+			continue // not a turn, or not its first item
+		}
+		anchor, _ := store.TurnAnchor(turn)
+		if j, ok := at[anchor]; ok && j != i-1 {
+			items[i].Quote = quoteOf(items[j], plain[anchor])
+		}
 	}
 	return items
+}
+
+// quoteOf is how a turn's item recalls the message it answers, shown as the
+// item it.
+func quoteOf(it ThreadItem, m store.MessageWithID) *Quote {
+	q := &Quote{Target: fmt.Sprintf("m%d", it.ID)}
+	switch it.Kind {
+	case ItemBrief:
+		q.Target, q.Label = "brief", "en réponse au brief"
+	case ItemReport:
+		q.Label = "en réponse au rapport du fork « " + it.Report.Title + " »"
+	case ItemAgent:
+		q.Label, q.Text = "en réponse à "+it.Agent.Name, clipLine(text(m.Content), maxQuoteRunes)
+	default:
+		q.Label, q.Text = "en réponse à "+it.Author.Name, clipLine(text(m.Content), maxQuoteRunes)
+	}
+	return q
+}
+
+// clipLine is s on one line, its spaces collapsed, cut to n runes with an
+// ellipsis.
+func clipLine(s string, n int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if r := []rune(s); len(r) > n {
+		return strings.TrimRight(string(r[:n-1]), " ") + "…"
+	}
+	return s
 }
 
 // reportSource is the fork a report names, linked when the viewer can open it.
@@ -367,11 +529,11 @@ func reportSource(f *store.ForkRef, visible map[string]bool) ReportLink {
 // the questions waiting. The parent is linked when the viewer is a member of
 // it. A fork that never reported is left as it is.
 //
-// The thread is in the order of the anchors (BuildThread), and a report
-// covers the messages up to an ID: an answer that went on after the report
-// (a turn running then, ending later, its item's ID past the report) shows
-// whole above the mark when a message it does not answer was reported
-// after it.
+// The thread is chronological (BuildThread), a turn shown where it ended or
+// at the end while it runs, and a report covers the messages up to an ID:
+// a turn whose answer the report covers, which went on after it, still
+// puts the mark after it, below the messages shown before it, reported or
+// not; a turn still running, its answer covered, puts it at the end.
 func MarkReported(items []ThreadItem, fork store.Session, parentVisible bool) []ThreadItem {
 	if fork.LastReportedMessageID == 0 || fork.LastReportedAt == nil {
 		return items
@@ -389,8 +551,10 @@ func MarkReported(items []ThreadItem, fork store.Session, parentVisible bool) []
 }
 
 // LastMessageID is the last message of the thread to fork from: the highest
-// ID of its messages, answers and reports. The thread is in the order of the
-// anchors, not of the IDs: its last item need not be its latest message.
+// ID of its messages, answers and reports. The thread is chronological, but
+// an answer carries the ID of its last text, not of its end, and a turn
+// still running shows at the end: its last item need not be its latest
+// message.
 func LastMessageID(items []ThreadItem) int64 {
 	var last int64
 	for _, it := range items {

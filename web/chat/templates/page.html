@@ -70,6 +70,15 @@ if (!window.chatWired) {
     if (t) t.scrollTop = t.scrollHeight;
   }
   document.addEventListener('DOMContentLoaded', function () { toHash() || toBottom(); });
+  // A quote goes to the message it recalls: the same scroll and highlight,
+  // even on the hash the page already has.
+  document.addEventListener('click', function (e) {
+    var a = e.target.closest && e.target.closest('a.quote');
+    if (!a || !document.querySelector(a.hash)) return;
+    e.preventDefault();
+    history.replaceState(history.state, '', a.hash);
+    toHash();
+  });
   // A reload follows the conversation only for a member who was at its end, or
   // who just sent a message: one reading further up stays where they are.
   var sent = false, follow = false;

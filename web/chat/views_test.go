@@ -3,11 +3,15 @@ package chat
 import (
 	"encoding/json"
 	"fmt"
+	"math/rand/v2"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
+	"github.com/victor/temporal-agent/conversation"
 	"github.com/victor/temporal-agent/store"
 )
 
@@ -216,61 +220,370 @@ func parallel(done bool) []store.MessageWithID {
 	return msgs
 }
 
-// Two participants answer at once: each answer shows whole under the
-// message it answers, signed by its agent, a turn still running included;
-// in the order of the IDs, Jarvis's would be cut by Bob's message and
-// Smith's answer.
+// hist writes a session's history as the store numbers it: each message the
+// next ID, a minute after the one before.
+type hist struct {
+	msgs []store.MessageWithID
+	idx  map[string]int
+}
+
+func (h *hist) add(key string, m store.Message) int64 {
+	id := int64(len(h.msgs) + 1)
+	h.msgs = append(h.msgs, store.MessageWithID{ID: id, Key: key, CreatedAt: t0.Add(time.Duration(id) * time.Minute), Message: m})
+	return id
+}
+
+// human is a member's message.
+func (h *hist) human(who, text string) int64 {
+	return h.add(fmt.Sprintf("msg:%d", len(h.msgs)+1), store.Message{Role: store.RoleUser, Content: j(text), UserID: "u-" + who, Author: who})
+}
+
+// say is a turn's message: its text, and the tools it calls, each followed
+// by its result.
+func (h *hist) say(turn, text string, tools ...string) int64 {
+	if h.idx == nil {
+		h.idx = map[string]int{}
+	}
+	key := func() string {
+		i := h.idx[turn]
+		h.idx[turn]++
+		return fmt.Sprintf("%s:%d", turn, i)
+	}
+	m := store.Message{Role: store.RoleAssistant, Content: j(text), AgentID: store.TurnParticipant(turn)}
+	for i, name := range tools {
+		m.ToolCalls = append(m.ToolCalls, store.ToolCall{ID: fmt.Sprintf("c%d-%d", len(h.msgs), i), Name: name})
+	}
+	id := h.add(key(), m)
+	for _, tc := range m.ToolCalls {
+		h.add(key(), store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: tc.ID}})
+	}
+	return id
+}
+
+// end is a turn's end, failed for reason ("": done).
+func (h *hist) end(turn, reason string) int64 {
+	return h.add(store.TurnEndKey(turn), store.TurnEnd(store.TurnParticipant(turn), reason))
+}
+
+// shape is a thread in short: each item's kind and ID, "…" while it runs,
+// "↩" and the element it quotes.
+func shape(items []ThreadItem) string {
+	var out []string
+	for _, it := range items {
+		s := fmt.Sprint(it.Kind, it.ID)
+		if it.Running {
+			s += "…"
+		}
+		if it.Quote != nil {
+			s += "↩" + it.Quote.Target
+		}
+		out = append(out, s)
+	}
+	return strings.Join(out, " ")
+}
+
+var (
+	jarvisInfo   = AgentInfo{ID: "default", Name: "Jarvis", Mention: "jarvis"}
+	reviewerInfo = AgentInfo{ID: "reviewer", Name: "Reviewer", Mention: "reviewer"}
+	directory    = AgentDirectory{ByID: map[string]AgentInfo{"default": jarvisInfo, "reviewer": reviewerInfo, "smith": smith}, Session: jarvisInfo}
+)
+
+// Two participants answer at once: each answer shows whole where it ended,
+// signed by its agent, a turn still running at the end; one shown away from
+// the message it answers quotes it. In the order of the IDs, Jarvis's
+// would be cut by Bob's message and Smith's answer.
 func TestBuildThread_TwoParticipantsInParallel(t *testing.T) {
 	jarvis := AgentInfo{ID: "default", Name: "Jarvis", Mention: "jarvis"}
 	smith := AgentInfo{ID: "smith", Name: "Agent Smith", Mention: "smith"}
 	dir := AgentDirectory{ByID: map[string]AgentInfo{"default": jarvis, "smith": smith}, Session: jarvis}
-	type want struct {
-		kind  string
-		id    int64
-		who   AgentInfo
-		text  string
-		tools string
-	}
 	for name, c := range map[string]struct {
-		done bool
-		want []want
+		done  bool
+		shape string
+		text  string // Jarvis's answer
+		last  int64
 	}{
-		"jarvis running": {false, []want{
-			{ItemHuman, 1, AgentInfo{}, "", ""},
-			{ItemAgent, 2, jarvis, "Je cherche.", "web_fetch"},
-			{ItemHuman, 4, AgentInfo{}, "", ""},
-			{ItemAgent, 7, smith, "Verdict.", "grep"},
-		}},
-		"both done": {true, []want{
-			{ItemHuman, 1, AgentInfo{}, "", ""},
-			{ItemAgent, 9, jarvis, "Je cherche.\n\nTrouvé.", "web_fetch"},
-			{ItemHuman, 4, AgentInfo{}, "", ""},
-			{ItemAgent, 7, smith, "Verdict.", "grep"},
-		}},
+		"jarvis running": {false, "human1 human4 agent7 agent2…↩m1", "Je cherche.", 7},
+		"both done":      {true, "human1 human4 agent7 agent9↩m1", "Je cherche.\n\nTrouvé.", 9},
 	} {
 		t.Run(name, func(t *testing.T) {
 			items := BuildThread(parallel(c.done), "u-alice", nil, nil, dir)
-			if len(items) != len(c.want) {
-				t.Fatalf("%d items, want %d: %+v", len(items), len(c.want), items)
+			if got := shape(items); got != c.shape {
+				t.Fatalf("thread %s, want %s", got, c.shape)
 			}
-			for i, w := range c.want {
-				it := items[i]
-				if it.Kind != w.kind || it.ID != w.id || it.Agent != w.who || strings.Join(it.Tools, ",") != w.tools {
-					t.Errorf("item %d: %s #%d by %+v with %v, want %s #%d by %+v with %s", i, it.Kind, it.ID, it.Agent, it.Tools, w.kind, w.id, w.who, w.tools)
-				}
-				if w.kind == ItemAgent && string(it.HTML) != string(Markdown(w.text)) {
-					t.Errorf("item %d: %s, want %q whole", i, it.HTML, w.text)
-				}
+			s, j := items[2], items[3]
+			if s.Agent != smith || strings.Join(s.Tools, ",") != "grep" || string(s.HTML) != string(Markdown("Verdict.")) {
+				t.Errorf("smith's answer %+v", s)
 			}
-			if got := LastMessageID(items); got != map[bool]int64{false: 7, true: 9}[c.done] {
-				t.Errorf("last message %d, want the highest ID, not the last item's", got)
+			if j.Agent != jarvis || strings.Join(j.Tools, ",") != "web_fetch" || string(j.HTML) != string(Markdown(c.text)) {
+				t.Errorf("jarvis's answer %+v, want %q whole", j, c.text)
+			}
+			if *j.Quote != (Quote{Target: "m1", Label: "en réponse à Alice", Text: "Jarvis, cherche"}) {
+				t.Errorf("quote %+v", *j.Quote)
+			}
+			if got := LastMessageID(items); got != c.last {
+				t.Errorf("last message %d, want %d: the highest ID, not the last item's", got, c.last)
 			}
 		})
 	}
 }
 
+// The user's case: Victor asks the reviewer for a long review, then Jarvis
+// the time. Jarvis answers first, right under its question; the review
+// comes after it, when it ended, and quotes what it answers.
+func TestBuildThread_Chronological(t *testing.T) {
+	var h hist
+	h.human("Victor", "@reviewer relis la PR 42 en entier") // 1
+	h.say("m1.reviewer", "", "read_file")                   // 2, 3
+	h.human("Victor", "@jarvis quelle heure est-il ?")      // 4
+	h.say("m4.default", "Midi.")                            // 5
+	h.end("m4.default", "")                                 // 6
+	h.say("m1.reviewer", "La PR est bonne.")                // 7
+	h.end("m1.reviewer", "")                                // 8
+
+	items := BuildThread(h.msgs, "u-Victor", nil, nil, directory)
+	if got, want := shape(items), "human1 human4 agent5 agent7↩m1"; got != want {
+		t.Fatalf("thread %s, want %s", got, want)
+	}
+	review := items[3]
+	if review.Agent != reviewerInfo || strings.Join(review.Tools, ",") != "read_file" ||
+		*review.Quote != (Quote{Target: "m1", Label: "en réponse à Victor", Text: "@reviewer relis la PR 42 en entier"}) {
+		t.Errorf("review %+v, quote %+v", review, review.Quote)
+	}
+	// Shown where it ended, at the time it ended: the times go on down.
+	if !review.Time.Equal(t0.Add(8*time.Minute)) || !items[2].Time.Equal(t0.Add(6*time.Minute)) {
+		t.Errorf("times %v, %v: want the turns' ends", items[2].Time, review.Time)
+	}
+	if LastMessageID(items) != 7 {
+		t.Errorf("last message %d", LastMessageID(items))
+	}
+}
+
+// A turn still running shows at the end, after a message written since,
+// marked running; once ended, where it ended, before what came after.
+func TestBuildThread_RunningTurnAtTheEnd(t *testing.T) {
+	var h hist
+	h.human("Victor", "@reviewer relis") // 1
+	h.say("m1.reviewer", "Je lis.", "read_file")
+	h.human("Victor", "@jarvis l'heure ?") // 4
+	h.say("m4.default", "Midi.")
+	h.end("m4.default", "")
+	h.human("Victor", "merci") // 7
+
+	items := BuildThread(h.msgs, "u-Victor", nil, []Question{{WorkflowID: "q", Text: "Quelle PR ?"}}, directory)
+	if got, want := shape(items), "human1 human4 agent5 human7 agent2…↩m1 question0"; got != want {
+		t.Errorf("running: %s, want %s, before the questions", got, want)
+	}
+	if !items[4].Time.Equal(t0.Add(2 * time.Minute)) {
+		t.Errorf("a running answer shows when it started: %v", items[4].Time)
+	}
+
+	h.say("m1.reviewer", "Bonne.") // 8
+	h.end("m1.reviewer", "")       // 9
+	h.human("Victor", "super")     // 10
+	if got, want := shape(BuildThread(h.msgs, "u-Victor", nil, nil, directory)), "human1 human4 agent5 human7 agent8↩m1 human10"; got != want {
+		t.Errorf("ended: %s, want %s", got, want)
+	}
+}
+
+// A turn without an end that its participant followed with another will
+// never end (its participant was stopped from outside): it shows where it
+// stopped, not as running.
+func TestBuildThread_StoppedTurnDoesNotRun(t *testing.T) {
+	var h hist
+	h.human("Victor", "un")
+	h.say("m1.default", "Je commence.")
+	h.human("Victor", "deux")
+	h.say("m3.default", "Fait.")
+	h.end("m3.default", "")
+	if got, want := shape(BuildThread(h.msgs, "u-Victor", nil, nil, directory)), "human1 agent2 human3 agent4"; got != want {
+		t.Errorf("thread %s, want %s", got, want)
+	}
+}
+
+// A relay: each answer to one message quotes it when it does not follow it.
+func TestBuildThread_RelayQuotesItsQuestion(t *testing.T) {
+	var h hist
+	h.human("Victor", "@jarvis @smith votre avis ?")
+	h.say("m1.default", "Oui.")
+	h.end("m1.default", "")
+	h.say("m1.smith", "Non.")
+	h.end("m1.smith", "")
+	if got, want := shape(BuildThread(h.msgs, "u-Victor", nil, nil, directory)), "human1 agent2 agent4↩m1"; got != want {
+		t.Errorf("relay: %s, want %s", got, want)
+	}
+
+	// Bob writes before either answers: both quote the question.
+	h = hist{}
+	h.human("Victor", "@jarvis @smith votre avis ?")
+	h.human("Bob", "je reviens")
+	h.say("m1.default", "Oui.")
+	h.end("m1.default", "")
+	h.say("m1.smith", "Non.")
+	h.end("m1.smith", "")
+	items := BuildThread(h.msgs, "u-Victor", nil, nil, directory)
+	if got, want := shape(items), "human1 human2 agent3↩m1 agent5↩m1"; got != want {
+		t.Errorf("relay after another message: %s, want %s", got, want)
+	}
+	if *items[2].Quote != *items[3].Quote {
+		t.Errorf("quotes %+v, %+v: the same question", *items[2].Quote, *items[3].Quote)
+	}
+}
+
+// A quote is the start of the question on one line; the template escapes
+// it.
+func TestBuildThread_QuoteIsClippedAndEscaped(t *testing.T) {
+	var h hist
+	h.human("Alice", "<script>alert(1)</script>\n\n"+strings.Repeat("très long ", 30))
+	h.say("m1.reviewer", "", "read_file")
+	h.human("Bob", "@jarvis salut")
+	h.say("m4.default", "Salut.")
+	h.end("m4.default", "")
+	h.say("m1.reviewer", "Lu.")
+	h.end("m1.reviewer", "")
+	items := BuildThread(h.msgs, "u-Bob", nil, nil, directory)
+	q := items[3].Quote
+	if q == nil {
+		t.Fatalf("no quote in %s", shape(items))
+	}
+	if n := utf8.RuneCountInString(q.Text); n != maxQuoteRunes || !strings.HasSuffix(q.Text, "…") ||
+		!strings.HasPrefix(q.Text, "<script>alert(1)</script> très long très") || strings.Contains(q.Text, "\n") {
+		t.Errorf("quote %q (%d runes)", q.Text, n)
+	}
+
+	p := testPage("thread")
+	p.Thread = items
+	page := render(t, "thread-inner", p)
+	if strings.Contains(page, "<script>alert") || !strings.Contains(page, `<a class="quote" href="#m1"><span class="quote-to">↩ en réponse à Alice</span> : <span class="quote-text">&lt;script&gt;alert(1)&lt;/script&gt; très long`) {
+		t.Errorf("quote rendered as %s", page)
+	}
+	// Jarvis follows Bob's message: no quote.
+	if strings.Count(page, `class="quote"`) != 1 {
+		t.Errorf("%d quotes, want 1", strings.Count(page, `class="quote"`))
+	}
+}
+
+// A failed turn shows its error where it ended, quoting its question when
+// it is away from it; with an answer, the answer quotes, not the error.
+func TestBuildThread_FailedTurnQuotes(t *testing.T) {
+	var h hist
+	h.human("Victor", "@reviewer relis")
+	h.human("Bob", "@jarvis salut")
+	h.say("m2.default", "Salut.")
+	h.end("m2.default", "")
+	h.end("m1.reviewer", "call LLM: boom")
+	items := BuildThread(h.msgs, "u-Victor", nil, nil, directory)
+	if got, want := shape(items), "human1 human2 agent3 error5↩m1"; got != want {
+		t.Fatalf("thread %s, want %s", got, want)
+	}
+	if items[3].Agent != reviewerInfo || items[3].Text != "call LLM: boom" {
+		t.Errorf("error %+v", items[3])
+	}
+	p := testPage("thread")
+	p.Thread = items
+	if page := render(t, "thread-inner", p); !strings.Contains(page, `↩ en réponse à Victor</span> : <span class="quote-text">@reviewer relis</span>`) {
+		t.Errorf("error's quote not rendered: %s", page)
+	}
+
+	h = hist{}
+	h.human("Victor", "@reviewer relis")
+	h.say("m1.reviewer", "", "read_file")
+	h.human("Bob", "@jarvis salut")
+	h.say("m4.default", "Salut.")
+	h.end("m4.default", "")
+	h.end("m1.reviewer", "call LLM: boom")
+	if got, want := shape(BuildThread(h.msgs, "u-Victor", nil, nil, directory)), "human1 human4 agent5 agent2↩m1 error7"; got != want {
+		t.Errorf("thread %s, want %s", got, want)
+	}
+}
+
+// What a quote names: a member, the brief, a fork's report, a scheduled
+// result's agent.
+func TestBuildThread_QuotesWhatItAnswers(t *testing.T) {
+	for name, c := range map[string]struct {
+		first store.MessageWithID
+		want  Quote
+	}{
+		"brief": {store.MessageWithID{Key: store.ForkSummaryKey, Message: store.Message{Role: store.RoleUser, Kind: store.KindForkSummary, Content: j("Le brief.")}},
+			Quote{Target: "brief", Label: "en réponse au brief"}},
+		"report": {store.MessageWithID{Key: "report:f:0-9", Message: store.Message{Role: store.RoleUser, Kind: store.KindForkReport, Content: j("## Fait"), UserID: "u-Bob", Author: "Bob",
+			Fork: &store.ForkRef{SessionID: "f", Title: "Export CSV"}}},
+			Quote{Target: "m1", Label: "en réponse au rapport du fork « Export CSV »"}},
+		"scheduled": {store.MessageWithID{Key: "sched:t:1", Message: store.Message{Role: store.RoleAssistant, Content: j("Rappel : réunion"), AgentID: "default"}},
+			Quote{Target: "m1", Label: "en réponse à Jarvis", Text: "Rappel : réunion"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var h hist
+			h.add(c.first.Key, c.first.Message)
+			h.human("Bob", "rien pour l'agent")
+			h.say("m1.default", "Vu.")
+			h.end("m1.default", "")
+			items := BuildThread(h.msgs, "u-Bob", nil, nil, directory)
+			if got := shape(items); got != fmt.Sprintf("%s1 human2 agent3↩%s", items[0].Kind, c.want.Target) {
+				t.Fatalf("thread %s", got)
+			}
+			if *items[2].Quote != c.want {
+				t.Errorf("quote %+v, want %+v", *items[2].Quote, c.want)
+			}
+		})
+	}
+}
+
+// When each message is written once the answers to the one before have
+// ended, the thread is as it was in the order of the anchors, with no
+// quote: random histories of members' messages, answers by one agent or
+// another, with tools, errors, the brief, reports, scheduled results, the
+// last answer still running or not.
+func TestBuildThread_OneAtATimeAsBefore(t *testing.T) {
+	rng := rand.New(rand.NewPCG(7, 42))
+	agents := []string{"default", "smith", "reviewer"}
+	for n := 0; n < 3000; n++ {
+		var h hist
+		if rng.IntN(4) == 0 {
+			h.add(store.ForkSummaryKey, store.Message{Role: store.RoleUser, Kind: store.KindForkSummary, Content: j("brief")})
+		}
+		rounds := 1 + rng.IntN(6)
+		for r := 0; r < rounds; r++ {
+			switch rng.IntN(8) {
+			case 0:
+				h.add(fmt.Sprintf("sched:t:%d", r), store.Message{Role: store.RoleAssistant, Content: j("Rappel"), AgentID: "default"})
+			case 1:
+				h.add(fmt.Sprintf("report:f:0-%d", r), store.Message{Role: store.RoleUser, Kind: store.KindForkReport, Content: j("Fait"), UserID: "u-Bob", Author: "Bob"})
+			}
+			q := h.human([]string{"Victor", "Bob"}[rng.IntN(2)], "question")
+			if rng.IntN(5) == 0 {
+				continue // no agent called
+			}
+			turn := store.TurnKey(q, agents[rng.IntN(len(agents))])
+			for s := rng.IntN(4); s > 0; s-- {
+				var tools []string
+				if rng.IntN(2) == 0 {
+					tools = []string{"grep", "read_file"}[:1+rng.IntN(2)]
+				}
+				h.say(turn, []string{"", "Réponse."}[rng.IntN(2)], tools...)
+			}
+			if r == rounds-1 && rng.IntN(3) == 0 {
+				break // still running
+			}
+			h.end(turn, []string{"", "", "", "boom"}[rng.IntN(4)])
+		}
+
+		got := BuildThread(h.msgs, "u-Victor", nil, nil, directory)
+		_, running := chronological(h.msgs)
+		want := threadItems(conversation.Order(h.msgs), running, "u-Victor", map[string]bool{}, directory)
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("history %d: thread %s, want %s as in the order of the anchors", n, shape(got), shape(want))
+		}
+		for _, it := range got {
+			if it.Quote != nil {
+				t.Fatalf("history %d: %s, a quote though each answer follows its question", n, shape(got))
+			}
+		}
+	}
+}
+
 // A turn is an item of its own, even next to an answer of the same agent
-// that is not of it: a scheduled task's result stored while the turn runs.
+// that is not of it: a scheduled task's result stored while the turn runs
+// shows before it, and the turn quotes its question.
 func TestBuildThread_AnItemPerTurn(t *testing.T) {
 	msgs := []store.MessageWithID{
 		{ID: 1, Key: "msg:a", Message: store.Message{Role: store.RoleUser, Content: j("M1"), UserID: "u-me"}},
@@ -279,12 +592,8 @@ func TestBuildThread_AnItemPerTurn(t *testing.T) {
 		{ID: 4, Key: "m1.default:1", Message: store.Message{Role: store.RoleAssistant, Content: j("R1 bis"), AgentID: "default"}},
 	}
 	items := BuildThread(msgs, "u-me", nil, nil, AgentDirectory{Session: AgentInfo{ID: "default"}})
-	var got []string
-	for _, it := range items {
-		got = append(got, fmt.Sprint(it.Kind, it.ID))
-	}
-	if want := "human1 agent4 agent3"; strings.Join(got, " ") != want {
-		t.Errorf("items %v, want %s: the turn whole, then the task's result", got, want)
+	if got, want := shape(items), "human1 agent3 agent4…↩m1"; got != want {
+		t.Errorf("items %s, want %s: the task's result, then the turn whole", got, want)
 	}
 }
 
@@ -343,22 +652,25 @@ func TestMarkReported(t *testing.T) {
 	}
 }
 
-// In the order of the anchors, the mark still goes after the last item the
-// report covers: a report made while Jarvis's turn ran, after Smith had
-// answered Bob, comes after Smith's answer; one made before Bob wrote,
-// right after Alice's message, Jarvis's answer having gone on since.
-func TestMarkReported_InTheOrderOfTheAnchors(t *testing.T) {
-	items := BuildThread(parallel(true), "u-alice", nil, nil, AgentDirectory{})
+// In the chronological thread, the mark still goes after the last item the
+// report covers (ID up to its last message), in the order shown: a report
+// made while Jarvis's turn ran, after Smith had answered Bob, comes after
+// Smith's answer; one made before Bob wrote, right after Alice's message;
+// one made after Bob's message, after it. Jarvis's answer still running,
+// covered in part, puts it at the end, before the questions.
+func TestMarkReported_InChronologicalOrder(t *testing.T) {
 	at := t0
 	for _, c := range []struct {
+		done  bool
 		upTo  int64
 		after int64 // the item the mark follows
-	}{{8, 7}, {3, 1}, {10, 7}} {
+	}{{true, 8, 7}, {true, 3, 1}, {true, 5, 4}, {true, 10, 9}, {false, 8, 2}, {false, 1, 1}} {
+		items := BuildThread(parallel(c.done), "u-alice", nil, []Question{{WorkflowID: "q"}}, AgentDirectory{})
 		fork := store.Session{SessionID: "f", ParentSessionID: "p", LastReportedMessageID: c.upTo, LastReportID: 40, LastReportedAt: &at}
-		got := MarkReported(append([]ThreadItem(nil), items...), fork, true)
+		got := MarkReported(items, fork, true)
 		i := slices.IndexFunc(got, func(it ThreadItem) bool { return it.Kind == ItemReported })
-		if i < 1 || got[i-1].ID != c.after {
-			t.Errorf("reported up to %d: mark at %d in %+v, want after item #%d", c.upTo, i, got, c.after)
+		if i < 1 || got[i-1].ID != c.after || got[len(got)-1].Kind != ItemQuestion {
+			t.Errorf("done %v, reported up to %d: mark after %s, want after item #%d", c.done, c.upTo, shape(got[:max(i, 0)]), c.after)
 		}
 	}
 }
