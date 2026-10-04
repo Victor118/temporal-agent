@@ -222,7 +222,8 @@ le LLM : il n'y a pas d'`agent_id` à inventer.
 ### Fichiers publiés
 
 Un agent remet un fichier aux membres de deux façons : `publish_file(name,
-content)`, un texte qu'il écrit (Markdown, CSV, SVG, JSON…), sur n'importe
+content)`, un texte court qu'il écrit (Markdown, CSV, SVG, JSON… ; 1 Mio : ce
+contenu est l'entrée de l'appel, il reste dans l'historique), sur n'importe
 quel worker ; ou le paramètre `publish` d'`exec`, des chemins du workspace
 publiés après la commande, dans la même activity, sur le worker qui les a,
 lus par l'`os.Root` du workspace. Le contenu va de l'outil au stockage
@@ -281,11 +282,13 @@ diagnostic.
   le fork a été supprimé, ou dont le lecteur n'est pas membre, affiche « Fork
   inaccessible » : les deux cas ne sont pas distingués (`ListForks` ne rend que
   les forks dont il est membre).
-- **Fichiers publiés** : stockés dans PostgreSQL (20 Mio par fichier,
-  `FILES_MAX_BYTES`), pas encore dans un stockage objet (S3) ; pas de quota
-  par session ; pas d'aperçu dans la page (toujours téléchargés) ; rien n'est
-  envoyé sur Telegram. Les runs Claude Code ne publient pas encore (pas de
-  dossier `outputs/`, pas de pont MCP vers `publish_file`).
+- **Fichiers publiés** : stockés dans PostgreSQL (20 Mio par fichier
+  d'`exec`, `FILES_MAX_BYTES` ; 1 Mio pour `publish_file`), pas encore dans
+  un stockage objet (S3) ; un téléchargement charge le fichier entier en
+  mémoire du serveur : avec S3, le servir en flux. Pas de quota par session ;
+  pas d'aperçu dans la page (toujours téléchargés) ; rien n'est envoyé sur
+  Telegram. Les runs Claude Code ne publient pas encore (pas de dossier
+  `outputs/`, pas de pont MCP vers `publish_file`).
 - **Comptes** : connexion par email et mot de passe (argon2id), sessions de
   connexion en base. Pas encore d'envoi d'emails (réinitialisation du mot de
   passe par un admin seulement).
