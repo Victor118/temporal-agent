@@ -260,9 +260,10 @@ Mention the file by its name in your answer; do not repeat its content.`,
 // publishFromWorkspace publishes the files at paths in the workspace, after
 // a command: each one read through root, so that a link leading out of the
 // workspace is refused, and only a regular file is read (a FIFO would block).
-// It returns what to append to the command's output: what was published,
-// and why the others were not. A failure is no error: the command ran, and
-// its output stands.
+// It returns what to put before the command's output: what was published,
+// and why the others were not. Before, so that a long output clipped from
+// its end (a fork's summary reads the head of a result) keeps the files'
+// names. A failure is no error: the command ran, and its output stands.
 func (p *Publisher) publishFromWorkspace(ctx context.Context, ws workspace, paths []string) string {
 	if len(paths) == 0 {
 		return ""
@@ -331,12 +332,14 @@ func (p *Publisher) readPublished(root *os.Root, path string) ([]byte, error) {
 func publishReport(done, failed []string) string {
 	var b strings.Builder
 	if len(done) > 0 {
-		b.WriteString("\n\nFiles published (the session's members can download them from your answer):\n")
+		b.WriteString("Files published (the session's members can download them from your answer):\n")
 		b.WriteString(strings.Join(done, "\n"))
+		b.WriteString("\n\n")
 	}
 	if len(failed) > 0 {
-		b.WriteString("\n\nFiles not published:\n")
+		b.WriteString("Files not published:\n")
 		b.WriteString(strings.Join(failed, "\n"))
+		b.WriteString("\n\n")
 	}
 	return b.String()
 }

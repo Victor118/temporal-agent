@@ -152,7 +152,8 @@ func TestExec_Publish(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(out, "done") || !strings.Contains(out, "Files published") || !strings.Contains(out, "data.csv (4 B, id ") {
+	// The files first: a summary that clips a long output keeps their names.
+	if !strings.HasPrefix(out, "Files published") || !strings.HasSuffix(out, "\n\ndone") || !strings.Contains(out, "data.csv (4 B, id ") {
 		t.Errorf("result %q", out)
 	}
 	if len(saver.files) != 1 || saver.files[0].Name != "data.csv" || saver.files[0].TurnKey != "m7.jarvis" ||
@@ -182,7 +183,7 @@ func TestExec_PublishPartly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(out, "ran") {
+	if !strings.HasSuffix(out, "\n\nran") {
 		t.Errorf("the command's output is gone: %q", out)
 	}
 	if len(saver.files) != 1 || saver.files[0].Name != "good.txt" {
@@ -206,7 +207,7 @@ func TestExec_PublishAfterAFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(out, "Command failed") || !strings.Contains(out, "log.txt (8 B") || len(saver.files) != 1 {
+	if !strings.Contains(out, "\n\nCommand failed") || !strings.Contains(out, "log.txt (8 B") || len(saver.files) != 1 {
 		t.Errorf("result %q, saved %+v", out, saver.files)
 	}
 }
@@ -218,7 +219,7 @@ func TestExec_PublishWithoutATurn(t *testing.T) {
 	input, _ := json.Marshal(map[string]any{"command": "echo x > a.txt && echo ran", "publish": []string{"a.txt"}})
 	ctx, _ := callCtx(CallContext{})
 	out, err := r.Execute(ctx, "exec", input)
-	if err != nil || !strings.HasPrefix(out, "ran") || !strings.Contains(out, "no session turn") || len(saver.files) != 0 {
+	if err != nil || !strings.HasSuffix(out, "ran") || !strings.Contains(out, "no session turn") || len(saver.files) != 0 {
 		t.Errorf("result %q, %v, saved %+v", out, err, saver.files)
 	}
 }

@@ -50,7 +50,7 @@ type Holder interface {
 // parameter lists are published (pub): in the same activity, on the worker
 // whose workspace holds them, read through the workspace's os.Root. A file
 // that cannot be published leaves the command's output as it is: the result
-// says which were and which were not.
+// says first which were and which were not, then what the command wrote.
 func RegisterExecTool(r *Registry, workspacePath string, runAs *subproc.Identity, runs Holder, pub *Publisher) {
 	ws := newWorkspace(workspacePath, runAs)
 	r.Register(&Tool{
@@ -127,14 +127,14 @@ func RegisterExecTool(r *Registry, workspacePath string, runAs *subproc.Identity
 				// Return error output to the LLM so it can reason about it.
 				// What it asked to publish is published all the same: the
 				// files may be what tells it why the command failed.
-				return fmt.Sprintf("Command failed: %s\n%s", err.Error(), result) + pub.publishFromWorkspace(callCtx, ws, params.Publish), nil
+				return pub.publishFromWorkspace(callCtx, ws, params.Publish) + fmt.Sprintf("Command failed: %s\n%s", err.Error(), result), nil
 			}
 
 			if len(result) > 50000 {
 				result = result[:50000] + "\n... (output truncated)"
 			}
 
-			return strings.TrimSpace(result) + pub.publishFromWorkspace(callCtx, ws, params.Publish), nil
+			return pub.publishFromWorkspace(callCtx, ws, params.Publish) + strings.TrimSpace(result), nil
 		},
 	})
 }
