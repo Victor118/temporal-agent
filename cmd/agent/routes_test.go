@@ -1121,6 +1121,19 @@ func TestRoutes_StopAParticipant(t *testing.T) {
 	if w := call(t, h, http.MethodPost, stop, "", carol); w.Code != http.StatusNotFound {
 		t.Errorf("a non-member stopping: %d", w.Code)
 	}
+	// The interface's panel and buttons are the members' too.
+	agents := "/s/" + liveSID + "/agents"
+	if w := call(t, h, http.MethodGet, agents, "", carol); w.Code != http.StatusNotFound || strings.Contains(w.Body.String(), "agent-jarvis") {
+		t.Errorf("a non-member's panel: %d", w.Code)
+	}
+	for _, action := range []string{"stop", "clear"} {
+		if w := form(t, h, "/s/"+liveSID+"/participants/jarvis/"+action, url.Values{"turn": {"m4.jarvis"}}, carol); w.Code != http.StatusNotFound {
+			t.Errorf("a non-member's %s form: %d", action, w.Code)
+		}
+	}
+	if w := call(t, h, http.MethodGet, agents, "", bob); w.Code != 200 || !strings.Contains(w.Body.String(), `class="agents-inner"`) {
+		t.Errorf("a member's panel: %d %s", w.Code, w.Body)
+	}
 	if w := form(t, h, "/s/"+liveSID+"/participants/jarvis/stop", url.Values{"turn": {"m4.jarvis"}}, bob); w.Code != 200 || !strings.Contains(w.Body.String(), "Seul l&#39;auteur du message en cours") {
 		t.Errorf("bob's form: %d %s", w.Code, w.Body)
 	}
