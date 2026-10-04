@@ -60,10 +60,13 @@
 </div>
 
 {{else if eq .Kind "agent"}}
-<div class="msg{{if .Running}} running{{end}}" id="m{{.ID}}">
+{{/* Its time is when it started, then → when it ended: it completes,
+     never jumps. A fork from it goes up to its end (ForkID), which a link
+     from the fork names (data-fork). */}}
+<div class="msg{{if .Running}} running{{end}}" id="m{{.ID}}"{{if ne .ForkID .ID}} data-fork="m{{.ForkID}}"{{end}}>
   <div class="agent-mark"></div>
   <div class="msg-body">
-    <div class="msg-head"><span class="who">{{.Agent.Name}}</span>{{with .Agent.Mention}}<span class="agent-meta">@{{.}}</span>{{end}}<span class="when">{{clock .Time}}{{if .Running}} · en cours{{end}}</span></div>
+    <div class="msg-head"><span class="who">{{.Agent.Name}}</span>{{with .Agent.Mention}}<span class="agent-meta">@{{.}}</span>{{end}}<span class="when">{{clock .Time}}{{if .Running}} → en cours{{else if .Stopped}} → interrompu{{else if not .End.IsZero}} → {{clock .End}}{{end}}</span></div>
     {{template "quote" .Quote}}
     <div class="agent-card">
       <div class="prose">{{.HTML}}</div>
@@ -138,7 +141,7 @@
   <details class="fork-menu" id="fork-m{{.Item.ID}}">
     <summary class="btn" title="Nouvelle session à partir de ce message">⑂ Forker ici</summary>
     <form class="fork-form" hx-post="/s/{{.Page.Node.Session.SessionID}}/fork">
-      <input type="hidden" name="message_id" value="{{.Item.ID}}">
+      <input type="hidden" name="message_id" value="{{.Item.ForkID}}">
       <label for="fork-purpose-m{{.Item.ID}}">Pour quoi faire ?</label>
       <input class="input" id="fork-purpose-m{{.Item.ID}}" name="purpose" maxlength="{{purposeMax}}" autocomplete="off"
              placeholder="Optionnel : le but de ce fil, il oriente son brief">

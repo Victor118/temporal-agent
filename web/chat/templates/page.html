@@ -56,9 +56,11 @@ if (!window.chatWired) {
     var source = e.target.closest('[sse-connect]'), id = e.detail && e.detail.lastEventId;
     if (source && id) source.setAttribute('sse-connect', source.getAttribute('sse-connect').split('?')[0] + '?last_event_id=' + encodeURIComponent(id));
   });
-  // The thread opens at its end, or on the message a link points to (#m<id>).
+  // The thread opens at its end, or on the message a link points to
+  // (#m<id>): its element, or the turn a fork from it went up to (data-fork).
   function toHash() {
-    var t = location.hash && document.querySelector(location.hash);
+    var t = location.hash && (document.querySelector(location.hash) ||
+      document.querySelector('[data-fork="' + CSS.escape(location.hash.slice(1)) + '"]'));
     if (!t) return false;
     t.scrollIntoView({block: 'center'});
     t.classList.add('highlight');
@@ -71,12 +73,33 @@ if (!window.chatWired) {
   }
   document.addEventListener('DOMContentLoaded', function () { toHash() || toBottom(); });
   // A quote goes to the message it recalls: the same scroll and highlight,
-  // even on the hash the page already has.
+  // even on the hash the page already has. It is a step of the history:
+  // "back" returns to where the reader was in the thread. htmx answers a
+  // step of its own history with a whole page (window.onpopstate, set once
+  // it is ready): a step within the thread on screen is answered here.
+  var popWrapped = false;
+  function wrapPop() {
+    if (popWrapped) return;
+    popWrapped = true;
+    var htmxPop = window.onpopstate;
+    window.onpopstate = function (e) {
+      var t = document.getElementById('thread');
+      if (e.state && e.state.quote && t && t.getAttribute('hx-get') === location.pathname + '/thread') {
+        if (typeof e.state.threadTop === 'number') t.scrollTop = e.state.threadTop;
+        else toHash();
+        return;
+      }
+      if (htmxPop) htmxPop.call(window, e);
+    };
+  }
   document.addEventListener('click', function (e) {
     var a = e.target.closest && e.target.closest('a.quote');
     if (!a || !document.querySelector(a.hash)) return;
     e.preventDefault();
-    history.replaceState(history.state, '', a.hash);
+    wrapPop();
+    var t = document.getElementById('thread');
+    history.replaceState(Object.assign({}, history.state, {quote: true, threadTop: t ? t.scrollTop : null}), '');
+    history.pushState(Object.assign({}, history.state, {quote: true, threadTop: null}), '', a.hash);
     toHash();
   });
   // A reload follows the conversation only for a member who was at its end, or

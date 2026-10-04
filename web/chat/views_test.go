@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -302,8 +303,8 @@ func TestBuildThread_TwoParticipantsInParallel(t *testing.T) {
 		text  string // Jarvis's answer
 		last  int64
 	}{
-		"jarvis running": {false, "human1 human4 agent7 agent2…↩m1", "Je cherche.", 7},
-		"both done":      {true, "human1 human4 agent7 agent9↩m1", "Je cherche.\n\nTrouvé.", 9},
+		"jarvis running": {false, "human1 human4 agent7 agent2…↩m1", "Je cherche.", 8},
+		"both done":      {true, "human1 human4 agent7 agent9↩m1", "Je cherche.\n\nTrouvé.", 10},
 	} {
 		t.Run(name, func(t *testing.T) {
 			items := BuildThread(parallel(c.done), "u-alice", nil, nil, dir)
@@ -321,7 +322,7 @@ func TestBuildThread_TwoParticipantsInParallel(t *testing.T) {
 				t.Errorf("quote %+v", *j.Quote)
 			}
 			if got := LastMessageID(items); got != c.last {
-				t.Errorf("last message %d, want %d: the highest ID, not the last item's", got, c.last)
+				t.Errorf("last message %d, want %d: the highest fork point, not the last item's", got, c.last)
 			}
 		})
 	}
@@ -349,12 +350,116 @@ func TestBuildThread_Chronological(t *testing.T) {
 		*review.Quote != (Quote{Target: "m1", Label: "en réponse à Victor", Text: "@reviewer relis la PR 42 en entier"}) {
 		t.Errorf("review %+v, quote %+v", review, review.Quote)
 	}
-	// Shown where it ended, at the time it ended: the times go on down.
-	if !review.Time.Equal(t0.Add(8*time.Minute)) || !items[2].Time.Equal(t0.Add(6*time.Minute)) {
-		t.Errorf("times %v, %v: want the turns' ends", items[2].Time, review.Time)
+	// Each shows when it started, then when it ended.
+	if !review.Time.Equal(t0.Add(2*time.Minute)) || !review.End.Equal(t0.Add(8*time.Minute)) ||
+		!items[2].Time.Equal(t0.Add(5*time.Minute)) || !items[2].End.Equal(t0.Add(6*time.Minute)) {
+		t.Errorf("jarvis %v → %v, review %v → %v: want start → end", items[2].Time, items[2].End, review.Time, review.End)
 	}
-	if LastMessageID(items) != 7 {
-		t.Errorf("last message %d", LastMessageID(items))
+	if LastMessageID(items) != 8 {
+		t.Errorf("last message %d, want the review's end", LastMessageID(items))
+	}
+}
+
+// Forking from a block takes what the thread shows above it: a turn that
+// ended forks up to its end, not to its last text. The reviewer said « Je
+// lis. » first, then worked while Victor asked Jarvis: the review shows
+// last, and a fork from it must keep Jarvis's question and answer.
+func TestBuildThread_ForkFromABlockTakesWhatIsAbove(t *testing.T) {
+	var h hist
+	h.human("Victor", "@reviewer relis")         // 1
+	h.say("m1.reviewer", "Je lis.", "read_file") // 2, 3
+	h.human("Victor", "@jarvis l'heure ?")       // 4
+	h.say("m4.default", "Midi.")                 // 5
+	h.end("m4.default", "")                      // 6
+	h.say("m1.reviewer", "", "read_file")        // 7, 8
+	end := h.end("m1.reviewer", "")              // 9
+	items := BuildThread(h.msgs, "u-Victor", nil, nil, directory)
+	if got, want := shape(items), "human1 human4 agent5 agent2↩m1"; got != want {
+		t.Fatalf("thread %s, want %s", got, want)
+	}
+	review := items[3]
+	if review.ID != 2 || review.ForkID != end {
+		t.Fatalf("review: element m%d, forks from %d; want m2 (its last text), %d (its end)", review.ID, review.ForkID, end)
+	}
+	// What session.Fork accepts (forkable): a user's or assistant's
+	// message, not a tool result. It takes every message up to it.
+	fork := h.msgs[review.ForkID-1]
+	if fork.ID != review.ForkID || fork.Role != store.RoleAssistant || fork.ToolResult != nil {
+		t.Errorf("fork point %+v: not one a fork accepts", fork)
+	}
+	for _, it := range items {
+		if it.ForkID > review.ForkID {
+			t.Errorf("%s: %d shown above the review, left out of its fork", shape([]ThreadItem{it}), it.ForkID)
+		}
+	}
+	if LastMessageID(items) != end {
+		t.Errorf("« Forker un fil » from %d, want %d", LastMessageID(items), end)
+	}
+	// The element keeps its ID; the fork goes up to the end.
+	p := testPage("thread")
+	p.Thread = items
+	page := render(t, "thread-inner", p)
+	if !strings.Contains(page, `id="m2" data-fork="m9"`) || !strings.Contains(page, `name="message_id" value="9"`) ||
+		strings.Contains(page, `name="message_id" value="2"`) {
+		t.Errorf("fork menu: %s", page)
+	}
+	// Jarvis's ended too: its fork point is its end; a member's, the message.
+	if items[2].ForkID != 6 || items[0].ForkID != 1 {
+		t.Errorf("fork points %d, %d", items[2].ForkID, items[0].ForkID)
+	}
+}
+
+// A block's time is its start, then → its end once it ended in another
+// minute, « → en cours » while it runs, « → interrompu » if it never ends:
+// it completes, never jumps.
+func TestRender_BlockTime(t *testing.T) {
+	at := func(min, sec int) time.Time {
+		return t0.Add(time.Duration(min)*time.Minute + time.Duration(sec)*time.Second)
+	}
+	human := func(id int64, at time.Time) store.MessageWithID {
+		return store.MessageWithID{ID: id, Key: fmt.Sprintf("msg:%d", id), CreatedAt: at, Message: store.Message{Role: store.RoleUser, Content: j("?"), UserID: "u-v", Author: "V"}}
+	}
+	turn := func(id int64, key string, at time.Time, agent string) store.MessageWithID {
+		m := store.TurnEnd(agent, "")
+		if !strings.HasSuffix(key, ":end") {
+			m = store.Message{Role: store.RoleAssistant, Content: j("!"), AgentID: agent}
+		}
+		return store.MessageWithID{ID: id, Key: key, CreatedAt: at, Message: m}
+	}
+	msgs := []store.MessageWithID{
+		human(1, at(0, 0)),
+		turn(2, "m1.default:0", at(0, 10), "default"),
+		turn(3, "m1.default:end", at(0, 50), "default"), // the same minute
+		human(4, at(1, 0)),
+		turn(5, "m4.default:0", at(1, 10), "default"),
+		turn(6, "m4.default:end", at(11, 0), "default"),
+		human(7, at(12, 0)),
+		turn(8, "m7.reviewer:0", at(12, 10), "reviewer"), // never ends
+		human(9, at(13, 0)),
+		turn(10, "m9.reviewer:0", at(13, 10), "reviewer"), // runs
+	}
+	items := BuildThread(msgs, "u-v", nil, nil, directory)
+	if got, want := shape(items), "human1 agent2 human4 agent5 human7 agent8 human9 agent10…"; got != want {
+		t.Fatalf("thread %s, want %s", got, want)
+	}
+	if !items[1].End.IsZero() || !items[3].End.Equal(at(11, 0)) || !items[5].Stopped || items[5].Running {
+		t.Errorf("quick %+v, long %+v, dead %+v", items[1], items[3], items[5])
+	}
+	p := testPage("thread")
+	p.Thread = items
+	page := render(t, "thread-inner", p)
+	var got []string
+	for _, w := range regexp.MustCompile(`<span class="when">([^<]*)</span>`).FindAllStringSubmatch(page, -1) {
+		got = append(got, w[1])
+	}
+	want := []string{
+		clock(at(0, 0)), clock(at(0, 10)),
+		clock(at(1, 0)), clock(at(1, 10)) + " → " + clock(at(11, 0)),
+		clock(at(12, 0)), clock(at(12, 10)) + " → interrompu",
+		clock(at(13, 0)), clock(at(13, 10)) + " → en cours",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("times %q, want %q", got, want)
 	}
 }
 
@@ -387,7 +492,7 @@ func TestBuildThread_RunningTurnAtTheEnd(t *testing.T) {
 
 // A turn without an end that its participant followed with another will
 // never end (its participant was stopped from outside): it shows where it
-// stopped, not as running.
+// stopped, interrupted, not as running.
 func TestBuildThread_StoppedTurnDoesNotRun(t *testing.T) {
 	var h hist
 	h.human("Victor", "un")
@@ -395,8 +500,45 @@ func TestBuildThread_StoppedTurnDoesNotRun(t *testing.T) {
 	h.human("Victor", "deux")
 	h.say("m3.default", "Fait.")
 	h.end("m3.default", "")
-	if got, want := shape(BuildThread(h.msgs, "u-Victor", nil, nil, directory)), "human1 agent2 human3 agent4"; got != want {
+	items := BuildThread(h.msgs, "u-Victor", nil, nil, directory)
+	if got, want := shape(items), "human1 agent2 human3 agent4"; got != want {
 		t.Errorf("thread %s, want %s", got, want)
+	}
+	if !items[1].Stopped || items[1].Running || items[3].Stopped {
+		t.Errorf("dead %+v, next %+v", items[1], items[3])
+	}
+	p := testPage("thread")
+	p.Thread = items
+	if page := render(t, "thread-inner", p); strings.Count(page, "→ interrompu") != 1 || strings.Contains(page, "en cours") {
+		t.Errorf("the dead turn not shown interrupted: %s", page)
+	}
+}
+
+// An end alone is no proof its participant went on: a relay that failed
+// writes the end of the turn it could not start (as would a queue cleared,
+// or a turn refused by its check). Smith, still on message 1, stays running
+// though message 5's relay to it failed.
+func TestBuildThread_AnEndAloneDoesNotStopATurn(t *testing.T) {
+	var h hist
+	h.human("Victor", "@jarvis @smith un")              // 1
+	h.say("m1.default", "Oui.")                         // 2
+	h.end("m1.default", "")                             // 3
+	h.say("m1.smith", "Je regarde.", "grep")            // 4, 5
+	h.human("Victor", "@jarvis @smith deux")            // 6
+	h.say("m6.default", "Toujours oui.")                // 7
+	h.end("m6.default", "")                             // 8
+	h.end("m6.smith", "le relais vers @smith a échoué") // 9
+	items := BuildThread(h.msgs, "u-Victor", nil, nil, directory)
+	if got, want := shape(items), "human1 agent2 human6 agent7 error9↩m6 agent4…↩m1"; got != want {
+		t.Fatalf("thread %s, want %s", got, want)
+	}
+	if smith := items[5]; smith.Stopped || !smith.Running {
+		t.Errorf("smith %+v: still running", smith)
+	}
+	p := testPage("thread")
+	p.Thread = items
+	if page := render(t, "thread-inner", p); !strings.Contains(page, "→ en cours") || strings.Contains(page, "interrompu") {
+		t.Errorf("smith not shown running: %s", page)
 	}
 }
 
@@ -532,16 +674,26 @@ func TestBuildThread_QuotesWhatItAnswers(t *testing.T) {
 // ended, the thread is as it was in the order of the anchors, with no
 // quote: random histories of members' messages, answers by one agent or
 // another, with tools, errors, the brief, reports, scheduled results, the
-// last answer still running or not.
+// last answer still running or not. Which turns run is read from the
+// history (a turn without an end), not from the code under test.
+//
+// Not covered, being no longer one at a time: a relay (several agents
+// answering one message), an aside (/btw), a scheduled result stored while
+// a turn runs.
 func TestBuildThread_OneAtATimeAsBefore(t *testing.T) {
 	rng := rand.New(rand.NewPCG(7, 42))
 	agents := []string{"default", "smith", "reviewer"}
-	for n := 0; n < 3000; n++ {
+	n := 3000
+	if testing.Short() {
+		n = 300
+	}
+	for i := 0; i < n; i++ {
 		var h hist
 		if rng.IntN(4) == 0 {
 			h.add(store.ForkSummaryKey, store.Message{Role: store.RoleUser, Kind: store.KindForkSummary, Content: j("brief")})
 		}
 		rounds := 1 + rng.IntN(6)
+		unfinished := false // the last turn wrote and has no end
 		for r := 0; r < rounds; r++ {
 			switch rng.IntN(8) {
 			case 0:
@@ -554,7 +706,8 @@ func TestBuildThread_OneAtATimeAsBefore(t *testing.T) {
 				continue // no agent called
 			}
 			turn := store.TurnKey(q, agents[rng.IntN(len(agents))])
-			for s := rng.IntN(4); s > 0; s-- {
+			said := rng.IntN(4)
+			for s := said; s > 0; s-- {
 				var tools []string
 				if rng.IntN(2) == 0 {
 					tools = []string{"grep", "read_file"}[:1+rng.IntN(2)]
@@ -562,20 +715,32 @@ func TestBuildThread_OneAtATimeAsBefore(t *testing.T) {
 				h.say(turn, []string{"", "Réponse."}[rng.IntN(2)], tools...)
 			}
 			if r == rounds-1 && rng.IntN(3) == 0 {
+				unfinished = said > 0
 				break // still running
 			}
 			h.end(turn, []string{"", "", "", "boom"}[rng.IntN(4)])
 		}
 
-		got := BuildThread(h.msgs, "u-Victor", nil, nil, directory)
-		_, running := chronological(h.msgs)
-		want := threadItems(conversation.Order(h.msgs), running, "u-Victor", map[string]bool{}, directory)
-		if !reflect.DeepEqual(got, want) {
-			t.Fatalf("history %d: thread %s, want %s as in the order of the anchors", n, shape(got), shape(want))
+		ends := store.TurnEndIDs(h.msgs)
+		states := map[string]turnState{}
+		for _, m := range h.msgs {
+			if turn, ok := store.TurnOf(m.Key); ok {
+				if _, ended := ends[turn]; !ended {
+					states[turn] = turnRunning
+				}
+			}
 		}
-		for _, it := range got {
+		got := BuildThread(h.msgs, "u-Victor", nil, nil, directory)
+		want := threadItems(conversation.Order(h.msgs), states, "u-Victor", map[string]bool{}, directory)
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("history %d: thread %s, want %s as in the order of the anchors", i, shape(got), shape(want))
+		}
+		for k, it := range got {
 			if it.Quote != nil {
-				t.Fatalf("history %d: %s, a quote though each answer follows its question", n, shape(got))
+				t.Fatalf("history %d: %s, a quote though each answer follows its question", i, shape(got))
+			}
+			if last := k == len(got)-1; it.Running != (last && unfinished) || it.Stopped {
+				t.Fatalf("history %d (unfinished %v): %s, item %d running %v, stopped %v", i, unfinished, shape(got), k, it.Running, it.Stopped)
 			}
 		}
 	}
@@ -594,6 +759,23 @@ func TestBuildThread_AnItemPerTurn(t *testing.T) {
 	items := BuildThread(msgs, "u-me", nil, nil, AgentDirectory{Session: AgentInfo{ID: "default"}})
 	if got, want := shape(items), "human1 agent3 agent4…↩m1"; got != want {
 		t.Errorf("items %s, want %s: the task's result, then the turn whole", got, want)
+	}
+}
+
+// Two scheduled results in a row are two items: a turn answering the first
+// quotes it, not the second.
+func TestBuildThread_ScheduledResultsApart(t *testing.T) {
+	var h hist
+	h.add("sched:t1:1", store.Message{Role: store.RoleAssistant, Content: j("Rappel 1"), AgentID: "default"})
+	h.add("sched:t2:1", store.Message{Role: store.RoleAssistant, Content: j("Rappel 2"), AgentID: "default"})
+	h.say("m1.default", "Vu le premier.")
+	h.end("m1.default", "")
+	items := BuildThread(h.msgs, "u-me", nil, nil, directory)
+	if got, want := shape(items), "agent1 agent2 agent3↩m1"; got != want {
+		t.Fatalf("items %s, want %s", got, want)
+	}
+	if q := items[2].Quote; q.Text != "Rappel 1" {
+		t.Errorf("quote %+v", q)
 	}
 }
 

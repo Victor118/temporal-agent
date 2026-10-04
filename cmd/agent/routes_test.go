@@ -832,8 +832,9 @@ func TestUI_TheThreadIsChronological(t *testing.T) {
 	if strings.Count(body, `class="quote"`) != 1 {
 		t.Errorf("Smith's answer follows Bob's question: no quote for it: %s", body)
 	}
-	if !strings.Contains(body, `name="message_id" value="4"`) {
-		t.Errorf("forks from another message than the latest: %s", body)
+	// Alice's answer keeps its element (its text) and forks up to its end.
+	if !strings.Contains(body, `id="m4" data-fork="m6"`) || !strings.Contains(body, `name="message_id" value="6"`) {
+		t.Errorf("forks from another message than the answer's end: %s", body)
 	}
 }
 

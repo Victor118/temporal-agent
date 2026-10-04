@@ -301,9 +301,13 @@ func TurnMessageKey(turnKey string, index int) string {
 	return fmt.Sprintf("%s:%d", turnKey, index)
 }
 
+// IsScheduledResult reports whether msgKey is a scheduled task's result
+// (ScheduledMessageKey).
+func IsScheduledResult(msgKey string) bool { return strings.HasPrefix(msgKey, scheduledKeyPrefix) }
+
 // ScheduledMessageKey is the idempotency key of a scheduled task result. A cron
 // schedule fires repeatedly under the same ID, so the run timestamp is part of
 // the key: retries of one run dedupe, successive runs do not.
 func ScheduledMessageKey(scheduleID string, runUnixMilli int64) string {
-	return fmt.Sprintf("sched:%s:%d", scheduleID, runUnixMilli)
+	return fmt.Sprintf("%s%s:%d", scheduledKeyPrefix, scheduleID, runUnixMilli)
 }
