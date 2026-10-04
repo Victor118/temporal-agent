@@ -173,23 +173,27 @@ const (
 
 // Activity options of a participant's steps.
 var (
-	// checkTurnOptions: retried for about two minutes, so that a store
-	// away for a moment (a restart, a failover) loses no message; only a
-	// missing agent or session is final (activity.ErrTypeAgentNotFound,
+	// checkTurnOptions: about twelve attempts, so that a store away for a
+	// moment (a restart, a failover: about two minutes) loses no message;
+	// only a missing agent or session is final (activity.ErrTypeAgentNotFound,
 	// activity.ErrTypeSessionGone, never retried).
 	checkTurnOptions = storeStepOptions
 	// endTurnOptions: the same; past them the turn has no end (it stays
 	// unread by the others, and answered again if delivered again).
 	endTurnOptions = storeStepOptions
 	// storeStepOptions are those of a step that only reads or writes the
-	// store: retried over a duration, not a number of attempts.
+	// store. A number of attempts, not a duration: a ScheduleToClose would
+	// also count the wait for a worker, and a worker away a few minutes (a
+	// redeploy) would fail the step; with attempts, the step waits for the
+	// worker like the workflow does, and only the store being away is bounded
+	// (attempts at 0, 1, 3, 7, 15, 30… 120 s).
 	storeStepOptions = workflow.ActivityOptions{
-		StartToCloseTimeout:    10 * time.Second,
-		ScheduleToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: 10 * time.Second,
 		RetryPolicy: &temporal.RetryPolicy{
 			InitialInterval:    time.Second,
 			BackoffCoefficient: 2,
 			MaximumInterval:    15 * time.Second,
+			MaximumAttempts:    12,
 		},
 	}
 	// relayOptions: about five attempts over a minute; past them the relay

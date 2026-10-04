@@ -40,6 +40,9 @@ export WORKER_CONFIG=/nonexistent SKILLS_REPO= MCP_SERVERS= BRAVE_SEARCH_API_KEY
 export WORKSPACE_PATH="$DIR/workspace" CLAUDE_CODE_WORKSPACE="$DIR/claude-code" CLAUDE_CONFIG_DIR="$DIR/claude-config"
 export TELEGRAM_BOT_TOKEN= TELEGRAM_WEBHOOK_SECRET= SKILLS_WEBHOOK_SECRET= SMTP_HOST=
 export LLM_API_KEY=smoke-invalid-key
+# No run-as user: this process shares the container of the real dev worker,
+# whose subproc.Runs would end any process of the same uid.
+export RUN_AS_UID= RUN_AS_GID=
 
 "$DIR/agent" dev >"$DIR/log" 2>&1 &
 PID=$!

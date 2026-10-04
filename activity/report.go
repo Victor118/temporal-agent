@@ -8,6 +8,7 @@ import (
 
 	"go.temporal.io/sdk/temporal"
 
+	"github.com/victor/temporal-agent/conversation"
 	"github.com/victor/temporal-agent/store"
 )
 
@@ -79,7 +80,7 @@ func (a *ForkActivities) SummarizeForkReport(ctx context.Context, in SummarizeFo
 	}
 	// A result of part may answer a call made before it, which the previous
 	// report covered: its call is looked up in all of msgs.
-	transcript, truncated := buildTranscript(part, toolCalls(msgs), a.Private)
+	transcript, truncated := buildTranscript(conversation.Order(part), toolCalls(msgs), a.Private)
 
 	system, request := reportSystemPrompt, ""
 	if in.Purpose != "" {

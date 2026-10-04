@@ -12,6 +12,7 @@ import (
 
 	"go.temporal.io/sdk/temporal"
 
+	"github.com/victor/temporal-agent/conversation"
 	"github.com/victor/temporal-agent/provider"
 	"github.com/victor/temporal-agent/store"
 	"github.com/victor/temporal-agent/tool"
@@ -89,7 +90,9 @@ func (a *ForkActivities) SummarizeConversation(ctx context.Context, in Summarize
 			fmt.Sprintf("message %d not found in session %s", in.UpToMessageID, in.SessionID), "MessageNotFound", nil)
 	}
 
-	transcript, truncated := buildTranscript(msgs, toolCalls(msgs), a.Private)
+	// In the order the thread shows and the model reads: by ID, parallel
+	// participants' turns would interleave.
+	transcript, truncated := buildTranscript(conversation.Order(msgs), toolCalls(msgs), a.Private)
 	system, request := summarySystemPrompt, "Conversation to summarize:\n\n"+transcript
 	if in.Purpose != "" {
 		system += summaryPurposePrompt

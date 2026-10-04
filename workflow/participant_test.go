@@ -597,8 +597,8 @@ func TestParticipant_TheStoreAwayForAWhile(t *testing.T) {
 	if err := h.run("jarvis", msg); err != nil {
 		t.Fatal(err)
 	}
-	// The last retry that fits in the two minutes, not one more.
-	if took := h.env.Now().Sub(start); took < time.Minute || took > 2*time.Minute {
+	// Twelve attempts, the last about two minutes in.
+	if took := h.env.Now().Sub(start); took < time.Minute || took > 2*time.Minute+30*time.Second {
 		t.Errorf("gave up after %s, want about two minutes", took)
 	}
 	if reason := h.ends()["m1.jarvis"]; len(h.turns) != 0 || !strings.Contains(reason, "database unavailable") {
