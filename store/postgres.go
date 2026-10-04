@@ -416,6 +416,22 @@ func (s *PostgresStore) AppendMessages(ctx context.Context, sessionID, turnKey s
 	return tx.Commit()
 }
 
+// AppendTurnEnd writes the end of a turn (KindTurnEnd) under its own key
+// (TurnEndKey), and returns its ID: the first end written, when a retry
+// writes it again.
+func (s *PostgresStore) AppendTurnEnd(ctx context.Context, sessionID, turnKey string, msg Message) (int64, error) {
+	return s.AppendMessage(ctx, sessionID, TurnEndKey(turnKey), msg)
+}
+
+// HasTurnEnd reports whether a turn has its end: its participant answered
+// its message, and a second delivery of that message is not answered again.
+func (s *PostgresStore) HasTurnEnd(ctx context.Context, sessionID, turnKey string) (bool, error) {
+	var done bool
+	err := s.db.QueryRowContext(ctx,
+		"SELECT EXISTS (SELECT 1 FROM messages WHERE session_id = $1 AND msg_key = $2)", sessionID, TurnEndKey(turnKey)).Scan(&done)
+	return done, err
+}
+
 // AppendMessage stores msg under key, and returns its ID: the new row's, or
 // the one already stored under key (a retried write), left as it was. The
 // no-op update is what makes the conflicting row return its ID.

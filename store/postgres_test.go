@@ -658,7 +658,7 @@ func TestLoadConversation(t *testing.T) {
 
 	// Jarvis's turn ends; Smith's next turn, on a later message, reads it
 	// whole, never its end.
-	if _, err := s.AppendMessage(ctx, sid, TurnEndKey(jarvis), TurnEnd("jarvis", "")); err != nil {
+	if _, err := s.AppendTurnEnd(ctx, sid, jarvis, TurnEnd("jarvis", "")); err != nil {
 		t.Fatal(err)
 	}
 	later, _ := s.AppendMessage(ctx, sid, HumanMessageKey("l"), text("later"))
@@ -669,6 +669,45 @@ func TestLoadConversation(t *testing.T) {
 	// Ended after the message Smith answers: still not read.
 	if got := load(ScopeOf(smith, nil)); len(got) != 2 {
 		t.Errorf("smith on the message before jarvis ended loaded %q", got)
+	}
+}
+
+// A turn's end goes under its own key, after the turn's messages: a turn
+// that stored message 0 does not absorb it, and a rewrite keeps the first.
+// Whether a participant answered a message is whether its turn has an end.
+func TestAppendTurnEnd(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	const sid = "zz-turn-end"
+	cleanup := func() { s.DeleteMessagesBySession(ctx, sid) }
+	cleanup()
+	t.Cleanup(cleanup)
+
+	question, _ := s.AppendMessage(ctx, sid, HumanMessageKey("q"), Message{Role: RoleUser, Content: `"q"`})
+	turn := TurnKey(question, "jarvis")
+	if done, err := s.HasTurnEnd(ctx, sid, turn); err != nil || done {
+		t.Fatalf("before any end: %v, %v", done, err)
+	}
+	if err := s.AppendMessages(ctx, sid, turn, 0, []Message{{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "t1"}}}, {Role: RoleTool, ToolResult: &ToolResult{ToolCallID: "t1"}}}); err != nil {
+		t.Fatal(err)
+	}
+	id, err := s.AppendTurnEnd(ctx, sid, turn, TurnEnd("jarvis", "call LLM: boom"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := s.AppendTurnEnd(ctx, sid, turn, TurnEnd("jarvis", ""))
+	if err != nil || again != id {
+		t.Errorf("rewrite: %d, %v; want %d", again, err, id)
+	}
+	msgs, _ := s.LoadMessagesWithID(ctx, sid)
+	if len(msgs) != 4 || msgs[3].ID != id || msgs[3].Key != TurnEndKey(turn) || TurnEndError(msgs[3].Message) != "call LLM: boom" {
+		t.Fatalf("messages %+v, want the turn's two then its end, with the first error", msgs)
+	}
+	if done, err := s.HasTurnEnd(ctx, sid, turn); err != nil || !done {
+		t.Errorf("after the end: %v, %v", done, err)
+	}
+	if done, _ := s.HasTurnEnd(ctx, sid, TurnKey(question, "smith")); done {
+		t.Error("another participant's turn has an end")
 	}
 }
 

@@ -72,6 +72,10 @@ type Store interface {
 	// AppendMessage appends one message under an explicit idempotency key,
 	// and returns its ID (the stored one, when the key was already written).
 	AppendMessage(ctx context.Context, sessionID, key string, msg Message) (int64, error)
+	// AppendTurnEnd writes a turn's end under TurnEndKey, after what the turn
+	// wrote, and returns its ID; HasTurnEnd tells whether it is there.
+	AppendTurnEnd(ctx context.Context, sessionID, turnKey string, msg Message) (int64, error)
+	HasTurnEnd(ctx context.Context, sessionID, turnKey string) (bool, error)
 	// AppendForkReport posts a fork's report into its parent and records it
 	// on the fork, in one transaction (see ForkReport).
 	AppendForkReport(ctx context.Context, r ForkReport) (int64, error)
