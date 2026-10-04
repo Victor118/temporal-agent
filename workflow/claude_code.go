@@ -21,11 +21,14 @@ const (
 	// workflow rather than a plain tool activity, which is capped at 120s.
 	analyzeTimeout = 45 * time.Minute
 	// claudeCodeHeartbeat is how long a run (analysis or implementation) may
-	// go without a heartbeat: what tells a lost worker, as the session's
-	// does (runHeartbeatTimeout). The runner beats every 20s while the CLI
-	// lives, writing or not (claudecode.DefaultHeartbeatEvery); a CLI alive
-	// but stuck is the runner's to end (claudecode.DefaultStallTimeout).
-	claudeCodeHeartbeat = time.Minute
+	// go without a heartbeat: what tells a lost worker (or a run blocked on
+	// it). The runner beats every 20s while the CLI lives, writing or not
+	// (claudecode.DefaultHeartbeatEvery), but the SDK sends at most one
+	// heartbeat per 0.8 × this timeout, capped at 60s: 2 min leaves a whole
+	// minute of margin over that, where 1 min would leave 12s, which one slow
+	// answer of the frontend eats. A CLI alive but stuck is the runner's to
+	// end (claudecode.DefaultStallTimeout).
+	claudeCodeHeartbeat = 2 * time.Minute
 	// prepareTimeout bounds the clone.
 	prepareTimeout = 15 * time.Minute
 	// gitHeartbeatTimeout must exceed the interval the git activity beats at.
@@ -263,7 +266,7 @@ func whyEnded(err error, limit time.Duration) string {
 	switch {
 	case errors.As(err, &timeoutErr):
 		if timeoutErr.TimeoutType() == enumspb.TIMEOUT_TYPE_HEARTBEAT {
-			return fmt.Sprintf("its worker stopped answering (no heartbeat for %s): lost or stuck", claudeCodeHeartbeat)
+			return fmt.Sprintf("its worker stopped answering (no heartbeat for %s): lost, or blocked", claudeCodeHeartbeat)
 		}
 		return fmt.Sprintf("it reached its time limit (%s)", limit)
 	case errors.As(err, &appErr):

@@ -257,7 +257,7 @@ func TestAnalyzeRepoWorkflow_InterruptedRunSaysWhatItDid(t *testing.T) {
 		name, why string
 		err       error
 	}{
-		{"heartbeat timeout", "its worker stopped answering (no heartbeat for 1m0s)",
+		{"heartbeat timeout", "its worker stopped answering (no heartbeat for 2m0s)",
 			temporal.NewTimeoutError(enumspb.TIMEOUT_TYPE_HEARTBEAT, nil, progress)},
 		{"stalled", "the CLI wrote nothing for 12m0s (stuck?), so the run was ended",
 			temporal.NewNonRetryableApplicationError("claudecode: the CLI wrote nothing for 12m0s (stuck?), so the run was ended",

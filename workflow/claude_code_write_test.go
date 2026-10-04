@@ -308,7 +308,7 @@ func TestImplementFeatureWorkflow_InterruptedRunSaysWhatItDid(t *testing.T) {
 
 	out := e.run_(t, ImplementFeatureInput{Repo: "/src/repo", Task: "do it"})
 
-	if want := "the run did not complete: its worker stopped answering (no heartbeat for 1m0s)"; !strings.HasPrefix(out.Error, want) {
+	if want := "the run did not complete: its worker stopped answering (no heartbeat for 2m0s)"; !strings.HasPrefix(out.Error, want) {
 		t.Errorf("Error = %q, want %q", out.Error, want)
 	}
 	if !out.Pushed {
