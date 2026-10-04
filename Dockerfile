@@ -28,10 +28,10 @@ RUN set -eu; \
     cd /tmp; \
     curl -fsSL -o pandoc.tar.gz "https://github.com/jgm/pandoc/releases/download/${PANDOC_VERSION}/pandoc-${PANDOC_VERSION}-linux-${arch}.tar.gz"; \
     echo "$pandoc_sum  pandoc.tar.gz" | sha256sum -c -; \
-    tar -xzf pandoc.tar.gz -C /usr/local/bin --strip-components=2 "pandoc-${PANDOC_VERSION}/bin/pandoc"; \
+    tar -xzf pandoc.tar.gz -C /usr/local/bin --no-same-owner --strip-components=2 "pandoc-${PANDOC_VERSION}/bin/pandoc"; \
     curl -fsSL -o typst.tar.xz "https://github.com/typst/typst/releases/download/v${TYPST_VERSION}/typst-${typst_arch}-unknown-linux-musl.tar.xz"; \
     echo "$typst_sum  typst.tar.xz" | sha256sum -c -; \
-    tar -xJf typst.tar.xz -C /usr/local/bin --strip-components=1 "typst-${typst_arch}-unknown-linux-musl/typst"; \
+    tar -xJf typst.tar.xz -C /usr/local/bin --no-same-owner --strip-components=1 "typst-${typst_arch}-unknown-linux-musl/typst"; \
     rm pandoc.tar.gz typst.tar.xz; \
     pandoc --version >/dev/null && typst --version >/dev/null; \
     apt-get purge -y --auto-remove xz-utils; \
