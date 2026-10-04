@@ -17,7 +17,11 @@ import (
 // turnTrust is how long a turn event outweighs the visibility queries.
 // Those lag behind the workflows by a moment: right after a participant
 // ends they may still list it running. Past that moment they are right, and
-// they also cover an event that never arrived.
+// they also cover an event that never arrived: a turn_done lost, or a
+// turn_started lost on a message this server delivered. A participant done
+// with its turn and given nothing more still does not work, whatever the
+// queries say: it runs on between two turns (writing an end, relaying,
+// checking a message it does not answer).
 const turnTrust = 30 * time.Second
 
 // turnForget is how long what the events told of a participant is kept:
@@ -79,9 +83,10 @@ func (t *turns) participant(sessionID, participant string) *participantTurns {
 	return p
 }
 
-// prune drops what tells nothing more than the visibility queries: a
-// participant done and no longer trusted, with nothing pending, and
-// anything forgotten. Under t.mu.
+// prune drops what is forgotten: a participant with nothing pending, whose
+// last event is older than turnForget, and messages pending as long. A
+// participant done is kept until then: its turn_done outweighs the queries
+// (working). Under t.mu.
 func (t *turns) prune(now time.Time) {
 	for sid, participants := range t.m {
 		for name, p := range participants {
@@ -90,8 +95,7 @@ func (t *turns) prune(now time.Time) {
 					delete(p.pending, id)
 				}
 			}
-			age := now.Sub(p.at)
-			if len(p.pending) == 0 && (!p.working && age >= turnTrust || age >= turnForget) {
+			if len(p.pending) == 0 && now.Sub(p.at) >= turnForget {
 				delete(participants, name)
 			}
 		}
@@ -196,9 +200,14 @@ func (t *turns) forget(sessionID string) {
 }
 
 // working lists the participants of a session that work: those a trusted
-// event says are on a turn, and those the visibility queries see running
-// that no trusted event says are done. running are the participants the
-// queries see. In the order of their names.
+// event says are on a turn, and past the trust those the visibility queries
+// see running that are on a turn, or have a message delivered and not
+// started, as far as the events tell. A participant whose last event is its
+// turn_done does not work, whatever its age: the queries list it running
+// between two turns too. A turn_started lost on a message this server did
+// not deliver (a relay) leaves that turn unseen until its end: a known
+// limit of phase 1. running are the participants the queries see. In the
+// order of their names.
 func (t *turns) working(sessionID string, running []string) []Working {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -206,8 +215,11 @@ func (t *turns) working(sessionID string, running []string) []Working {
 	var out []Working
 	known := t.m[sessionID]
 	for name, p := range known {
-		trusted := !p.at.IsZero() && now.Sub(p.at) < turnTrust
-		if trusted && !p.working || !trusted && !slices.Contains(running, name) {
+		works := p.working
+		if p.at.IsZero() || now.Sub(p.at) >= turnTrust {
+			works = slices.Contains(running, name) && (p.working || len(p.pending) > 0)
+		}
+		if !works {
 			continue
 		}
 		w := Working{Participant: name, AgentID: name}

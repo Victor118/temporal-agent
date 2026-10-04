@@ -336,6 +336,48 @@ func TestWorkingAgents_PastTheTrust(t *testing.T) {
 	s.background.Wait()
 }
 
+// A participant done with its turn does not work, however long the queries
+// list it running: it runs on between two turns (an end written over a
+// store away, a relay retried). A message delivered to it and not started
+// makes it work again for the queries: its turn_started may be lost.
+func TestWorkingAgents_DoneOutweighsTheQueries(t *testing.T) {
+	tc := &fakeTemporal{byType: map[string][]string{"ParticipantWorkflow": {sid + ":p:default"}}}
+	s := newTest(&memStore{}, tc)
+	now := time.Now()
+	s.turns.now = func() time.Time { return now }
+	s.statuses.now = func() time.Time { return now }
+	ctx := context.Background()
+
+	s.Observe(sid, turnEvent(workflow.EventTurnStarted, "default", "Jarvis", 1))
+	s.Observe(sid, turnEvent(workflow.EventTurnDone, "default", "Jarvis", 1))
+	now = now.Add(10 * time.Minute)
+	if got := s.WorkingAgents(ctx, sid); len(got) != 0 {
+		t.Errorf("done, listed running for 10 min: %+v, want none at work", got)
+	}
+	if got := s.Statuses(ctx)[sid]; cmp.Or(got, StatusIdle) != StatusIdle {
+		t.Errorf("status %q", got)
+	}
+
+	s.turns.expect(sid, "default", 3)
+	now = now.Add(turnTrust)
+	if got := names(s.WorkingAgents(ctx, sid)); got != "default=" {
+		t.Errorf("a message delivered and never seen started: %q, want the queries' word", got)
+	}
+	s.Observe(sid, turnEvent(workflow.EventTurnStarted, "default", "Jarvis", 3))
+	s.Observe(sid, turnEvent(workflow.EventTurnDone, "default", "Jarvis", 3))
+	now = now.Add(time.Hour)
+	if got := s.WorkingAgents(ctx, sid); len(got) != 0 {
+		t.Errorf("done again: %+v", got)
+	}
+	// Forgotten past a day: the queries alone again.
+	now = now.Add(turnForget)
+	s.Observe("0e1c2a9e-3b4d-4e5f-8a7b-0c1d2e3f4a5b", turnEvent(workflow.EventTurnStarted, "x", "", 1))
+	if got := names(s.WorkingAgents(ctx, sid)); got != "default=" {
+		t.Errorf("past a day: %q", got)
+	}
+	s.background.Wait()
+}
+
 // Members out of a session are told on its topic: its streams end theirs.
 func TestMembersLeft_Published(t *testing.T) {
 	st := &memStore{session: &store.Session{SessionID: sid, CreatedBy: "u-alice"},
