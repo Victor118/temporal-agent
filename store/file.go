@@ -32,6 +32,11 @@ type File struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
+// ErrFileExists is the error of a file a call publishes under a name it
+// already published, with other content: nothing was stored. The same
+// content is a retry, and finds the file stored first.
+var ErrFileExists = errors.New("a file of that name, with other content, was already published by this call")
+
 // ErrFileSessionGone is the error of a file published in a session that no
 // longer exists: nothing was stored.
 var ErrFileSessionGone = errors.New("the session no longer exists")
@@ -41,8 +46,9 @@ var ErrFileSessionGone = errors.New("the session no longer exists")
 type FileStore interface {
 	// SaveFile stores f and its content, and returns f as stored (its
 	// creation time). A file the same call of the same turn already stored
-	// under that name is returned as it is, f and content ignored. A
-	// session that no longer exists is ErrFileSessionGone.
+	// under that name, with the same content (SHA256), is returned as it
+	// is: a retry. With other content, ErrFileExists. A session that no
+	// longer exists is ErrFileSessionGone.
 	SaveFile(ctx context.Context, f File, content []byte) (File, error)
 	// GetFile returns a file's metadata; nil when there is none.
 	GetFile(ctx context.Context, id string) (*File, error)
@@ -57,7 +63,8 @@ const fileColumns = "id, session_id, turn_key, call_id, agent_id, user_id, name,
 
 // SaveFile writes the file's row and its content in one transaction: no
 // file is listed without its content. The row is keyed by its session, turn,
-// call and name (idx_files_call): a second write of it finds the first.
+// call and name (idx_files_call): a second write of it finds the first,
+// or ErrFileExists if its content differs.
 func (s *PostgresStore) SaveFile(ctx context.Context, f File, content []byte) (File, error) {
 	err := s.inTx(ctx, func(tx *sql.Tx) error {
 		err := tx.QueryRowContext(ctx, `
@@ -69,10 +76,20 @@ func (s *PostgresStore) SaveFile(ctx context.Context, f File, content []byte) (F
 		).Scan(&f.CreatedAt)
 		if errors.Is(err, sql.ErrNoRows) {
 			// Stored already: the first write stands, content included.
-			f, err = scanFile(tx.QueryRowContext(ctx, `SELECT `+fileColumns+` FROM files
+			stored, err := scanFile(tx.QueryRowContext(ctx, `SELECT `+fileColumns+` FROM files
 				WHERE session_id = $1 AND turn_key = $2 AND call_id = $3 AND name = $4`,
 				f.SessionID, f.TurnKey, f.CallID, f.Name))
-			return err
+			switch {
+			case errors.Is(err, sql.ErrNoRows):
+				// Gone between the two statements: its session was deleted.
+				return ErrFileSessionGone
+			case err != nil:
+				return err
+			case stored.SHA256 != f.SHA256:
+				return ErrFileExists
+			}
+			f = stored
+			return nil
 		}
 		if err != nil {
 			return err

@@ -44,11 +44,18 @@ func TestFiles(t *testing.T) {
 	// first file, content included; another call publishes a new one.
 	again := f
 	again.ID = "zz-file-again"
-	if got, err := s.SaveFile(ctx, again, []byte("other")); err != nil || got.ID != "zz-file-1" || !got.CreatedAt.Equal(saved.CreatedAt) {
+	if got, err := s.SaveFile(ctx, again, content); err != nil || got.ID != "zz-file-1" || !got.CreatedAt.Equal(saved.CreatedAt) {
 		t.Errorf("same call again: %+v, %v", got, err)
 	}
 	if data, _ := s.ReadFileContent(ctx, "zz-file-1"); !bytes.Equal(data, content) {
 		t.Errorf("content after a retry %q", data)
+	}
+	// The same name with other content, from the same call (two paths with
+	// one base name): refused, never the first file in its place.
+	clash := f
+	clash.ID, clash.SHA256 = "zz-file-clash", "other"
+	if got, err := s.SaveFile(ctx, clash, []byte("other")); !errors.Is(err, ErrFileExists) {
+		t.Errorf("same name, other content: %+v, %v, want ErrFileExists", got, err)
 	}
 	if f, _ := s.GetFile(ctx, "zz-file-again"); f != nil {
 		t.Errorf("a retry stored a second file: %+v", f)
