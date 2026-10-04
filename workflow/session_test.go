@@ -519,25 +519,6 @@ func TestSessionWorkflow_TheNextAgentSeesTheAnswerBefore(t *testing.T) {
 	}
 }
 
-// The part note quotes the message it is about, on one line and clipped, and
-// names each agent as the history does.
-func TestPartNote_QuotesTheMessage(t *testing.T) {
-	agents := []AddressedAgent{{ID: "cr", Name: "Reviewer de code", Mention: "cr"}, {ID: "smith"}}
-	long := "@cr relis\n\n" + strings.Repeat("é", 300) + " FIN"
-	note := partNote(agents, 1, UserMessage{Text: long})
-	for _, want := range []string{"the message that reads “@cr relis éé", "…”", "Reviewer de code (@cr), smith (@smith)", "You are smith (@smith)"} {
-		if !strings.Contains(note, want) {
-			t.Errorf("note %q lacks %q", note, want)
-		}
-	}
-	if strings.Contains(note, "FIN") || strings.Contains(note, "relis\n") || !utf8.ValidString(note) {
-		t.Errorf("note %q: the quote is not clipped to one line", note)
-	}
-	if partNote(agents[:1], 0, UserMessage{Text: long}) != "" {
-		t.Error("a message to one agent got a part note")
-	}
-}
-
 // registerRealTurns runs the real AgentWorkflow over fakes: the agent reads
 // a page with web_fetch.
 func registerRealTurns(env *testsuite.TestWorkflowEnvironment, answer func(int, provider.ChatRequest) (provider.ChatResponse, error)) *llmFakes {

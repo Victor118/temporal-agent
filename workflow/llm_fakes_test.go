@@ -27,6 +27,10 @@ type memSession struct {
 	failPersists  int
 	writeThenFail bool
 	loads         int // LoadConversation calls
+	// agents are the agents the store holds, by ID, with their names;
+	// deleted says the session is gone. For the participant's turn checks.
+	agents  map[string]string
+	deleted bool
 }
 
 // persistCall records one PersistContext activity call.
@@ -109,6 +113,42 @@ func (s *memSession) LoadConversation(_ context.Context, _ string, scope store.T
 		}
 	}
 	return out, nil
+}
+
+func (s *memSession) GetSession(_ context.Context, sessionID string) (*store.Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.deleted {
+		return nil, nil
+	}
+	return &store.Session{SessionID: sessionID}, nil
+}
+
+func (s *memSession) GetAgent(_ context.Context, agentID string) (*store.Agent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	name, ok := s.agents[agentID]
+	if !ok {
+		return nil, nil
+	}
+	return &store.Agent{ID: agentID, Name: name}, nil
+}
+
+func (s *memSession) HasTurnEnd(_ context.Context, _ string, turnKey string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, m := range s.messages {
+		if m.Key == store.TurnEndKey(turnKey) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (s *memSession) AppendTurnEnd(_ context.Context, _ string, turnKey string, msg store.Message) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.addLocked(store.TurnEndKey(turnKey), msg), nil
 }
 
 func (s *memSession) LoadMemory(_ context.Context, _ store.MemoryScope, userID string) (store.Memory, error) {

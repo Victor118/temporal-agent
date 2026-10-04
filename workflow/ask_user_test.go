@@ -25,7 +25,7 @@ func TestAskUserWorkflow_SignsTheQuestion(t *testing.T) {
 			sent = in
 			return nil
 		}, sdkactivity.RegisterOptions{Name: "NotifyStep"})
-		env.SetStartWorkflowOptions(client.StartWorkflowOptions{ID: "s1-tool-ask_user-t1"})
+		env.SetStartWorkflowOptions(client.StartWorkflowOptions{ID: "s1:p:jarvis:m3:tool:ask_user:t1"})
 		env.RegisterDelayedCallback(func() { env.SignalWorkflow(SignalUserAnswer, "main") }, time.Second)
 
 		input, _ := tool.WithCallContext(json.RawMessage(`{"question":"Quelle branche ?"}`),

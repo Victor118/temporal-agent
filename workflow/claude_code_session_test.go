@@ -33,8 +33,8 @@ const (
 )
 
 // testRunWorkflowID is the coding workflow's ID in the tests: a tool call of
-// session "s1" (childWorkflowID).
-const testRunWorkflowID = "s1-tool-implement_feature-c1"
+// jarvis's turn in session "s1" (childWorkflowID).
+const testRunWorkflowID = "s1:p:jarvis:m3:tool:implement_feature:c1"
 
 // activityQueues records the task queue each activity ran on, in order, and
 // the notifications sent.
@@ -243,10 +243,10 @@ func TestCodingRuns_WaitForAWorkerThenRun(t *testing.T) {
 		t.Fatalf("sent %+v, want the notice, then its clear", notices)
 	}
 	n := notices[0]
-	var data struct{ Type, Text, Agent string }
+	var data struct{ Type, Text, Agent, Participant string }
 	json.Unmarshal(n.Event.Data, &data)
 	if n.SessionID != "s1" || n.Channel != "telegram" || n.ChannelID != "42" || n.Event.Type != activity.EventNotice ||
-		data.Agent != "Jarvis" || !strings.Contains(data.Text, "attend un worker libre") || !strings.Contains(data.Text, "30 min") {
+		data.Agent != "Jarvis" || data.Participant != "jarvis" || !strings.Contains(data.Text, "attend un worker libre") || !strings.Contains(data.Text, "30 min") {
 		t.Errorf("notice %+v %s", n, n.Event.Data)
 	}
 	checkCleared(t, notices[1])
@@ -346,18 +346,28 @@ func TestCodingRuns_NoNoticeWhenTheSlotFreesAsItIsDue(t *testing.T) {
 	}
 }
 
-func TestToolCallSession(t *testing.T) {
-	for id, want := range map[string]string{
-		"s1-tool-implement_feature-c1":                  "s1",
-		"s1-tool-agent_analyst-c1-tool-analyze_repo-c2": "s1",
-		"9f0e-aa-tool-ask_user-3":                       "9f0e-aa",
+// The session of a workflow is what precedes its first ':', and its
+// participant follows ":p:": a sub-agent's tools carry them too.
+func TestSessionOf(t *testing.T) {
+	for id, want := range map[string][2]string{
+		"s1:p:jarvis":     {"s1", "jarvis"},
+		"s1:p:jarvis:m3":  {"s1", "jarvis"},
+		testRunWorkflowID: {"s1", "jarvis"},
+		"s1:p:jarvis:m3:tool:agent_analyst:c1:tool:analyze_repo:c2": {"s1", "jarvis"},
+		"s1:i:42:m3:tool:ask_user:c1":                               {"s1", ""},
+		"sched-1-agent-17:tool:ask_user:c1":                         {"sched-1-agent-17", ""},
 	} {
-		if got, ok := toolCallSession(id); !ok || got != want {
-			t.Errorf("toolCallSession(%q) = %q, %v; want %q", id, got, ok, want)
+		if got, ok := SessionOf(id); !ok || got != want[0] {
+			t.Errorf("SessionOf(%q) = %q, %v; want %q", id, got, ok, want[0])
+		}
+		if got, ok := ParticipantOf(id); got != want[1] || ok != (want[1] != "") {
+			t.Errorf("ParticipantOf(%q) = %q, %v; want %q", id, got, ok, want[1])
 		}
 	}
-	if _, ok := toolCallSession("scheduled-x"); ok {
-		t.Error("a session read from an ID with none")
+	for _, id := range []string{"scheduled-x", "fork-6f1c", "report-a-b", ":p:x"} {
+		if s, ok := SessionOf(id); ok {
+			t.Errorf("SessionOf(%q) = %q: a session read from an ID with none", id, s)
+		}
 	}
 }
 

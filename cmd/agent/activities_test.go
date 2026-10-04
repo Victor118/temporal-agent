@@ -3,7 +3,9 @@ package main
 import (
 	"fmt"
 	"reflect"
+	"runtime"
 	"slices"
+	"strings"
 	"testing"
 
 	"go.temporal.io/sdk/testsuite"
@@ -49,6 +51,30 @@ func TestWorkerActivities_Register(t *testing.T) {
 	}
 }
 
+// Every workflow a worker registers passes the SDK's validation, under the
+// name the server and the relay start it by.
+func TestWorkerWorkflows_Register(t *testing.T) {
+	var names []string
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("a worker would not start: %v", r)
+			}
+		}()
+		env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+		for _, wf := range workerWorkflows() {
+			env.RegisterWorkflow(wf)
+			name := runtime.FuncForPC(reflect.ValueOf(wf).Pointer()).Name()
+			names = append(names, name[strings.LastIndexByte(name, '.')+1:])
+		}
+	}()
+	for _, want := range []string{"ParticipantWorkflow", "AgentWorkflow", "AskUserWorkflow", "ForkSessionWorkflow", "ReportToParentWorkflow"} {
+		if !slices.Contains(names, want) {
+			t.Errorf("workflows %v lack %s", names, want)
+		}
+	}
+}
+
 // The test above would catch it: a method with no result is refused.
 type noResult struct{}
 
@@ -66,9 +92,11 @@ func TestRegister_RefusesAMethodWithNoResult(t *testing.T) {
 func TestWorkerActivities_AreTheActivities(t *testing.T) {
 	want := []string{
 		"CallLLM",
+		"CheckTurn",
 		"CleanupWorkspace",
 		"DeleteSchedule",
 		"DeliverResult",
+		"EndTurn",
 		"ExecuteTool",
 		"InspectWorkspace",
 		"LastMessageID",
@@ -81,6 +109,7 @@ func TestWorkerActivities_AreTheActivities(t *testing.T) {
 		"PrepareWorkspace",
 		"ProbeRunWorker",
 		"PushBranch",
+		"Relay",
 		"RunClaudeCode",
 		"SummarizeConversation",
 		"SummarizeForkReport",

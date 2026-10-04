@@ -41,9 +41,9 @@ func AskUserWorkflow(ctx workflow.Context, rawInput json.RawMessage) (tool.Resul
 		return tool.Result{}, fmt.Errorf("parse input: %w", err)
 	}
 
-	// The session, from the workflow ID: "{sessionID}-tool-ask_user-{N}"
+	// The session, from the workflow ID: "<turn>:tool:ask_user:<call>"
 	wfID := workflow.GetInfo(ctx).WorkflowExecution.ID
-	sessionID, ok := toolCallSession(wfID)
+	sessionID, ok := SessionOf(wfID)
 	if !ok {
 		return tool.Result{}, fmt.Errorf("cannot extract session ID from workflow ID: %s", wfID)
 	}

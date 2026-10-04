@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"go.temporal.io/sdk/temporal"
@@ -192,15 +191,20 @@ func waitingNotice(wait time.Duration) string {
 // Best effort: a failure is logged, and the run goes on.
 func sendRunNotice(ctx workflow.Context, call tool.CallContext, text string) {
 	logger := workflow.GetLogger(ctx)
-	sessionID, ok := toolCallSession(workflow.GetInfo(ctx).WorkflowExecution.ID)
-	if !ok || sessionID == "" {
+	wfID := workflow.GetInfo(ctx).WorkflowExecution.ID
+	sessionID, ok := SessionOf(wfID)
+	if !ok {
 		logger.Warn("A coding run has a notice for its user, and no session to say it to")
 		return
 	}
+	// The participant whose turn waits: the server shows the notice on its
+	// line.
+	participant, _ := ParticipantOf(wfID)
 	data, _ := json.Marshal(map[string]string{
-		"type":  activity.EventNotice,
-		"text":  text,
-		"agent": call.Agent,
+		"type":        activity.EventNotice,
+		"text":        text,
+		"agent":       call.Agent,
+		"participant": participant,
 	})
 	var notifAct *activity.NotificationActivities
 	err := workflow.ExecuteActivity(
@@ -230,17 +234,6 @@ func inMinutes(d time.Duration) string {
 		return d.String()
 	}
 	return fmt.Sprintf("%d min", int(d.Round(time.Minute)/time.Minute))
-}
-
-// toolCallSession is the session of a workflow tool's call, read from its
-// workflow ID: "<session>-tool-<name>-<call>" (childWorkflowID). A
-// sub-agent's own tools carry the session's ID first too.
-func toolCallSession(workflowID string) (string, bool) {
-	i := strings.Index(workflowID, "-tool-")
-	if i < 0 {
-		return "", false
-	}
-	return workflowID[:i], true
 }
 
 // complete releases the worker: the session's end.

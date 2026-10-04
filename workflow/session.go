@@ -1,17 +1,14 @@
 package workflow
 
 import (
-	"cmp"
 	"fmt"
 	"slices"
 	"strings"
 	"time"
 
-	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/victor/temporal-agent/activity"
-	"github.com/victor/temporal-agent/conversation"
 	"github.com/victor/temporal-agent/store"
 )
 
@@ -43,29 +40,6 @@ type UserMessage struct {
 	// it mentions, as the server resolved them. Empty: the session's agent
 	// alone.
 	Agents []AddressedAgent `json:"agents,omitempty"`
-}
-
-// AddressedAgent is an agent a message calls by its mention. The server
-// resolves it: a workflow cannot read the agents.
-type AddressedAgent struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Mention string `json:"mention"`
-}
-
-// Turn events tell the web members when an agent starts a turn, and when it
-// is over, its transcript persisted: the server knows at once, where the
-// visibility queries lag. They go to the web whatever the session's channel.
-const (
-	EventTurnStarted = "turn_started"
-	EventTurnDone    = "turn_done"
-)
-
-// TurnEvent is the data of a turn event.
-type TurnEvent struct {
-	AgentID   string `json:"agent_id"`
-	AgentName string `json:"agent_name,omitempty"` // empty for the session's agent: the server names it
-	Turn      string `json:"turn"`                 // the turn's key
 }
 
 type SessionWorkflowInput struct {
@@ -212,7 +186,7 @@ func processMessage(actCtx, ctx workflow.Context, input SessionWorkflowInput, us
 			key:       store.TurnKey(upTo, a.ID),
 			upTo:      upTo,
 			earlier:   slices.Clone(earlier),
-			partNote:  partNote(agents, i, userMessage),
+			partNote:  partNote(agents, i, Quote(userMessage.Text), userMessage.UserName),
 			// On the channel, an answer that could be taken for another
 			// agent's is signed.
 			signReply: len(agents) > 1 || a.ID != input.AgentID,
@@ -241,42 +215,6 @@ type agentTurn struct {
 	systemPrompt string   // override; empty = the agent's own
 	partNote     string   // see partNote
 	signReply    bool
-}
-
-// maxQuotedMessageBytes bounds the quote of the message a part note is about.
-const maxQuotedMessageBytes = 200
-
-// partNote tells the i-th of the agents a message addresses which part is its
-// own: they answer one after another, and each sees the whole message. Its
-// text is not split, since a part can refer to another ("from there, tell
-// me…"). The note quotes the message: one written meanwhile is stored after
-// it, and the agent must still answer this one. Empty when the message
-// addresses one agent.
-func partNote(agents []AddressedAgent, i int, msg UserMessage) string {
-	if len(agents) < 2 {
-		return ""
-	}
-	names := make([]string, len(agents))
-	for j, a := range agents {
-		names[j] = strings.TrimPrefix(conversation.AgentLabel(cmp.Or(a.Name, a.ID), cmp.Or(a.Mention, a.ID)), "agent ")
-	}
-	quote := conversation.Clip(strings.Join(strings.Fields(msg.Text), " "), maxQuotedMessageBytes)
-	from := ""
-	if msg.UserName != "" {
-		from = " from " + msg.UserName
-	}
-	var sb strings.Builder
-	sb.WriteString("\n## Several agents addressed\n\n")
-	fmt.Fprintf(&sb, "You are answering the message%s that reads “%s”. It addresses several agents, who answer it one after another, in this order: %s. You are %s: answer only the part meant for you.",
-		from, quote, strings.Join(names, ", "), names[i])
-	if i > 0 {
-		sb.WriteString(" The agents before you have answered already, above, in their [agent …] blocks: build on what they said rather than repeat it.")
-	}
-	if i < len(agents)-1 {
-		sb.WriteString(" The agents after you answer next and will see your reply: leave their part to them.")
-	}
-	sb.WriteString(" Messages written after it get their own turn: answer this one.\n")
-	return sb.String()
 }
 
 // processTurn runs one agent on a user message, then persists what the turn
@@ -396,21 +334,4 @@ func processTurn(actCtx, ctx workflow.Context, input SessionWorkflowInput, userM
 	}
 
 	return false, nil
-}
-
-// turnNotifyOptions are those of a turn event: one short attempt. The turn
-// waits for it (a turn's start must not overtake the end of the one before),
-// so a server slow or away must not hold the turn: a page that misses the
-// event falls back on the visibility queries. ScheduleToClose bounds the
-// wait for a worker to pick the attempt up, which StartToClose does not count.
-var turnNotifyOptions = workflow.ActivityOptions{
-	ScheduleToCloseTimeout: 5 * time.Second,
-	StartToCloseTimeout:    3 * time.Second,
-	RetryPolicy:            &temporal.RetryPolicy{MaximumAttempts: 1},
-}
-
-// notifyTurn sends a turn event to the session's web members. Best effort:
-// its failure neither fails nor holds the turn.
-func notifyTurn(ctx workflow.Context, sessionID, eventType string, e TurnEvent) {
-	notifySessionWith(ctx, turnNotifyOptions, sessionID, eventType, map[string]string{"agent_id": e.AgentID, "agent_name": e.AgentName, "turn": e.Turn})
 }

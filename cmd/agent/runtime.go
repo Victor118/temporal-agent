@@ -180,7 +180,7 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 	}
 	acts := workerActivities(activityDeps{
 		llm: llmProvider, store: st, catalog: catalog, skills: skillAct, maxContext: maxContext,
-		code: codeAct, registry: registry, notifiers: notifiers, web: opts.web, schedules: tc.ScheduleClient(),
+		code: codeAct, registry: registry, notifiers: notifiers, web: opts.web, schedules: tc.ScheduleClient(), relay: tc,
 	})
 	rt := &workerRuntime{queues: queues, workflows: workerConf.Workflows, skills: skills, endRuns: endRuns, releaseRuns: releaseRuns}
 	for _, queue := range queues {
@@ -193,14 +193,9 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 		withCodingSessions(&wopts, queue == workerConf.Queue && coding, maxRuns)
 		w := worker.New(tc, queue, wopts)
 
-		w.RegisterWorkflow(workflow.SessionWorkflow)
-		w.RegisterWorkflow(workflow.AgentWorkflow)
-		w.RegisterWorkflow(workflow.AskUserWorkflow)
-		w.RegisterWorkflow(workflow.AnalyzeRepoWorkflow)
-		w.RegisterWorkflow(workflow.ImplementFeatureWorkflow)
-		w.RegisterWorkflow(workflow.ScheduledAgentWorkflow)
-		w.RegisterWorkflow(workflow.ForkSessionWorkflow)
-		w.RegisterWorkflow(workflow.ReportToParentWorkflow)
+		for _, wf := range workerWorkflows() {
+			w.RegisterWorkflow(wf)
+		}
 
 		for _, act := range acts {
 			w.RegisterActivity(act)
@@ -229,6 +224,22 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 	return rt, nil
 }
 
+// workerWorkflows are the workflows every worker registers, on each of its
+// queues. The tests register this very list (TestWorkerWorkflows_Register).
+func workerWorkflows() []any {
+	return []any{
+		workflow.SessionWorkflow,
+		workflow.ParticipantWorkflow,
+		workflow.AgentWorkflow,
+		workflow.AskUserWorkflow,
+		workflow.AnalyzeRepoWorkflow,
+		workflow.ImplementFeatureWorkflow,
+		workflow.ScheduledAgentWorkflow,
+		workflow.ForkSessionWorkflow,
+		workflow.ReportToParentWorkflow,
+	}
+}
+
 // activityDeps is what a worker's activities are built from.
 type activityDeps struct {
 	llm        provider.LLMProvider
@@ -241,6 +252,7 @@ type activityDeps struct {
 	notifiers  map[string]activity.Notifier
 	web        activity.Notifier
 	schedules  activity.ScheduleHandles
+	relay      activity.SignalStarter
 }
 
 // workerActivities are the activity structs every worker registers, on each
@@ -254,6 +266,8 @@ func workerActivities(d activityDeps) []any {
 		&activity.LLMActivities{Provider: d.llm, Store: d.store, Catalog: d.catalog, Prompts: d.skills.Prompts, MaxContextBytes: d.maxContext},
 		&activity.ForkActivities{Store: d.store, LLM: d.llm, Private: d.catalog},
 		&activity.MemoryActivities{Store: d.store},
+		&activity.TurnActivities{Store: d.store},
+		&activity.RelayActivities{Client: d.relay},
 		&activity.ForkPostActivities{Store: d.store},
 		d.code,
 		&activity.ToolActivities{Registry: d.registry, Catalog: d.catalog},

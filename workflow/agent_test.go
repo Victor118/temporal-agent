@@ -367,10 +367,10 @@ func TestBuildChildInput_CallContextOnlyWhenPublished(t *testing.T) {
 }
 
 func TestChildWorkflowID(t *testing.T) {
-	if got := childWorkflowID("s1", "agent_analyst", "toolu_01A", 3, 1); got != "s1-tool-agent_analyst-toolu_01A" {
+	if got := childWorkflowID("s1:p:jarvis:m3", "agent_analyst", "toolu_01A", 3, 1); got != "s1:p:jarvis:m3:tool:agent_analyst:toolu_01A" {
 		t.Errorf("got %q", got)
 	}
-	if got := childWorkflowID("s1", "ask_user", "", 3, 1); got != "s1-tool-ask_user-3-1" {
+	if got := childWorkflowID("s1:p:jarvis:m3", "ask_user", "", 3, 1); got != "s1:p:jarvis:m3:tool:ask_user:3-1" {
 		t.Errorf("got %q", got)
 	}
 }

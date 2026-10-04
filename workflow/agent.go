@@ -391,7 +391,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 			d := toolDispatch{kind: tool.ToolKind(res.Kind), agent: res.AgentID != "", fireAndForget: res.FireAndForget, taskQueue: res.TaskQueue}
 
 			if d.kind == tool.ToolKindWorkflow {
-				d.workflowID = childWorkflowID(input.SessionID, tc.Name, tc.ID, i, j)
+				d.workflowID = childWorkflowID(workflow.GetInfo(ctx).WorkflowExecution.ID, tc.Name, tc.ID, i, j)
 
 				// Build input first — a sub-agent runs on the current workflow queue
 				childWorkflow, childInput, err := buildChildInput(tc.Input, input, d.workflowID, &res, call, currentAgentID, workflow.GetInfo(ctx).TaskQueueName)
@@ -780,12 +780,14 @@ func subAgentContent(result json.RawMessage) (content string, isError bool) {
 	return string(result), false
 }
 
-// childWorkflowID names a workflow tool call "{sessionID}-tool-{tool}-{callID}".
-// The prefix is relied upon (ask_user extracts the session ID from it); the tool
-// call ID keeps parallel calls and later turns distinct.
-func childWorkflowID(sessionID, toolName, callID string, iteration, index int) string {
+// childWorkflowID names a workflow tool call "<parent>:tool:<tool>:<call>",
+// parent being the calling run's own workflow ID: a turn's
+// ("<session>:p:<agent>:m<id>"), a sub-agent's, under it. Its session is what
+// precedes the first ':' (SessionOf): ask_user and the coding runs find it
+// there. The tool call ID keeps parallel calls and later turns distinct.
+func childWorkflowID(parentID, toolName, callID string, iteration, index int) string {
 	if callID == "" {
 		callID = fmt.Sprintf("%d-%d", iteration, index)
 	}
-	return fmt.Sprintf("%s-tool-%s-%s", sessionID, toolName, callID)
+	return parentID + toolMark + toolName + ":" + callID
 }
