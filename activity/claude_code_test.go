@@ -1189,3 +1189,56 @@ func TestRunStop(t *testing.T) {
 		t.Fatal("not stopped after Stop")
 	}
 }
+
+// A run that ends without the CLI's result says why by its error's type, and
+// how far it got in its details: no result reaches the workflow with an
+// error, and the agent is owed what the run did before it ended.
+func TestRunClaudeCode_AFailedRunSaysHowFarItGot(t *testing.T) {
+	id := subproctest.Identity(t)
+	if os.Geteuid() == 0 && id == nil {
+		t.Skip("no identity to run as")
+	}
+	const started = `printf '{"type":"system","subtype":"init","session_id":"s"}\n'
+printf '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu_1","name":"Bash","input":{"command":"go test ./..."}}]},"session_id":"s"}\n'
+`
+	for _, c := range []struct {
+		name, script, typ string
+	}{
+		{"stalled", started + "exec sleep 60\n", ErrRunStalled},
+		{"no result", started + "echo 'out of memory' >&2\nexit 137\n", ErrRunFailed},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			bin := filepath.Join(subproctest.Dir(t, nil), "fake-claude")
+			if err := os.WriteFile(bin, []byte("#!/bin/sh\n"+c.script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			a := &ClaudeCodeActivities{
+				AllowedRepos: testRepos, Root: subproctest.Dir(t, nil), RunAs: id,
+				Runner: &claudecode.Runner{Binary: bin, StallTimeout: 500 * time.Millisecond},
+			}
+			if id != nil {
+				a.Runs = subproc.NewRuns(id)
+			}
+			dir := filepath.Join(a.Root, "run-1")
+			os.Mkdir(dir, 0o755)
+			if id != nil {
+				if err := id.Give(dir); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			_, err := a.RunClaudeCode(context.Background(), RunClaudeCodeInput{Dir: dir, Task: "x"})
+			var appErr *temporal.ApplicationError
+			if !errors.As(err, &appErr) || appErr.Type() != c.typ || !appErr.NonRetryable() {
+				t.Fatalf("err = %v, want a non-retryable %s", err, c.typ)
+			}
+			var p claudecode.Progress
+			if err := appErr.Details(&p); err != nil {
+				t.Fatalf("details: %v", err)
+			}
+			if p.Events != 2 || p.ToolCalls != 1 || p.LastTool != "Bash" {
+				t.Errorf("progress = %+v, want 2 events, 1 tool call, Bash last", p)
+			}
+		})
+	}
+}

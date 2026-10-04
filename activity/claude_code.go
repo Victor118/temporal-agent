@@ -132,6 +132,15 @@ func (a *ClaudeCodeActivities) ProbeRunWorker(ctx context.Context) (ProbeRunWork
 // because it was stopping (RunStop): the workflow reads it as a lost worker.
 const ErrWorkerStopping = "WorkerStopping"
 
+// ErrRunStalled is the type of the error of a run whose CLI wrote nothing
+// for too long (claudecode.StallError), and ErrRunFailed of any other run
+// that ended without the CLI's result. Both carry, as their details, how far
+// the run got (claudecode.Progress), as ErrWorkerStopping does.
+const (
+	ErrRunStalled = "RunStalled"
+	ErrRunFailed  = "RunFailed"
+)
+
 // RunStop ends the coding runs under way when their worker stops: each
 // kills its CLI and answers ErrWorkerStopping, while the worker still polls
 // the session's queue and waits for the answer to go out (worker.Options
@@ -514,7 +523,9 @@ type RunClaudeCodeInput struct {
 // RunClaudeCode runs one coding session and heartbeats while it does. A run the
 // CLI reports as failed comes back as a Result, not an error: the workflow
 // decides what a failed run means, and the report explains it better than an
-// activity failure would.
+// activity failure would. A run that ends without the CLI's result is an
+// error (ErrRunStalled, ErrRunFailed, ErrWorkerStopping) whose details say
+// how far it got: no result reaches the workflow along with an error.
 func (a *ClaudeCodeActivities) RunClaudeCode(ctx context.Context, in RunClaudeCodeInput) (claudecode.Result, error) {
 	if err := subproc.CheckRunAs(a.RunAs); err != nil {
 		return claudecode.Result{}, temporal.NewNonRetryableApplicationError(
@@ -575,10 +586,15 @@ func (a *ClaudeCodeActivities) RunClaudeCode(ctx context.Context, in RunClaudeCo
 	// result, which "stopped() && err != nil" would take for a whole run.
 	if stopped() {
 		return res, temporal.NewNonRetryableApplicationError(
-			"claude code: the worker stopped during the run", ErrWorkerStopping, err)
+			"claude code: the worker stopped during the run", ErrWorkerStopping, err, res.Progress)
 	}
 	if err != nil {
-		return res, err
+		typ := ErrRunFailed
+		var stall *claudecode.StallError
+		if errors.As(err, &stall) {
+			typ = ErrRunStalled
+		}
+		return res, temporal.NewNonRetryableApplicationError(err.Error(), typ, nil, res.Progress)
 	}
 	// What paid the run is the worker's choice, checked against the CLI's
 	// word: the summary the agent reads names a payer only when both agree.
