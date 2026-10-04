@@ -95,12 +95,6 @@ func (s *memSession) AppendMessages(_ context.Context, _ string, turnKey string,
 	return nil
 }
 
-func (s *memSession) LastMessageID(context.Context, string) (int64, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return int64(len(s.messages)), nil
-}
-
 func (s *memSession) LoadConversation(_ context.Context, _ string, scope store.TurnScope) ([]store.MessageWithID, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -208,7 +202,7 @@ type llmFakes struct {
 	inputs []int // size of each CallLLM input, as Temporal records it
 }
 
-// registerLLM registers CallLLM, PersistContext and LastMessageID: the real
+// registerLLM registers CallLLM and PersistContext: the real
 // activities, over a session in memory, a catalog that knows the tools the
 // tests use, a base prompt "prompt", and a model answering with answer.
 func registerLLM(env *testsuite.TestWorkflowEnvironment, answer func(n int, req provider.ChatRequest) (provider.ChatResponse, error)) *llmFakes {
@@ -235,7 +229,6 @@ func registerLLM(env *testsuite.TestWorkflowEnvironment, answer func(n int, req 
 	}, sdkactivity.RegisterOptions{Name: "CallLLM"})
 	memAct := &activity.MemoryActivities{Store: f.session}
 	env.RegisterActivityWithOptions(memAct.PersistContext, sdkactivity.RegisterOptions{Name: "PersistContext"})
-	env.RegisterActivityWithOptions(memAct.LastMessageID, sdkactivity.RegisterOptions{Name: "LastMessageID"})
 	return f
 }
 

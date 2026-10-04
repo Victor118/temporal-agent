@@ -25,7 +25,7 @@ type Config struct {
 	// TemporalTLSServerName is the name the server's certificate is checked
 	// for; empty = the host of TemporalHost.
 	TemporalTLSServerName string
-	WorkflowQueue         string // Task queue running SessionWorkflow, AgentWorkflow and LLM calls
+	WorkflowQueue         string // Task queue running ParticipantWorkflow, AgentWorkflow and LLM calls
 
 	// Agent started when a session doesn't name one
 	DefaultAgentID string

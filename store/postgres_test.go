@@ -594,9 +594,6 @@ func TestAppendMessage_ReturnsItsID(t *testing.T) {
 	if err != nil || second <= first {
 		t.Fatalf("second: %d, %v; want after %d", second, err, first)
 	}
-	if last, _ := s.LastMessageID(ctx, sid); last != second {
-		t.Errorf("last message %d, want %d", last, second)
-	}
 	again, err := s.AppendMessage(ctx, sid, HumanMessageKey("a"), Message{Role: RoleUser, Content: `"changed"`})
 	if err != nil || again != first {
 		t.Errorf("rewrite: %d, %v; want %d", again, err, first)

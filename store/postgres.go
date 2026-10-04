@@ -300,16 +300,6 @@ func (s *PostgresStore) LoadMessagesUpTo(ctx context.Context, sessionID string, 
 	return scanMessages(rows, nil)
 }
 
-// LastMessageID is the ID of a session's latest message, 0 when it has none.
-// A turn's snapshot is the message it answers (UserMessage.MessageID); this
-// is only the fallback for a message the server did not store.
-func (s *PostgresStore) LastMessageID(ctx context.Context, sessionID string) (int64, error) {
-	var id int64
-	err := s.db.QueryRowContext(ctx,
-		"SELECT COALESCE(MAX(id), 0) FROM messages WHERE session_id = $1", sessionID).Scan(&id)
-	return id, err
-}
-
 // LoadConversation returns what the turn of scope reads of its session
 // (TurnReads): the messages up to the one it answers, its own turn and its
 // relay's, its participant's turns anchored there, and the turns of the

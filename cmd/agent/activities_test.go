@@ -99,7 +99,6 @@ func TestWorkerActivities_AreTheActivities(t *testing.T) {
 		"EndTurn",
 		"ExecuteTool",
 		"InspectWorkspace",
-		"LastMessageID",
 		"ListTools",
 		"LoadSkillsForAgent",
 		"NotifyStep",

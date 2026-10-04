@@ -754,3 +754,115 @@ func TestPartNote_QuotesTheMessage(t *testing.T) {
 		t.Error("a note for an agent addressed alone, or not at all")
 	}
 }
+
+// childRun is what a stubbed AgentWorkflow saw of its run.
+type childRun struct {
+	workflowID string
+	in         AgentWorkflowInput
+}
+
+// answer is a turn that answers at once.
+func answer(ctx sdkworkflow.Context, in AgentWorkflowInput) (AgentWorkflowOutput, error) {
+	return AgentWorkflowOutput{Response: "done"}, nil
+}
+
+// A member writes while a turn runs, before it wrote anything: the turn does
+// not read the message, and the next turn, which answers it, reads it last,
+// after the first turn's answer, not before it.
+func TestParticipant_AMessageWrittenMidTurnIsTheNextOne(t *testing.T) {
+	var h *harness
+	h = newHarness(t, func(n int, _ provider.ChatRequest) (provider.ChatResponse, error) {
+		switch n {
+		case 1: // Bob writes while the model thinks: the server stores it
+			h.human("and the tests?", "Bob")
+			return provider.ChatResponse{ToolCalls: []provider.ToolCallInfo{{ID: "t1", Name: "web_fetch", Input: json.RawMessage(`{}`)}}}, nil
+		case 2:
+			return say("read"), nil
+		}
+		return say("tests too"), nil
+	}, nil)
+	alice := h.human("read the page", "Alice")
+	// Bob's message, stored as 2 during the first call, is delivered behind
+	// Alice's.
+	bob := ParticipantMessage{MessageID: 2, UserID: "u-Bob", UserName: "Bob"}
+	if err := h.run("jarvis", alice, bob); err != nil {
+		t.Fatal(err)
+	}
+	requests := h.f.model.sent()
+	if len(requests) != 3 {
+		t.Fatalf("%d LLM calls, want 3: two for Alice's message, one for Bob's", len(requests))
+	}
+	for _, line := range read(requests[1]) {
+		if strings.Contains(line, "and the tests?") {
+			t.Errorf("the first turn read Bob's message, written after it started: %q", read(requests[1]))
+		}
+	}
+	want := []string{"user [Alice] read the page", "assistant call web_fetch", "tool result page content", "assistant read", "user [Bob] and the tests?"}
+	if got := read(requests[2]); !slices.Equal(got, want) {
+		t.Errorf("the next turn read %q\nwant %q", got, want)
+	}
+}
+
+// A conversation too long for the model fails its turn with what to do,
+// written as the turn's end.
+func TestParticipant_RecordsAConversationTooLong(t *testing.T) {
+	h := newHarness(t, nil, nil)
+	h.f.llm.MaxContextBytes = 2000
+	if err := h.run("jarvis", h.human(strings.Repeat("x", 3000), "Alice")); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.ends()["m1.jarvis"]; got != activity.ContextTooLongMessage {
+		t.Errorf("end %q, want %q", got, activity.ContextTooLongMessage)
+	}
+}
+
+// A turn event the server does not take is given up at once: the turns run,
+// persist and end as if it had gone, without a retry to wait for.
+func TestParticipant_TurnEventsFailing(t *testing.T) {
+	var starts []time.Time
+	h := newHarness(t, nil, func(ctx sdkworkflow.Context, in AgentWorkflowInput) (AgentWorkflowOutput, error) {
+		starts = append(starts, sdkworkflow.Now(ctx))
+		return answer(ctx, in)
+	})
+	sent := 0
+	h.env.RegisterActivityWithOptions(func(_ context.Context, in activity.NotifyInput) error {
+		if in.Event.Type == EventTurnStarted || in.Event.Type == EventTurnDone {
+			sent++
+			return errors.New("server away")
+		}
+		return nil
+	}, sdkactivity.RegisterOptions{Name: "NotifyStep"})
+	if err := h.run("jarvis", h.human("M1", "Alice"), h.human("M2", "Alice")); err != nil {
+		t.Fatal(err)
+	}
+	if sent != 4 || len(starts) != 2 {
+		t.Fatalf("%d events sent, %d turns: want each event tried once, both turns", sent, len(starts))
+	}
+	if gap := starts[1].Sub(starts[0]); gap >= time.Second {
+		t.Errorf("the second turn started %v after the first", gap)
+	}
+	if len(h.ends()) != 2 {
+		t.Errorf("ends %v", h.ends())
+	}
+}
+
+// A message delivered again after its participant ended (a delivery
+// retried) starts a new run that does not answer it again.
+func TestParticipant_RedeliveredAfterItEnded(t *testing.T) {
+	h := newHarness(t, nil, answer)
+	m1 := h.human("M1", "Alice")
+	if err := h.run("jarvis", m1); err != nil {
+		t.Fatal(err)
+	}
+	h2 := newHarness(t, nil, answer)
+	h2.f.session.messages = h.f.session.history()
+	if err := h2.run("jarvis", m1); err != nil {
+		t.Fatal(err)
+	}
+	if len(h.turns) != 1 || len(h2.turns) != 0 {
+		t.Errorf("turns %d then %d, want one then none", len(h.turns), len(h2.turns))
+	}
+	if got := h2.events(); !slices.Equal(got, []string{"turn_done m1.jarvis"}) {
+		t.Errorf("the second run's events %q, want the message done alone", got)
+	}
+}

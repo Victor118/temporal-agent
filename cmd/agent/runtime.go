@@ -228,7 +228,6 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 // queues. The tests register this very list (TestWorkerWorkflows_Register).
 func workerWorkflows() []any {
 	return []any{
-		workflow.SessionWorkflow,
 		workflow.ParticipantWorkflow,
 		workflow.AgentWorkflow,
 		workflow.AskUserWorkflow,
