@@ -10,15 +10,16 @@ import (
 
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/workflowservice/v1"
+
+	"github.com/victor/temporal-agent/workflow"
 )
 
 // Status is what a session is doing, from the workflows Temporal runs for it.
 type Status string
 
 const (
-	StatusIdle    Status = "idle"    // no workflow: the session sleeps until a message
-	StatusActive  Status = "active"  // its workflow runs, waiting for messages
-	StatusWorking Status = "working" // the agent is on a turn
+	StatusIdle    Status = "idle"    // no participant works
+	StatusWorking Status = "working" // a participant is on its messages, or a fork's summary is written
 	StatusWaiting Status = "waiting" // a question waits for a member's answer
 )
 
@@ -26,10 +27,8 @@ const (
 func (s Status) rank() int {
 	switch s {
 	case StatusWaiting:
-		return 3
-	case StatusWorking:
 		return 2
-	case StatusActive:
+	case StatusWorking:
 		return 1
 	}
 	return 0
@@ -45,7 +44,7 @@ func (s Status) Stronger(o Status) Status {
 
 // statusesTTL is how long the session states are reused. Every page and every
 // tree refresh (each open tab of each member, on every turn event) needs
-// them, and they cost four visibility queries over every running workflow:
+// them, and they cost three visibility queries over every running workflow:
 // shared for a few seconds, that load no longer grows with the number of
 // tabs.
 const statusesTTL = 3 * time.Second
@@ -65,7 +64,7 @@ const statusesLoadTimeout = 5 * time.Second
 type statusCache struct {
 	mu    sync.Mutex
 	at    time.Time
-	value map[string]Status
+	value *visible
 	// loading is closed when the running load ends; nil when none runs.
 	loading chan struct{}
 	// gen moves on every invalidation: a load started before one must not
@@ -97,7 +96,7 @@ type workflowState struct {
 // get returns the cached states, reloading them when they are older than
 // statusesTTL. It waits for a load only when it has nothing else to return,
 // and no longer than ctx allows: a cancelled request gets nil.
-func (c *statusCache) get(ctx context.Context, load func(context.Context) map[string]Status) map[string]Status {
+func (c *statusCache) get(ctx context.Context, load func(context.Context) *visible) *visible {
 	for {
 		c.mu.Lock()
 		if c.value != nil && c.clock().Sub(c.at) < statusesTTL {
@@ -126,7 +125,7 @@ func (c *statusCache) get(ctx context.Context, load func(context.Context) map[st
 
 // refresh runs one load and stores its result, unless the states were
 // invalidated since it started.
-func (c *statusCache) refresh(gen uint64, done chan struct{}, load func(context.Context) map[string]Status) {
+func (c *statusCache) refresh(gen uint64, done chan struct{}, load func(context.Context) *visible) {
 	ctx, cancel := context.WithTimeout(context.Background(), statusesLoadTimeout)
 	defer cancel()
 	v := load(ctx)
@@ -188,20 +187,58 @@ func (c *statusCache) invalidate() {
 	c.loading = nil
 }
 
-// Statuses tells what each session is doing: from Temporal, cached for
-// statusesTTL, and corrected by the turn events the server heard (turns.go).
-// The map is shared: read it, never write to it.
-func (s *Service) Statuses(ctx context.Context) map[string]Status {
-	return s.turns.overlay(s.statuses.get(ctx, s.loadStatuses))
+// visible is what the visibility queries tell of the sessions. Its maps
+// are shared: read them, never write to them.
+type visible struct {
+	// statuses are the sessions' statuses but their participants': a
+	// question waiting, a fork's summary being written.
+	statuses map[string]Status
+	// participants are the participants running, by session.
+	participants map[string][]string
 }
 
-// loadStatuses tells what each session is doing, from the workflows running
-// for it: a question waiting, an agent turn, or the session's own workflow
-// waiting for messages. Four visibility queries, whatever the number of
-// sessions. A failed query degrades the states shown, nothing else.
-func (s *Service) loadStatuses(ctx context.Context) map[string]Status {
+// runningIn is the participants v sees running in a session; none for a nil
+// v (a request cancelled before any load).
+func (v *visible) runningIn(sessionID string) []string {
+	if v == nil {
+		return nil
+	}
+	return v.participants[sessionID]
+}
+
+// Statuses tells what each session is doing: from Temporal, cached for
+// statusesTTL, and corrected by the turn events the server heard (turns.go).
+// A session works while one of its participants does: one ending does not
+// hide another one at work. The map is the caller's.
+func (s *Service) Statuses(ctx context.Context) map[string]Status {
+	v := s.statuses.get(ctx, s.loadVisible)
 	statuses := map[string]Status{}
-	mark := func(workflowType string, status Status, sessionOf func(id string) string) {
+	if v != nil {
+		for id, st := range v.statuses {
+			statuses[id] = st
+		}
+	}
+	sessions := s.turns.sessions()
+	if v != nil {
+		for id := range v.participants {
+			sessions = append(sessions, id)
+		}
+	}
+	for _, id := range sessions {
+		if len(s.turns.working(id, v.runningIn(id))) > 0 {
+			statuses[id] = statuses[id].Stronger(StatusWorking)
+		}
+	}
+	return statuses
+}
+
+// loadVisible reads what the sessions are doing from the workflows running
+// for them: their participants, a question waiting, a fork's summary being
+// written. Three visibility queries, whatever the number of sessions. A
+// failed query degrades the states shown, nothing else.
+func (s *Service) loadVisible(ctx context.Context) *visible {
+	v := &visible{statuses: map[string]Status{}, participants: map[string][]string{}}
+	each := func(workflowType string, of func(id string)) {
 		resp, err := s.temporal.ListWorkflow(ctx, &workflowservice.ListWorkflowExecutionsRequest{
 			Namespace: s.cfg.Namespace,
 			Query:     fmt.Sprintf("WorkflowType = '%s' AND ExecutionStatus = 'Running'", workflowType),
@@ -212,27 +249,38 @@ func (s *Service) loadStatuses(ctx context.Context) map[string]Status {
 			return
 		}
 		for _, e := range resp.Executions {
-			if sid := sessionOf(e.Execution.WorkflowId); sid != "" {
-				statuses[sid] = statuses[sid].Stronger(status)
-			}
+			of(e.Execution.WorkflowId)
 		}
 	}
-	// "session-<id>" or "session-<id>-<unix time>" for a resumed run.
-	mark("SessionWorkflow", StatusActive, func(id string) string { return uuidPrefix(strings.TrimPrefix(id, "session-")) })
-	// "<id>-turn-<n>", and sub-agents "<id>-tool-…".
-	mark("AgentWorkflow", StatusWorking, uuidPrefix)
-	// A fork's summary being written.
-	mark("ForkSessionWorkflow", StatusWorking, func(id string) string { return uuidPrefix(strings.TrimPrefix(id, "fork-")) })
-	// "<id>-tool-ask_user-…", from the session's agent or a sub-agent of it.
-	mark("AskUserWorkflow", StatusWaiting, uuidPrefix)
-	return statuses
+	// "<session>:p:<agent>"
+	each("ParticipantWorkflow", func(id string) {
+		if sid := sessionOf(id); sid != "" {
+			if agent, ok := workflow.ParticipantOf(id); ok {
+				v.participants[sid] = append(v.participants[sid], agent)
+			}
+		}
+	})
+	// A fork's summary being written: "fork-<session>".
+	each("ForkSessionWorkflow", func(id string) {
+		if sid := strings.TrimPrefix(id, "fork-"); checkSessionID(sid) == nil {
+			v.statuses[sid] = v.statuses[sid].Stronger(StatusWorking)
+		}
+	})
+	// "<turn>:tool:ask_user:…", from an agent or a sub-agent of it.
+	each("AskUserWorkflow", func(id string) {
+		if sid := sessionOf(id); sid != "" {
+			v.statuses[sid] = v.statuses[sid].Stronger(StatusWaiting)
+		}
+	})
+	return v
 }
 
-// uuidPrefix returns the session ID (a UUID, 36 characters) a workflow ID
-// starts with, or "".
-func uuidPrefix(id string) string {
-	if len(id) < 36 || (len(id) > 36 && id[36] != '-') {
+// sessionOf returns the session (a canonical UUID) a workflow ID belongs to,
+// what precedes its first ':' (workflow.SessionOf), or "".
+func sessionOf(id string) string {
+	sid, ok := workflow.SessionOf(id)
+	if !ok || checkSessionID(sid) != nil {
 		return ""
 	}
-	return id[:36]
+	return sid
 }

@@ -3,6 +3,10 @@
 // agent turn, how a session is opened, forked, left or deleted, and how its
 // workflows are found in Temporal.
 //
+// A session has no workflow of its own: each agent answering in it is a
+// participant (workflow.ParticipantWorkflow), which runs while it has
+// messages to answer.
+//
 // The JSON API, the htmx interface and the Telegram webhook are adapters over
 // this service: they decode a request, call it, and shape its answer.
 package session
@@ -31,7 +35,8 @@ var (
 	ErrEmptyMessage    = errors.New("message content is required")
 	ErrSummaryPending  = errors.New("the summary of the parent session is still being written")
 	ErrBadMode         = errors.New("mode must be auto, always or mention")
-	ErrNoActiveSession = errors.New("no active session found")
+	ErrNothingToStop   = errors.New("no agent is working in this session")
+	ErrQueueFull       = fmt.Errorf("the agent has %d messages waiting already: wait for it to answer them", MaxQueued)
 	ErrForeignQuestion = errors.New("this question does not belong to this session")
 	ErrEmptyAnswer     = errors.New("an answer is required")
 )
@@ -80,7 +85,7 @@ type Publisher interface {
 // Config is the part of the server's configuration the service uses.
 type Config struct {
 	Namespace      string // Temporal namespace, for the visibility queries
-	WorkflowQueue  string // where session and fork workflows run
+	WorkflowQueue  string // where the participants and fork workflows run
 	DefaultAgentID string // the agent of a session that names none
 	SummaryModel   string // writes a fork's summary; empty = the workers' default
 }

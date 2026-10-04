@@ -29,7 +29,7 @@ func RegisterQueryWorkflowTool(registry *Registry, temporalClient WorkflowQuerie
 				},
 				"query_name": {
 					"type": "string",
-					"description": "The query handler name (default: session-state)"
+					"description": "The query handler name (default: state, a participant's state)"
 				}
 			},
 			"required": ["workflow_id"]
@@ -47,7 +47,7 @@ func RegisterQueryWorkflowTool(registry *Registry, temporalClient WorkflowQuerie
 				return fmt.Sprintf("Workflow %s is not one of this session's.", params.WorkflowID), nil
 			}
 			if params.QueryName == "" {
-				params.QueryName = "session-state"
+				params.QueryName = "state"
 			}
 
 			resp, err := temporalClient.QueryWorkflow(ctx, params.WorkflowID, "", params.QueryName)
@@ -65,15 +65,13 @@ func RegisterQueryWorkflowTool(registry *Registry, temporalClient WorkflowQuerie
 	})
 }
 
-// ownWorkflow reports whether workflowID belongs to sessionID: the session's
-// own workflow ("session-<id>", "session-<id>-<run>") or one started from it,
-// whose ID starts with "<id>-". Workflows of other sessions, other users' among
-// them, are out of reach.
+// ownWorkflow reports whether workflowID belongs to the calling session:
+// every workflow of a session (its participants, their turns, their tools)
+// has an ID starting with the session's and ':'. The caller's own ID may be a
+// sub-agent's, itself such an ID: its session is what precedes its first
+// ':'. Workflows of other sessions, other users' among them, are out of
+// reach.
 func ownWorkflow(sessionID, workflowID string) bool {
-	if sessionID == "" {
-		return false
-	}
-	own := "session-" + sessionID
-	return strings.HasPrefix(workflowID, sessionID+"-") ||
-		workflowID == own || strings.HasPrefix(workflowID, own+"-")
+	session, _, _ := strings.Cut(sessionID, ":")
+	return session != "" && strings.HasPrefix(workflowID, session+":")
 }

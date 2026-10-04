@@ -23,7 +23,6 @@ type Status = session.Status
 
 const (
 	StatusIdle    = session.StatusIdle
-	StatusActive  = session.StatusActive
 	StatusWorking = session.StatusWorking
 	StatusWaiting = session.StatusWaiting
 )

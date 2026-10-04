@@ -6,24 +6,20 @@ import (
 	"log"
 
 	"github.com/google/uuid"
-	"go.temporal.io/sdk/client"
 
 	"github.com/victor/temporal-agent/store"
-	"github.com/victor/temporal-agent/workflow"
 )
 
 // OpenOptions describe a new session. Everything is optional.
 type OpenOptions struct {
-	AgentID      string // empty = the default agent
-	SystemPrompt string // override; empty = built from the agent
-	Model        string // explicit choice only; empty = the worker's LLM_MODEL
-	Channel      string // where the user is reached; empty = the web
-	ChannelID    string // the user's address on that channel (a Telegram chat)
+	AgentID   string // empty = the default agent
+	Channel   string // where the user is reached; empty = the web
+	ChannelID string // the user's address on that channel (a Telegram chat)
 }
 
-// Open creates a session for me, with its workflow, and returns its ID.
+// Open creates a session for me, and returns its ID. Nothing runs for it
+// until a message calls an agent.
 func (s *Service) Open(ctx context.Context, me *store.User, o OpenOptions) (string, error) {
-	defer s.statuses.invalidate()
 	agentID, err := s.resolveAgentID(ctx, o.AgentID)
 	if err != nil {
 		return "", err
@@ -33,19 +29,6 @@ func (s *Service) Open(ctx context.Context, me *store.User, o OpenOptions) (stri
 		channel = ChannelWeb
 	}
 	sessionID := uuid.New().String()
-	if _, err := s.temporal.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
-		ID:        sessionWorkflowID(sessionID),
-		TaskQueue: s.cfg.WorkflowQueue,
-	}, workflow.SessionWorkflow, workflow.SessionWorkflowInput{
-		SessionID:    sessionID,
-		AgentID:      agentID,
-		SystemPrompt: o.SystemPrompt,
-		Model:        o.Model,
-		Channel:      channel,
-		ChannelID:    o.ChannelID,
-	}); err != nil {
-		return "", fmt.Errorf("start session: %w", err)
-	}
 	// Without the record nobody is a member, so nobody could open the session.
 	if err := s.store.CreateSession(ctx, store.Session{
 		SessionID: sessionID,
@@ -102,9 +85,9 @@ func (s *Service) Delete(ctx context.Context, sessionID, by string) error {
 	if sess.CreatedBy != by {
 		return ErrNotCreator
 	}
-	if wf := s.activeWorkflowID(ctx, sessionID); wf != "" {
-		_ = s.temporal.TerminateWorkflow(ctx, wf, "", "session deleted by user")
-	}
+	// Its participants end with it: a turn would write into a session gone,
+	// and a question wait for days.
+	s.terminateParticipants(ctx, sessionID, "session deleted by user")
 	members, _ := s.store.ListSessionMembers(ctx, sessionID)
 	if err := s.store.DeleteSession(ctx, sessionID); err != nil {
 		return err
@@ -147,9 +130,7 @@ func (s *Service) Leave(ctx context.Context, sessionID, userID string) error {
 	defer s.ringTrees(ctx, sessionID, userID)
 	members, err := s.store.ListSessionMembers(ctx, sessionID)
 	if err == nil && len(members) == 0 {
-		if wf := s.activeWorkflowID(ctx, sessionID); wf != "" {
-			_ = s.temporal.TerminateWorkflow(ctx, wf, "", "last member left")
-		}
+		s.terminateParticipants(ctx, sessionID, "last member left")
 		if err := s.store.DeleteSession(ctx, sessionID); err != nil {
 			log.Printf("Session %s: delete after last member left: %v", sessionID, err)
 		}

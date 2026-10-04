@@ -28,7 +28,7 @@ func testPage(view string) *Page {
 		Parent:         &ParentInfo{SessionID: "root", Title: "root", Accessible: true, MessageID: 3},
 		IsCreator:      true,
 		Notifications:  2,
-		Working:        true,
+		Working:        []WorkingAgent{{Name: "Jarvis"}},
 		LastMessageID:  9,
 		Error:          "boom",
 	}
@@ -70,7 +70,7 @@ func TestRender_Pages(t *testing.T) {
 		`href="/s/f2"`,                // a fork of a message
 		`name="workflow_id" value="fork-tool-ask_user-1"`,
 		`href="/s/root#m3"`, // back to the message forked from
-		"L'agent travaille",
+		"Jarvis travaille…",
 		"@jarvis pour le solliciter, la mention d'un autre agent pour l'appeler", // other agents can be called
 		"les autres agents à leur mention",
 		"Plusieurs dans un message répondent l'un après l'autre",
@@ -405,7 +405,7 @@ func TestRender_FragmentVersions(t *testing.T) {
 
 	// Another content, another version, and the fragment comes.
 	frag := testPage("thread")
-	frag.Fragment, frag.Working = true, false
+	frag.Fragment, frag.Working = true, nil
 	w := httptest.NewRecorder()
 	RenderFragment(w, "thread", frag, p.Versions["thread"])
 	if w.Code != 200 || !strings.Contains(w.Body.String(), `data-version="`+frag.Versions["thread"]+`"`) || frag.Versions["thread"] == p.Versions["thread"] {
@@ -413,27 +413,30 @@ func TestRender_FragmentVersions(t *testing.T) {
 	}
 }
 
-// The working line names the agent on the turn when the server knows it,
-// and says "the agent" when only the visibility queries told.
-func TestRender_WorkingLineNamesTheAgent(t *testing.T) {
+// The working line names the agents at work, several at once, and what
+// each waits for, escaped.
+func TestRender_WorkingLineNamesTheAgents(t *testing.T) {
 	p := testPage("thread")
-	p.WorkingAgent = "Agent <Smith>"
-	if out := render(t, "thread-inner", p); !strings.Contains(out, "Agent &lt;Smith&gt; travaille…") || strings.Contains(out, "L'agent travaille") {
-		t.Errorf("named: %s", out)
+	for _, c := range []struct {
+		working []WorkingAgent
+		want    string
+	}{
+		{[]WorkingAgent{{Name: "Agent <Smith>"}}, "Agent &lt;Smith&gt; travaille…"},
+		{[]WorkingAgent{{}}, "L&#39;agent travaille…"},
+		{[]WorkingAgent{{Name: "Jarvis", Note: "Ton run attend un <worker> libre"}}, "Jarvis travaille… — Ton run attend un &lt;worker&gt; libre"},
+		{[]WorkingAgent{{Name: "Jarvis"}, {Name: "Smith", Note: "attend"}}, "Jarvis et Smith travaillent… — Smith : attend"},
+		{[]WorkingAgent{{Name: "A"}, {Name: "B"}, {Name: "C"}}, "A, B et C travaillent…"},
+	} {
+		p.Working = c.working
+		if out := render(t, "thread-inner", p); !strings.Contains(out, c.want) {
+			t.Errorf("working %+v: want %q in %s", c.working, c.want, out)
+		}
 	}
-	p.WorkingAgent = ""
-	if out := render(t, "thread-inner", p); !strings.Contains(out, "L'agent travaille…") {
-		t.Errorf("unnamed: %s", out)
+	p.Working = nil
+	if out := render(t, "thread-inner", p); strings.Contains(out, "travaille") || strings.Contains(out, `id="working"`) {
+		t.Errorf("nobody works: %s", out)
 	}
-	// What the turn waits for follows, escaped.
-	p.WorkingAgent, p.WorkingNote = "Jarvis", "Ton run attend un <worker> libre"
-	if out := render(t, "thread-inner", p); !strings.Contains(out, "Jarvis travaille… — Ton run attend un &lt;worker&gt; libre") {
-		t.Errorf("with a note: %s", out)
-	}
-	p.WorkingNote = ""
-	if out := render(t, "thread-inner", p); strings.Contains(out, "travaille… —") || !strings.Contains(out, "Jarvis travaille…") {
-		t.Errorf("no note, a dash: %s", out)
-	}
+	p.Working = []WorkingAgent{{Name: "Jarvis"}}
 	if page := render(t, "page", p); !strings.Contains(page, `hx-trigger="`+mustReloadOn(t, "thread")+`"`) {
 		t.Error("the thread does not reload on its events")
 	}

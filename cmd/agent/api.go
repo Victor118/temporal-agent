@@ -129,9 +129,7 @@ func (a *api) me(w http.ResponseWriter, r *http.Request) {
 // --- Sessions ---
 
 type createSessionRequest struct {
-	AgentID      string `json:"agent_id,omitempty"`
-	SystemPrompt string `json:"system_prompt,omitempty"`
-	Model        string `json:"model,omitempty"`
+	AgentID string `json:"agent_id,omitempty"`
 }
 
 type createSessionResponse struct {
@@ -143,9 +141,7 @@ func (a *api) createSession(w http.ResponseWriter, r *http.Request) {
 	if r.Body != nil {
 		json.NewDecoder(r.Body).Decode(&req)
 	}
-	sessionID, err := a.sessions.Open(r.Context(), auth.UserFrom(r.Context()), session.OpenOptions{
-		AgentID: req.AgentID, SystemPrompt: req.SystemPrompt, Model: req.Model,
-	})
+	sessionID, err := a.sessions.Open(r.Context(), auth.UserFrom(r.Context()), session.OpenOptions{AgentID: req.AgentID})
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to create session: %v", err), http.StatusInternalServerError)
 		return
@@ -164,7 +160,6 @@ func (a *api) listSessions(w http.ResponseWriter, r *http.Request) {
 	type sessionEntry struct {
 		store.Session
 		Members []store.SessionMember `json:"members"`
-		Active  bool                  `json:"active"`
 	}
 	entries := make([]sessionEntry, 0, len(sessions))
 	for _, s := range sessions {
@@ -173,7 +168,7 @@ func (a *api) listSessions(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("Failed to list members: %v", err), http.StatusInternalServerError)
 			return
 		}
-		entries = append(entries, sessionEntry{Session: s, Members: members, Active: a.sessions.IsActive(r.Context(), s.SessionID)})
+		entries = append(entries, sessionEntry{Session: s, Members: members})
 	}
 	writeJSON(w, http.StatusOK, entries)
 }
@@ -216,6 +211,8 @@ func (a *api) sendMessage(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case errors.Is(err, session.ErrSummaryPending):
 		http.Error(w, "The summary of the parent session is still being written", http.StatusConflict)
+	case errors.Is(err, session.ErrQueueFull):
+		http.Error(w, err.Error(), http.StatusTooManyRequests)
 	case err != nil:
 		http.Error(w, fmt.Sprintf("Failed to send message: %v", err), http.StatusInternalServerError)
 	default:
@@ -247,8 +244,8 @@ func (a *api) setAgentMode(w http.ResponseWriter, r *http.Request) {
 
 func (a *api) cancelAgent(w http.ResponseWriter, r *http.Request) {
 	switch err := a.sessions.Cancel(r.Context(), chi.URLParam(r, "id")); {
-	case errors.Is(err, session.ErrNoActiveSession):
-		http.Error(w, "No active session found", http.StatusNotFound)
+	case errors.Is(err, session.ErrNothingToStop):
+		http.Error(w, err.Error(), http.StatusNotFound)
 	case err != nil:
 		http.Error(w, fmt.Sprintf("Failed to cancel agent: %v", err), http.StatusInternalServerError)
 	default:
@@ -321,6 +318,8 @@ func (a *api) getHistory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, history)
 }
 
+// getState answers where the session's participants stand: each one
+// running, as its state query says.
 func (a *api) getState(w http.ResponseWriter, r *http.Request) {
 	state, err := a.sessions.State(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {

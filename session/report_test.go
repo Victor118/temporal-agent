@@ -137,8 +137,8 @@ func TestReportState(t *testing.T) {
 	// covering what is written so far, and the page says so. A fork's
 	// summary being written is no turn.
 	for name, byType := range map[string]map[string][]string{
-		"on a turn":         {"AgentWorkflow": {sid + "-turn-1"}},
-		"asking a question": {"AgentWorkflow": {sid + "-turn-1"}, "AskUserWorkflow": {sid + "-tool-ask_user-1"}},
+		"on a turn":         {"ParticipantWorkflow": {sid + ":p:default"}},
+		"asking a question": {"ParticipantWorkflow": {sid + ":p:default"}, "AskUserWorkflow": {sid + ":p:default:m3:tool:ask_user:c1"}},
 	} {
 		working := &fakeTemporal{byType: byType}
 		if got, _ := newTest(st, working).ReportState(ctx, st.session, st.messages, victor); !got.CanReport() || !got.AgentWorking {
@@ -282,7 +282,7 @@ func TestReportToParent_DuringATurn(t *testing.T) {
 		store.MessageWithID{ID: 6, Key: "m4.default:1", Message: store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "c1", Content: "spec"}}},
 	)
 	working := func() *fakeTemporal {
-		return &fakeTemporal{byType: map[string][]string{"AgentWorkflow": {sid + "-turn-2"}}}
+		return &fakeTemporal{byType: map[string][]string{"ParticipantWorkflow": {sid + ":p:default"}}}
 	}
 	tc := working()
 	if err := newTest(st, tc).ReportToParent(context.Background(), sid, victor); err != nil {

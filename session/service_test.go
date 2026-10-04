@@ -2,13 +2,16 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
 
+	"github.com/victor/temporal-agent/activity"
 	"github.com/victor/temporal-agent/store"
 	"github.com/victor/temporal-agent/workflow"
 )
@@ -41,25 +44,31 @@ func TestVisibilityQueriesTakeOnlyUUIDs(t *testing.T) {
 		t.Error(err)
 	}
 
-	tc := &fakeTemporal{running: []string{sid + "-tool-ask_user-1"}}
+	tc := &fakeTemporal{running: []string{sid + ":p:default:m1:tool:ask_user:c1"}}
 	if newTest(&memStore{}, tc).AnswerPending(context.Background(), "x' OR '1'='1", "yes") || len(tc.lists) != 0 {
 		t.Errorf("a forged session ID reached Temporal: %v", tc.lists)
 	}
 }
 
 // An answer from a channel without buttons reaches a question a sub-agent
-// asked: they are found by type, not by the session agent's own ID prefix.
+// asked: they are found by type, under the session's ID. With several
+// waiting, the oldest one.
 func TestAnswerPending_FindsSubAgentQuestions(t *testing.T) {
-	question := sid + "-tool-agent_analyst-c1-tool-ask_user-c2"
-	tc := &fakeTemporal{running: []string{question}}
+	question := sid + ":p:jarvis:m3:tool:agent_analyst:c1:tool:ask_user:c2"
+	newer := sid + ":p:smith:m4:tool:ask_user:c1"
+	now := time.Now()
+	tc := &fakeTemporal{running: []string{newer, question}, startedAt: map[string]time.Time{question: now.Add(-time.Minute), newer: now}}
 	if !newTest(&memStore{}, tc).AnswerPending(context.Background(), sid, "yes") {
 		t.Fatal("the answer was not delivered")
 	}
-	if len(tc.lists) != 1 || !strings.Contains(tc.lists[0], "WorkflowType = 'AskUserWorkflow'") || !strings.Contains(tc.lists[0], "STARTS_WITH '"+sid+"-'") {
+	if len(tc.lists) != 1 || !strings.Contains(tc.lists[0], "WorkflowType = 'AskUserWorkflow'") || !strings.Contains(tc.lists[0], "STARTS_WITH '"+sid+":'") {
 		t.Errorf("query %v", tc.lists)
 	}
 	if len(tc.signals) != 1 || tc.signals[0] != question {
-		t.Errorf("signalled %v", tc.signals)
+		t.Errorf("signalled %v, want the oldest question", tc.signals)
+	}
+	if qs := newTest(&memStore{}, tc).PendingQuestions(context.Background(), sid); len(qs) != 0 {
+		t.Errorf("questions %+v from a fake that answers no query", qs)
 	}
 }
 
@@ -67,13 +76,16 @@ func TestAnswerPending_FindsSubAgentQuestions(t *testing.T) {
 func TestAnswer_OwnQuestionsOnly(t *testing.T) {
 	tc := &fakeTemporal{}
 	s := newTest(&memStore{}, tc)
-	if err := s.Answer(context.Background(), sid, "other-tool-ask_user-1", "yes"); !errors.Is(err, ErrForeignQuestion) {
-		t.Errorf("another session's question: %v", err)
+	for _, other := range []string{"other:p:x:m1:tool:ask_user:c1", sid + "x:p:x:m1:tool:ask_user:c1", sid + "-tool-ask_user-1"} {
+		if err := s.Answer(context.Background(), sid, other, "yes"); !errors.Is(err, ErrForeignQuestion) {
+			t.Errorf("another session's question %q: %v", other, err)
+		}
 	}
-	if err := s.Answer(context.Background(), sid, sid+"-tool-ask_user-1", "  "); !errors.Is(err, ErrEmptyAnswer) {
+	own := sid + ":p:default:m1:tool:ask_user:c1"
+	if err := s.Answer(context.Background(), sid, own, "  "); !errors.Is(err, ErrEmptyAnswer) {
 		t.Errorf("an empty answer: %v", err)
 	}
-	if err := s.Answer(context.Background(), sid, sid+"-tool-ask_user-1", "yes"); err != nil || len(tc.signals) != 1 {
+	if err := s.Answer(context.Background(), sid, own, "yes"); err != nil || len(tc.signals) != 1 {
 		t.Errorf("own question: %v, %v", err, tc.signals)
 	}
 }
@@ -81,13 +93,13 @@ func TestAnswer_OwnQuestionsOnly(t *testing.T) {
 // Every tab refreshes the tree: the states are read from Temporal once for
 // all of them, and again after an action changes them.
 func TestStatuses_SharedForAFewSeconds(t *testing.T) {
-	tc := &fakeTemporal{running: []string{sid + "-turn-1"}}
+	tc := &fakeTemporal{running: []string{sid + ":p:default"}}
 	s := newTest(&memStore{}, tc)
 	for i := 0; i < 10; i++ {
 		s.Statuses(context.Background())
 	}
-	if len(tc.lists) != 4 {
-		t.Errorf("%d visibility queries for 10 reads, want 4", len(tc.lists))
+	if len(tc.lists) != 3 {
+		t.Errorf("%d visibility queries for 10 reads, want 3", len(tc.lists))
 	}
 	// The fake answers every query with the same workflow: the strongest
 	// state, a question waiting, wins.
@@ -96,9 +108,14 @@ func TestStatuses_SharedForAFewSeconds(t *testing.T) {
 	}
 	s.statuses.invalidate()
 	s.Statuses(context.Background())
-	if len(tc.lists) != 8 {
-		t.Errorf("%d visibility queries after an invalidation, want 8", len(tc.lists))
+	if len(tc.lists) != 6 {
+		t.Errorf("%d visibility queries after an invalidation, want 6", len(tc.lists))
 	}
+}
+
+// states is what the visibility queries tell: the session in status.
+func states(status Status) *visible {
+	return &visible{statuses: map[string]Status{sid: status}}
 }
 
 // The request that starts a load and goes away does not cancel it: the
@@ -108,15 +125,15 @@ func TestStatusCache_LoadOutlivesTheRequest(t *testing.T) {
 	release := make(chan struct{})
 	var loadErr error
 	loads := 0
-	load := func(ctx context.Context) map[string]Status {
+	load := func(ctx context.Context) *visible {
 		loads++
 		<-release
 		loadErr = ctx.Err()
-		return map[string]Status{sid: StatusWorking}
+		return states(StatusWorking)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	got := make(chan map[string]Status)
+	got := make(chan *visible)
 	go func() { got <- c.get(ctx, load) }()
 	cancel()
 	if v := <-got; v != nil {
@@ -124,7 +141,7 @@ func TestStatusCache_LoadOutlivesTheRequest(t *testing.T) {
 	}
 
 	close(release)
-	if v := c.get(context.Background(), load); v[sid] != StatusWorking {
+	if v := c.get(context.Background(), load); v.statuses[sid] != StatusWorking {
 		t.Errorf("after the load: %v", v)
 	}
 	if loadErr != nil {
@@ -138,19 +155,19 @@ func TestStatusCache_LoadOutlivesTheRequest(t *testing.T) {
 // While states expire and reload, requests get the previous ones instead of
 // waiting behind a slow Temporal.
 func TestStatusCache_ServesStaleStatesWhileReloading(t *testing.T) {
-	c := statusCache{value: map[string]Status{sid: StatusActive}, at: time.Now().Add(-time.Minute)}
+	c := statusCache{value: states(StatusWorking), at: time.Now().Add(-time.Minute)}
 	release := make(chan struct{})
-	load := func(context.Context) map[string]Status {
+	load := func(context.Context) *visible {
 		<-release
-		return map[string]Status{sid: StatusWaiting}
+		return states(StatusWaiting)
 	}
 
-	if v := c.get(context.Background(), load); v[sid] != StatusActive {
+	if v := c.get(context.Background(), load); v.statuses[sid] != StatusWorking {
 		t.Errorf("during the reload: %v, want the previous states", v)
 	}
 	close(release)
 	deadline := time.Now().Add(2 * time.Second)
-	for c.get(context.Background(), load)[sid] != StatusWaiting {
+	for c.get(context.Background(), load).statuses[sid] != StatusWaiting {
 		if time.Now().After(deadline) {
 			t.Fatal("the reloaded states never replaced the previous ones")
 		}
@@ -164,13 +181,13 @@ func TestStatusCache_InvalidationDiscardsARunningLoad(t *testing.T) {
 	var c statusCache
 	started, release := make(chan struct{}), make(chan struct{})
 	var loads atomic.Int32
-	load := func(context.Context) map[string]Status {
+	load := func(context.Context) *visible {
 		if loads.Add(1) == 1 {
 			close(started)
 			<-release
-			return map[string]Status{sid: StatusActive}
+			return states(StatusWorking)
 		}
-		return map[string]Status{sid: StatusIdle}
+		return states(StatusIdle)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -183,7 +200,7 @@ func TestStatusCache_InvalidationDiscardsARunningLoad(t *testing.T) {
 	close(release)
 	cancel()
 
-	if v := c.get(context.Background(), load); v[sid] != StatusIdle {
+	if v := c.get(context.Background(), load); v.statuses[sid] != StatusIdle {
 		t.Errorf("got %v, want the states read after the invalidation", v)
 	}
 }
@@ -227,11 +244,11 @@ func TestDeliver_Refusals(t *testing.T) {
 	}
 }
 
-// A message to a session whose run timed out starts a new run on the
-// session's fixed ID, in the same call that signals it, with the input the
-// session had: its agent and its channel. The message carries the ID it was
-// stored under: its turns read the session up to it.
-func TestDeliver_SignalsWithStartOnTheFixedID(t *testing.T) {
+// A message is delivered to its agent's participant, started if it does not
+// run, in one call on the participant's fixed ID, with the session's agent
+// and channel. It carries the ID it was stored under, not its text: its
+// turn reads the session up to it.
+func TestDeliver_SignalsWithStartTheParticipant(t *testing.T) {
 	st := &memStore{members: []store.SessionMember{{UserID: "u-alice"}}}
 	tc := &fakeTemporal{}
 	s := newTest(st, tc)
@@ -248,33 +265,218 @@ func TestDeliver_SignalsWithStartOnTheFixedID(t *testing.T) {
 		t.Fatalf("%d signal-with-start calls, want 1", len(tc.signalStarts))
 	}
 	got := tc.signalStarts[0]
-	if got.id != "session-"+sid || got.options.ID != got.id || got.options.TaskQueue != "agent" || got.signal != workflow.SignalUserMessage {
+	if got.id != sid+":p:analyst" || got.options.ID != got.id || got.options.TaskQueue != "agent" || got.signal != workflow.SignalMessage {
 		t.Errorf("signal-with-start %q, options %+v, signal %q", got.id, got.options, got.signal)
 	}
-	if msg, ok := got.arg.(workflow.UserMessage); !ok || msg.Text != "bonjour" || msg.UserID != "u-alice" || !msg.Stored || msg.MessageID != 1 {
-		t.Errorf("message %+v", got.arg)
+	want := workflow.ParticipantMessage{MessageID: 1, UserID: "u-alice", UserName: "alice@example.com", Channel: "telegram", ChannelID: "42"}
+	if msg, ok := got.arg.(workflow.ParticipantMessage); !ok || fmt.Sprint(msg) != fmt.Sprint(want) {
+		t.Errorf("message %+v, want %+v", got.arg, want)
 	}
-	want := workflow.SessionWorkflowInput{SessionID: sid, AgentID: "analyst", Channel: "telegram", ChannelID: "42"}
-	if len(got.input) != 1 || got.input[0] != want {
-		t.Errorf("input %+v, want %+v", got.input, want)
+	start := workflow.ParticipantInput{SessionID: sid, AgentID: "analyst", Channel: "telegram", ChannelID: "42"}
+	if len(got.input) != 1 || fmt.Sprint(got.input[0]) != fmt.Sprint(start) {
+		t.Errorf("input %+v, want %+v", got.input, start)
+	}
+	s.background.Wait()
+}
+
+// A message to several agents goes to the first: the others follow by
+// relay, in order, each told its part; the answers are signed.
+func TestDeliver_SeveralAgents(t *testing.T) {
+	st := &memStore{members: []store.SessionMember{{UserID: "u-alice"}}, agents: team}
+	tc := &fakeTemporal{}
+	s := newTest(st, tc)
+	alice := &store.User{ID: "u-alice", Email: "alice@example.com", DisplayName: "Alice"}
+	sess := &store.Session{SessionID: sid, AgentID: "default"}
+	if _, err := s.Deliver(context.Background(), sess, alice, "@agentSmith résume,\n @jarvis juge"); err != nil {
+		t.Fatal(err)
+	}
+	got := tc.signalStarts[0]
+	msg := got.arg.(workflow.ParticipantMessage)
+	smith, jarvis := workflow.AddressedAgent{ID: "smith", Name: "Agent Smith", Mention: "agentSmith"}, workflow.AddressedAgent{ID: "default", Name: "Jarvis", Mention: "jarvis"}
+	if got.id != sid+":p:smith" || !msg.SignReply || fmt.Sprint(msg.Next) != fmt.Sprint([]workflow.AddressedAgent{jarvis}) ||
+		msg.Part == nil || fmt.Sprint(msg.Part.Agents) != fmt.Sprint([]workflow.AddressedAgent{smith, jarvis}) || msg.Part.Quote != "@agentSmith résume, @jarvis juge" {
+		t.Errorf("delivered to %s: %+v (part %+v)", got.id, msg, msg.Part)
+	}
+	// Another agent than the session's, alone: signed, no part.
+	if _, err := s.Deliver(context.Background(), sess, alice, "@analyst ?"); err != nil {
+		t.Fatal(err)
+	}
+	if msg := tc.signalStarts[1].arg.(workflow.ParticipantMessage); !msg.SignReply || msg.Part != nil || len(msg.Next) != 0 {
+		t.Errorf("one other agent: %+v", msg)
+	}
+	// The session's agent: unsigned.
+	if _, err := s.Deliver(context.Background(), sess, alice, "merci"); err != nil {
+		t.Fatal(err)
+	}
+	if got := tc.signalStarts[2]; got.id != sid+":p:default" || got.arg.(workflow.ParticipantMessage).SignReply {
+		t.Errorf("the session's agent: %s %+v", got.id, got.arg)
+	}
+	s.background.Wait()
+}
+
+// started and done are turn events of a participant on a message.
+func started(agentID string, message int64) activity.SSEEvent {
+	return turnEvent(workflow.EventTurnStarted, agentID, "", message)
+}
+func done(agentID string, message int64) activity.SSEEvent {
+	return turnEvent(workflow.EventTurnDone, agentID, "", message)
+}
+
+// A participant takes MaxQueued messages waiting: one more is refused, and
+// not stored. Once it starts one, there is room again. Another agent's
+// queue is its own; a relay, which the server does not deliver, counts in
+// none. A delivery that failed is not counted either.
+func TestDeliver_QueueCap(t *testing.T) {
+	st := &memStore{members: []store.SessionMember{{UserID: "u-alice"}}, agents: team}
+	tc := &fakeTemporal{}
+	s := newTest(st, tc)
+	alice := &store.User{ID: "u-alice", Email: "alice@example.com"}
+	sess := &store.Session{SessionID: sid, AgentID: "default"}
+	ctx := context.Background()
+	for i := range MaxQueued {
+		if _, err := s.Deliver(ctx, sess, alice, fmt.Sprint("M", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.Deliver(ctx, sess, alice, "one more"); !errors.Is(err, ErrQueueFull) {
+		t.Fatalf("over the cap: %v", err)
+	}
+	if len(st.appended) != MaxQueued || len(tc.signalStarts) != MaxQueued {
+		t.Errorf("%d stored, %d delivered: the refused message is in", len(st.appended), len(tc.signalStarts))
+	}
+	if _, err := s.Deliver(ctx, sess, alice, "@agentSmith ?"); err != nil {
+		t.Errorf("another agent's queue: %v", err)
+	}
+	s.Observe(sid, started("smith", 99)) // a relay: delivered by a participant
+	s.Observe(sid, started("default", 1))
+	if _, err := s.Deliver(ctx, sess, alice, "now it fits"); err != nil {
+		t.Errorf("after a message started: %v", err)
+	}
+	// A participant done with a message it never started (dropped by a
+	// clear, delivered twice) has it out of its queue too.
+	s.Observe(sid, done("default", 2))
+	tc.startErr = errors.New("temporal away")
+	if _, err := s.Deliver(ctx, sess, alice, "lost"); err == nil {
+		t.Error("a failed delivery reported none")
+	}
+	tc.startErr = nil
+	if _, err := s.Deliver(ctx, sess, alice, "fits again"); err != nil {
+		t.Errorf("a failed delivery took a place: %v", err)
+	}
+	s.background.Wait()
+}
+
+// The live message tells, for each agent it calls that answers another
+// message, which one: it waits behind it.
+func TestDeliver_QueuedBehind(t *testing.T) {
+	st := &memStore{members: []store.SessionMember{{UserID: "u-alice"}}, agents: team}
+	s := newTest(st, &fakeTemporal{})
+	alice := &store.User{ID: "u-alice", Email: "alice@example.com"}
+	sess := &store.Session{SessionID: sid, AgentID: "default"}
+	s.Observe(sid, started("default", 7))
+	if _, err := s.Deliver(context.Background(), sess, alice, "@jarvis @agentSmith ?"); err != nil {
+		t.Fatal(err)
+	}
+	s.background.Wait()
+	var event struct {
+		Agents       []string         `json:"agents"`
+		QueuedBehind map[string]int64 `json:"queued_behind"`
+	}
+	for _, ev := range s.hub.(*nopHub).on(sid) {
+		if ev.Type == EventUserMessage {
+			json.Unmarshal(ev.Data, &event)
+		}
+	}
+	if fmt.Sprint(event.Agents) != "[Jarvis Agent Smith]" || len(event.QueuedBehind) != 1 || event.QueuedBehind["default"] != 7 {
+		t.Errorf("event %+v", event)
 	}
 }
 
-// The state is the running run's, a resumed session's included; with none
-// running, the last run's: every run has the session's fixed ID.
-func TestState_FindsTheSession(t *testing.T) {
-	base := "session-" + sid
-	for name, tc := range map[string]*fakeTemporal{
-		"resumed":      {running: []string{base}},
-		"none running": {},
-	} {
-		t.Run(name, func(t *testing.T) {
-			want := base
-			tc.states = map[string]workflow.SessionState{want: {SessionID: sid, Status: "idle", TurnCount: 3}}
-			got, err := newTest(&memStore{}, tc).State(context.Background(), sid)
-			if err != nil || got.TurnCount != 3 {
-				t.Errorf("State = %+v, %v; queried %v", got, err, tc.queried)
-			}
-		})
+// The state of a session is its participants', each as its state query
+// answers.
+func TestState_ThePartipantsStates(t *testing.T) {
+	jarvis, smith := sid+":p:jarvis", sid+":p:smith"
+	tc := &fakeTemporal{running: []string{smith, jarvis}, states: map[string]interface{}{
+		jarvis: workflow.ParticipantState{Current: &workflow.CurrentMessage{MessageID: 4, UserName: "Alice"}, Queued: 2, Background: []string{}},
+		smith:  workflow.ParticipantState{Queued: 0, Background: []string{}},
+	}}
+	got, err := newTest(&memStore{}, tc).State(context.Background(), sid)
+	if err != nil || len(got) != 2 {
+		t.Fatalf("State = %+v, %v", got, err)
+	}
+	if got[0].AgentID != "jarvis" || got[0].WorkflowID != jarvis || got[0].Current == nil || got[0].Current.MessageID != 4 || got[0].Queued != 2 || got[1].AgentID != "smith" {
+		t.Errorf("states %+v", got)
+	}
+	if len(tc.lists) != 1 || !strings.Contains(tc.lists[0], "WorkflowType = 'ParticipantWorkflow'") || !strings.Contains(tc.lists[0], "STARTS_WITH '"+sid+":'") {
+		t.Errorf("query %v", tc.lists)
+	}
+	if _, err := newTest(&memStore{}, tc).State(context.Background(), "x' OR '1'='1"); err == nil {
+		t.Error("a forged session ID reached Temporal")
+	}
+}
+
+// Arrêter stops every participant at work: those the queries list, and one
+// a turn event says started, which they may not list yet. With none, there
+// is nothing to stop.
+func TestCancel_StopsEveryParticipant(t *testing.T) {
+	tc := &fakeTemporal{byType: map[string][]string{"ParticipantWorkflow": {sid + ":p:jarvis"}}}
+	s := newTest(&memStore{}, tc)
+	s.Observe(sid, started("smith", 3))
+	if err := s.Cancel(context.Background(), sid); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(tc.signals) != fmt.Sprint([]string{sid + ":p:jarvis", sid + ":p:smith"}) || fmt.Sprint(tc.signalNames) != "[stop-turn stop-turn]" {
+		t.Errorf("signalled %v %v", tc.signals, tc.signalNames)
+	}
+	if err := newTest(&memStore{}, &fakeTemporal{}).Cancel(context.Background(), sid); !errors.Is(err, ErrNothingToStop) {
+		t.Errorf("nothing running: %v", err)
+	}
+	s.background.Wait()
+}
+
+// Deleting a session, or its last member leaving it, ends its participants,
+// and their turns with them.
+func TestDeleteAndLeave_EndTheParticipants(t *testing.T) {
+	running := map[string][]string{"ParticipantWorkflow": {sid + ":p:jarvis", sid + ":p:smith"}}
+	st := &memStore{session: &store.Session{SessionID: sid, CreatedBy: "u-alice"}, members: []store.SessionMember{{UserID: "u-alice"}}}
+	tc := &fakeTemporal{byType: running}
+	s := newTest(st, tc)
+	if err := s.Delete(context.Background(), sid, "u-alice"); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(tc.terminated) != fmt.Sprint(running["ParticipantWorkflow"]) {
+		t.Errorf("delete ended %v", tc.terminated)
+	}
+
+	st = &memStore{session: &store.Session{SessionID: sid, CreatedBy: "u-alice"}}
+	tc = &fakeTemporal{byType: running}
+	s = newTest(st, tc)
+	if err := s.Leave(context.Background(), sid, "u-alice"); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(tc.terminated) != fmt.Sprint(running["ParticipantWorkflow"]) {
+		t.Errorf("the last member's leave ended %v", tc.terminated)
+	}
+
+	// A member leaving others behind ends nothing.
+	st = &memStore{session: &store.Session{SessionID: sid, CreatedBy: "u-alice"}, members: []store.SessionMember{{UserID: "u-bob"}}}
+	tc = &fakeTemporal{byType: running}
+	s = newTest(st, tc)
+	if err := s.Leave(context.Background(), sid, "u-alice"); err != nil || len(tc.terminated) != 0 {
+		t.Errorf("leave with members left: %v, ended %v", err, tc.terminated)
+	}
+	s.background.Wait()
+}
+
+// A new session runs nothing until a message calls an agent.
+func TestOpen_StartsNothing(t *testing.T) {
+	st := &memStore{}
+	tc := &fakeTemporal{}
+	id, err := newTest(st, tc).Open(context.Background(), &store.User{ID: "u-alice"}, OpenOptions{})
+	if err != nil || st.session == nil || st.session.SessionID != id || st.session.AgentID != "default" || st.session.Channel != ChannelWeb {
+		t.Fatalf("Open = %q, %v; stored %+v", id, err, st.session)
+	}
+	if len(tc.started)+len(tc.signalStarts) != 0 {
+		t.Errorf("started %v %v", tc.started, tc.signalStarts)
 	}
 }

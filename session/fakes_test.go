@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"slices"
 	"strings"
@@ -18,7 +19,6 @@ import (
 
 	"github.com/victor/temporal-agent/activity"
 	"github.com/victor/temporal-agent/store"
-	"github.com/victor/temporal-agent/workflow"
 )
 
 // memStore is a session.Store in memory: one session at most is enough here.
@@ -104,11 +104,15 @@ type fakeTemporal struct {
 	options      []client.StartWorkflowOptions              // of each workflow started
 	lists        []string                                   // the queries
 	signals      []string                                   // workflow IDs signalled
+	signalNames  []string                                   // the signal of each
 	started      []string
 	inputs       []interface{} // the input of each workflow started
 	signalStarts []signalStart
-	states       map[string]workflow.SessionState // by workflow ID
-	queried      []string                         // workflow IDs queried
+	startErr     error                  // fails every SignalWithStart
+	startedAt    map[string]time.Time   // when the workflows listed started; zero if not set
+	states       map[string]interface{} // query answers, by workflow ID
+	queried      []string               // workflow IDs queried
+	terminated   []string
 }
 
 // signalStart is a SignalWithStartWorkflow call.
@@ -121,17 +125,23 @@ type signalStart struct {
 }
 
 func (f *fakeTemporal) SignalWithStartWorkflow(_ context.Context, id, signal string, arg interface{}, o client.StartWorkflowOptions, _ interface{}, input ...interface{}) (client.WorkflowRun, error) {
+	if f.startErr != nil {
+		return nil, f.startErr
+	}
 	f.signalStarts = append(f.signalStarts, signalStart{id: id, options: o, signal: signal, arg: arg, input: input})
 	return nil, nil
 }
 
-// encodedState is a query's answer.
-type encodedState struct{ state workflow.SessionState }
+// encodedState is a query's answer, as JSON goes through Temporal.
+type encodedState struct{ state interface{} }
 
 func (e encodedState) HasValue() bool { return true }
 func (e encodedState) Get(v interface{}) error {
-	*v.(*workflow.SessionState) = e.state
-	return nil
+	b, err := json.Marshal(e.state)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(b, v)
 }
 
 func (f *fakeTemporal) ExecuteWorkflow(_ context.Context, o client.StartWorkflowOptions, _ interface{}, args ...interface{}) (client.WorkflowRun, error) {
@@ -142,8 +152,9 @@ func (f *fakeTemporal) ExecuteWorkflow(_ context.Context, o client.StartWorkflow
 	}
 	return nil, nil
 }
-func (f *fakeTemporal) SignalWorkflow(_ context.Context, id, _, _ string, _ interface{}) error {
+func (f *fakeTemporal) SignalWorkflow(_ context.Context, id, _, signal string, _ interface{}) error {
 	f.signals = append(f.signals, id)
+	f.signalNames = append(f.signalNames, signal)
 	return nil
 }
 func (f *fakeTemporal) QueryWorkflow(_ context.Context, id, _, _ string, _ ...interface{}) (converter.EncodedValue, error) {
@@ -184,11 +195,14 @@ func (f *fakeTemporal) ListWorkflow(_ context.Context, req *workflowservice.List
 		}
 	}
 	for _, id := range ids {
-		resp.Executions = append(resp.Executions, &workflowpb.WorkflowExecutionInfo{Execution: &commonpb.WorkflowExecution{WorkflowId: id}})
+		resp.Executions = append(resp.Executions, &workflowpb.WorkflowExecutionInfo{
+			Execution: &commonpb.WorkflowExecution{WorkflowId: id}, StartTime: timestamppb.New(f.startedAt[id]),
+		})
 	}
 	return resp, nil
 }
-func (f *fakeTemporal) TerminateWorkflow(context.Context, string, string, string, ...interface{}) error {
+func (f *fakeTemporal) TerminateWorkflow(_ context.Context, id, _, _ string, _ ...interface{}) error {
+	f.terminated = append(f.terminated, id)
 	return nil
 }
 

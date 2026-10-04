@@ -217,7 +217,7 @@ La course documentée sur `TurnReads` (IDs pas dans l'ordre des commits) subsist
 
 **`Deliver`**, dans cet ordre *[rev2 N4]* :
 1. résout les participants (inchangé, `agentOrDefault` pour l'agent par défaut) : la résolution ne dépend que du texte ;
-2. **contrôle la file** : si le premier participant a déjà 5 messages en attente, refus (429, et sur Telegram une réponse en texte), **sans rien enregistrer**. Le compte vient de l'état en mémoire du serveur (§6, alimenté par les événements), pas d'une requête Temporal sur le chemin de la requête ; en cas de doute, on laisse passer. Le relais en est exempté ;
+2. **contrôle la file** : si le premier participant a déjà 5 messages en attente, refus (429, et sur Telegram une réponse en texte, envoyée dans la réponse du webhook), **sans rien enregistrer**. Le compte vient de l'état en mémoire du serveur (§6) : les messages qu'il a livrés à ce participant et dont aucun événement de tour n'a encore dit le début ou la fin ; pas d'une requête Temporal sur le chemin de la requête ; en cas de doute (serveur redémarré), on laisse passer, et deux envois simultanés peuvent dépasser le plafond d'un message. Le relais en est exempté ;
 3. enregistre le message (inchangé) ;
 4. fait un `SignalWithStart` chez le premier (§4.7).
 
@@ -229,13 +229,13 @@ La course documentée sur `TurnReads` (IDs pas dans l'ordre des commits) subsist
 - **Phase 1** : le bouton actuel « Arrêter » (`Cancel(sessionID)`, appelé par `cmd/agent/ui.go` et `cmd/agent/api.go`) envoie `stop-turn` à **tous** les participants en cours de la session.
 - **Phase 2** : un bouton par participant, autorisé à l'auteur du message en cours ou au créateur de la session.
 
-**Supprimer ou quitter une session** *[rev. I7]* : `Delete` et le `Leave` du dernier membre **terminent tous les participants** de la session et leurs tours (aujourd'hui, ils ne terminent que le workflow de session). Sinon, un tour écrirait dans une session supprimée, et une question `ask_user` attendrait 72 h. La liste vient de la visibilité, qui a un léger retard : un participant démarré à l'instant peut survivre. Ses écritures échouent alors sur la clé étrangère de la session, sans dégât *[rev2 N15]*.
+**Supprimer ou quitter une session** *[rev. I7]* : `Delete` et le `Leave` du dernier membre **terminent tous les participants** de la session et leurs tours (aujourd'hui, ils ne terminent que le workflow de session). Sinon, un tour écrirait dans une session supprimée, et une question `ask_user` attendrait 72 h. La liste vient de la visibilité, qui a un léger retard, complétée par les participants que les événements de tour disent au travail : un participant démarré à l'instant peut encore survivre. *Corrigé à l'implémentation :* `messages` n'a pas de clé étrangère vers `sessions`, un tour en cours peut donc y laisser des lignes orphelines (sans lecteur : la session n'existe plus) ; au tour suivant, la vérification (`CheckTurn`) trouve la session absente et le participant s'arrête sans tour *[rev2 N15]*.
 
 **Qui travaille** *[rev. I8]* :
 - `WorkflowId STARTS_WITH '<session>:p:'` (et `:i:`) + `ExecutionStatus = 'Running'` donne les participants actifs. La requête `state` de chacun donne le détail.
 - L'état des tours en mémoire (`session/turns.go`, alimenté par `turn_started` et `turn_done`) devient **indexé par participant**, et l'état d'une session est l'**agrégat** de ses participants : sinon, le `turn_done` d'un participant masquerait le travail d'un autre. Les points de l'arbre et la ligne « … travaille… » en dérivent ; elle peut nommer plusieurs agents.
-- `StatusActive` (l'état « session ouverte » du workflow de session) disparaît, et `Active` est retiré de `/api/sessions`.
-- `GET /api/sessions/{id}/state` renvoie l'**agrégat des états des participants** (la liste des requêtes `state`), et l'outil `query_workflow` prend `state` comme requête par défaut *[rev2 N11]*.
+- `StatusActive` (l'état « session ouverte » du workflow de session) disparaît, et `Active` est retiré de la liste des sessions (`GET /me/sessions`).
+- `GET /sessions/{id}/state` renvoie l'**agrégat des états des participants** (la liste des requêtes `state`), et l'outil `query_workflow` prend `state` comme requête par défaut *[rev2 N11]*.
 - Questions en attente (`ask_user`) : la même requête qu'aujourd'hui, avec le nouveau préfixe. Avec plusieurs questions ouvertes, une réponse Telegram va à **la plus ancienne** (aujourd'hui `PageSize: 1`, au hasard) *[rev. m5]*.
 
 **Panneau « Agents »** (phase 2) dans le panneau de détails, une ligne par participant : disponible, répond (à qui, depuis quand), N messages en file, tâche de fond, attend une réponse, attend un worker. Avec « Arrêter » et « tout arrêter » selon les droits.

@@ -68,25 +68,14 @@ func TestMentionedAgents_AMentionWinsOverAnID(t *testing.T) {
 	}
 }
 
-// The live event names the agents that answer: those mentioned, or the
-// session's, or the default one when the session's is gone.
-func TestAnswering(t *testing.T) {
-	two := []workflow.AddressedAgent{{ID: "smith", Name: "Agent Smith"}, {ID: "default", Name: "Jarvis"}}
-	for _, c := range []struct {
-		called    bool
-		mentioned []workflow.AddressedAgent
-		session   string
-		want      string
-	}{
-		{false, nil, "default", "[]"},
-		{true, two, "default", "[Agent Smith Jarvis]"},
-		{true, nil, "code-reviewer", "[Reviewer]"},
-		{true, nil, "gone", "[Jarvis]"},
-		{true, nil, "", "[Jarvis]"},
-	} {
-		if got := fmt.Sprint(answering(c.called, c.mentioned, c.session, "default", team)); got != c.want {
-			t.Errorf("answering(%v, %v, %q) = %s, want %s", c.called, c.mentioned, c.session, got, c.want)
-		}
+// An agent a message calls without mentioning it (the session's) is named as
+// the catalog has it, or by its ID.
+func TestAddressed(t *testing.T) {
+	if got := addressed("code-reviewer", team); got != (workflow.AddressedAgent{ID: "code-reviewer", Name: "Reviewer", Mention: "code-reviewer"}) {
+		t.Errorf("addressed %+v", got)
+	}
+	if got := addressed("gone", team); got != (workflow.AddressedAgent{ID: "gone", Name: "gone", Mention: "gone"}) {
+		t.Errorf("addressed %+v", got)
 	}
 }
 
@@ -132,11 +121,11 @@ func TestDeliver_SignalsTheMentionedAgents(t *testing.T) {
 		wantCalled       bool
 		wantAgents       string
 	}{
-		{"mention mode, mentioned", store.AgentModeMention, "@agentSmith juge", 1, true, "[agentSmith]"},
+		{"mention mode, mentioned", store.AgentModeMention, "@agentSmith juge", 1, true, "smith []"},
 		{"mention mode, no mention", store.AgentModeMention, "bonjour", 1, false, ""},
-		{"auto shared, two mentioned", store.AgentModeAuto, "@jarvis résume, @agentSmith juge", 2, true, "[jarvis agentSmith]"},
+		{"auto shared, two mentioned", store.AgentModeAuto, "@jarvis résume, @agentSmith juge", 2, true, "default [agentSmith]"},
 		{"auto shared, no mention", store.AgentModeAuto, "bonjour", 2, false, ""},
-		{"auto alone, no mention", store.AgentModeAuto, "bonjour", 1, true, "[]"},
+		{"auto alone, no mention", store.AgentModeAuto, "bonjour", 1, true, "default []"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			st := &memStore{agents: team}
@@ -159,9 +148,10 @@ func TestDeliver_SignalsTheMentionedAgents(t *testing.T) {
 			if len(tc.signalStarts) != 1 {
 				t.Fatalf("%d signals, want 1", len(tc.signalStarts))
 			}
-			msg := tc.signalStarts[0].arg.(workflow.UserMessage)
-			if got := fmt.Sprint(mentions(msg.Agents)); got != c.wantAgents {
-				t.Errorf("agents %s, want %s", got, c.wantAgents)
+			msg := tc.signalStarts[0].arg.(workflow.ParticipantMessage)
+			first, _ := workflow.ParticipantOf(tc.signalStarts[0].id)
+			if got := first + " " + fmt.Sprint(mentions(msg.Next)); got != c.wantAgents {
+				t.Errorf("delivered to %s, want %s", got, c.wantAgents)
 			}
 			// The members see live who answers.
 			ev := svc.hub.(*nopHub).on(sid)

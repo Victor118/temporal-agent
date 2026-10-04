@@ -153,24 +153,25 @@ func TestQueryWorkflow_OwnSessionOnly(t *testing.T) {
 	q := &fakeQuerier{}
 	r := NewRegistry()
 	RegisterQueryWorkflowTool(r, q)
-	ctx := WithSessionID(context.Background(), "s1")
-	for id, allowed := range map[string]bool{
-		"s1-tool-implement_feature-abc": true,
-		"session-s1":                    true,
-		"session-s1-1700000000":         true,
-		"s2-tool-ask_user-x":            false,
-		"session-s2":                    false,
-		"s1x-tool-a":                    false,
-		"schedule-bob":                  false,
-	} {
-		q.queried = nil
-		input, _ := json.Marshal(map[string]string{"workflow_id": id})
-		out, _ := r.Execute(ctx, "query_workflow", input)
-		if got := len(q.queried) == 1; got != allowed {
-			t.Errorf("%s: queried %v (%q), want %v", id, got, out, allowed)
+	for _, caller := range []string{"s1", "s1:p:jarvis:m3:tool:agent_analyst:c1"} { // a turn's, a sub-agent's
+		ctx := WithSessionID(context.Background(), caller)
+		for id, allowed := range map[string]bool{
+			"s1:p:jarvis:m3:tool:implement_feature:abc": true,
+			"s1:p:smith":                     true,
+			"s2:p:jarvis:m1:tool:ask_user:x": false,
+			"s1x:p:a":                        false,
+			"s1-tool-a":                      false,
+			"schedule-bob":                   false,
+		} {
+			q.queried = nil
+			input, _ := json.Marshal(map[string]string{"workflow_id": id})
+			out, _ := r.Execute(ctx, "query_workflow", input)
+			if got := len(q.queried) == 1; got != allowed {
+				t.Errorf("caller %s, %s: queried %v (%q), want %v", caller, id, got, out, allowed)
+			}
 		}
 	}
-	input, _ := json.Marshal(map[string]string{"workflow_id": "s1-tool-x"})
+	input, _ := json.Marshal(map[string]string{"workflow_id": "s1:p:x"})
 	q.queried = nil
 	r.Execute(context.Background(), "query_workflow", input)
 	if len(q.queried) != 0 {

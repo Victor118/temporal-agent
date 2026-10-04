@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -92,10 +94,26 @@ func (t *telegramChannel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	if _, err := t.sessions.Deliver(r.Context(), sess, user, text); err != nil {
+	_, err = t.sessions.Deliver(r.Context(), sess, user, text)
+	switch {
+	case errors.Is(err, session.ErrQueueFull):
+		replyInWebhook(w, chatID, queueFullText)
+	case err != nil:
 		log.Printf("Telegram webhook: %v", err)
 		http.Error(w, "Internal error", http.StatusInternalServerError)
-		return
+	default:
+		w.WriteHeader(http.StatusOK)
 	}
-	w.WriteHeader(http.StatusOK)
+}
+
+// queueFullText is what a member reads when the agent has too many
+// messages waiting: theirs was not taken.
+var queueFullText = fmt.Sprintf("L'agent a déjà %d messages en attente : renvoie celui-ci quand il aura répondu.", session.MaxQueued)
+
+// replyInWebhook answers an update with a message to its chat, in the
+// webhook's response: Telegram makes the call (sendMessage), so the server
+// needs no client of its own.
+func replyInWebhook(w http.ResponseWriter, chatID int64, text string) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"method": "sendMessage", "chat_id": chatID, "text": text})
 }

@@ -237,18 +237,14 @@ func (u *ui) buildPage(ctx context.Context, me *store.User, sessionID, view stri
 			p.LastMessageID = it.ID
 		}
 	}
-	// Working is an agent turn: a fork's summary workflow finishing up is not.
-	p.Working = statuses[sessionID] == chat.StatusWorking && !p.SummaryPending &&
-		!(sess.ForkedAtMessageID != 0 && u.sessions.ForkRunning(ctx, sessionID))
-	// Who works, when a turn event said: the session's agent goes unnamed
-	// there, and an agent shows under its name as it is now.
-	if id, name := u.sessions.WorkingAgent(sessionID); p.Working && id != "" {
-		p.WorkingAgent = cmp.Or(directory.ByID[id].Name, name, id)
-	}
-	// What the turn waits for, when the workflow said (a coding run waiting
-	// for a free worker).
-	if p.Working {
-		p.WorkingNote = u.sessions.WorkingNote(sessionID)
+	// Who works: the participants at work, several at once, each under its
+	// agent's name as it is now, and what its turn waits for when its
+	// workflow said (a coding run waiting for a free worker). A fork's
+	// summary workflow is no participant.
+	if !p.SummaryPending {
+		for _, w := range u.sessions.WorkingAgents(ctx, sessionID) {
+			p.Working = append(p.Working, chat.WorkingAgent{Name: cmp.Or(directory.ByID[w.AgentID].Name, w.Name, w.AgentID), Note: w.Note})
+		}
 	}
 	return p, nil
 }
@@ -399,6 +395,9 @@ func (u *ui) sendForm(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, session.ErrSummaryPending):
 		fail("Le résumé de la session parente est en cours : patiente un instant.")
 		return
+	case errors.Is(err, session.ErrQueueFull):
+		fail(queueFullText)
+		return
 	case err != nil:
 		log.Printf("ui: send to %s: %v", sessionID, err)
 		fail("Message non envoyé : " + err.Error())
@@ -526,7 +525,7 @@ func (u *ui) answerForm(w http.ResponseWriter, r *http.Request) {
 
 func (u *ui) cancelForm(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "id")
-	if err := u.sessions.Cancel(r.Context(), sessionID); err != nil && !errors.Is(err, session.ErrNoActiveSession) {
+	if err := u.sessions.Cancel(r.Context(), sessionID); err != nil && !errors.Is(err, session.ErrNothingToStop) {
 		log.Printf("ui: cancel %s: %v", sessionID, err)
 	}
 	u.renderPage(w, r, sessionID, "thread", "thread", nil)

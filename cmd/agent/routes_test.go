@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/google/uuid"
 	"net/http"
 	"net/http/httptest"
@@ -506,9 +507,9 @@ func TestRoutes_MessagesCallTheAgentOnlyWhenMeant(t *testing.T) {
 	if len(tc.signals) != 1 {
 		t.Fatalf("signals %v", tc.signals)
 	}
-	msg := tc.signals[0].(workflow.UserMessage)
-	// The turn loads the message from the store: it must not be added twice.
-	if !msg.Stored || msg.UserID != "u-bob" {
+	msg := tc.signals[0].(workflow.ParticipantMessage)
+	// The turn loads the message from the store: the signal names it.
+	if msg.MessageID == 0 || msg.UserID != "u-bob" {
 		t.Errorf("signal %+v", msg)
 	}
 	if len(st.appended) != 3 {
@@ -973,5 +974,78 @@ func TestStreams_EndForAMemberWhoLeaves(t *testing.T) {
 	got := restOf(t, alicePage)
 	if len(got) < 2 || !slices.Equal(got[len(got)-2:], goneLines) || slices.Contains(got, "event: "+session.EventMemberLeft) {
 		t.Errorf("alice's stream after the deletion: %q, want it to end with %q", got, goneLines)
+	}
+}
+
+// A participant with MaxQueued messages waiting refuses one more: 429, and
+// the message is not stored, so the member who sends it again sends it once.
+func TestRoutes_QueueFull(t *testing.T) {
+	h, st := newRouteTestWith(t, &fakeTemporal{})
+	bob := logIn(t, h, "bob@example.com")
+	for i := range session.MaxQueued {
+		if w := call(t, h, http.MethodPost, "/sessions/s1/messages", fmt.Sprintf(`{"content":"@default %d"}`, i), bob); w.Code != http.StatusAccepted {
+			t.Fatalf("message %d: %d %s", i, w.Code, w.Body)
+		}
+	}
+	w := call(t, h, http.MethodPost, "/sessions/s1/messages", `{"content":"@default one more"}`, bob)
+	if w.Code != http.StatusTooManyRequests || len(st.appended) != session.MaxQueued {
+		t.Errorf("one more: %d %s, %d stored", w.Code, w.Body, len(st.appended))
+	}
+}
+
+// telegramStore is a store whose Telegram chat 42 is Bob's, in session s1.
+type telegramStore struct {
+	*routeStore
+}
+
+func (s telegramStore) GetUserByTelegramID(context.Context, int64) (*store.User, error) {
+	return &store.User{ID: "u-bob", Email: "bob@example.com"}, nil
+}
+func (s telegramStore) GetActiveSessionByChannel(context.Context, string, string, string) (*store.Session, error) {
+	return &s.session, nil
+}
+
+// On Telegram, a message refused for a full queue is answered in text, in
+// the webhook's response, and not stored.
+func TestTelegram_QueueFullIsAnsweredInText(t *testing.T) {
+	_, rs := newRouteTest(t)
+	st := telegramStore{rs}
+	ch := &telegramChannel{
+		sessions: session.New(st, &fakeTemporal{}, sse.NewHub(), session.Config{WorkflowQueue: "agent", DefaultAgentID: "default"}),
+		users:    st, secret: "s3cret",
+	}
+	send := func(text string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/webhooks/telegram", strings.NewReader(`{"update_id":1,"message":{"message_id":1,"chat":{"id":42},"text":"`+text+`"}}`))
+		req.Header.Set(telegramSecretHeader, "s3cret")
+		w := httptest.NewRecorder()
+		ch.ServeHTTP(w, req)
+		return w
+	}
+	for i := range session.MaxQueued {
+		if w := send(fmt.Sprint("@default ", i)); w.Code != http.StatusOK || w.Body.Len() != 0 {
+			t.Fatalf("message %d: %d %s", i, w.Code, w.Body)
+		}
+	}
+	w := send("@default one more")
+	var reply struct {
+		Method string `json:"method"`
+		ChatID int64  `json:"chat_id"`
+		Text   string `json:"text"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &reply); err != nil || w.Code != http.StatusOK || reply.Method != "sendMessage" || reply.ChatID != 42 || reply.Text != queueFullText {
+		t.Errorf("reply %d %s (%v)", w.Code, w.Body, err)
+	}
+	if len(rs.appended) != session.MaxQueued {
+		t.Errorf("%d stored, want the refused one out", len(rs.appended))
+	}
+}
+
+// The session list says nothing of a workflow of its own, which no session
+// has any more.
+func TestRoutes_ListHasNoActive(t *testing.T) {
+	h, _ := newRouteTestWith(t, &fakeTemporal{})
+	bob := logIn(t, h, "bob@example.com")
+	if w := call(t, h, http.MethodGet, "/me/sessions", "", bob); w.Code != http.StatusOK || strings.Contains(w.Body.String(), `"active"`) || !strings.Contains(w.Body.String(), `"s1"`) {
+		t.Errorf("sessions %d %s", w.Code, w.Body)
 	}
 }

@@ -22,8 +22,14 @@ import (
 var mentionPattern = regexp.MustCompile(`(?:^|[^\w@.])@([\w-]+)`)
 
 // maxAgentsPerMessage bounds the agents one message calls: each runs a full
-// turn, one after another, while the session's next messages wait.
+// turn on it, one after another (the relay), each holding its own
+// participant's next messages meanwhile.
 const maxAgentsPerMessage = 3
+
+// MaxQueued bounds the messages waiting for a participant: past it, a
+// message for that participant is refused, before it is stored. A relay is
+// not counted: the server does not deliver it.
+const MaxQueued = 5
 
 // mentionedAgents returns the agents text calls by their mentions, in the
 // order they first appear, once each. Case does not matter, and a mention
@@ -79,10 +85,22 @@ func answered(mode string, members int, mentioned []workflow.AddressedAgent) boo
 	}
 }
 
-// Deliver takes a human message into a session, from any channel: it stores
-// it at once, shows it to the members, and starts the turns of the agents the
-// message calls (answered). Each turn then loads the whole conversation, the
-// messages no agent was called on included. Reports whether it called one.
+// Deliver takes a human message into a session, from any channel, and
+// reports whether it called an agent:
+//  1. it resolves who answers (answered): the agents it mentions, in order,
+//     or the session's agent (the default one if it is gone); this depends
+//     on the text alone;
+//  2. it refuses the message when the first of them has MaxQueued messages
+//     waiting already, as far as the server knows (ErrQueueFull), without
+//     storing it: refused after being stored, it would be in the
+//     conversation, unanswered, and sent again;
+//  3. it stores it, and shows it to the members;
+//  4. it delivers it to the first agent's participant, by SignalWithStart:
+//     started if it does not run, queued behind its current message if it
+//     does. The participant relays it to the next agents.
+//
+// Each turn then loads the whole conversation, the messages no agent was
+// called on included.
 //
 // An empty message is refused: stored as an empty user turn, every later turn
 // would replay it to the LLM, which rejects a user message with no content —
@@ -96,14 +114,6 @@ func (s *Service) Deliver(ctx context.Context, sess *store.Session, author *stor
 		return false, ErrSummaryPending
 	}
 
-	content, _ := json.Marshal(text)
-	stored := store.Message{Role: store.RoleUser, Content: string(content), UserID: author.ID, Author: author.Name()}
-	id, err := s.store.AppendMessage(ctx, sess.SessionID, store.HumanMessageKey(uuid.New().String()), stored)
-	if err != nil {
-		return false, fmt.Errorf("store message: %w", err)
-	}
-	s.inBackground(func() { s.setTitleFrom(sess.SessionID, text) })
-
 	members, err := s.store.ListSessionMembers(ctx, sess.SessionID)
 	if err != nil {
 		return false, fmt.Errorf("list members: %w", err)
@@ -116,85 +126,109 @@ func (s *Service) Deliver(ctx context.Context, sess *store.Session, author *stor
 	if len(dropped) > 0 {
 		log.Printf("Session %s: a message calls more than %d agents; not called: %s", sess.SessionID, maxAgentsPerMessage, strings.Join(dropped, ", "))
 	}
-	called := answered(sess.AgentMode, len(members), mentioned)
-	// No agent mentioned: the session's agent answers (an empty list).
-	// Its ID is the snapshot of the turns answering it: they read the session
-	// up to it, not the messages stored after it.
-	msg := workflow.UserMessage{Text: text, UserID: author.ID, UserName: author.Name(), Stored: true, MessageID: id, Agents: mentioned}
-	s.publishUserMessage(sess.SessionID, msg, answering(called, mentioned, sess.AgentID, s.cfg.DefaultAgentID, agents))
-	if !called {
+	var who []workflow.AddressedAgent
+	sessionAgent := ""
+	if answered(sess.AgentMode, len(members), mentioned) {
+		if sessionAgent, err = s.agentOrDefault(ctx, sess.AgentID); err != nil {
+			return false, err
+		}
+		who = mentioned
+		if len(who) == 0 {
+			who = []workflow.AddressedAgent{addressed(sessionAgent, agents)}
+		}
+		if s.turns.queued(sess.SessionID, who[0].ID) >= MaxQueued {
+			return false, ErrQueueFull
+		}
+	}
+
+	content, _ := json.Marshal(text)
+	stored := store.Message{Role: store.RoleUser, Content: string(content), UserID: author.ID, Author: author.Name()}
+	id, err := s.store.AppendMessage(ctx, sess.SessionID, store.HumanMessageKey(uuid.New().String()), stored)
+	if err != nil {
+		return false, fmt.Errorf("store message: %w", err)
+	}
+	s.inBackground(func() { s.setTitleFrom(sess.SessionID, text) })
+	s.publishUserMessage(sess.SessionID, text, author, who)
+	if len(who) == 0 {
 		return false, nil
 	}
 
 	defer s.statuses.invalidate()
-	if err := s.signalSession(ctx, sess, msg); err != nil {
+	msg := workflow.ParticipantMessage{
+		MessageID: id, UserID: author.ID, UserName: author.Name(),
+		Next: who[1:],
+		// On the channel, an answer that could be taken for another
+		// agent's is signed.
+		SignReply: len(who) > 1 || who[0].ID != sessionAgent,
+		Channel:   sess.Channel, ChannelID: sess.ChannelID,
+	}
+	if len(who) > 1 {
+		msg.Part = &workflow.Part{Agents: who, Quote: workflow.Quote(text)}
+	}
+	if err := s.deliver(ctx, sess, who[0].ID, msg); err != nil {
 		return false, err
 	}
 	return true, nil
 }
 
-// signalSession hands a message to the session's workflow, starting a new run
-// when the last one is over (an idle session times out). Signal and start are
-// one call on the session's fixed ID: Temporal starts a run only if none is
-// running, so two messages never start two runs, and a run ending while the
-// message is sent cannot lose it.
-func (s *Service) signalSession(ctx context.Context, sess *store.Session, msg workflow.UserMessage) error {
-	// Resume with the session's agent, or the default one if it is gone.
-	agentID, err := s.agentOrDefault(ctx, sess.AgentID)
-	if err != nil {
-		return err
+// addressed is the agent agentID as a message addresses it, named from
+// agents when it is among them.
+func addressed(agentID string, agents []store.Agent) workflow.AddressedAgent {
+	for _, a := range agents {
+		if a.ID == agentID {
+			return workflow.AddressedAgent{ID: a.ID, Name: cmp.Or(a.Name, a.ID), Mention: a.MentionName()}
+		}
 	}
-	id := sessionWorkflowID(sess.SessionID)
-	if _, err := s.temporal.SignalWithStartWorkflow(ctx, id, workflow.SignalUserMessage, msg, client.StartWorkflowOptions{
+	return workflow.AddressedAgent{ID: agentID, Name: agentID, Mention: agentID}
+}
+
+// deliver hands a message to agentID's participant in the session: one
+// SignalWithStart on its fixed ID, which starts it only if it does not run,
+// so two messages never start two, and one ending as the message is sent
+// cannot lose it (the Temporal server refuses to close it with a signal
+// unhandled). The message is counted in the participant's queue until it
+// says it started it.
+func (s *Service) deliver(ctx context.Context, sess *store.Session, agentID string, msg workflow.ParticipantMessage) error {
+	id := workflow.ParticipantWorkflowID(sess.SessionID, agentID)
+	s.turns.expect(sess.SessionID, agentID, msg.MessageID)
+	if _, err := s.temporal.SignalWithStartWorkflow(ctx, id, workflow.SignalMessage, msg, client.StartWorkflowOptions{
 		ID:        id,
 		TaskQueue: s.cfg.WorkflowQueue,
-	}, workflow.SessionWorkflow, workflow.SessionWorkflowInput{
+	}, workflow.ParticipantWorkflow, workflow.ParticipantInput{
 		SessionID: sess.SessionID,
 		AgentID:   agentID,
 		Channel:   sess.Channel,
 		ChannelID: sess.ChannelID,
 	}); err != nil {
-		return fmt.Errorf("signal session: %w", err)
+		s.turns.unexpect(sess.SessionID, agentID, msg.MessageID)
+		return fmt.Errorf("deliver to %s: %w", agentID, err)
 	}
 	return nil
 }
 
 // publishUserMessage shows a user's message to the other members of the
-// session, live, and which agents it called, by name (none: no agent
-// answers). The sender displays it already and skips its own.
-func (s *Service) publishUserMessage(sessionID string, msg workflow.UserMessage, agents []string) {
-	data, _ := json.Marshal(map[string]any{
-		"content":      msg.Text,
-		"user_id":      msg.UserID,
-		"author":       msg.UserName,
-		"agent_called": len(agents) > 0,
-		"agents":       agents,
-	})
-	s.hub.Publish(sessionID, activity.SSEEvent{Type: EventUserMessage, Data: data})
-}
-
-// answering names the agents a message calls, in the order they answer: the
-// ones it mentions, or the session's agent (the default one when it names
-// none, or is gone). Nil when the message calls none.
-func answering(called bool, mentioned []workflow.AddressedAgent, sessionAgent, defaultAgent string, agents []store.Agent) []string {
-	if !called {
-		return nil
-	}
-	names := make([]string, 0, max(len(mentioned), 1))
-	for _, a := range mentioned {
-		names = append(names, a.Name)
-	}
-	if len(names) > 0 {
-		return names
-	}
-	for _, id := range []string{sessionAgent, defaultAgent} {
-		for _, a := range agents {
-			if id != "" && a.ID == id {
-				return append(names, cmp.Or(a.Name, a.ID))
-			}
+// session, live, and which agents it calls, by name (none: no agent
+// answers), with, for each one answering a message already, that message
+// (queued_behind, by agent ID): this one waits behind it. The sender
+// displays it already and skips its own.
+func (s *Service) publishUserMessage(sessionID, text string, author *store.User, who []workflow.AddressedAgent) {
+	names := make([]string, len(who))
+	behind := map[string]int64{}
+	for i, a := range who {
+		names[i] = cmp.Or(a.Name, a.ID)
+		if current := s.QueuedBehind(sessionID, a.ID); current != 0 {
+			behind[a.ID] = current
 		}
 	}
-	return append(names, cmp.Or(sessionAgent, defaultAgent))
+	data, _ := json.Marshal(map[string]any{
+		"content":       text,
+		"user_id":       author.ID,
+		"author":        author.Name(),
+		"agent_called":  len(who) > 0,
+		"agents":        names,
+		"queued_behind": behind,
+	})
+	s.hub.Publish(sessionID, activity.SSEEvent{Type: EventUserMessage, Data: data})
 }
 
 // maxTitleRunes bounds a session title taken from its first message.

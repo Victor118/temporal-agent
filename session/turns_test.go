@@ -1,6 +1,7 @@
 package session
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,20 +16,30 @@ import (
 	"github.com/victor/temporal-agent/workflow"
 )
 
-func turnEvent(typ, agentID, name string) activity.SSEEvent {
-	data, _ := json.Marshal(workflow.TurnEvent{AgentID: agentID, AgentName: name, Turn: "k"})
+func turnEvent(typ, agentID, name string, message int64) activity.SSEEvent {
+	data, _ := json.Marshal(workflow.TurnEvent{AgentID: agentID, AgentName: name, Turn: store.TurnKey(message, agentID)})
 	return activity.SSEEvent{Type: typ, Data: data}
 }
 
+// names lists the working participants' agents, with their names.
+func names(ws []Working) string {
+	var out []string
+	for _, w := range ws {
+		out = append(out, w.AgentID+"="+w.Name)
+	}
+	return strings.Join(out, " ")
+}
+
 // The turn events tell, at once, what the visibility queries tell late: a
-// turn started is working, one over is not, whatever the queries still say.
-// Past a while the queries are right again, an event lost included; with no
-// event at all (after a restart), they are all there is.
+// participant that started a turn works, one done does not, whatever the
+// queries still say; and a session works while one of its participants
+// does, another one's end hiding nothing. Past a while the queries are
+// right again, an event lost included; with no event at all (after a
+// restart), they are all there is.
 func TestStatuses_TurnEventsOutweighTheQueriesForAWhile(t *testing.T) {
 	other := "0e1c2a9e-3b4d-4e5f-8a7b-0c1d2e3f4a5b"
 	tc := &fakeTemporal{byType: map[string][]string{
-		"SessionWorkflow": {"session-" + sid, "session-" + other},
-		"AgentWorkflow":   {sid + "-turn-1"}, // the queries lag: the turn is over
+		"ParticipantWorkflow": {sid + ":p:default"}, // the queries lag: it ended
 	}}
 	s := newTest(&memStore{}, tc)
 	now := time.Now()
@@ -38,37 +49,59 @@ func TestStatuses_TurnEventsOutweighTheQueriesForAWhile(t *testing.T) {
 	if got := s.Statuses(ctx)[sid]; got != StatusWorking {
 		t.Fatalf("no event: %q, want the queries' working", got)
 	}
-	if id, _ := s.WorkingAgent(sid); id != "" {
-		t.Errorf("no event names %q", id)
+	if got := names(s.WorkingAgents(ctx, sid)); got != "default=" {
+		t.Errorf("no event: working %q, want the participant the queries see", got)
 	}
 
-	s.Observe(other, turnEvent(workflow.EventTurnStarted, "smith", "Agent Smith"))
-	s.Observe(sid, turnEvent(workflow.EventTurnStarted, "default", ""))
-	s.Observe(sid, turnEvent(workflow.EventTurnDone, "default", ""))
+	s.Observe(other, turnEvent(workflow.EventTurnStarted, "smith", "Agent Smith", 4))
+	s.Observe(sid, turnEvent(workflow.EventTurnStarted, "default", "Jarvis", 2))
+	s.Observe(sid, turnEvent(workflow.EventTurnDone, "default", "Jarvis", 2))
 	statuses := s.Statuses(ctx)
-	if statuses[sid] != StatusActive || statuses[other] != StatusWorking {
+	if cmp.Or(statuses[sid], StatusIdle) != StatusIdle || statuses[other] != StatusWorking {
 		t.Errorf("after the events: %v", statuses)
 	}
-	if id, name := s.WorkingAgent(other); id != "smith" || name != "Agent Smith" {
-		t.Errorf("working agent %q %q", id, name)
+	if got := names(s.WorkingAgents(ctx, other)); got != "smith=Agent Smith" {
+		t.Errorf("working %q", got)
 	}
-	if id, _ := s.WorkingAgent(sid); id != "" {
-		t.Errorf("a turn over still names %q", id)
-	}
-	if shared := s.statuses.get(ctx, s.loadStatuses); shared[sid] != StatusWorking || shared[other] != StatusActive {
-		t.Errorf("the shared statuses were written to: %v", shared)
+	if got := s.WorkingAgents(ctx, sid); len(got) != 0 {
+		t.Errorf("a participant done still works: %+v", got)
 	}
 
-	// Past the trust: the queries again (the started event's turn, never
-	// seen ending, is no longer working).
+	// Two participants of one session: one done, the other still works.
+	s.Observe(sid, turnEvent(workflow.EventTurnStarted, "default", "Jarvis", 5))
+	s.Observe(sid, turnEvent(workflow.EventTurnStarted, "smith", "Agent Smith", 6))
+	s.Observe(sid, turnEvent(workflow.EventTurnDone, "smith", "Agent Smith", 6))
+	if got := s.Statuses(ctx)[sid]; got != StatusWorking {
+		t.Errorf("smith done, jarvis working: %q", got)
+	}
+	if got := names(s.WorkingAgents(ctx, sid)); got != "default=Jarvis" {
+		t.Errorf("working %q", got)
+	}
+	s.Observe(sid, turnEvent(workflow.EventTurnStarted, "smith", "Agent Smith", 7))
+	if got := names(s.WorkingAgents(ctx, sid)); got != "default=Jarvis smith=Agent Smith" {
+		t.Errorf("both at work: %q", got)
+	}
+	// A participant done with a message it was not on (one it skipped) is
+	// still on its turn.
+	s.Observe(sid, turnEvent(workflow.EventTurnDone, "smith", "", 8))
+	if got := names(s.WorkingAgents(ctx, sid)); got != "default=Jarvis smith=Agent Smith" {
+		t.Errorf("after a skipped message: %q", got)
+	}
+
+	// Past the trust: the queries again; a participant they see running is
+	// named by its last turn.
 	now = now.Add(turnTrust)
-	if statuses := s.Statuses(ctx); statuses[sid] != StatusWorking || statuses[other] != StatusActive {
+	statuses = s.Statuses(ctx)
+	if statuses[sid] != StatusWorking || cmp.Or(statuses[other], StatusIdle) != StatusIdle {
 		t.Errorf("past the trust: %v", statuses)
+	}
+	if got := names(s.WorkingAgents(ctx, sid)); got != "default=Jarvis" {
+		t.Errorf("past the trust: %q", got)
 	}
 
 	// A question waits during a turn: waiting it stays.
-	tc.byType["AskUserWorkflow"] = []string{other + "-tool-ask_user-1"}
-	s.Observe(other, turnEvent(workflow.EventTurnStarted, "smith", ""))
+	tc.byType["AskUserWorkflow"] = []string{other + ":p:smith:m4:tool:ask_user:c1"}
+	s.Observe(other, turnEvent(workflow.EventTurnStarted, "smith", "", 9))
 	if got := s.Statuses(ctx)[other]; got != StatusWaiting {
 		t.Errorf("a question during a turn: %q", got)
 	}
@@ -85,32 +118,41 @@ func TestObserve_TurnEventsInvalidate(t *testing.T) {
 	ctx := context.Background()
 	s.Statuses(ctx)
 	for _, topic := range []string{"notifications:u1", TreeTopic("u1"), "admin", strings.ToUpper(sid)} {
-		s.Observe(topic, turnEvent(workflow.EventTurnStarted, "x", ""))
-		if _, ok := s.turns.get(topic); ok {
-			t.Errorf("a turn recorded for %q, not a session", topic)
+		s.Observe(topic, turnEvent(workflow.EventTurnStarted, "x", "", 1))
+		if got := s.turns.sessions(); len(got) != 0 {
+			t.Errorf("a turn recorded for %q, not a session: %v", topic, got)
 		}
 	}
 	s.Observe(sid, activity.SSEEvent{Type: activity.EventToolCalls, Data: []byte(`{}`)})
 	s.Statuses(ctx)
-	if len(tc.lists) != 4 {
+	if len(tc.lists) != 3 {
 		t.Fatalf("%d queries: an event that changes nothing reloaded the statuses", len(tc.lists))
 	}
-	s.Observe(sid, turnEvent(workflow.EventTurnDone, "default", ""))
+	s.Observe(sid, turnEvent(workflow.EventTurnDone, "default", "", 1))
 	s.Statuses(ctx)
-	if len(tc.lists) != 8 {
-		t.Errorf("%d queries after a turn event, want 8", len(tc.lists))
+	if len(tc.lists) != 6 {
+		t.Errorf("%d queries after a turn event, want 6", len(tc.lists))
 	}
 	s.background.Wait()
 }
 
-func notice(text string) activity.SSEEvent {
-	data, _ := json.Marshal(map[string]string{"type": activity.EventNotice, "text": text, "agent": "Jarvis"})
+func notice(participant, text string) activity.SSEEvent {
+	data, _ := json.Marshal(map[string]string{"type": activity.EventNotice, "text": text, "agent": "Jarvis", "participant": participant})
 	return activity.SSEEvent{Type: activity.EventNotice, Data: data}
 }
 
-// A notice sets what the working turn waits for, an empty one clears it, and
-// the next turn event replaces the turn, note included. A notice is no state
-// event: the statuses stay cached.
+// notes lists the working participants' notes.
+func notes(ws []Working) string {
+	var out []string
+	for _, w := range ws {
+		out = append(out, w.AgentID+":"+w.Note)
+	}
+	return strings.Join(out, " ")
+}
+
+// A notice sets what its participant's working turn waits for, an empty one
+// clears it, and the participant's next turn starts without it. A notice is
+// no state event: the statuses stay cached.
 func TestObserve_NoticeSetsTheWorkingNote(t *testing.T) {
 	tc := &fakeTemporal{}
 	s := newTest(&memStore{}, tc)
@@ -118,44 +160,44 @@ func TestObserve_NoticeSetsTheWorkingNote(t *testing.T) {
 	s.statuses.now = func() time.Time { return now }
 	ctx := context.Background()
 
-	s.Observe(sid, notice("waits"))
-	if got := s.WorkingNote(sid); got != "" {
-		t.Errorf("a note with no turn known: %q", got)
+	s.Observe(sid, notice("default", "waits"))
+	if got := s.WorkingAgents(ctx, sid); len(got) != 0 {
+		t.Errorf("a note with no turn known: %+v", got)
 	}
 
-	s.Observe(sid, turnEvent(workflow.EventTurnStarted, "default", ""))
+	s.Observe(sid, turnEvent(workflow.EventTurnStarted, "default", "", 1))
+	s.Observe(sid, turnEvent(workflow.EventTurnStarted, "smith", "", 2))
 	s.Statuses(ctx)
 	queries := len(tc.lists)
-	s.Observe(sid, notice("Ton run attend un worker libre"))
-	if got := s.WorkingNote(sid); got != "Ton run attend un worker libre" {
-		t.Errorf("note %q", got)
-	}
-	if id, _ := s.WorkingAgent(sid); id != "default" {
-		t.Errorf("the notice changed the turn: working agent %q", id)
+	s.Observe(sid, notice("default", "Ton run attend un worker libre"))
+	if got := notes(s.WorkingAgents(ctx, sid)); got != "default:Ton run attend un worker libre smith:" {
+		t.Errorf("notes %q", got)
 	}
 	s.Statuses(ctx)
 	if len(tc.lists) != queries {
 		t.Errorf("a notice reloaded the statuses: %d queries, want %d", len(tc.lists), queries)
 	}
 
-	s.Observe(sid, notice(""))
-	if got := s.WorkingNote(sid); got != "" {
-		t.Errorf("cleared, the note is %q", got)
+	s.Observe(sid, notice("default", ""))
+	if got := notes(s.WorkingAgents(ctx, sid)); got != "default: smith:" {
+		t.Errorf("cleared, the notes are %q", got)
 	}
 
-	s.Observe(sid, notice("again"))
+	s.Observe(sid, notice("default", "again"))
 	s.Observe(sid, activity.SSEEvent{Type: activity.EventNotice, Data: []byte(`not json`)})
-	if got := s.WorkingNote(sid); got != "again" {
+	if got := notes(s.WorkingAgents(ctx, sid)); got != "default:again smith:" {
 		t.Errorf("an unreadable notice changed the note: %q", got)
 	}
-	s.Observe(sid, turnEvent(workflow.EventTurnDone, "default", ""))
-	if got := s.WorkingNote(sid); got != "" {
-		t.Errorf("the turn over, the note is %q", got)
+	// A notice naming no participant is for those at work.
+	s.Observe(sid, notice("", "all"))
+	if got := notes(s.WorkingAgents(ctx, sid)); got != "default:all smith:all" {
+		t.Errorf("notes %q", got)
 	}
-	s.Observe(sid, notice("late"))
-	s.Observe(sid, turnEvent(workflow.EventTurnStarted, "default", ""))
-	if got := s.WorkingNote(sid); got != "" {
-		t.Errorf("the next turn inherits the note %q", got)
+	s.Observe(sid, turnEvent(workflow.EventTurnDone, "default", "", 1))
+	s.Observe(sid, notice("default", "late"))
+	s.Observe(sid, turnEvent(workflow.EventTurnStarted, "default", "", 3))
+	if got := notes(s.WorkingAgents(ctx, sid)); got != "default: smith:all" {
+		t.Errorf("the next turn inherits the note: %q", got)
 	}
 	s.background.Wait()
 }
@@ -190,7 +232,7 @@ func TestTreesRing(t *testing.T) {
 		t.Fatalf("rung %s for nothing", got)
 	}
 	for _, typ := range []string{workflow.EventTurnStarted, workflow.EventTurnDone, activity.EventAskUser, workflow.EventForkReady} {
-		s.Observe(sid, turnEvent(typ, "default", ""))
+		s.Observe(sid, turnEvent(typ, "default", "", 1))
 	}
 	if got := rung(); got != "4 4 0" {
 		t.Errorf("rung %s, want each member's tree four times", got)
@@ -213,7 +255,7 @@ func TestObserve_RingsInTheBackground(t *testing.T) {
 	hub := s.hub.(*nopHub)
 	done := make(chan struct{})
 	go func() {
-		s.Observe(sid, turnEvent(workflow.EventTurnStarted, "default", ""))
+		s.Observe(sid, turnEvent(workflow.EventTurnStarted, "default", "", 1))
 		close(done)
 	}()
 	select {
@@ -221,8 +263,8 @@ func TestObserve_RingsInTheBackground(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Observe waits for the members")
 	}
-	if id, _ := s.WorkingAgent(sid); id != "default" {
-		t.Errorf("the turn is not recorded before the ring: %q", id)
+	if got := names(s.turns.working(sid, nil)); got != "default=" {
+		t.Errorf("the turn is not recorded before the ring: %q", got)
 	}
 	if n := len(hub.on(TreeTopic("u-alice"))); n != 0 {
 		t.Errorf("rung %d times before the members were read", n)
@@ -244,58 +286,52 @@ func TestRingTrees_MembersUnread(t *testing.T) {
 	if a, c := len(hub.on(TreeTopic("u-alice"))), len(hub.on(TreeTopic("u-carol"))); a != 0 || c != 1 {
 		t.Errorf("rung alice %d, carol %d times", a, c)
 	}
-	s.Observe(sid, turnEvent(workflow.EventTurnStarted, "default", ""))
+	s.Observe(sid, turnEvent(workflow.EventTurnStarted, "default", "", 1))
 	s.background.Wait()
-	if id, _ := s.WorkingAgent(sid); id != "default" {
-		t.Errorf("a failed ring lost the turn: %q", id)
+	if got := names(s.turns.working(sid, nil)); got != "default=" {
+		t.Errorf("a failed ring lost the turn: %q", got)
 	}
 }
 
 // A turn longer than the trust still names its agent, as long as the queries
-// say a turn runs. One never seen ending is forgotten after a while, and with
-// its session.
-func TestWorkingAgent_PastTheTrust(t *testing.T) {
+// say its participant runs. One never seen ending is forgotten after a
+// while, and with its session.
+func TestWorkingAgents_PastTheTrust(t *testing.T) {
 	st := &memStore{session: &store.Session{SessionID: sid, CreatedBy: "u-alice"}, members: []store.SessionMember{{UserID: "u-alice"}}}
-	tc := &fakeTemporal{byType: map[string][]string{
-		"SessionWorkflow": {"session-" + sid},
-		"AgentWorkflow":   {sid + "-turn-1"},
-	}}
+	tc := &fakeTemporal{byType: map[string][]string{"ParticipantWorkflow": {sid + ":p:smith"}}}
 	s := newTest(st, tc)
 	now := time.Now()
 	s.turns.now = func() time.Time { return now }
 	s.statuses.now = func() time.Time { return now }
 	ctx := context.Background()
 
-	s.Observe(sid, turnEvent(workflow.EventTurnStarted, "smith", "Agent Smith"))
+	s.Observe(sid, turnEvent(workflow.EventTurnStarted, "smith", "Agent Smith", 1))
 	now = now.Add(turnTrust + time.Minute)
 	if got := s.Statuses(ctx)[sid]; got != StatusWorking {
 		t.Fatalf("past the trust, the queries: %q", got)
 	}
-	if id, name := s.WorkingAgent(sid); id != "smith" || name != "Agent Smith" {
-		t.Errorf("past the trust, a turn the queries see running: %q %q", id, name)
+	if got := names(s.WorkingAgents(ctx, sid)); got != "smith=Agent Smith" {
+		t.Errorf("past the trust, a turn the queries see running: %q", got)
 	}
 
 	// Its end never came: forgotten, and dropped by the next event.
 	now = now.Add(turnForget)
-	if id, _ := s.WorkingAgent(sid); id != "" {
-		t.Errorf("a turn never seen ending still names %q", id)
+	if got := names(s.WorkingAgents(ctx, sid)); got != "smith=" {
+		t.Errorf("a turn never seen ending still names its agent: %q", got)
 	}
 	other := "0e1c2a9e-3b4d-4e5f-8a7b-0c1d2e3f4a5b"
-	s.Observe(other, turnEvent(workflow.EventTurnStarted, "default", ""))
-	s.turns.mu.Lock()
-	_, kept := s.turns.m[sid]
-	s.turns.mu.Unlock()
-	if kept {
+	s.Observe(other, turnEvent(workflow.EventTurnStarted, "default", "", 1))
+	if slices.Contains(s.turns.sessions(), sid) {
 		t.Error("a forgotten turn is still held")
 	}
 
-	// A session deleted during a turn takes its turn along.
-	s.Observe(sid, turnEvent(workflow.EventTurnStarted, "smith", ""))
+	// A session deleted during a turn takes its turns along.
+	s.Observe(sid, turnEvent(workflow.EventTurnStarted, "smith", "", 2))
 	if err := s.Delete(ctx, sid, "u-alice"); err != nil {
 		t.Fatal(err)
 	}
-	if id, _ := s.WorkingAgent(sid); id != "" {
-		t.Errorf("a deleted session's turn still names %q", id)
+	if slices.Contains(s.turns.sessions(), sid) {
+		t.Error("a deleted session's turns are still held")
 	}
 	s.background.Wait()
 }

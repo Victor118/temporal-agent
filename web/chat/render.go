@@ -2,6 +2,7 @@ package chat
 
 import (
 	"bytes"
+	"cmp"
 	"crypto/rand"
 	"crypto/sha256"
 	"embed"
@@ -53,14 +54,10 @@ type Page struct {
 	// there.
 	StreamFrom string
 
-	Thread  []ThreadItem
-	Working bool // the agent is on a turn
-	// WorkingAgent names the agent on the turn; empty when the server has
-	// only the visibility queries to tell (after a restart).
-	WorkingAgent string
-	// WorkingNote is what the turn waits for, as the workflow last said
-	// (a coding run waiting for a free worker); empty: nothing to say.
-	WorkingNote string
+	Thread []ThreadItem
+	// Working are the participants at work, several at once; none when no
+	// agent works.
+	Working []WorkingAgent
 	// The fork's starting summary: still being written, or failed.
 	SummaryPending bool
 	SummaryFailed  bool
@@ -91,6 +88,42 @@ type Page struct {
 	// their versions: the page shows these bytes rather than render them
 	// again. Without one, the page renders the fragment.
 	Rendered map[string]template.HTML
+}
+
+// WorkingAgent is an agent at work in the session: its name, and what its
+// turn waits for, as its workflow last said (a coding run waiting for a
+// free worker); empty: nothing to say.
+type WorkingAgent struct {
+	Name string
+	Note string
+}
+
+// WorkingLine says who works, and what they wait for: "Jarvis travaille…",
+// "Jarvis et Agent Smith travaillent… — Jarvis : <note>".
+func (p Page) WorkingLine() string {
+	names := make([]string, len(p.Working))
+	for i, w := range p.Working {
+		names[i] = cmp.Or(w.Name, "L'agent")
+	}
+	var line string
+	switch n := len(names); n {
+	case 0:
+		return ""
+	case 1:
+		line = names[0] + " travaille…"
+	default:
+		line = strings.Join(names[:n-1], ", ") + " et " + names[n-1] + " travaillent…"
+	}
+	for _, w := range p.Working {
+		switch {
+		case w.Note == "":
+		case len(p.Working) == 1:
+			line += " — " + w.Note
+		default:
+			line += " — " + cmp.Or(w.Name, "L'agent") + " : " + w.Note
+		}
+	}
+	return line
 }
 
 // SeveralAgents reports whether members can call more than one agent: the
@@ -409,8 +442,6 @@ func withMention(text string) template.HTML {
 
 func statusLabel(s Status) string {
 	switch s {
-	case StatusActive:
-		return "active"
 	case StatusWorking:
 		return "l'agent travaille"
 	case StatusWaiting:
