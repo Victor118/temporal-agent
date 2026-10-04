@@ -18,6 +18,9 @@ type File struct {
 	// TurnKey is the session turn that published it (TurnKey): a
 	// sub-agent's file goes to the turn that launched it.
 	TurnKey string `json:"turn_key"`
+	// CallID is the tool call that published it: with the turn and the
+	// name, it identifies the file, so a retried call stores nothing more.
+	CallID  string `json:"call_id"`
 	AgentID string `json:"agent_id"` // the agent whose tool call published it
 	UserID  string `json:"user_id"`  // the user that turn answered
 	Name    string `json:"name"`
@@ -37,7 +40,9 @@ var ErrFileSessionGone = errors.New("the session no longer exists")
 // PostgresStore is one; an object store (S3) would keep the content.
 type FileStore interface {
 	// SaveFile stores f and its content, and returns f as stored (its
-	// creation time). A session that no longer exists is ErrFileSessionGone.
+	// creation time). A file the same call of the same turn already stored
+	// under that name is returned as it is, f and content ignored. A
+	// session that no longer exists is ErrFileSessionGone.
 	SaveFile(ctx context.Context, f File, content []byte) (File, error)
 	// GetFile returns a file's metadata; nil when there is none.
 	GetFile(ctx context.Context, id string) (*File, error)
@@ -48,21 +53,31 @@ type FileStore interface {
 	ListSessionFiles(ctx context.Context, sessionID string) ([]File, error)
 }
 
-const fileColumns = "id, session_id, turn_key, agent_id, user_id, name, content_type, size, sha256, created_at"
+const fileColumns = "id, session_id, turn_key, call_id, agent_id, user_id, name, content_type, size, sha256, created_at"
 
 // SaveFile writes the file's row and its content in one transaction: no
-// file is listed without its content.
+// file is listed without its content. The row is keyed by its session, turn,
+// call and name (idx_files_call): a second write of it finds the first.
 func (s *PostgresStore) SaveFile(ctx context.Context, f File, content []byte) (File, error) {
 	err := s.inTx(ctx, func(tx *sql.Tx) error {
-		if err := tx.QueryRowContext(ctx, `
-			INSERT INTO files (id, session_id, turn_key, agent_id, user_id, name, content_type, size, sha256)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		err := tx.QueryRowContext(ctx, `
+			INSERT INTO files (id, session_id, turn_key, call_id, agent_id, user_id, name, content_type, size, sha256)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+			ON CONFLICT (session_id, turn_key, call_id, name) DO NOTHING
 			RETURNING created_at`,
-			f.ID, f.SessionID, f.TurnKey, f.AgentID, f.UserID, f.Name, f.ContentType, f.Size, f.SHA256,
-		).Scan(&f.CreatedAt); err != nil {
+			f.ID, f.SessionID, f.TurnKey, f.CallID, f.AgentID, f.UserID, f.Name, f.ContentType, f.Size, f.SHA256,
+		).Scan(&f.CreatedAt)
+		if errors.Is(err, sql.ErrNoRows) {
+			// Stored already: the first write stands, content included.
+			f, err = scanFile(tx.QueryRowContext(ctx, `SELECT `+fileColumns+` FROM files
+				WHERE session_id = $1 AND turn_key = $2 AND call_id = $3 AND name = $4`,
+				f.SessionID, f.TurnKey, f.CallID, f.Name))
 			return err
 		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO file_contents (file_id, data) VALUES ($1, $2)`, f.ID, content)
+		if err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, `INSERT INTO file_contents (file_id, data) VALUES ($1, $2)`, f.ID, content)
 		return err
 	})
 	if isForeignKeyViolation(err) {
@@ -121,6 +136,6 @@ func (s *PostgresStore) ListSessionFiles(ctx context.Context, sessionID string) 
 
 func scanFile(row interface{ Scan(...any) error }) (File, error) {
 	var f File
-	err := row.Scan(&f.ID, &f.SessionID, &f.TurnKey, &f.AgentID, &f.UserID, &f.Name, &f.ContentType, &f.Size, &f.SHA256, &f.CreatedAt)
+	err := row.Scan(&f.ID, &f.SessionID, &f.TurnKey, &f.CallID, &f.AgentID, &f.UserID, &f.Name, &f.ContentType, &f.Size, &f.SHA256, &f.CreatedAt)
 	return f, err
 }

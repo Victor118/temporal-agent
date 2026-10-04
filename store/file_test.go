@@ -26,7 +26,7 @@ func TestFiles(t *testing.T) {
 	}
 
 	content := []byte("a,b\n1,2\n")
-	f := File{ID: "zz-file-1", SessionID: "zz-file-s1", TurnKey: "m7.jarvis", AgentID: "jarvis", UserID: "zz-file-alice",
+	f := File{ID: "zz-file-1", SessionID: "zz-file-s1", TurnKey: "m7.jarvis", CallID: "toolu_1", AgentID: "jarvis", UserID: "zz-file-alice",
 		Name: "data.csv", ContentType: "text/csv", Size: int64(len(content)), SHA256: "abc"}
 	saved, err := s.SaveFile(ctx, f, content)
 	if err != nil {
@@ -40,11 +40,30 @@ func TestFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// The same call publishing the same name again (a retry) finds the
+	// first file, content included; another call publishes a new one.
+	again := f
+	again.ID = "zz-file-again"
+	if got, err := s.SaveFile(ctx, again, []byte("other")); err != nil || got.ID != "zz-file-1" || !got.CreatedAt.Equal(saved.CreatedAt) {
+		t.Errorf("same call again: %+v, %v", got, err)
+	}
+	if data, _ := s.ReadFileContent(ctx, "zz-file-1"); !bytes.Equal(data, content) {
+		t.Errorf("content after a retry %q", data)
+	}
+	if f, _ := s.GetFile(ctx, "zz-file-again"); f != nil {
+		t.Errorf("a retry stored a second file: %+v", f)
+	}
+	next := f
+	next.ID, next.CallID = "zz-file-next", "toolu_2"
+	if got, err := s.SaveFile(ctx, next, content); err != nil || got.ID != "zz-file-next" {
+		t.Errorf("another call: %+v, %v", got, err)
+	}
+
 	got, err := s.GetFile(ctx, "zz-file-1")
 	if err != nil || got == nil {
 		t.Fatalf("get: %v %v", got, err)
 	}
-	if got.Name != "data.csv" || got.TurnKey != "m7.jarvis" || got.AgentID != "jarvis" || got.UserID != "zz-file-alice" || got.Size != 8 || got.SHA256 != "abc" {
+	if got.Name != "data.csv" || got.TurnKey != "m7.jarvis" || got.CallID != "toolu_1" || got.AgentID != "jarvis" || got.UserID != "zz-file-alice" || got.Size != 8 || got.SHA256 != "abc" {
 		t.Errorf("got %+v", got)
 	}
 	if data, err := s.ReadFileContent(ctx, "zz-file-1"); err != nil || !bytes.Equal(data, content) {
@@ -59,7 +78,7 @@ func TestFiles(t *testing.T) {
 
 	// A session lists its own files only.
 	list, err := s.ListSessionFiles(ctx, "zz-file-s1")
-	if err != nil || len(list) != 1 || list[0].ID != "zz-file-1" {
+	if err != nil || len(list) != 2 || list[0].ID != "zz-file-1" || list[1].ID != "zz-file-next" {
 		t.Errorf("s1's files: %+v, %v", list, err)
 	}
 

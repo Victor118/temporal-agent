@@ -162,6 +162,7 @@ const schema = `
 			id           TEXT PRIMARY KEY,
 			session_id   TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
 			turn_key     TEXT NOT NULL,
+			call_id      TEXT NOT NULL DEFAULT '',
 			agent_id     TEXT NOT NULL DEFAULT '',
 			user_id      TEXT NOT NULL DEFAULT '',
 			name         TEXT NOT NULL,
@@ -171,6 +172,8 @@ const schema = `
 			created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		);
 		CREATE INDEX IF NOT EXISTS idx_files_session ON files(session_id, created_at);
+		-- One file per call and name: a retried call stores nothing more.
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_files_call ON files(session_id, turn_key, call_id, name);
 		CREATE TABLE IF NOT EXISTS file_contents (
 			file_id TEXT PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
 			data    BYTEA NOT NULL
