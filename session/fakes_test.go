@@ -35,6 +35,7 @@ type memStore struct {
 	membersGate chan struct{}
 	messages    []store.MessageWithID
 	appended    []store.Message
+	titleMu     sync.Mutex // the title is set in the background
 	title       string
 	agents      []store.Agent // nil: the default agent alone
 	loads       int           // conversations loaded
@@ -55,6 +56,8 @@ func (m *memStore) GetActiveSessionByChannel(context.Context, string, string, st
 }
 func (m *memStore) DeleteSession(context.Context, string) error { return nil }
 func (m *memStore) UpdateSessionTitle(_ context.Context, _, title string) error {
+	m.titleMu.Lock()
+	defer m.titleMu.Unlock()
 	m.title = title
 	return nil
 }
@@ -96,6 +99,7 @@ func (m *memStore) LoadMessagesUpTo(context.Context, string, int64) ([]store.Mes
 // records the queries and signals. A workflow of running is described as
 // running, and answers a query with states, if set.
 type fakeTemporal struct {
+	mu           sync.Mutex                                 // the statuses load in the background
 	running      []string                                   // workflow IDs the visibility queries return
 	byType       map[string][]string                        // set: what a query naming a workflow type returns instead
 	closed       map[string]enumspb.WorkflowExecutionStatus // how the workflows not running ended
@@ -125,6 +129,8 @@ type signalStart struct {
 }
 
 func (f *fakeTemporal) SignalWithStartWorkflow(_ context.Context, id, signal string, arg interface{}, o client.StartWorkflowOptions, _ interface{}, input ...interface{}) (client.WorkflowRun, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.startErr != nil {
 		return nil, f.startErr
 	}
@@ -145,6 +151,8 @@ func (e encodedState) Get(v interface{}) error {
 }
 
 func (f *fakeTemporal) ExecuteWorkflow(_ context.Context, o client.StartWorkflowOptions, _ interface{}, args ...interface{}) (client.WorkflowRun, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.started = append(f.started, o.ID)
 	f.options = append(f.options, o)
 	if len(args) > 0 {
@@ -153,11 +161,15 @@ func (f *fakeTemporal) ExecuteWorkflow(_ context.Context, o client.StartWorkflow
 	return nil, nil
 }
 func (f *fakeTemporal) SignalWorkflow(_ context.Context, id, _, signal string, _ interface{}) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.signals = append(f.signals, id)
 	f.signalNames = append(f.signalNames, signal)
 	return nil
 }
 func (f *fakeTemporal) QueryWorkflow(_ context.Context, id, _, _ string, _ ...interface{}) (converter.EncodedValue, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.queried = append(f.queried, id)
 	if state, ok := f.states[id]; ok {
 		return encodedState{state}, nil
@@ -165,6 +177,8 @@ func (f *fakeTemporal) QueryWorkflow(_ context.Context, id, _, _ string, _ ...in
 	return nil, errors.New("not running")
 }
 func (f *fakeTemporal) DescribeWorkflowExecution(_ context.Context, id, _ string) (*workflowservice.DescribeWorkflowExecutionResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.describes++
 	if status, ok := f.closed[id]; ok {
 		at, ok := f.closedAt[id]
@@ -183,6 +197,8 @@ func (f *fakeTemporal) DescribeWorkflowExecution(_ context.Context, id, _ string
 	}}, nil
 }
 func (f *fakeTemporal) ListWorkflow(_ context.Context, req *workflowservice.ListWorkflowExecutionsRequest) (*workflowservice.ListWorkflowExecutionsResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.lists = append(f.lists, req.Query)
 	resp := &workflowservice.ListWorkflowExecutionsResponse{}
 	ids := f.running
@@ -202,6 +218,8 @@ func (f *fakeTemporal) ListWorkflow(_ context.Context, req *workflowservice.List
 	return resp, nil
 }
 func (f *fakeTemporal) TerminateWorkflow(_ context.Context, id, _, _ string, _ ...interface{}) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.terminated = append(f.terminated, id)
 	return nil
 }

@@ -215,10 +215,10 @@ const clearedReason = "Annulé avant d'être traité : la file de l'agent a ét�
 // (UNHANDLED_COMMAND), and the next workflow task sees it.
 func ParticipantWorkflow(ctx workflow.Context, in ParticipantInput) error {
 	p := &participant{in: in, id: ParticipantWorkflowID(in.SessionID, in.AgentID), inbox: in.Inbox}
-	if err := workflow.SetQueryHandler(ctx, QueryState, p.state); err != nil {
+	messages := workflow.GetSignalChannel(ctx, SignalMessage)
+	if err := workflow.SetQueryHandler(ctx, QueryState, func() (ParticipantState, error) { return p.state(messages), nil }); err != nil {
 		return fmt.Errorf("set query handler: %w", err)
 	}
-	messages := workflow.GetSignalChannel(ctx, SignalMessage)
 	stops := workflow.GetSignalChannel(ctx, SignalStopTurn)
 	clears := workflow.GetSignalChannel(ctx, SignalClear)
 
@@ -256,8 +256,11 @@ type participant struct {
 	gone bool
 }
 
-func (p *participant) state() (ParticipantState, error) {
-	return ParticipantState{Current: p.current, Queued: len(p.inbox), Background: []string{}}, nil
+// state is what the state query answers: the messages waiting are those of
+// the inbox and those delivered but not yet received (the participant was
+// in an activity).
+func (p *participant) state(messages workflow.ReceiveChannel) ParticipantState {
+	return ParticipantState{Current: p.current, Queued: len(p.inbox) + messages.Len(), Background: []string{}}
 }
 
 // receive moves the messages delivered so far to the inbox.
