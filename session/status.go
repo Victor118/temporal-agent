@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -74,6 +75,10 @@ type statusCache struct {
 	// session states and dropped with them: the fork pages read them on
 	// every refresh (its summary's workflow, its report's).
 	workflows map[string]workflowState
+	// states are participants' answers to their state query, by workflow
+	// ID, kept and dropped likewise: the Agents panel reads those the turn
+	// events do not tell of on every refresh.
+	states map[string]queriedState
 	// now is the clock the states age by; nil = time.Now. Tests set it.
 	now func() time.Time
 }
@@ -91,6 +96,14 @@ type workflowState struct {
 	status enumspb.WorkflowExecutionStatus // unspecified: Temporal knows of none, or cannot tell
 	closed time.Time                       // when it ended; zero while it runs
 	at     time.Time                       // when it was read
+}
+
+// queriedState is a participant's answer to its state query; ok false when
+// it gave none.
+type queriedState struct {
+	state workflow.ParticipantState
+	ok    bool
+	at    time.Time
 }
 
 // get returns the cached states, reloading them when they are older than
@@ -174,6 +187,38 @@ func (c *statusCache) workflow(ctx context.Context, id string, describe func(con
 	return w
 }
 
+// participantState returns a participant's state, asked by query at most
+// once per statusesTTL, like workflow.
+func (c *statusCache) participantState(ctx context.Context, id string, query func(context.Context, string) (workflow.ParticipantState, error)) (workflow.ParticipantState, bool) {
+	c.mu.Lock()
+	if q, ok := c.states[id]; ok && c.clock().Sub(q.at) < statusesTTL {
+		c.mu.Unlock()
+		return q.state, q.ok
+	}
+	gen := c.gen
+	c.mu.Unlock()
+
+	at := c.clock()
+	st, err := query(ctx, id)
+	q := queriedState{state: st, ok: err == nil, at: at}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.gen == gen {
+		now := c.clock()
+		for k, old := range c.states {
+			if now.Sub(old.at) >= statusesTTL {
+				delete(c.states, k)
+			}
+		}
+		if c.states == nil {
+			c.states = map[string]queriedState{}
+		}
+		c.states[id] = q
+	}
+	return q.state, q.ok
+}
+
 // invalidate drops the cached states: after an action that changes them, the
 // page it renders must not show the state from before — neither the cached
 // one nor one a load already running read before the action.
@@ -182,6 +227,7 @@ func (c *statusCache) invalidate() {
 	defer c.mu.Unlock()
 	c.value = nil
 	c.workflows = nil
+	c.states = nil
 	c.gen++
 	// A running load now stores nothing; the next request starts its own.
 	c.loading = nil
@@ -195,6 +241,8 @@ type visible struct {
 	statuses map[string]Status
 	// participants are the participants running, by session.
 	participants map[string][]string
+	// asking are the participants with a question waiting, by session.
+	asking map[string][]string
 }
 
 // runningIn is the participants v sees running in a session; none for a nil
@@ -204,6 +252,15 @@ func (v *visible) runningIn(sessionID string) []string {
 		return nil
 	}
 	return v.participants[sessionID]
+}
+
+// askingIn is the participants v sees with a question waiting in a
+// session.
+func (v *visible) askingIn(sessionID string) []string {
+	if v == nil {
+		return nil
+	}
+	return v.asking[sessionID]
 }
 
 // Statuses tells what each session is doing: from Temporal, cached for
@@ -237,7 +294,7 @@ func (s *Service) Statuses(ctx context.Context) map[string]Status {
 // written. Three visibility queries, whatever the number of sessions. A
 // failed query degrades the states shown, nothing else.
 func (s *Service) loadVisible(ctx context.Context) *visible {
-	v := &visible{statuses: map[string]Status{}, participants: map[string][]string{}}
+	v := &visible{statuses: map[string]Status{}, participants: map[string][]string{}, asking: map[string][]string{}}
 	each := func(workflowType string, of func(id string)) {
 		resp, err := s.temporal.ListWorkflow(ctx, &workflowservice.ListWorkflowExecutionsRequest{
 			Namespace: s.cfg.Namespace,
@@ -270,6 +327,9 @@ func (s *Service) loadVisible(ctx context.Context) *visible {
 	each("AskUserWorkflow", func(id string) {
 		if sid := sessionOf(id); sid != "" {
 			v.statuses[sid] = v.statuses[sid].Stronger(StatusWaiting)
+			if agent, ok := workflow.ParticipantOf(id); ok && !slices.Contains(v.asking[sid], agent) {
+				v.asking[sid] = append(v.asking[sid], agent)
+			}
 		}
 	})
 	return v

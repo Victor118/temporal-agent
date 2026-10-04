@@ -422,13 +422,13 @@ func TestCancel_StopsEveryParticipant(t *testing.T) {
 	tc := &fakeTemporal{byType: map[string][]string{"ParticipantWorkflow": {sid + ":p:jarvis"}}}
 	s := newTest(&memStore{}, tc)
 	s.Observe(sid, started("smith", 3))
-	if err := s.Cancel(context.Background(), sid); err != nil {
+	if err := s.Cancel(context.Background(), creatorSession(), alice); err != nil {
 		t.Fatal(err)
 	}
 	if fmt.Sprint(tc.signals) != fmt.Sprint([]string{sid + ":p:jarvis", sid + ":p:smith"}) || fmt.Sprint(tc.signalNames) != "[stop-turn stop-turn]" {
 		t.Errorf("signalled %v %v", tc.signals, tc.signalNames)
 	}
-	if err := newTest(&memStore{}, &fakeTemporal{}).Cancel(context.Background(), sid); !errors.Is(err, ErrNothingToStop) {
+	if err := newTest(&memStore{}, &fakeTemporal{}).Cancel(context.Background(), creatorSession(), alice); !errors.Is(err, ErrNothingToStop) {
 		t.Errorf("nothing running: %v", err)
 	}
 	s.background.Wait()

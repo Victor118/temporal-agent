@@ -242,12 +242,65 @@ func (a *api) setAgentMode(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// cancelAgent stops the turns running that the user may stop: all of them
+// for the session's creator, those answering their messages for another
+// member.
 func (a *api) cancelAgent(w http.ResponseWriter, r *http.Request) {
-	switch err := a.sessions.Cancel(r.Context(), chi.URLParam(r, "id")); {
+	sess, err := a.sessions.Get(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "Session not found", http.StatusNotFound)
+		return
+	}
+	writeStopped(w, a.sessions.Cancel(r.Context(), sess, auth.UserFrom(r.Context())))
+}
+
+type stopRequest struct {
+	// Turn is the turn to stop (a turn key, as the state names it); empty,
+	// the one running.
+	Turn string `json:"turn"`
+}
+
+// stopParticipant stops a participant's turn: by the author of the message
+// it answers, or the session's creator. Its body is optional.
+func (a *api) stopParticipant(w http.ResponseWriter, r *http.Request) {
+	var req stopRequest
+	if r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
+	}
+	sess, err := a.sessions.Get(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "Session not found", http.StatusNotFound)
+		return
+	}
+	writeStopped(w, a.sessions.StopTurn(r.Context(), sess, chi.URLParam(r, "agent"), req.Turn, auth.UserFrom(r.Context())))
+}
+
+// clearParticipant stops a participant's turn and drops its waiting
+// messages: by the session's creator alone.
+func (a *api) clearParticipant(w http.ResponseWriter, r *http.Request) {
+	sess, err := a.sessions.Get(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "Session not found", http.StatusNotFound)
+		return
+	}
+	writeStopped(w, a.sessions.Clear(r.Context(), sess, chi.URLParam(r, "agent"), auth.UserFrom(r.Context())))
+}
+
+// writeStopped answers a stop: 202 once sent, 403 to a member who may not,
+// 409 when the turn aimed at is over, 404 when nothing runs.
+func writeStopped(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, session.ErrStopNotAllowed), errors.Is(err, session.ErrClearNotAllowed):
+		http.Error(w, err.Error(), http.StatusForbidden)
+	case errors.Is(err, session.ErrTurnOver):
+		http.Error(w, err.Error(), http.StatusConflict)
 	case errors.Is(err, session.ErrNothingToStop):
 		http.Error(w, err.Error(), http.StatusNotFound)
 	case err != nil:
-		http.Error(w, fmt.Sprintf("Failed to cancel agent: %v", err), http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("Failed to stop: %v", err), http.StatusInternalServerError)
 	default:
 		w.WriteHeader(http.StatusAccepted)
 	}

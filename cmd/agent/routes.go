@@ -165,6 +165,8 @@ func (s *server) routes() http.Handler {
 				r.Post("/messages", a.sendMessage)
 				r.Put("/agent-mode", a.setAgentMode)
 				r.Post("/cancel", a.cancelAgent)
+				r.Post("/participants/{agent}/stop", a.stopParticipant)
+				r.Post("/participants/{agent}/clear", a.clearParticipant)
 				r.Delete("/", a.deleteSession)
 				r.Get("/state", a.getState)
 				r.Get("/history", a.getHistory)

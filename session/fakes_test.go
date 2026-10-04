@@ -11,6 +11,7 @@ import (
 
 	commonpb "go.temporal.io/api/common/v1"
 	enumspb "go.temporal.io/api/enums/v1"
+	"go.temporal.io/api/serviceerror"
 	workflowpb "go.temporal.io/api/workflow/v1"
 	"go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/client"
@@ -109,6 +110,7 @@ type fakeTemporal struct {
 	lists        []string                                   // the queries
 	signals      []string                                   // workflow IDs signalled
 	signalNames  []string                                   // the signal of each
+	signalArgs   []interface{}                              // the argument of each
 	started      []string
 	inputs       []interface{} // the input of each workflow started
 	signalStarts []signalStart
@@ -160,11 +162,12 @@ func (f *fakeTemporal) ExecuteWorkflow(_ context.Context, o client.StartWorkflow
 	}
 	return nil, nil
 }
-func (f *fakeTemporal) SignalWorkflow(_ context.Context, id, _, signal string, _ interface{}) error {
+func (f *fakeTemporal) SignalWorkflow(_ context.Context, id, _, signal string, arg interface{}) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.signals = append(f.signals, id)
 	f.signalNames = append(f.signalNames, signal)
+	f.signalArgs = append(f.signalArgs, arg)
 	return nil
 }
 func (f *fakeTemporal) QueryWorkflow(_ context.Context, id, _, _ string, _ ...interface{}) (converter.EncodedValue, error) {
@@ -174,7 +177,7 @@ func (f *fakeTemporal) QueryWorkflow(_ context.Context, id, _, _ string, _ ...in
 	if state, ok := f.states[id]; ok {
 		return encodedState{state}, nil
 	}
-	return nil, errors.New("not running")
+	return nil, serviceerror.NewNotFound("not running")
 }
 func (f *fakeTemporal) DescribeWorkflowExecution(_ context.Context, id, _ string) (*workflowservice.DescribeWorkflowExecutionResponse, error) {
 	f.mu.Lock()

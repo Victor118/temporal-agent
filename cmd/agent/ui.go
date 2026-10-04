@@ -519,13 +519,29 @@ func (u *ui) answerForm(w http.ResponseWriter, r *http.Request) {
 	u.renderPage(w, r, sessionID, "thread", "thread", nil)
 }
 
+// cancelForm stops the turns running that the user may stop: all of them
+// for the session's creator, those answering their messages for another
+// member.
 func (u *ui) cancelForm(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "id")
-	if err := u.sessions.Cancel(r.Context(), sessionID); err != nil && !errors.Is(err, session.ErrNothingToStop) {
+	sess, err := u.sessions.Get(r.Context(), sessionID)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	switch err := u.sessions.Cancel(r.Context(), sess, auth.UserFrom(r.Context())); {
+	case err == nil, errors.Is(err, session.ErrNothingToStop):
+	case errors.Is(err, session.ErrStopNotAllowed):
+		u.renderPage(w, r, sessionID, "thread", "thread", func(p *chat.Page) { p.Error = stopRefusedText })
+		return
+	default:
 		log.Printf("ui: cancel %s: %v", sessionID, err)
 	}
 	u.renderPage(w, r, sessionID, "thread", "thread", nil)
 }
+
+// stopRefusedText is why a member may not stop a turn.
+const stopRefusedText = "Seul l'auteur du message en cours, ou le créateur de la session, peut arrêter ce tour."
 
 // --- Notifications ---
 

@@ -199,41 +199,64 @@ func (t *turns) forget(sessionID string) {
 	delete(t.m, sessionID)
 }
 
-// working lists the participants of a session that work: those a trusted
-// event says are on a turn, and past the trust those the visibility queries
-// see running that are on a turn, or have a message delivered and not
-// started, as far as the events tell. A participant whose last event is its
-// turn_done does not work, whatever its age: the queries list it running
-// between two turns too. A turn_started lost on a message this server did
-// not deliver (a relay) leaves that turn unseen until its end: a known
-// limit of phase 1. running are the participants the queries see. In the
+// snapshot is where the participants of a session stand, as far as the
+// events tell: those they told of, working or not, and those the
+// visibility queries see running (running) that they did not, working as
+// far as anyone knows (known false: their state query tells more). In the
 // order of their names.
-func (t *turns) working(sessionID string, running []string) []Working {
+//
+// One the events told of works when a trusted event says it is on a turn,
+// and past the trust when the queries see it running and it is on a turn,
+// or has a message delivered and not started. A participant whose last
+// event is its turn_done does not work, whatever its age: the queries list
+// it running between two turns too. A turn_started lost on a message this
+// server did not deliver (a relay) leaves that turn unseen until its end: a
+// known limit of phase 1.
+func (t *turns) snapshot(sessionID string, running []string) []Participant {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	now := t.clock()
-	var out []Working
+	var out []Participant
 	known := t.m[sessionID]
 	for name, p := range known {
+		trusted, isRunning := !p.at.IsZero() && now.Sub(p.at) < turnTrust, slices.Contains(running, name)
 		works := p.working
-		if p.at.IsZero() || now.Sub(p.at) >= turnTrust {
-			works = slices.Contains(running, name) && (p.working || len(p.pending) > 0)
+		if !trusted {
+			works = isRunning && (p.working || len(p.pending) > 0)
 		}
-		if !works {
-			continue
+		w := Participant{Participant: name, AgentID: name, Working: works, known: true}
+		// A message waits while its participant runs, or was delivered a
+		// moment ago: one left pending by events lost does not, once the
+		// participant has ended.
+		for _, at := range p.pending {
+			if now.Sub(at) < turnForget && (trusted || isRunning || now.Sub(at) < turnTrust) {
+				w.Queued++
+			}
 		}
-		w := Working{Participant: name, AgentID: name}
-		if p.working && now.Sub(p.at) < turnForget {
-			w.AgentID, w.Name, w.Note = p.event.AgentID, p.event.AgentName, p.note
+		if works && p.working && now.Sub(p.at) < turnForget {
+			e := p.event
+			w.AgentID, w.Name, w.Note = cmp.Or(e.AgentID, name), e.AgentName, p.note
+			w.Turn, w.UserID, w.UserName, w.Since = e.Turn, e.UserID, e.UserName, p.at
 		}
 		out = append(out, w)
 	}
 	for _, name := range running {
 		if _, ok := known[name]; !ok {
-			out = append(out, Working{Participant: name, AgentID: name})
+			out = append(out, Participant{Participant: name, AgentID: name, Working: true})
 		}
 	}
-	slices.SortFunc(out, func(a, b Working) int { return cmp.Compare(a.Participant, b.Participant) })
+	slices.SortFunc(out, func(a, b Participant) int { return cmp.Compare(a.Participant, b.Participant) })
+	return out
+}
+
+// working lists the participants of a session that work (snapshot).
+func (t *turns) working(sessionID string, running []string) []Working {
+	var out []Working
+	for _, p := range t.snapshot(sessionID, running) {
+		if p.Working {
+			out = append(out, p.working())
+		}
+	}
 	return out
 }
 
@@ -259,10 +282,16 @@ type Working struct {
 }
 
 // WorkingAgents are the participants at work in the session, as the turn
-// events and the visibility queries tell (Statuses): several work at once.
+// events, the visibility queries and the state queries tell (Participants):
+// several work at once.
 func (s *Service) WorkingAgents(ctx context.Context, sessionID string) []Working {
-	v := s.statuses.get(ctx, s.loadVisible)
-	return s.turns.working(sessionID, v.runningIn(sessionID))
+	var out []Working
+	for _, p := range s.Participants(ctx, sessionID) {
+		if p.Working {
+			out = append(out, p.working())
+		}
+	}
+	return out
 }
 
 // QueuedBehind is the message a participant answers, which a message

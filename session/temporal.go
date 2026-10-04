@@ -8,6 +8,8 @@ import (
 	"log"
 	"slices"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	enumspb "go.temporal.io/api/enums/v1"
@@ -123,32 +125,6 @@ func (s *Service) shownWorkflow(ctx context.Context, workflowID string) workflow
 	return s.statuses.workflow(ctx, workflowID, s.describeWorkflow)
 }
 
-// Cancel stops the turns running in the session: every participant at work
-// is sent stop-turn, which stops its turn, not the messages it has waiting.
-func (s *Service) Cancel(ctx context.Context, sessionID string) error {
-	defer s.statuses.invalidate()
-	ids, err := s.participants(ctx, sessionID)
-	if err != nil {
-		return fmt.Errorf("find the participants: %w", err)
-	}
-	stopped := 0
-	var errs []error
-	for _, id := range ids {
-		err := s.temporal.SignalWorkflow(ctx, id, "", workflow.SignalStopTurn, nil)
-		var gone *serviceerror.NotFound
-		switch {
-		case err == nil:
-			stopped++
-		case !errors.As(err, &gone): // ended meanwhile: nothing to stop
-			errs = append(errs, fmt.Errorf("stop %s: %w", id, err))
-		}
-	}
-	if stopped == 0 && len(errs) == 0 {
-		return ErrNothingToStop
-	}
-	return errors.Join(errs...)
-}
-
 // terminateParticipants ends the session's participants, and their turns
 // with them: the session is gone. A participant started a moment ago may not
 // be listed yet and survive: its next turn finds the session gone.
@@ -250,26 +226,60 @@ type ParticipantState struct {
 }
 
 // State is where the session's participants stand: each one running, as it
-// answers its state query. A participant that ended meanwhile is left out.
+// answers its state query, all queried at once. A participant that ended
+// meanwhile, or does not answer, is left out.
 func (s *Service) State(ctx context.Context, sessionID string) ([]ParticipantState, error) {
 	ids, err := s.participants(ctx, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("find the participants: %w", err)
 	}
+	states, errs := s.queryStates(ctx, ids)
 	out := []ParticipantState{}
-	for _, id := range ids {
-		resp, err := s.temporal.QueryWorkflow(ctx, id, "", workflow.QueryState)
-		if err != nil {
-			log.Printf("Session %s: state of %s: %v", sessionID, id, err)
+	for i, id := range ids {
+		if errs[i] != nil {
+			log.Printf("Session %s: state of %s: %v", sessionID, id, errs[i])
 			continue
 		}
-		st := ParticipantState{WorkflowID: id}
+		st := ParticipantState{WorkflowID: id, ParticipantState: states[i]}
 		st.AgentID, _ = workflow.ParticipantOf(id)
-		if err := resp.Get(&st.ParticipantState); err != nil {
-			return nil, fmt.Errorf("decode the state of %s: %w", id, err)
-		}
 		out = append(out, st)
 	}
 	slices.SortFunc(out, func(a, b ParticipantState) int { return cmp.Compare(a.AgentID, b.AgentID) })
 	return out, nil
+}
+
+// stateQueryTimeout bounds a participant's state query: a worker answers
+// it, and with none polling it would wait as long as the caller does.
+const stateQueryTimeout = 3 * time.Second
+
+// queryState asks a participant where it stands (workflow.QueryState). A
+// participant Temporal knows of none fails with serviceerror.NotFound.
+func (s *Service) queryState(ctx context.Context, workflowID string) (workflow.ParticipantState, error) {
+	ctx, cancel := context.WithTimeout(ctx, stateQueryTimeout)
+	defer cancel()
+	var st workflow.ParticipantState
+	resp, err := s.temporal.QueryWorkflow(ctx, workflowID, "", workflow.QueryState)
+	if err != nil {
+		return st, err
+	}
+	if err := resp.Get(&st); err != nil {
+		return st, fmt.Errorf("decode the state of %s: %w", workflowID, err)
+	}
+	return st, nil
+}
+
+// queryStates asks several participants at once: their states and errors,
+// in the order of ids.
+func (s *Service) queryStates(ctx context.Context, ids []string) ([]workflow.ParticipantState, []error) {
+	states, errs := make([]workflow.ParticipantState, len(ids)), make([]error, len(ids))
+	var wg sync.WaitGroup
+	for i, id := range ids {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			states[i], errs[i] = s.queryState(ctx, id)
+		}()
+	}
+	wg.Wait()
+	return states, errs
 }
