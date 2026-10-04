@@ -297,62 +297,61 @@ func (s *PostgresStore) LoadMessagesUpTo(ctx context.Context, sessionID string, 
 	if err != nil {
 		return nil, err
 	}
-	return scanMessages(rows, nil)
+	return scanMessages(rows)
 }
 
 // LoadConversation returns what the turn of scope reads of its session
 // (TurnReads): the messages up to the one it answers, its own turn and its
 // relay's, its participant's turns anchored there, and the turns of the
-// others that ended by then. The ends are read first, the messages then, in
-// one snapshot: whether another participant's turn is read depends on its
-// end, written after its messages. No index on msg_key: the rows up to UpTo
-// are nearly all of the session's, and the ends few.
+// others that ended by then. One read of the session: whether another
+// participant's turn is read depends on its end, written after its
+// messages, and a single statement sees the ends and the messages in one
+// snapshot. The rows are decoded only once kept.
 func (s *PostgresStore) LoadConversation(ctx context.Context, sessionID string, scope TurnScope) ([]MessageWithID, error) {
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-	ends, err := turnEnds(ctx, tx, sessionID)
-	if err != nil {
-		return nil, err
-	}
-	rows, err := tx.QueryContext(ctx,
+	rows, err := s.db.QueryContext(ctx,
 		"SELECT id, created_at, msg_key, data FROM messages WHERE session_id = $1 ORDER BY id", sessionID)
 	if err != nil {
 		return nil, err
 	}
-	return scanMessages(rows, func(id int64, key string) bool {
-		return TurnReads(id, key, scope, ends)
-	})
-}
-
-// turnEnds is the ID of each turn's end in a session, by turn (TurnEndIDs).
-func turnEnds(ctx context.Context, tx *sql.Tx, sessionID string) (map[string]int64, error) {
-	rows, err := tx.QueryContext(ctx,
-		"SELECT id, msg_key FROM messages WHERE session_id = $1 AND msg_key LIKE $2", sessionID, "%:"+turnEndSuffix)
-	if err != nil {
-		return nil, err
-	}
 	defer rows.Close()
+	type row struct {
+		id        int64
+		createdAt sql.NullTime
+		key       string
+		data      []byte
+	}
+	var all []row
 	ends := map[string]int64{}
 	for rows.Next() {
-		var id int64
-		var key string
-		if err := rows.Scan(&id, &key); err != nil {
+		var r row
+		if err := rows.Scan(&r.id, &r.createdAt, &r.key, &r.data); err != nil {
 			return nil, err
 		}
-		if IsTurnEnd(key) {
-			turn, _ := TurnOf(key)
-			ends[turn] = id
+		if IsTurnEnd(r.key) {
+			turn, _ := TurnOf(r.key)
+			ends[turn] = r.id
 		}
+		all = append(all, r)
 	}
-	return ends, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	var messages []MessageWithID
+	for _, r := range all {
+		if !TurnReads(r.id, r.key, scope, ends) {
+			continue
+		}
+		m := MessageWithID{ID: r.id, CreatedAt: r.createdAt.Time, Key: r.key}
+		if err := json.Unmarshal(r.data, &m.Message); err != nil {
+			return nil, err
+		}
+		messages = append(messages, m)
+	}
+	return messages, nil
 }
 
 // scanMessages reads rows of id, created_at, msg_key and data, and closes them.
-// keep, when not nil, picks the rows to decode and return.
-func scanMessages(rows *sql.Rows, keep func(id int64, key string) bool) ([]MessageWithID, error) {
+func scanMessages(rows *sql.Rows) ([]MessageWithID, error) {
 	defer rows.Close()
 	var messages []MessageWithID
 	for rows.Next() {
@@ -361,9 +360,6 @@ func scanMessages(rows *sql.Rows, keep func(id int64, key string) bool) ([]Messa
 		var createdAt sql.NullTime
 		if err := rows.Scan(&m.ID, &createdAt, &m.Key, &data); err != nil {
 			return nil, err
-		}
-		if keep != nil && !keep(m.ID, m.Key) {
-			continue
 		}
 		m.CreatedAt = createdAt.Time
 		if err := json.Unmarshal([]byte(data), &m.Message); err != nil {

@@ -157,16 +157,15 @@ func TurnKey(messageID int64, participant string) string {
 }
 
 // parseTurn reads a turn key: the anchor after "m", the participant after
-// the last dot. False for any other string.
+// the dot, the only one. False for any other string.
 func parseTurn(turn string) (anchor int64, participant string, ok bool) {
 	rest, found := strings.CutPrefix(turn, "m")
-	dot := strings.IndexByte(rest, '.')
-	if !found || dot <= 0 || !digits(rest[:dot]) {
+	digitsOf, participant, dot := strings.Cut(rest, ".")
+	if !found || !dot || !digits(digitsOf) {
 		return 0, "", false
 	}
-	anchor, err := strconv.ParseInt(rest[:dot], 10, 64)
-	participant = turn[strings.LastIndexByte(turn, '.')+1:]
-	if err != nil || participant == "" || strings.ContainsRune(participant, ':') {
+	anchor, err := strconv.ParseInt(digitsOf, 10, 64)
+	if err != nil || participant == "" || strings.ContainsAny(participant, ".:") {
 		return 0, "", false
 	}
 	return anchor, participant, true

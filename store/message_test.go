@@ -31,6 +31,9 @@ func TestTurnOf(t *testing.T) {
 		{"m+12.jarvis:0", "", false, 0, ""}, // the anchor is digits alone
 		{"m12.:0", "", false, 0, ""},        // no participant
 		{"mx.jarvis:0", "", false, 0, ""},
+		{"m10.a.b:0", "", false, 0, ""}, // one dot: no participant holds one
+		{"m10..b:end", "", false, 0, ""},
+		{"m.jarvis:0", "", false, 0, ""},
 	} {
 		turn, ok := TurnOf(c.key)
 		if turn != c.turn || ok != c.ok {
@@ -50,7 +53,7 @@ func TestTurnOf(t *testing.T) {
 	if _, ok := TurnAnchor("fork-summary"); ok {
 		t.Error("fork-summary has an anchor")
 	}
-	if TurnParticipant("r-1@3.0x") != "" {
+	if TurnParticipant("m10.a.b") != "" || TurnParticipant("r-1@3.0x") != "" {
 		t.Error("a key of another form has a participant")
 	}
 }
