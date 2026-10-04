@@ -176,7 +176,8 @@ précédents : chacun lit les réponses des agents d'avant. Un échec ou un arr�
 coupe la suite. Des agents différents travaillent en parallèle sur des
 messages différents ; un tour ne lit un tour d'un autre participant qu'une
 fois celui-ci terminé, et entier (`store.TurnReads`), et la conversation est
-présentée par ancre (`conversation.Order`). Chaque agent lit les tours des autres comme du texte signé
+présentée au modèle par ancre (`conversation.Order`) ; le fil des membres, lui,
+est chronologique, avec citation de la question. Chaque agent lit les tours des autres comme du texte signé
 (`[agent Nom (@mention)]`, appels d'outils et résultats tronqués compris),
 jamais comme ses propres messages ni comme des blocs d'outils. Une note en fin
 de prompt cite le message et dit à chacun sa part. Toute l'installation peut
