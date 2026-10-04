@@ -20,6 +20,7 @@ agents:
       - web_fetch
       - ask_user
       - save_user_memory
+      - publish_file
       - schedule_task
       - list_schedules
       - cancel_schedule
@@ -36,6 +37,7 @@ agents:
       - web_fetch
       - ask_user
       - save_user_memory
+      - publish_file
 
   - id: code-reviewer
     name: Code Reviewer
