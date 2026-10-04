@@ -36,6 +36,9 @@ type readStore interface {
 	ListAgents(ctx context.Context) ([]store.Agent, error)
 	LoadMessagesWithID(ctx context.Context, sessionID string) ([]store.MessageWithID, error)
 	ListTools(ctx context.Context) ([]store.ToolRecord, error)
+	GetFile(ctx context.Context, id string) (*store.File, error)
+	ReadFileContent(ctx context.Context, id string) ([]byte, error)
+	ListSessionFiles(ctx context.Context, sessionID string) ([]store.File, error)
 	DeleteMessage(ctx context.Context, sessionID string, id int64) error
 	DeleteMessagesBySession(ctx context.Context, sessionID string) error
 }

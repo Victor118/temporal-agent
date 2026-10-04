@@ -222,6 +222,11 @@ func (u *ui) buildPage(ctx context.Context, me *store.User, sessionID, view stri
 		byMessage[f.ForkedAtMessageID] = append(byMessage[f.ForkedAtMessageID], chat.ForkLink{SessionID: f.SessionID, Title: title})
 	}
 	p.Thread = chat.BuildThread(msgs, me.ID, byMessage, u.sessions.PendingQuestions(ctx, sessionID), directory)
+	files, err := u.store.ListSessionFiles(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	p.Thread = chat.AttachFiles(p.Thread, files, directory)
 	if p.Report != nil {
 		p.Thread = chat.MarkReported(p.Thread, sess, p.Report.Refused == nil)
 	}

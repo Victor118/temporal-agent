@@ -49,8 +49,8 @@ var StateEvents = []string{
 // ThreadEvents are the session's events after which its thread shows
 // something new: its state, a message, a tool call, what the turn waits for
 // (a notice, shown on the working line: not a state event, it changes no
-// status).
-var ThreadEvents = slices.Concat(StateEvents, []string{EventUserMessage, activity.EventMessage, activity.EventToolCalls, activity.EventNotice})
+// status), files a turn published.
+var ThreadEvents = slices.Concat(StateEvents, []string{EventUserMessage, activity.EventMessage, activity.EventToolCalls, activity.EventNotice, activity.EventFilePublished})
 
 // ReportEvents are the fork's events after which its report section may
 // change: its state, a message (there is something new to report).

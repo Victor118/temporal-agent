@@ -153,6 +153,13 @@ button, input, textarea, select { font-family: inherit; font-size: inherit; colo
 .divider.reported span { color: var(--accent); }
 .tools { border-top: 1px solid #EFECE5; margin-top: 12px; padding-top: 11px; display: flex; gap: 8px; flex-wrap: wrap; }
 .tool { font-size: 11px; font-family: var(--mono); color: var(--muted); background: var(--chip); border-radius: 4px; padding: 4px 8px; }
+.files { border-top: 1px solid #EFECE5; margin-top: 12px; padding-top: 11px; display: flex; gap: 8px; flex-wrap: wrap; }
+.agent-card > .files:first-child { border-top: 0; margin-top: 0; padding-top: 0; }
+.file { font-size: 12.5px; color: var(--text-2); text-decoration: none; border: 1px solid var(--line-soft); border-radius: 6px; padding: 5px 10px; display: inline-flex; gap: 6px; align-items: baseline; max-width: 100%; }
+.file:hover { background: var(--chip); }
+.file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-size { font-size: 11px; color: var(--muted); white-space: nowrap; }
+.notice .files { border-top: 0; margin-top: 8px; padding-top: 0; }
 .msg.highlight, .brief.highlight { background: var(--accent-bg); border-radius: var(--radius-card); box-shadow: 0 0 0 8px var(--accent-bg); }
 .quote { display: block; margin: 0 0 6px; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border-left: 2px solid var(--line-strong); padding-left: 8px; }
 .quote:hover { color: var(--text-2); }

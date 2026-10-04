@@ -197,6 +197,9 @@ const (
 	ItemError    = "error"    // why a turn failed
 	ItemReport   = "report"   // a fork's report to this session
 	ItemReported = "reported" // in a fork: where its latest report stopped
+	// ItemFiles: the files of a turn the thread does not show yet (it
+	// wrote nothing so far), on their own until it does (AttachFiles).
+	ItemFiles = "files"
 )
 
 // ReportLink is the other end of a report: in the parent, the fork it comes
@@ -234,7 +237,10 @@ type ThreadItem struct {
 	HTML   template.HTML // agent answer, brief or report, rendered from Markdown
 	Report ReportLink    // report: the fork it comes from; reported: the parent
 	Tools  []string      // agent: the tools the answer used, in order, once each
-	Agent  AgentInfo     // agent answer, error: the agent that wrote it
+	Agent  AgentInfo     // agent answer, error, files: the agent that wrote it
+	// Files are the files the turn published (AttachFiles): on its answer,
+	// or on its error when it shows none.
+	Files []FileLink
 
 	// Running: an agent's turn not ended yet, shown at the thread's end
 	// (« 16:27 → en cours »).
@@ -534,6 +540,88 @@ func threadItems(ordered []store.MessageWithID, states map[string]turnState, vie
 		}
 	}
 	return items
+}
+
+// FileLink is a file a turn published, as the thread lists it.
+type FileLink struct {
+	ID   string
+	Name string
+	Size string // « 12,4 Ko »
+}
+
+// FileHref is where a file is downloaded.
+func (f FileLink) Href() string { return "/files/" + f.ID }
+
+// AttachFiles puts a session's files under the turns that published them:
+// on the turn's answer (its last item, should it show as several), else on
+// its error. A turn the thread does not show yet — it published from its
+// first step, or from a sub-agent, before writing anything — gets an item
+// of its own at the thread's end, before the questions, until it shows.
+func AttachFiles(items []ThreadItem, files []store.File, agents AgentDirectory) []ThreadItem {
+	if len(files) == 0 {
+		return items
+	}
+	var order []string // turns, in the order of their first file
+	byTurn := map[string][]store.File{}
+	for _, f := range files {
+		if _, ok := byTurn[f.TurnKey]; !ok {
+			order = append(order, f.TurnKey)
+		}
+		byTurn[f.TurnKey] = append(byTurn[f.TurnKey], f)
+	}
+	agentAt, errorAt := map[string]int{}, map[string]int{}
+	for i, it := range items {
+		switch {
+		case it.turn == "":
+		case it.Kind == ItemAgent:
+			agentAt[it.turn] = i
+		case it.Kind == ItemError:
+			errorAt[it.turn] = i
+		}
+	}
+	var orphans []ThreadItem
+	for _, turn := range order {
+		links := fileLinks(byTurn[turn])
+		if i, ok := agentAt[turn]; ok {
+			items[i].Files = links
+		} else if i, ok := errorAt[turn]; ok {
+			items[i].Files = links
+		} else {
+			first := byTurn[turn][0]
+			orphans = append(orphans, ThreadItem{Kind: ItemFiles, Time: first.CreatedAt,
+				Agent: agents.Signer(store.Message{AgentID: first.AgentID}), Files: links, turn: turn})
+		}
+	}
+	if len(orphans) == 0 {
+		return items
+	}
+	at := len(items)
+	for at > 0 && items[at-1].Kind == ItemQuestion {
+		at--
+	}
+	return slices.Concat(items[:at:at], orphans, items[at:])
+}
+
+func fileLinks(files []store.File) []FileLink {
+	links := make([]FileLink, len(files))
+	for i, f := range files {
+		links[i] = FileLink{ID: f.ID, Name: f.Name, Size: FileSize(f.Size)}
+	}
+	return links
+}
+
+// FileSize is a size as the members read it: 820 o, 12,4 Ko, 3,1 Mo.
+func FileSize(n int64) string {
+	format := func(v float64, unit string) string {
+		return strings.Replace(fmt.Sprintf("%.1f %s", v, unit), ".", ",", 1)
+	}
+	switch {
+	case n < 1024:
+		return fmt.Sprintf("%d o", n)
+	case n < 1024*1024:
+		return format(float64(n)/1024, "Ko")
+	}
+	return format(float64(n)/(1024*1024), "Mo")
 }
 
 // sameMinute reports whether a and b fall in the same minute of the clock:

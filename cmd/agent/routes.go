@@ -112,6 +112,9 @@ func (s *server) routes() http.Handler {
 			r.Post("/s/new", u.newSessionForm)
 			r.Get("/notifications", u.notificationsPage)
 			r.Post("/notifications/{notifID}/delete", u.deleteNotificationForm)
+			// A published file: its session's members only, checked by the
+			// handler, which finds the session from the file.
+			r.Get("/files/{fileID}", u.fileDownload)
 
 			r.Route("/s/{id}", func(r chi.Router) {
 				// The stream checks the membership itself: a page that is
@@ -173,6 +176,7 @@ func (s *server) routes() http.Handler {
 				r.Delete("/", a.deleteSession)
 				r.Get("/state", a.getState)
 				r.Get("/history", a.getHistory)
+				r.Get("/files", a.listFiles)
 				r.Get("/stream", a.stream)
 				r.Post("/answer", a.answerQuestion)
 				r.Get("/members", a.listMembers)

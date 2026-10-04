@@ -568,3 +568,30 @@ func TestRender_PlaceholderIsNotGuessable(t *testing.T) {
 		t.Error("a member's text was taken for the placeholder")
 	}
 }
+
+// A turn's files are links to download them, under its answer; the thread
+// reloads when one is published.
+func TestRender_Files(t *testing.T) {
+	p := testPage("thread")
+	turn := store.TurnKey(2, "default")
+	p.Thread = BuildThread([]store.MessageWithID{
+		{ID: 2, Key: store.HumanMessageKey("a"), Message: store.Message{Role: store.RoleUser, Content: j("go"), UserID: "u2", Author: "Bob"}},
+		{ID: 9, Key: store.TurnMessageKey(turn, 0), Message: store.Message{Role: store.RoleAssistant, Content: j("Done.")}},
+		{ID: 10, Key: store.TurnEndKey(turn), Message: store.TurnEnd("default", "")},
+	}, "u1", nil, nil, AgentDirectory{Session: p.Agent})
+	p.Thread = AttachFiles(p.Thread, []store.File{{ID: "f1", TurnKey: turn, Name: `<b>x</b>.html`, Size: 10}}, AgentDirectory{})
+	out := render(t, "thread-inner", p)
+	link := `href="/files/f1" download="&lt;b&gt;x&lt;/b&gt;.html"`
+	if !strings.Contains(out, link) || !strings.Contains(out, "10 o") {
+		t.Fatalf("thread lacks the file link: %s", out)
+	}
+	if i, j := strings.Index(out, `id="m9"`), strings.Index(out, link); !(i >= 0 && i < j) {
+		t.Errorf("the file is not under the answer: %d, %d", i, j)
+	}
+	if strings.Contains(out, "<b>x</b>") {
+		t.Error("the file name is not escaped")
+	}
+	if page := render(t, "page", p); !strings.Contains(page, "sse:file_published") {
+		t.Error("the thread does not reload on file_published")
+	}
+}

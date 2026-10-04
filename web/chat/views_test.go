@@ -961,3 +961,57 @@ func TestBuildAgents(t *testing.T) {
 		t.Errorf("rows %+v", rows)
 	}
 }
+
+// A turn's files go under its answer, else under its error; a turn the
+// thread does not show yet gets them on an item of its own, at the end,
+// before the questions.
+func TestAttachFiles(t *testing.T) {
+	jarvis := AgentInfo{ID: "jarvis", Name: "Jarvis", Mention: "jarvis"}
+	smith := AgentInfo{ID: "smith", Name: "Agent Smith"}
+	answered := store.TurnKey(1, "jarvis")
+	failed := store.TurnKey(1, "smith")
+	silent := store.TurnKey(1, "writer")
+	msgs := []store.MessageWithID{
+		{ID: 1, Key: store.HumanMessageKey("a"), Message: store.Message{Role: store.RoleUser, Content: j("@jarvis @smith a report"), UserID: "u-me"}},
+		{ID: 2, Key: store.TurnMessageKey(answered, 0), Message: store.Message{Role: store.RoleAssistant, AgentID: "jarvis", ToolCalls: []store.ToolCall{{ID: "c1", Name: "publish_file"}}}},
+		{ID: 3, Key: store.TurnMessageKey(answered, 1), Message: store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "c1", Content: "Published"}}},
+		{ID: 4, Key: store.TurnMessageKey(answered, 2), Message: store.Message{Role: store.RoleAssistant, AgentID: "jarvis", Content: j("Here it is.")}},
+		{ID: 5, Key: store.TurnEndKey(answered), Message: store.TurnEnd("jarvis", "")},
+		{ID: 6, Key: store.TurnEndKey(failed), Message: store.TurnEnd("smith", "call LLM: boom")},
+	}
+	directory := AgentDirectory{ByID: map[string]AgentInfo{"jarvis": jarvis, "smith": smith}, Session: jarvis}
+	items := BuildThread(msgs, "u-me", nil, []Question{{WorkflowID: "q1", Text: "Which?"}}, directory)
+	files := []store.File{
+		{ID: "f1", TurnKey: answered, AgentID: "jarvis", Name: "rapport.md", Size: 1536},
+		{ID: "f2", TurnKey: failed, AgentID: "smith", Name: "partial.csv", Size: 12},
+		{ID: "f3", TurnKey: silent, AgentID: "writer", Name: "draft.md", Size: 3 << 20, CreatedAt: t0},
+		{ID: "f4", TurnKey: answered, AgentID: "jarvis", Name: "data.json", Size: 2},
+	}
+	items = AttachFiles(items, files, directory)
+
+	var kinds []string
+	for _, it := range items {
+		kinds = append(kinds, it.Kind)
+	}
+	if got := strings.Join(kinds, ","); got != "human,agent,error,files,question" {
+		t.Fatalf("kinds %s", got)
+	}
+	want := []FileLink{{ID: "f1", Name: "rapport.md", Size: "1,5 Ko"}, {ID: "f4", Name: "data.json", Size: "2 o"}}
+	if !reflect.DeepEqual(items[1].Files, want) {
+		t.Errorf("answer's files %+v", items[1].Files)
+	}
+	if len(items[2].Files) != 1 || items[2].Files[0].ID != "f2" {
+		t.Errorf("error's files %+v", items[2].Files)
+	}
+	orphan := items[3]
+	if len(orphan.Files) != 1 || orphan.Files[0].Size != "3,0 Mo" || orphan.Agent.Name != "writer" || !orphan.Time.Equal(t0) || orphan.ID != 0 {
+		t.Errorf("orphan %+v", orphan)
+	}
+	if items[1].Files[0].Href() != "/files/f1" {
+		t.Errorf("href %s", items[1].Files[0].Href())
+	}
+	// No files: nothing changes.
+	if got := AttachFiles(items[:1], nil, directory); len(got) != 1 {
+		t.Errorf("no files: %+v", got)
+	}
+}

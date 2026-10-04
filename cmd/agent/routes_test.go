@@ -48,6 +48,9 @@ type routeStore struct {
 	otherMembers map[string][]string
 	// loads counts the loads of each session's conversation.
 	loads map[string]int
+	// Published files, and their content by ID.
+	files    []store.File
+	contents map[string][]byte
 }
 
 func (f *routeStore) user(match func(store.User) bool) *store.User {

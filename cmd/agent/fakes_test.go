@@ -45,3 +45,23 @@ func (f *routeStore) ListActivityQueues(context.Context) ([]store.ActivityQueueE
 }
 func (f *routeStore) SetActivityQueue(context.Context, string, string) error { return nil }
 func (f *routeStore) DeleteActivityQueue(context.Context, string) error      { return nil }
+func (f *routeStore) GetFile(_ context.Context, id string) (*store.File, error) {
+	for _, file := range f.files {
+		if file.ID == id {
+			return &file, nil
+		}
+	}
+	return nil, nil
+}
+func (f *routeStore) ReadFileContent(_ context.Context, id string) ([]byte, error) {
+	return f.contents[id], nil
+}
+func (f *routeStore) ListSessionFiles(_ context.Context, sessionID string) ([]store.File, error) {
+	var out []store.File
+	for _, file := range f.files {
+		if file.SessionID == sessionID {
+			out = append(out, file)
+		}
+	}
+	return out, nil
+}

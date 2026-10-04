@@ -71,6 +71,7 @@
     <div class="agent-card">
       <div class="prose">{{.HTML}}</div>
       {{with .Tools}}<div class="tools">{{range .}}<span class="tool">{{.}}</span>{{end}}</div>{{end}}
+      {{template "files" .Files}}
     </div>
     {{template "forks" .}}
   </div>
@@ -101,6 +102,18 @@
     <div class="ttl">{{.Agent.Name}} s'est arrêté sur une erreur <span class="when">{{clock .Time}}</span></div>
     {{template "quote" .Quote}}
     <div class="txt">{{.Text}}</div>
+    {{template "files" .Files}}
+  </div>
+</div>
+
+{{else if eq .Kind "files"}}
+{{/* A turn's files before the thread shows the turn: they move under it
+     once it does. */}}
+<div class="msg" id="files-{{(index .Files 0).ID}}">
+  <div class="agent-mark"></div>
+  <div class="msg-body">
+    <div class="msg-head"><span class="who">{{.Agent.Name}}</span>{{with .Agent.Mention}}<span class="agent-meta">@{{.}}</span>{{end}}<span class="when">{{clock .Time}}</span></div>
+    <div class="agent-card">{{template "files" .Files}}</div>
   </div>
 </div>
 
@@ -126,6 +139,12 @@
      scrolls to it and highlights it (page.html). */}}
 {{define "quote"}}
 {{with .}}<a class="quote" href="#{{.Target}}"><span class="quote-to">↩ {{.Label}}</span>{{with .Text}} : <span class="quote-text">{{.}}</span>{{end}}</a>{{end}}
+{{end}}
+
+{{/* The files a turn published: each one downloads (/files/{id}, members
+     of the session only, always as an attachment). */}}
+{{define "files"}}
+{{with .}}<div class="files">{{range .}}<a class="file" id="file-{{.ID}}" href="{{.Href}}" download="{{.Name}}" title="Télécharger {{.Name}}">↓ <span class="file-name">{{.Name}}</span> <span class="file-size">{{.Size}}</span></a>{{end}}</div>{{end}}
 {{end}}
 
 {{define "forks"}}
