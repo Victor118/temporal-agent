@@ -111,7 +111,12 @@ func newDebugRunner(cfg *config.Config, binary string) (*claudecode.Runner, erro
 	if err != nil {
 		return nil, err
 	}
-	return &claudecode.Runner{Binary: binary, RunAs: runAs, Runs: subproc.NewRuns(runAs), Auth: auth}, nil
+	// Ended when silent as long as a worker's runs are.
+	stall, err := parseStallTimeout(cfg.ClaudeCodeStallTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("CLAUDE_CODE_STALL_TIMEOUT: %w", err)
+	}
+	return &claudecode.Runner{Binary: binary, RunAs: runAs, Runs: subproc.NewRuns(runAs), Auth: auth, StallTimeout: stall}, nil
 }
 
 // debugConfigDir is the CLI's configuration for a manual run: a copy of the

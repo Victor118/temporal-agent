@@ -11,6 +11,7 @@ import (
 	"go.temporal.io/sdk/worker"
 
 	"github.com/victor/temporal-agent/activity"
+	"github.com/victor/temporal-agent/claudecode"
 	"github.com/victor/temporal-agent/config"
 	"github.com/victor/temporal-agent/subproc"
 )
@@ -165,6 +166,23 @@ func TestParseQueueWait(t *testing.T) {
 	for _, raw := range []string{"0", "0s", "-5m", "30", "soon"} {
 		if _, err := parseQueueWait(raw); err == nil {
 			t.Errorf("parseQueueWait(%q) accepted", raw)
+		}
+	}
+}
+
+// How long a coding run's CLI may be silent: a Go duration, empty the
+// default, 0 never; anything else stops the worker.
+func TestParseStallTimeout(t *testing.T) {
+	for raw, want := range map[string]time.Duration{
+		"": claudecode.DefaultStallTimeout, "20m": 20 * time.Minute, "0": -1, "0s": -1,
+	} {
+		if got, err := parseStallTimeout(raw); err != nil || got != want {
+			t.Errorf("parseStallTimeout(%q) = %s, %v; want %s", raw, got, err, want)
+		}
+	}
+	for _, raw := range []string{"-5m", "12", "soon"} {
+		if _, err := parseStallTimeout(raw); err == nil {
+			t.Errorf("parseStallTimeout(%q) accepted", raw)
 		}
 	}
 }

@@ -89,6 +89,10 @@ type Config struct {
 	// queue with a run to spare, a Go duration (30m); empty =
 	// activity.DefaultRunQueueWait.
 	ClaudeCodeQueueWait string
+	// ClaudeCodeStallTimeout is how long the CLI of a coding run may write
+	// nothing before the run is ended as stuck, a Go duration (12m); empty =
+	// claudecode.DefaultStallTimeout, 0 = never.
+	ClaudeCodeStallTimeout string
 	// ClaudeCodeAuth is how this worker's coding runs authenticate: "api"
 	// (ANTHROPIC_API_KEY) or "subscription" (CLAUDE_CODE_OAUTH_TOKEN, or the
 	// CLI's login); empty = the one credential set (claudecode.ResolveAuth).
@@ -198,6 +202,7 @@ func Load() *Config {
 		ClaudeCodeMaxBudgetUSD:      os.Getenv("CLAUDE_CODE_MAX_BUDGET_USD"),
 		ClaudeCodeMaxConcurrentRuns: os.Getenv("CLAUDE_CODE_MAX_CONCURRENT_RUNS"),
 		ClaudeCodeQueueWait:         os.Getenv("CLAUDE_CODE_QUEUE_WAIT"),
+		ClaudeCodeStallTimeout:      os.Getenv("CLAUDE_CODE_STALL_TIMEOUT"),
 		ClaudeCodeAuth:              os.Getenv("CLAUDE_CODE_AUTH"),
 
 		SkillsRepo:          os.Getenv("SKILLS_REPO"),

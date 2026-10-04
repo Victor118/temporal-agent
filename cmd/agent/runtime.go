@@ -105,6 +105,10 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 	if err != nil {
 		return nil, fmt.Errorf("CLAUDE_CODE_QUEUE_WAIT: %w", err)
 	}
+	stallTimeout, err := parseStallTimeout(cfg.ClaudeCodeStallTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("CLAUDE_CODE_STALL_TIMEOUT: %w", err)
+	}
 
 	// Who pays for a coding run, the API or a subscription, is settled before
 	// any run, where the CLI is installed: never left to the CLI picking
@@ -131,7 +135,7 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 	runs := subproc.NewRuns(runAs)
 
 	stopRuns := &activity.RunStop{}
-	codeAct := &activity.ClaudeCodeActivities{Root: cfg.ClaudeCodeWorkspace, SSHKeyPath: cfg.ClaudeCodeSSHKey, AllowedRepos: cfg.ClaudeCodeRepos, RunAs: runAs, Runs: runs, ClaudeConfigDir: cfg.ClaudeConfigDir, Model: cfg.ClaudeCodeModel, MaxBudgetUSD: budget, Auth: auth, QueueWait: queueWait, Stopper: stopRuns}
+	codeAct := &activity.ClaudeCodeActivities{Root: cfg.ClaudeCodeWorkspace, SSHKeyPath: cfg.ClaudeCodeSSHKey, AllowedRepos: cfg.ClaudeCodeRepos, RunAs: runAs, Runs: runs, Runner: &claudecode.Runner{StallTimeout: stallTimeout}, ClaudeConfigDir: cfg.ClaudeConfigDir, Model: cfg.ClaudeCodeModel, MaxBudgetUSD: budget, Auth: auth, QueueWait: queueWait, Stopper: stopRuns}
 	// Before this worker offers a run: what a run left on this machine's
 	// disk when its worker died is reachable from here alone.
 	releaseRuns := func() {}
@@ -173,6 +177,11 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 	if coding {
 		log.Printf("Coding runs: at most %d at a time on this worker (CLAUDE_CODE_MAX_CONCURRENT_RUNS); "+
 			"a run waits up to %s for a worker with one to spare (CLAUDE_CODE_QUEUE_WAIT)", maxRuns, queueWait)
+		if stallTimeout < 0 {
+			log.Printf("Coding runs: a CLI that writes nothing is never ended for it (CLAUDE_CODE_STALL_TIMEOUT=0)")
+		} else {
+			log.Printf("Coding runs: a CLI that writes nothing for %s is ended as stuck (CLAUDE_CODE_STALL_TIMEOUT)", stallTimeout)
+		}
 	}
 	endRuns := func() {}
 	if coding {
@@ -393,6 +402,24 @@ func parseQueueWait(raw string) (time.Duration, error) {
 	d, err := time.ParseDuration(raw)
 	if err != nil || d <= 0 {
 		return 0, fmt.Errorf("%q is not a positive duration (e.g. 30m)", raw)
+	}
+	return d, nil
+}
+
+// parseStallTimeout reads CLAUDE_CODE_STALL_TIMEOUT, a Go duration: empty is
+// claudecode.DefaultStallTimeout, zero turns the check off (a negative
+// Runner.StallTimeout), and anything else stops the worker rather than end
+// runs at a limit nobody chose.
+func parseStallTimeout(raw string) (time.Duration, error) {
+	if raw == "" {
+		return claudecode.DefaultStallTimeout, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d < 0 {
+		return 0, fmt.Errorf("%q is not a duration (e.g. 12m; 0 = never)", raw)
+	}
+	if d == 0 {
+		return -1, nil
 	}
 	return d, nil
 }
