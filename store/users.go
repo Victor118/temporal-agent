@@ -271,14 +271,14 @@ func (s *PostgresStore) ListSessionStats(ctx context.Context, userID string) (ma
 	return stats, rows.Err()
 }
 
-// DeleteSession removes a session, its members and its messages. The row goes
-// first: unlinking its forks waits for a report a fork is posting
-// (AppendForkReport holds the fork's row), and the messages, deleted after,
-// take that report with them.
+// DeleteSession removes a session, its members, its files and its messages.
+// The row goes first: unlinking its forks waits for a report a fork is
+// posting (AppendForkReport holds the fork's row), and the messages, deleted
+// after, take that report with them.
 func (s *PostgresStore) DeleteSession(ctx context.Context, sessionID string) error {
 	return s.inTx(ctx, func(tx *sql.Tx) error {
 		for _, q := range []string{
-			"DELETE FROM sessions WHERE session_id = $1", // members cascade, forks lose their link
+			"DELETE FROM sessions WHERE session_id = $1", // members and files cascade, forks lose their link
 			"DELETE FROM messages WHERE session_id = $1",
 			"DELETE FROM memory WHERE scope = 'session' AND scope_id = $1",
 		} {

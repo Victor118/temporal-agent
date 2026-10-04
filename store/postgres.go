@@ -155,6 +155,27 @@ const schema = `
 		);
 		CREATE INDEX IF NOT EXISTS idx_session_members_user ON session_members(user_id);
 
+		-- A file an agent published in a session (publish_file, exec's
+		-- publish), under the turn that published it. Deleting the session
+		-- deletes its files. The content is apart, so listing reads no bytes.
+		CREATE TABLE IF NOT EXISTS files (
+			id           TEXT PRIMARY KEY,
+			session_id   TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+			turn_key     TEXT NOT NULL,
+			agent_id     TEXT NOT NULL DEFAULT '',
+			user_id      TEXT NOT NULL DEFAULT '',
+			name         TEXT NOT NULL,
+			content_type TEXT NOT NULL,
+			size         BIGINT NOT NULL CHECK (size >= 0),
+			sha256       TEXT NOT NULL,
+			created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+		CREATE INDEX IF NOT EXISTS idx_files_session ON files(session_id, created_at);
+		CREATE TABLE IF NOT EXISTS file_contents (
+			file_id TEXT PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+			data    BYTEA NOT NULL
+		);
+
 		CREATE TABLE IF NOT EXISTS task_logs (
 			schedule_id TEXT PRIMARY KEY,
 			type TEXT NOT NULL DEFAULT 'schedule',
