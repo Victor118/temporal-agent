@@ -144,12 +144,13 @@ func TestCancel_Rights(t *testing.T) {
 	states := map[string]interface{}{jarvis: answering("jarvis", 4, bob.ID), smith: answering("smith", 5, "u-carol")}
 	ctx := context.Background()
 
+	// The creator stops every turn, each stop naming the turn read.
 	tc := &fakeTemporal{byType: running, states: states}
 	if err := newTest(&memStore{}, tc).Cancel(ctx, creatorSession(), alice); err != nil {
 		t.Fatal(err)
 	}
-	if got := fmt.Sprint(stopsSent(tc)); got != fmt.Sprintf("[%s= %s=]", jarvis, smith) || len(tc.queried) != 0 {
-		t.Errorf("the creator's stops %s, queried %v", got, tc.queried)
+	if got := fmt.Sprint(stopsSent(tc)); got != fmt.Sprintf("[%s=m4.jarvis %s=m5.smith]", jarvis, smith) {
+		t.Errorf("the creator's stops %s", got)
 	}
 
 	tc = &fakeTemporal{byType: running, states: states}
@@ -165,15 +166,26 @@ func TestCancel_Rights(t *testing.T) {
 		t.Errorf("dave: %v, signalled %v", err, tc.signals)
 	}
 
-	// A participant that cannot be read is left running: not an error when
-	// another stop went, one when none did.
-	tc = &fakeTemporal{byType: running, states: states, queryErrs: map[string]error{smith: errors.New("no worker")}}
+	// A participant that cannot be read: the creator stops it whichever its
+	// turn; another member leaves it running, as someone else's.
+	unread := map[string]error{smith: errors.New("no worker")}
+	tc = &fakeTemporal{byType: running, states: states, queryErrs: unread}
+	if err := newTest(&memStore{}, tc).Cancel(ctx, creatorSession(), alice); err != nil || fmt.Sprint(stopsSent(tc)) != fmt.Sprintf("[%s=m4.jarvis %s=]", jarvis, smith) {
+		t.Errorf("the creator, smith unreadable: %v, stops %v", err, stopsSent(tc))
+	}
+	tc = &fakeTemporal{byType: running, states: states, queryErrs: unread}
 	if err := newTest(&memStore{}, tc).Cancel(ctx, creatorSession(), bob); err != nil || fmt.Sprint(stopsSent(tc)) != fmt.Sprintf("[%s=m4.jarvis]", jarvis) {
 		t.Errorf("bob, smith unreadable: %v, stops %v", err, stopsSent(tc))
 	}
 	tc = &fakeTemporal{byType: running, states: states, queryErrs: map[string]error{jarvis: errors.New("no worker")}}
-	if err := newTest(&memStore{}, tc).Cancel(ctx, creatorSession(), bob); err == nil || errors.Is(err, ErrStopNotAllowed) || len(tc.signals) != 0 {
+	if err := newTest(&memStore{}, tc).Cancel(ctx, creatorSession(), bob); !errors.Is(err, ErrStopNotAllowed) || len(tc.signals) != 0 {
 		t.Errorf("bob, his turn unreadable: %v, signalled %v", err, tc.signals)
+	}
+
+	// A stop that could not be sent, and none went: an error.
+	tc = &fakeTemporal{byType: running, states: states, signalErr: errors.New("temporal away")}
+	if err := newTest(&memStore{}, tc).Cancel(ctx, creatorSession(), bob); err == nil || errors.Is(err, ErrStopNotAllowed) || errors.Is(err, ErrNothingToStop) {
+		t.Errorf("bob, the signal failed: %v", err)
 	}
 }
 
@@ -349,10 +361,13 @@ func TestStatusCache_ParticipantState(t *testing.T) {
 // Temporal knows no more has ended: idle if the events told of it, not
 // shown otherwise.
 func TestParticipants_StateQueriedWhenUnclear(t *testing.T) {
-	jarvis, smith, watson := sid+":p:jarvis", sid+":p:smith", sid+":p:watson"
+	jarvis, smith, watson, holmes := sid+":p:jarvis", sid+":p:smith", sid+":p:watson", sid+":p:holmes"
 	tc := &fakeTemporal{
-		byType: map[string][]string{"ParticipantWorkflow": {jarvis, smith, watson}},
-		states: map[string]interface{}{jarvis: answering("jarvis", 3, bob.ID)},
+		byType: map[string][]string{"ParticipantWorkflow": {jarvis, smith, watson, holmes}},
+		// Holmes ended a moment ago, still within the retention: Temporal
+		// answers its query, at rest. NotFound is a participant unknown, or
+		// purged.
+		states: map[string]interface{}{jarvis: answering("jarvis", 3, bob.ID), holmes: workflow.ParticipantState{Background: []string{}}},
 		queryErrs: map[string]error{
 			smith:  serviceerror.NewNotFound("ended"),
 			watson: serviceerror.NewNotFound("ended"),
@@ -362,13 +377,16 @@ func TestParticipants_StateQueriedWhenUnclear(t *testing.T) {
 	s.turns.expect(sid, "jarvis", 3) // delivered, its turn_started lost
 	s.turns.expect(sid, "watson", 5)
 	ps := s.Participants(context.Background(), sid)
-	if len(ps) != 2 {
+	if len(ps) != 3 {
 		t.Fatalf("participants %+v, want smith left out", ps)
 	}
-	if j := ps[0]; !j.Working || j.Turn != "m3.jarvis" || j.UserID != bob.ID {
+	if h := ps[0]; h.Participant != "holmes" || h.Working || h.Queued != 0 {
+		t.Errorf("holmes, ended within the retention: %+v", h)
+	}
+	if j := ps[1]; !j.Working || j.Turn != "m3.jarvis" || j.UserID != bob.ID {
 		t.Errorf("jarvis %+v", j)
 	}
-	if w := ps[1]; w.Participant != "watson" || w.Working || w.Queued != 0 {
+	if w := ps[2]; w.Participant != "watson" || w.Working || w.Queued != 0 {
 		t.Errorf("watson %+v", w)
 	}
 	s.background.Wait()

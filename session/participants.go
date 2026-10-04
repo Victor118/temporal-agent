@@ -200,15 +200,17 @@ func (s *Service) signalParticipant(ctx context.Context, id, signal string, arg 
 }
 
 // Cancel stops the turns running in the session that the user may stop
-// (MayStop): all of them for its creator, whichever turn each runs; for
-// another member, those answering their messages, read now from each
-// participant, all at once, each stop naming its turn. A participant that
-// cannot be read is logged and left running, as if its turn were another
-// member's. It stops turns, not the messages waiting.
+// (MayStop): all of them for its creator, those answering their messages for
+// another member. Each participant is read now, all at once, and each stop
+// names the turn read: a turn still in its check is stopped before it
+// starts, one started meanwhile goes on. A participant that cannot be read
+// is logged; the creator stops it anyway, whichever turn it runs (a stop
+// with no key), another member leaves it running, as if its turn were
+// someone else's. It stops turns, not the messages waiting.
 //
-// An error only when no stop went: the stops that went are what the user
-// asked for, as far as could be done. ErrStopNotAllowed: turns run, none of
-// them the user's (or readable). ErrNothingToStop: none runs.
+// An error only when a stop could not be sent, and none went.
+// ErrStopNotAllowed: turns run, none of them the user's (or readable).
+// ErrNothingToStop: none runs.
 func (s *Service) Cancel(ctx context.Context, sess *store.Session, me *store.User) error {
 	defer s.statuses.invalidate()
 	ids, err := s.participants(ctx, sess.SessionID)
@@ -217,29 +219,26 @@ func (s *Service) Cancel(ctx context.Context, sess *store.Session, me *store.Use
 	}
 	stops := make([]*workflow.StopTurn, len(ids))
 	others := 0
-	var errs []error
-	if sess.CreatedBy == me.ID {
-		for i := range ids {
-			stops[i] = &workflow.StopTurn{}
-		}
-	} else {
-		states, qerrs := s.queryStates(ctx, ids)
-		for i, st := range states {
-			var gone *serviceerror.NotFound
-			switch {
-			case errors.As(qerrs[i], &gone), qerrs[i] == nil && st.Current == nil:
-			case qerrs[i] != nil:
-				log.Printf("Session %s: read the turn of %s: %v", sess.SessionID, ids[i], qerrs[i])
-				errs = append(errs, fmt.Errorf("read the turn of %s: %w", ids[i], qerrs[i]))
-				others++
-			case MayStop(sess, st.Current.UserID, me.ID):
-				stops[i] = &workflow.StopTurn{TurnKey: st.Current.Turn}
-			default:
+	states, qerrs := s.queryStates(ctx, ids)
+	for i, st := range states {
+		var gone *serviceerror.NotFound
+		switch {
+		case errors.As(qerrs[i], &gone), qerrs[i] == nil && st.Current == nil:
+		case qerrs[i] != nil:
+			log.Printf("Session %s: read the turn of %s: %v", sess.SessionID, ids[i], qerrs[i])
+			if MayClear(sess, me.ID) { // the creator may stop any turn, unread
+				stops[i] = &workflow.StopTurn{}
+			} else {
 				others++
 			}
+		case MayStop(sess, st.Current.UserID, me.ID):
+			stops[i] = &workflow.StopTurn{TurnKey: st.Current.Turn}
+		default:
+			others++
 		}
 	}
 	stopped := 0
+	var errs []error
 	for i, stop := range stops {
 		if stop == nil {
 			continue

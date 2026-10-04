@@ -120,6 +120,7 @@ type fakeTemporal struct {
 	states       map[string]interface{} // query answers, by workflow ID
 	queryErrs    map[string]error       // query failures, by workflow ID
 	listGate     chan struct{}          // set: every list waits for it to close
+	signalErr    error                  // fails every SignalWorkflow, recorded all the same
 	queried      []string               // workflow IDs queried
 	terminated   []string
 }
@@ -171,7 +172,7 @@ func (f *fakeTemporal) SignalWorkflow(_ context.Context, id, _, signal string, a
 	f.signals = append(f.signals, id)
 	f.signalNames = append(f.signalNames, signal)
 	f.signalArgs = append(f.signalArgs, arg)
-	return nil
+	return f.signalErr
 }
 func (f *fakeTemporal) QueryWorkflow(_ context.Context, id, _, _ string, _ ...interface{}) (converter.EncodedValue, error) {
 	f.mu.Lock()

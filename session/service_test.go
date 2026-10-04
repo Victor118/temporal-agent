@@ -419,7 +419,10 @@ func TestState_ThePartipantsStates(t *testing.T) {
 // a turn event says started, which they may not list yet. With none, there
 // is nothing to stop.
 func TestCancel_StopsEveryParticipant(t *testing.T) {
-	tc := &fakeTemporal{byType: map[string][]string{"ParticipantWorkflow": {sid + ":p:jarvis"}}}
+	tc := &fakeTemporal{
+		byType: map[string][]string{"ParticipantWorkflow": {sid + ":p:jarvis"}},
+		states: map[string]interface{}{sid + ":p:smith": answering("smith", 3, bob.ID)},
+	}
 	s := newTest(&memStore{}, tc)
 	s.Observe(sid, started("smith", 3))
 	if err := s.Cancel(context.Background(), creatorSession(), alice); err != nil {
