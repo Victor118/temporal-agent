@@ -394,12 +394,15 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 				continue
 			}
 			d := toolDispatch{kind: tool.ToolKind(res.Kind), agent: res.AgentID != "", fireAndForget: res.FireAndForget, taskQueue: res.TaskQueue}
+			// This call's context: the run's, and the call's own ID.
+			cc := call
+			cc.CallID = tc.ID
 
 			if d.kind == tool.ToolKindWorkflow {
 				d.workflowID = childWorkflowID(workflow.GetInfo(ctx).WorkflowExecution.ID, tc.Name, tc.ID, i, j)
 
 				// Build input first — a sub-agent runs on the current workflow queue
-				childWorkflow, childInput, err := buildChildInput(tc.Input, input, d.workflowID, &res, call, currentAgentID, workflow.GetInfo(ctx).TaskQueueName)
+				childWorkflow, childInput, err := buildChildInput(tc.Input, input, d.workflowID, &res, cc, currentAgentID, workflow.GetInfo(ctx).TaskQueueName)
 				if err == nil && d.agent {
 					err = delegationRefusal(currentChain, res.AgentID)
 				}
@@ -433,7 +436,6 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 					UserID:    input.UserID,
 				}
 				if res.NeedsCallContext {
-					cc := call
 					execInput.Call = &cc
 				}
 				d.future = workflow.ExecuteActivity(execCtx, toolAct.ExecuteTool, execInput)

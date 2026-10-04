@@ -11,6 +11,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/victor/temporal-agent/store"
 	"github.com/victor/temporal-agent/subproc"
@@ -36,7 +37,7 @@ func (s *fileSaver) SaveFile(_ context.Context, f store.File, content []byte) (s
 	return f, nil
 }
 
-var turnCall = CallContext{Turn: &TurnRef{SessionID: "s1", TurnKey: "m7.jarvis"}}
+var turnCall = CallContext{Turn: &TurnRef{SessionID: "s1", TurnKey: "m7.jarvis"}, CallID: "toolu_1"}
 
 // callCtx is the context of a call from a session turn of jarvis's,
 // answering alice, with a collector of what it publishes.
@@ -66,7 +67,7 @@ func TestPublishFile(t *testing.T) {
 	}
 	f := saver.files[0]
 	sum := sha256.Sum256([]byte("# Rapport\n"))
-	if f.SessionID != "s1" || f.TurnKey != "m7.jarvis" || f.AgentID != "jarvis" || f.UserID != "u-alice" ||
+	if f.SessionID != "s1" || f.TurnKey != "m7.jarvis" || f.CallID != "toolu_1" || f.AgentID != "jarvis" || f.UserID != "u-alice" ||
 		f.Name != "rapport.md" || f.Size != 10 || f.SHA256 != hex.EncodeToString(sum[:]) ||
 		!strings.HasPrefix(f.ContentType, "text/markdown") || f.ID == "" {
 		t.Errorf("saved %+v", f)
@@ -89,7 +90,6 @@ func TestPublishFile_Refusals(t *testing.T) {
 		name, file, content string
 		cc                  CallContext
 		saver               *fileSaver
-		max                 int64
 		want                string
 	}{
 		{name: "no session turn", file: "a.txt", cc: CallContext{}, want: "no session turn"},
@@ -100,7 +100,7 @@ func TestPublishFile_Refusals(t *testing.T) {
 		{name: "a control character", file: "a\nb.txt", cc: turnCall, want: "control"},
 		{name: "a right-to-left override", file: "rapport‮fdp.exe", cc: turnCall, want: "control"},
 		{name: "too long", file: strings.Repeat("a", 252) + ".txt", cc: turnCall, want: "too long"},
-		{name: "too large", file: "a.txt", content: "12345", max: 4, cc: turnCall, want: "too large"},
+		{name: "too large", file: "a.txt", content: strings.Repeat("x", MaxTextFileBytes+1), cc: turnCall, want: "too large"},
 		{name: "session deleted", file: "a.txt", cc: turnCall, saver: &fileSaver{gone: true}, want: "session was deleted"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -108,7 +108,7 @@ func TestPublishFile_Refusals(t *testing.T) {
 			if saver == nil {
 				saver = &fileSaver{}
 			}
-			_, err, pub := publishFile(t, &Publisher{Store: saver, MaxBytes: c.max}, c.cc, c.file, c.content)
+			_, err, pub := publishFile(t, &Publisher{Store: saver}, c.cc, c.file, c.content)
 			if err == nil || !strings.Contains(err.Error(), c.want) {
 				t.Errorf("error %v, want %q", err, c.want)
 			}
@@ -119,11 +119,23 @@ func TestPublishFile_Refusals(t *testing.T) {
 	}
 }
 
-// A file at the size limit is published; one byte more is not.
+// publish_file has a bound of its own, low: FILES_MAX_BYTES is exec's.
 func TestPublishFile_AtTheLimit(t *testing.T) {
 	saver := &fileSaver{}
-	if _, err, _ := publishFile(t, &Publisher{Store: saver, MaxBytes: 4}, turnCall, "a.txt", "1234"); err != nil {
+	if _, err, _ := publishFile(t, &Publisher{Store: saver, MaxBytes: 4}, turnCall, "a.txt", strings.Repeat("x", MaxTextFileBytes)); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A call the workflow gave no context (its catalog said the tool needs
+// none) is told to try again, not that it belongs to no session.
+func TestPublishFile_WithoutACallContext(t *testing.T) {
+	r := NewRegistry()
+	saver := &fileSaver{}
+	RegisterPublishFileTool(r, &Publisher{Store: saver})
+	_, err := r.Execute(context.Background(), "publish_file", json.RawMessage(`{"name":"a.txt","content":"x"}`))
+	if err == nil || !strings.Contains(err.Error(), "could not tell which turn") || len(saver.files) != 0 {
+		t.Errorf("error %v, saved %+v", err, saver.files)
 	}
 }
 
@@ -229,5 +241,56 @@ func TestFormatSize(t *testing.T) {
 		if got := FormatSize(n); got != want {
 			t.Errorf("FormatSize(%d) = %q, want %q", n, got, want)
 		}
+	}
+}
+
+// slowSaver stores its first file, then takes until the call's end.
+type slowSaver struct{ fileSaver }
+
+func (s *slowSaver) SaveFile(ctx context.Context, f store.File, content []byte) (store.File, error) {
+	if len(s.files) == 0 {
+		return s.fileSaver.SaveFile(ctx, f, content)
+	}
+	<-ctx.Done()
+	return store.File{}, ctx.Err()
+}
+
+// Publishing has a budget of its own: what it leaves is said not published,
+// and the call returns, with what was stored.
+func TestExec_PublishWithinItsBudget(t *testing.T) {
+	id := subproctest.Identity(t)
+	dir := subproctest.Dir(t, id)
+	r := NewRegistry()
+	saver := &slowSaver{}
+	RegisterExecTool(r, dir, id, subproc.NewRuns(id), &Publisher{Store: saver, budget: 200 * time.Millisecond})
+	start := time.Now()
+	out, err, pub := execPublishing(t, r, "echo a > a.txt; echo b > b.txt; echo c > c.txt; echo ran", "a.txt", "b.txt", "c.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Errorf("publishing took %s", time.Since(start))
+	}
+	if len(saver.files) != 1 || len(pub.Files()) != 1 || !strings.Contains(out, "a.txt (2 B") {
+		t.Errorf("published %+v: %q", saver.files, out)
+	}
+	for _, path := range []string{"b.txt", "c.txt"} {
+		if !strings.Contains(out, "- "+path+": not published: the 200ms given to publish ran out") {
+			t.Errorf("%s not said out of time: %q", path, out)
+		}
+	}
+	if !strings.HasSuffix(out, "ran") {
+		t.Errorf("the command's output is gone: %q", out)
+	}
+}
+
+// exec with no call context runs its command and says why nothing was
+// published.
+func TestExec_PublishWithoutACallContext(t *testing.T) {
+	_, r, saver := setupPublishingExec(t, 0)
+	input, _ := json.Marshal(map[string]any{"command": "echo x > a.txt && echo ran", "publish": []string{"a.txt"}})
+	out, err := r.Execute(context.Background(), "exec", input)
+	if err != nil || !strings.HasSuffix(out, "ran") || !strings.Contains(out, "could not tell which turn") || len(saver.files) != 0 {
+		t.Errorf("result %q, %v, saved %+v", out, err, saver.files)
 	}
 }

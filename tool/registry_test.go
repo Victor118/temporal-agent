@@ -301,7 +301,8 @@ func TestTool_TimeoutCoversItsOwnLimit(t *testing.T) {
 		tool  *Tool
 		limit time.Duration
 	}{
-		{get("exec"), execMaxTimeout},
+		// The command, then publishing its files.
+		{get("exec"), execMaxTimeout + publishBudget},
 		{get("web_fetch"), fetchTimeout},
 		{get("grep"), grepTimeout},
 		{mcpTools[0], mcpCallTimeout},

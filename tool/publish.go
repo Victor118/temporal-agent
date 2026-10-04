@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -22,9 +23,20 @@ import (
 	"github.com/victor/temporal-agent/store"
 )
 
-// DefaultMaxFileBytes bounds a published file when the worker sets no
+// DefaultMaxFileBytes bounds a file exec publishes when the worker sets no
 // FILES_MAX_BYTES.
 const DefaultMaxFileBytes = 20 << 20
+
+// MaxTextFileBytes bounds a file publish_file publishes: its content is the
+// model's input, which goes through Temporal and stays in the session's
+// history, read again by every LLM call. A large file is exec's to publish.
+const MaxTextFileBytes = 1 << 20
+
+// publishBudget bounds the time exec takes to publish its files once the
+// command is over; its Timeout makes room for it. What it leaves
+// unpublished is said, never failed: a failed activity would hide the files
+// already stored.
+const publishBudget = 60 * time.Second
 
 // maxFileNameBytes bounds a published file's name, as most file systems do.
 const maxFileNameBytes = 255
@@ -57,8 +69,13 @@ type FileSaver interface {
 // exec's publish. The content goes from the tool to the store directly;
 // the call's result, and so Temporal, only carries its reference.
 type Publisher struct {
-	Store    FileSaver
-	MaxBytes int64 // a file's largest size; DefaultMaxFileBytes when not positive
+	Store FileSaver
+	// MaxBytes is the largest file exec publishes (FILES_MAX_BYTES);
+	// DefaultMaxFileBytes when not positive. publish_file has its own
+	// bound, MaxTextFileBytes.
+	MaxBytes int64
+	// budget replaces publishBudget, shorter, in tests.
+	budget time.Duration
 }
 
 func (p *Publisher) maxBytes() int64 {
@@ -102,21 +119,31 @@ func recordPublished(ctx context.Context, f FileRef) {
 // scheduled task, for one. Its members could not see it anywhere.
 var errNoTurn = errors.New("Cannot publish: this run belongs to no session turn (a scheduled task, for instance), so there is no session to attach a file to. Put the content in your answer instead.")
 
+// errNoCall refuses a file from a call given no call context: the workflow
+// read a catalog that did not yet say the tool needs one. The next call
+// reads it again.
+var errNoCall = errors.New("Cannot publish: the worker could not tell which turn to attach the file to. Nothing was published; try again.")
+
 // publish stores content as a file named name, attached to the session turn
-// the call works for (CallContext.Turn), and returns it.
-func (p *Publisher) publish(ctx context.Context, name string, content []byte) (store.File, error) {
+// the call works for (CallContext.Turn), and returns it. A file the same
+// call already published under that name is returned as it was stored
+// (store.FileStore.SaveFile).
+func (p *Publisher) publish(ctx context.Context, name string, content []byte, max int64) (store.File, error) {
 	if p == nil || p.Store == nil {
 		return store.File{}, errors.New("Cannot publish: this worker has no file store")
 	}
 	call, ok := CallFromContext(ctx)
-	if !ok || call.Turn == nil || call.Turn.SessionID == "" || call.Turn.TurnKey == "" {
+	if !ok {
+		return store.File{}, errNoCall
+	}
+	if call.Turn == nil || call.Turn.SessionID == "" || call.Turn.TurnKey == "" {
 		return store.File{}, errNoTurn
 	}
 	name, err := CleanFileName(name)
 	if err != nil {
 		return store.File{}, err
 	}
-	if max := p.maxBytes(); int64(len(content)) > max {
+	if int64(len(content)) > max {
 		return store.File{}, fmt.Errorf("%s is too large: at most %s may be published", name, FormatSize(max))
 	}
 	sum := sha256.Sum256(content)
@@ -124,6 +151,7 @@ func (p *Publisher) publish(ctx context.Context, name string, content []byte) (s
 		ID:          uuid.NewString(),
 		SessionID:   call.Turn.SessionID,
 		TurnKey:     call.Turn.TurnKey,
+		CallID:      call.CallID,
 		AgentID:     AgentIDFromContext(ctx),
 		UserID:      UserIDFromContext(ctx),
 		Name:        name,
@@ -227,13 +255,13 @@ func FormatSize(n int64) string {
 func RegisterPublishFileTool(r *Registry, p *Publisher) {
 	r.Register(&Tool{
 		Name: "publish_file",
-		Description: `Publish a file to the session: its members see it attached to your answer and can download it. Use it for a deliverable the user should keep as a file — a report in Markdown, a table in CSV, a diagram in SVG, data in JSON — rather than pasting it into your answer. The content is text you write. To publish a file a command produced in the workspace, use exec's publish parameter instead.
+		Description: `Publish a file to the session: its members see it attached to your answer and can download it. Use it for a short text you write that the user should keep as a file — a report in Markdown, a table in CSV, a diagram in SVG, data in JSON — rather than pasting it into your answer. What you write here stays in the conversation, as any tool input: for anything large, write it with exec and publish it with exec's publish parameter.
 Mention the file by its name in your answer; do not repeat its content.`,
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
 				"name": {"type": "string", "description": "File name with its extension, e.g. report.md. A name, not a path."},
-				"content": {"type": "string", "description": "The file's content, as text (at most ` + FormatSize(p.maxBytes()) + `)."}
+				"content": {"type": "string", "description": "The file's content, as text (at most ` + FormatSize(MaxTextFileBytes) + `)."}
 			},
 			"required": ["name", "content"]
 		}`),
@@ -248,7 +276,7 @@ Mention the file by its name in your answer; do not repeat its content.`,
 			if err := json.Unmarshal(input, &params); err != nil {
 				return "", fmt.Errorf("parse input: %w", err)
 			}
-			f, err := p.publish(ctx, params.Name, []byte(params.Content))
+			f, err := p.publish(ctx, params.Name, []byte(params.Content), MaxTextFileBytes)
 			if err != nil {
 				return "", err
 			}
@@ -264,10 +292,21 @@ Mention the file by its name in your answer; do not repeat its content.`,
 // and why the others were not. Before, so that a long output clipped from
 // its end (a fork's summary reads the head of a result) keeps the files'
 // names. A failure is no error: the command ran, and its output stands.
+//
+// Publishing takes at most publishBudget: what is left once it runs out is
+// said not published, the files already stored stay so, and the activity
+// ends within the tool's Timeout.
 func (p *Publisher) publishFromWorkspace(ctx context.Context, ws workspace, paths []string) string {
 	if len(paths) == 0 {
 		return ""
 	}
+	budget := publishBudget
+	if p != nil && p.budget > 0 {
+		budget = p.budget
+	}
+	ctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	outOfTime := fmt.Errorf("not published: the %s given to publish ran out", budget)
 	var done, failed []string
 	fail := func(path string, err error) { failed = append(failed, fmt.Sprintf("- %s: %v", path, err)) }
 	if len(paths) > maxPublishPaths {
@@ -285,12 +324,20 @@ func (p *Publisher) publishFromWorkspace(ctx context.Context, ws workspace, path
 	}
 	defer root.Close()
 	for _, path := range paths {
+		if ctx.Err() != nil {
+			fail(path, outOfTime)
+			continue
+		}
 		content, err := p.readPublished(root, path)
 		if err != nil {
 			fail(path, err)
 			continue
 		}
-		f, err := p.publish(ctx, filepath.Base(filepath.Clean(path)), content)
+		f, err := p.publish(ctx, filepath.Base(filepath.Clean(path)), content, p.maxBytes())
+		if err != nil && ctx.Err() != nil {
+			// Cut short: the store wrote nothing of it (one transaction).
+			err = outOfTime
+		}
 		if err != nil {
 			fail(path, err)
 			continue

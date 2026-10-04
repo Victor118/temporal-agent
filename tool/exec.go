@@ -61,13 +61,14 @@ func RegisterExecTool(r *Registry, workspacePath string, runAs *subproc.Identity
 			"properties": {
 				"command": {"type": "string", "description": "Shell command to execute"},
 				"timeout_seconds": {"type": "integer", "description": "Timeout in seconds (default: ` + fmt.Sprint(execDefaultTimeout.Seconds()) + `, max: ` + fmt.Sprint(execMaxTimeout.Seconds()) + `)"},
-				"publish": {"type": "array", "items": {"type": "string"}, "description": "Files to publish to the session once the command is over, as paths relative to the workspace (at most ` + fmt.Sprint(maxPublishPaths) + `, ` + FormatSize(pub.maxBytes()) + ` each): the session's members see them attached to your answer and can download them. Use it for a file the command produced that the user should keep (a PDF, a chart, an archive)."}
+				"publish": {"type": "array", "items": {"type": "string"}, "description": "Files to publish to the session once the command is over, as paths relative to the workspace (at most ` + fmt.Sprint(maxPublishPaths) + `, each within this worker's size limit): the session's members see them attached to your answer and can download them. Use it for a file the command produced that the user should keep (a PDF, a chart, an archive)."}
 			},
 			"required": ["command"]
 		}`),
 		Kind:      ToolKindActivity,
 		Sensitive: true,
-		Timeout:   execMaxTimeout + TimeoutMargin,
+		// The command, then the time to publish its files.
+		Timeout: execMaxTimeout + publishBudget + TimeoutMargin,
 		// The session turn a published file is attached to (CallContext.Turn).
 		NeedsCallContext: true,
 		Execute: func(ctx context.Context, input json.RawMessage) (string, error) {

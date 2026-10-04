@@ -92,7 +92,8 @@ func TestAgentWorkflow_NotifiesPublishedFiles(t *testing.T) {
 		t.Fatalf("workflow error: %v", err)
 	}
 
-	if len(calls) != 1 || calls[0].Call == nil || calls[0].Call.Turn == nil || *calls[0].Call.Turn != (tool.TurnRef{SessionID: "s1", TurnKey: turn}) {
+	// The call's own ID: a file it publishes twice under one name is one.
+	if len(calls) != 1 || calls[0].Call == nil || calls[0].Call.Turn == nil || *calls[0].Call.Turn != (tool.TurnRef{SessionID: "s1", TurnKey: turn}) || calls[0].Call.CallID != "1" {
 		t.Fatalf("publish_file called with %+v", calls)
 	}
 	var published []activity.NotifyInput

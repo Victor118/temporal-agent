@@ -88,6 +88,9 @@ type CallContext struct {
 	// has none, the session turn that launched it. Nil: the run belongs to
 	// no session turn (a scheduled task).
 	Turn *TurnRef `json:"turn,omitempty"`
+	// CallID is the model's ID of this tool call: a file the call publishes
+	// again under the same name (a retried activity) is the one it stored.
+	CallID string `json:"call_id,omitempty"`
 }
 
 // callContextKeys are the input keys CallContext's fields decode from: its
