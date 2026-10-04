@@ -42,6 +42,8 @@
     </div>
   </section>
 
+  {{template "agents-section" .}}
+
   {{with .Parent}}
   <section>
     <div class="eyebrow">Hérité du parent</div>
@@ -97,4 +99,50 @@
   {{with .Error}}<div class="error">{{.}}</div>{{end}}
 </div>
 {{end}}
+{{end}}
+
+{{/* The Agents panel: where each agent of the session stands, and the
+     stops the viewer may make. Its section stays; its content is swapped
+     alone, morphed in place: by its buttons, and on the session's events
+     that change it (session.AgentsEvents). */}}
+{{define "agents-section"}}
+<section id="agents" hx-get="/s/{{.Node.Session.SessionID}}/agents" hx-swap="morph:innerHTML"
+         hx-trigger="{{reloadOn "agents"}}">{{with index .Rendered "agents"}}{{.}}{{else}}{{template "agents" .}}{{end}}</section>
+{{end}}
+
+{{/* A stop names the turn its row shows: a turn started since, another
+     member's maybe, goes on. Tout arrêter drops the queue too, other
+     members' messages included: the session's creator alone has it. */}}
+{{define "agents"}}
+{{$sid := .Node.Session.SessionID}}
+<div class="agents-inner" data-version="{{index .Versions "agents"}}">
+  <div class="eyebrow">Agents</div>
+  <div class="agent-rows">
+    {{range .Participants.Rows}}
+    <div class="agent-row" id="agent-{{.Participant}}">
+      <div class="agent-row-head"><span class="dot {{.State}}"></span><span class="ttl">{{.Agent.Name}}</span>{{with .Agent.Mention}}<span class="agent-meta">@{{.}}</span>{{end}}</div>
+      <div class="note">{{.Status}}</div>
+      {{with .Note}}<div class="note">⏳ {{.}}</div>{{end}}
+      {{if .Queued}}<div class="note">{{plural .Queued "message"}} en file</div>{{end}}
+      {{range .Background}}<div class="note">Tâche de fond : {{.}}</div>{{end}}
+      {{if or .CanStop .CanClear}}
+      <div class="agent-actions">
+        {{if .CanStop}}
+        <form hx-post="/s/{{$sid}}/participants/{{.Participant}}/stop" hx-target="#agents" hx-swap="morph:innerHTML">
+          <input type="hidden" name="turn" value="{{.Turn}}">
+          <button class="btn" type="submit" title="Arrête ce tour ; les messages en file restent">Arrêter</button>
+        </form>
+        {{end}}
+        {{if .CanClear}}
+        <form hx-post="/s/{{$sid}}/participants/{{.Participant}}/clear" hx-target="#agents" hx-swap="morph:innerHTML" hx-confirm="{{.ClearConfirm}}">
+          <button class="btn danger" type="submit" title="Arrête ce tour et vide la file">Tout arrêter</button>
+        </form>
+        {{end}}
+      </div>
+      {{end}}
+    </div>
+    {{end}}
+  </div>
+  {{with .Participants.Error}}<div class="error">{{.}}</div>{{end}}
+</div>
 {{end}}

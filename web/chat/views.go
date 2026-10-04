@@ -268,6 +268,7 @@ const maxQuoteRunes = 120
 // AgentDirectory names the agents of a thread.
 type AgentDirectory struct {
 	ByID    map[string]AgentInfo // the installation's agents, as they are now
+	List    []AgentInfo          // the same, in the store's order
 	Session AgentInfo            // the session's agent
 }
 
@@ -634,6 +635,136 @@ func contains(list []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// AgentsPanel is the rail's "Agents" panel: a row per participant of the
+// session, the session's agent first, then the others in the order of
+// their names.
+type AgentsPanel struct {
+	Rows []AgentRow
+	// CanStop: the viewer may stop one of the turns running, at least
+	// (the thread's Arrêter stops those).
+	CanStop bool
+	Error   string // why the viewer's last stop did not go
+}
+
+// AgentRow is a participant of the session, as the viewer sees it.
+type AgentRow struct {
+	// Participant is its name in the session: its row's element, its
+	// actions' path.
+	Participant string
+	Agent       AgentInfo
+	Working     bool
+	Waiting     bool      // a question of its turn waits for a member's answer
+	Author      string    // whom it answers: the author of its message; "" if not known
+	Mine        bool      // it answers the viewer
+	Since       time.Time // when its turn started; zero if not known
+	Note        string    // what its turn waits for (a worker)
+	Queued      int
+	Background  []string
+	// Turn is the turn shown: a stop names it, and stops no other.
+	Turn     string
+	CanStop  bool // the viewer may stop its turn (session.MayStop)
+	CanClear bool // the viewer may drop its queue too (session.MayClear)
+}
+
+// Status says where the participant stands, in words: "Disponible",
+// "Répond à Alice depuis 16:27", "Te répond depuis 16:27 · attend une
+// réponse".
+func (r AgentRow) Status() string {
+	if !r.Working {
+		if r.Queued > 0 {
+			return "Passe au message suivant"
+		}
+		return "Disponible"
+	}
+	line := "Répond"
+	switch {
+	case r.Mine:
+		line = "Te répond"
+	case r.Author != "":
+		line = "Répond à " + r.Author
+	}
+	if !r.Since.IsZero() {
+		line += " depuis " + clock(r.Since)
+	}
+	if r.Waiting {
+		line += " · attend une réponse"
+	}
+	return line
+}
+
+// ClearConfirm is what Tout arrêter asks before it posts: it drops other
+// members' messages too.
+func (r AgentRow) ClearConfirm() string {
+	what := "vider sa file"
+	if r.Queued > 0 {
+		what = "jeter " + pluralize(r.Queued, "message") + " de sa file"
+	}
+	return "Arrêter " + r.Agent.Name + " et " + what + ", ceux des autres membres compris ?"
+}
+
+// State is the row's dot: "waiting", "working" or "idle".
+func (r AgentRow) State() Status {
+	switch {
+	case r.Waiting:
+		return StatusWaiting
+	case r.Working:
+		return StatusWorking
+	}
+	return StatusIdle
+}
+
+// BuildAgents makes the Agents panel from where the session's participants
+// stand (session.Participants), for the viewer: the session's agent always
+// has its row, available if it has no participant. Each agent is named as
+// it is now, else as its turn event named it. The viewer may stop a turn
+// answering them, any if they created the session, and drop a queue only
+// then (session.MayStop, session.MayClear).
+func BuildAgents(ps []session.Participant, sess store.Session, viewerID string, agents AgentDirectory) AgentsPanel {
+	var panel AgentsPanel
+	row := func(p session.Participant) AgentRow {
+		agent, ok := agents.ByID[p.AgentID]
+		if !ok {
+			agent = AgentInfo{ID: p.AgentID, Name: cmp.Or(p.Name, p.AgentID), Mention: p.AgentID}
+		}
+		r := AgentRow{
+			Participant: p.Participant, Agent: agent, Working: p.Working, Waiting: p.Waiting,
+			Author: p.UserName, Mine: p.UserID != "" && p.UserID == viewerID, Since: p.Since,
+			Note: p.Note, Queued: p.Queued, Background: p.Background, Turn: p.Turn,
+		}
+		r.CanStop = p.Working && session.MayStop(&sess, p.UserID, viewerID)
+		r.CanClear = (p.Working || p.Queued > 0) && session.MayClear(&sess, viewerID)
+		panel.CanStop = panel.CanStop || r.CanStop
+		return r
+	}
+	first := agents.Session.ID
+	i := slices.IndexFunc(ps, func(p session.Participant) bool { return p.Participant == first })
+	switch {
+	case first == "":
+	case i < 0:
+		panel.Rows = append(panel.Rows, AgentRow{Participant: first, Agent: agents.Session})
+	default:
+		panel.Rows = append(panel.Rows, row(ps[i]))
+	}
+	for _, p := range ps {
+		if p.Participant != first {
+			panel.Rows = append(panel.Rows, row(p))
+		}
+	}
+	return panel
+}
+
+// Working are the agents at work, as the panel shows them, for the
+// thread's working line.
+func (a AgentsPanel) Working() []WorkingAgent {
+	var out []WorkingAgent
+	for _, r := range a.Rows {
+		if r.Working {
+			out = append(out, WorkingAgent{Name: r.Agent.Name, Note: r.Note})
+		}
+	}
+	return out
 }
 
 // MapNode is a session placed on the map.

@@ -32,7 +32,7 @@
   {{if .Working}}
   <div class="working-line" id="working">
     <span class="dot"></span>{{.WorkingLine}}
-    <form hx-post="/s/{{$sid}}/cancel" hx-target="#thread" hx-swap="morph:innerHTML"><button class="btn ghost" type="submit">Arrêter</button></form>
+    {{if .Participants.CanStop}}<form hx-post="/s/{{$sid}}/cancel" hx-target="#thread" hx-swap="morph:innerHTML"><button class="btn ghost" type="submit" title="{{if .IsCreator}}Arrête le tour de chaque agent au travail{{else}}Arrête les tours qui répondent à tes messages{{end}}">Arrêter</button></form>{{end}}
   </div>
   {{end}}
   {{with .Error}}<div class="composer-error" id="thread-error">{{.}}</div>{{end}}

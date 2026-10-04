@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/victor/temporal-agent/conversation"
+	"github.com/victor/temporal-agent/session"
 	"github.com/victor/temporal-agent/store"
 )
 
@@ -896,5 +897,62 @@ func TestInitials(t *testing.T) {
 		if got := initials(name); got != want {
 			t.Errorf("initials(%q) = %q, want %q", name, got, want)
 		}
+	}
+}
+
+// The Agents panel: the session's agent first, available when it has no
+// participant, then the others; each says whom it answers and since when.
+// A member may stop a turn answering them, the creator any, and only the
+// creator drops a queue.
+func TestBuildAgents(t *testing.T) {
+	since := time.Date(2026, 10, 4, 16, 27, 0, 0, time.Local)
+	directory := AgentDirectory{ByID: map[string]AgentInfo{"jarvis": {ID: "jarvis", Name: "Jarvis", Mention: "jarvis"}, "smith": smith}, Session: AgentInfo{ID: "jarvis", Name: "Jarvis", Mention: "jarvis"}}
+	sess := store.Session{SessionID: "s1", CreatedBy: "u-alice"}
+	ps := []session.Participant{
+		{Participant: "smith", AgentID: "smith", Name: "Old Smith", Working: true, Turn: "m4.smith", UserID: "u-bob", UserName: "Bob", Since: since, Queued: 2, Note: "attend un worker"},
+		{Participant: "watson", AgentID: "watson", Name: "Watson", Working: true, Waiting: true, Turn: "m5.watson", UserID: "u-carol", UserName: "Carol", Since: since},
+		{Participant: "zed", AgentID: "zed", Queued: 1},
+	}
+
+	bob := BuildAgents(ps, sess, "u-bob", directory)
+	var got []string
+	for _, r := range bob.Rows {
+		got = append(got, fmt.Sprintf("%s|%s|%s|%v|%v", r.Participant, r.Agent.Name, r.Status(), r.CanStop, r.CanClear))
+	}
+	want := []string{
+		"jarvis|Jarvis|Disponible|false|false",
+		"smith|Agent Smith|Te répond depuis " + clock(since) + "|true|false",
+		"watson|Watson|Répond à Carol depuis " + clock(since) + " · attend une réponse|false|false",
+		"zed|zed|Passe au message suivant|false|false",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("bob's panel\n got %q\nwant %q", got, want)
+	}
+	if !bob.CanStop || bob.Rows[1].Turn != "m4.smith" || bob.Rows[2].State() != StatusWaiting || bob.Rows[1].State() != StatusWorking || bob.Rows[0].State() != StatusIdle {
+		t.Errorf("bob's panel %+v", bob)
+	}
+	if w := bob.Working(); len(w) != 2 || w[0] != (WorkingAgent{Name: "Agent Smith", Note: "attend un worker"}) || w[1].Name != "Watson" {
+		t.Errorf("working %+v", w)
+	}
+
+	alice := BuildAgents(ps, sess, "u-alice", directory)
+	for _, r := range alice.Rows[1:] {
+		if r.CanStop != r.Working || !r.CanClear {
+			t.Errorf("the creator's row %+v", r)
+		}
+	}
+	if alice.Rows[0].CanClear || alice.Rows[1].ClearConfirm() != "Arrêter Agent Smith et jeter 2 messages de sa file, ceux des autres membres compris ?" {
+		t.Errorf("the creator's rows %+v", alice.Rows)
+	}
+
+	dave := BuildAgents(ps[1:2], sess, "u-dave", directory)
+	if dave.CanStop || len(dave.Rows) != 2 || dave.Rows[1].CanStop {
+		t.Errorf("dave's panel %+v", dave)
+	}
+
+	// The session's agent at work keeps its row, first.
+	ps[0].Participant, ps[0].AgentID = "jarvis", "jarvis"
+	if rows := BuildAgents(ps, sess, "u-bob", directory).Rows; len(rows) != 3 || rows[0].Participant != "jarvis" || !rows[0].Working {
+		t.Errorf("rows %+v", rows)
 	}
 }

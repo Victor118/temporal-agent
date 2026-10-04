@@ -56,6 +56,11 @@ var ThreadEvents = slices.Concat(StateEvents, []string{EventUserMessage, activit
 // change: its state, a message (there is something new to report).
 var ReportEvents = slices.Concat(StateEvents, []string{EventUserMessage, activity.EventMessage})
 
+// AgentsEvents are the session's events after which its Agents panel may
+// change: a turn or a question (StateEvents), a message delivered (a
+// participant's queue), what a turn waits for (a notice).
+var AgentsEvents = slices.Concat(StateEvents, []string{EventUserMessage, activity.EventNotice})
+
 // publishMembersLeft tells the session's streams that these users are out
 // of it.
 func (s *Service) publishMembersLeft(sessionID string, userIDs ...string) {

@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/converter"
@@ -305,14 +306,31 @@ func TestRoutes_RefuseCrossSiteWrites(t *testing.T) {
 // --- Forks ---
 
 // fakeTemporal records the workflows started and the signals sent. Nothing
-// runs: a description says not running, a query and a termination fail.
+// runs: a description says not running, a termination fails, a query finds
+// no workflow but those of states.
 type fakeTemporal struct {
 	started []string // workflow IDs
 	signals []interface{}
+	states  map[string]interface{} // query answers, by workflow ID
 }
 
-func (f *fakeTemporal) QueryWorkflow(context.Context, string, string, string, ...interface{}) (converter.EncodedValue, error) {
-	return nil, errors.New("not running")
+func (f *fakeTemporal) QueryWorkflow(_ context.Context, id, _, _ string, _ ...interface{}) (converter.EncodedValue, error) {
+	if state, ok := f.states[id]; ok {
+		return encodedJSON{state}, nil
+	}
+	return nil, serviceerror.NewNotFound("not running")
+}
+
+// encodedJSON is a query's answer, as JSON goes through Temporal.
+type encodedJSON struct{ v interface{} }
+
+func (e encodedJSON) HasValue() bool { return true }
+func (e encodedJSON) Get(v interface{}) error {
+	b, err := json.Marshal(e.v)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(b, v)
 }
 
 func (f *fakeTemporal) TerminateWorkflow(context.Context, string, string, string, ...interface{}) error {
@@ -1078,5 +1096,49 @@ func TestRoutes_ListHasNoActive(t *testing.T) {
 	bob := logIn(t, h, "bob@example.com")
 	if w := call(t, h, http.MethodGet, "/me/sessions", "", bob); w.Code != http.StatusOK || strings.Contains(w.Body.String(), `"active"`) || !strings.Contains(w.Body.String(), `"s1"`) {
 		t.Errorf("sessions %d %s", w.Code, w.Body)
+	}
+}
+
+// A participant's turn is stopped by the author of the message it answers,
+// or the session's creator; its queue dropped by the creator alone. The
+// author is read from the participant at the click; a stop names its turn.
+func TestRoutes_StopAParticipant(t *testing.T) {
+	jarvis := liveSID + ":p:jarvis"
+	tc := &fakeTemporal{states: map[string]interface{}{jarvis: workflow.ParticipantState{
+		Current: &workflow.CurrentMessage{MessageID: 4, Turn: "m4.jarvis", UserID: "u-alice"}, Background: []string{},
+	}}}
+	h, st := newRouteTestWith(t, tc)
+	st.session.SessionID = liveSID
+	alice, bob, carol := logIn(t, h, "alice@example.com"), logIn(t, h, "bob@example.com"), logIn(t, h, "carol@example.com")
+	stop, clear := "/sessions/"+liveSID+"/participants/jarvis/stop", "/sessions/"+liveSID+"/participants/jarvis/clear"
+
+	if w := call(t, h, http.MethodPost, stop, `{"turn":"m4.jarvis"}`, bob); w.Code != http.StatusForbidden {
+		t.Errorf("bob stopping alice's turn: %d %s", w.Code, w.Body)
+	}
+	if w := call(t, h, http.MethodPost, clear, "", bob); w.Code != http.StatusForbidden {
+		t.Errorf("bob clearing: %d", w.Code)
+	}
+	if w := call(t, h, http.MethodPost, stop, "", carol); w.Code != http.StatusNotFound {
+		t.Errorf("a non-member stopping: %d", w.Code)
+	}
+	if w := form(t, h, "/s/"+liveSID+"/participants/jarvis/stop", url.Values{"turn": {"m4.jarvis"}}, bob); w.Code != 200 || !strings.Contains(w.Body.String(), "Seul l&#39;auteur du message en cours") {
+		t.Errorf("bob's form: %d %s", w.Code, w.Body)
+	}
+	if len(tc.signals) != 0 {
+		t.Fatalf("signalled %v", tc.signals)
+	}
+
+	tc.states[jarvis] = workflow.ParticipantState{Current: &workflow.CurrentMessage{MessageID: 6, Turn: "m6.jarvis", UserID: "u-bob"}, Background: []string{}}
+	if w := call(t, h, http.MethodPost, stop, `{"turn":"m4.jarvis"}`, bob); w.Code != http.StatusConflict {
+		t.Errorf("a turn over: %d", w.Code)
+	}
+	if w := call(t, h, http.MethodPost, stop, "", bob); w.Code != http.StatusAccepted {
+		t.Errorf("bob stopping his turn: %d %s", w.Code, w.Body)
+	}
+	if w := call(t, h, http.MethodPost, clear, "", alice); w.Code != http.StatusAccepted {
+		t.Errorf("alice clearing: %d", w.Code)
+	}
+	if fmt.Sprint(tc.signals) != "[{m6.jarvis} <nil>]" {
+		t.Errorf("signalled %v", tc.signals)
 	}
 }

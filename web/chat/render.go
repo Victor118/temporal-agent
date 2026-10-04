@@ -70,6 +70,9 @@ type Page struct {
 	AgentOnMention bool // a plain message does not call the agent
 	Parent         *ParentInfo
 	IsCreator      bool
+	// Participants is the Agents panel: where each agent of the session
+	// stands, and what the viewer may stop.
+	Participants AgentsPanel
 	// Report is the fork's report to its parent; nil for a session that is
 	// not a fork.
 	Report *ReportView
@@ -346,8 +349,8 @@ func RenderFragment(w http.ResponseWriter, name string, p *Page, have string) {
 }
 
 // reloaded are the fragments a session's page reloads on its own: the
-// thread, the tree, a fork's report section.
-var reloaded = []string{"thread", "tree-items", "report"}
+// thread, the tree, a fork's report section, the Agents panel.
+var reloaded = []string{"thread", "tree-items", "report", "agents"}
 
 // RenderPage writes a whole page, its fragments carrying the versions their
 // reloads would get: the first reload of an unchanged one swaps nothing.
@@ -358,7 +361,7 @@ func RenderPage(w http.ResponseWriter, name string, p *Page) {
 	fragment := p.Fragment
 	p.Rendered = map[string]template.HTML{}
 	for _, f := range reloaded {
-		if f == "thread" && (p.Node == nil || p.View == "map") || f == "report" && p.Report == nil {
+		if f == "thread" && (p.Node == nil || p.View == "map") || f == "report" && p.Report == nil || f == "agents" && p.Node == nil {
 			continue
 		}
 		p.Fragment = f == "thread" // as its reload renders it, the composer along
@@ -384,6 +387,8 @@ func reloadOn(pane string) (string, error) {
 		events = session.ThreadEvents
 	case "report":
 		events = session.ReportEvents
+	case "agents":
+		events = session.AgentsEvents
 	case "tree":
 		events = []string{session.EventTreeChanged}
 	default:

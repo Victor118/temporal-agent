@@ -217,6 +217,12 @@ button, input, textarea, select { font-family: inherit; font-size: inherit; colo
 .card .meta { font-family: var(--mono); font-size: 11px; color: var(--muted); display: flex; flex-direction: column; gap: 5px; }
 .card select { margin-top: 8px; }
 .inherited { border-left: 2px solid var(--line); padding-left: 11px; }
+.agent-rows { display: flex; flex-direction: column; gap: 12px; }
+.agent-row-head { display: flex; align-items: center; gap: 7px; font-size: 13px; }
+.agent-row-head .ttl { font-weight: 600; }
+.agent-row-head .agent-meta { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.agent-row .note { margin-left: 14px; }
+.agent-actions { display: flex; gap: 8px; margin: 6px 0 0 14px; }
 .rail-actions { display: flex; flex-direction: column; gap: 8px; }
 .error { font-size: 12px; color: var(--danger); margin-top: 6px; }
 

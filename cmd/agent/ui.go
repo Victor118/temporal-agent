@@ -165,21 +165,14 @@ func (u *ui) buildPage(ctx context.Context, me *store.User, sessionID, view stri
 
 	// Every agent can be called in a session: the rail lists their mentions,
 	// and the thread signs each answer with its agent as it is now.
-	agents, err := u.store.ListAgents(ctx)
+	directory, err := u.agentDirectory(ctx, &sess)
 	if err != nil {
 		return nil, err
 	}
-	directory := chat.AgentDirectory{ByID: make(map[string]chat.AgentInfo, len(agents))}
-	for _, a := range agents {
-		info := chat.AgentInfo{ID: a.ID, Name: cmp.Or(a.Name, a.ID), Mention: a.MentionName(), Description: a.Description}
-		directory.ByID[a.ID] = info
-		p.Agents = append(p.Agents, info)
-	}
-	p.Agent = chat.AgentInfo{ID: sess.AgentID, Name: sess.AgentID, Mention: sess.AgentID}
-	if a, ok := directory.ByID[sess.AgentID]; ok {
-		p.Agent = a
-	}
-	directory.Session = p.Agent
+	p.Agents, p.Agent = directory.List, directory.Session
+	// Where each agent stands, and what the viewer may stop: the Agents
+	// panel, in the rail of both views.
+	p.Participants = u.agentsPanel(ctx, me, &sess, directory)
 
 	// The conversation is loaded once: the thread shows it, and a fork's
 	// next report is read from it (its summary's state is on its row).
@@ -233,16 +226,59 @@ func (u *ui) buildPage(ctx context.Context, me *store.User, sessionID, view stri
 		p.Thread = chat.MarkReported(p.Thread, sess, p.Report.Refused == nil)
 	}
 	p.LastMessageID = chat.LastMessageID(p.Thread)
-	// Who works: the participants at work, several at once, each under its
-	// agent's name as it is now, and what its turn waits for when its
-	// workflow said (a coding run waiting for a free worker). A fork's
-	// summary workflow is no participant.
+	// Who works: the participants at work, several at once, as the Agents
+	// panel shows them. A fork's summary workflow is no participant.
 	if !p.SummaryPending {
-		for _, w := range u.sessions.WorkingAgents(ctx, sessionID) {
-			p.Working = append(p.Working, chat.WorkingAgent{Name: cmp.Or(directory.ByID[w.AgentID].Name, w.Name, w.AgentID), Note: w.Note})
-		}
+		p.Working = p.Participants.Working()
 	}
 	return p, nil
+}
+
+// agentDirectory names the agents of the installation as they are now, and
+// the session's.
+func (u *ui) agentDirectory(ctx context.Context, sess *store.Session) (chat.AgentDirectory, error) {
+	agents, err := u.store.ListAgents(ctx)
+	if err != nil {
+		return chat.AgentDirectory{}, err
+	}
+	directory := chat.AgentDirectory{ByID: make(map[string]chat.AgentInfo, len(agents))}
+	for _, a := range agents {
+		info := chat.AgentInfo{ID: a.ID, Name: cmp.Or(a.Name, a.ID), Mention: a.MentionName(), Description: a.Description}
+		directory.ByID[a.ID] = info
+		directory.List = append(directory.List, info)
+	}
+	directory.Session = chat.AgentInfo{ID: sess.AgentID, Name: sess.AgentID, Mention: sess.AgentID}
+	if a, ok := directory.ByID[sess.AgentID]; ok {
+		directory.Session = a
+	}
+	return directory, nil
+}
+
+// agentsPanel is the Agents panel of a session, for me.
+func (u *ui) agentsPanel(ctx context.Context, me *store.User, sess *store.Session, directory chat.AgentDirectory) chat.AgentsPanel {
+	return chat.BuildAgents(u.sessions.Participants(ctx, sess.SessionID), *sess, me.ID, directory)
+}
+
+// renderAgents renders the Agents panel alone: its reload, and the answer
+// to its buttons, with why a stop did not go (failed). It reads what the
+// panel shows, not the whole page.
+func (u *ui) renderAgents(w http.ResponseWriter, r *http.Request, failed string) {
+	ctx := r.Context()
+	sess, err := u.sessions.Get(ctx, chi.URLParam(r, "id"))
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	directory, err := u.agentDirectory(ctx, sess)
+	if err != nil {
+		log.Printf("ui: agents of %s: %v", sess.SessionID, err)
+		http.Error(w, "Internal error", http.StatusInternalServerError)
+		return
+	}
+	p := &chat.Page{Node: &chat.TreeNode{Session: *sess}}
+	p.Participants = u.agentsPanel(ctx, auth.UserFrom(ctx), sess, directory)
+	p.Participants.Error = failed
+	chat.RenderFragment(w, "agents", p, r.Header.Get(chat.VersionHeader))
 }
 
 // renderPage renders a page or one of its fragments, or the error that kept
@@ -521,7 +557,7 @@ func (u *ui) answerForm(w http.ResponseWriter, r *http.Request) {
 
 // cancelForm stops the turns running that the user may stop: all of them
 // for the session's creator, those answering their messages for another
-// member.
+// member (the button shows only when there is one).
 func (u *ui) cancelForm(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "id")
 	sess, err := u.sessions.Get(r.Context(), sessionID)
@@ -542,6 +578,51 @@ func (u *ui) cancelForm(w http.ResponseWriter, r *http.Request) {
 
 // stopRefusedText is why a member may not stop a turn.
 const stopRefusedText = "Seul l'auteur du message en cours, ou le créateur de la session, peut arrêter ce tour."
+
+// agentsFragment is the Agents panel, reloaded on the session's events.
+func (u *ui) agentsFragment(w http.ResponseWriter, r *http.Request) {
+	u.renderAgents(w, r, "")
+}
+
+// stopForm stops a participant's turn, the one its row showed (turn), and
+// answers with the panel. The rights are checked again at the click, on the
+// turn the participant runs now.
+func (u *ui) stopForm(w http.ResponseWriter, r *http.Request) {
+	sess, err := u.sessions.Get(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	err = u.sessions.StopTurn(r.Context(), sess, chi.URLParam(r, "agent"), r.FormValue("turn"), auth.UserFrom(r.Context()))
+	u.renderAgents(w, r, u.stopFailure(sess.SessionID, err))
+}
+
+// clearForm stops a participant's turn and drops its queue, by the
+// session's creator, and answers with the panel.
+func (u *ui) clearForm(w http.ResponseWriter, r *http.Request) {
+	sess, err := u.sessions.Get(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	err = u.sessions.Clear(r.Context(), sess, chi.URLParam(r, "agent"), auth.UserFrom(r.Context()))
+	u.renderAgents(w, r, u.stopFailure(sess.SessionID, err))
+}
+
+// stopFailure is why a stop did not go, in words; "" when it went, or had
+// nothing left to stop (the panel shows it).
+func (u *ui) stopFailure(sessionID string, err error) string {
+	switch {
+	case err == nil, errors.Is(err, session.ErrNothingToStop), errors.Is(err, session.ErrTurnOver):
+		return ""
+	case errors.Is(err, session.ErrStopNotAllowed):
+		return stopRefusedText
+	case errors.Is(err, session.ErrClearNotAllowed):
+		return "Seul le créateur de la session peut vider la file d'un agent."
+	}
+	log.Printf("ui: stop in %s: %v", sessionID, err)
+	return "L'arrêt n'a pas pu être envoyé."
+}
 
 // --- Notifications ---
 

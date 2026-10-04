@@ -29,8 +29,12 @@ func testPage(view string) *Page {
 		IsCreator:      true,
 		Notifications:  2,
 		Working:        []WorkingAgent{{Name: "Jarvis"}},
-		LastMessageID:  9,
-		Error:          "boom",
+		Participants: AgentsPanel{CanStop: true, Rows: []AgentRow{
+			{Participant: "default", Agent: AgentInfo{ID: "default", Name: "Default Agent", Mention: "jarvis"}, Working: true, Turn: "m2.default", Author: "Bob", CanStop: true, CanClear: true, Queued: 1},
+			{Participant: "smith", Agent: smith},
+		}},
+		LastMessageID: 9,
+		Error:         "boom",
 	}
 	p.Thread = BuildThread([]store.MessageWithID{
 		{ID: 1, Message: store.Message{Role: store.RoleUser, Kind: store.KindForkSummary, Content: j("brief")}},
@@ -375,7 +379,7 @@ func TestRender_FragmentVersions(t *testing.T) {
 	p.Report = &ReportView{ReportState: session.ReportState{ParentSessionID: "root"}}
 	page := httptest.NewRecorder()
 	RenderPage(page, "page", p)
-	for _, name := range []string{"thread", "tree-items", "report"} {
+	for _, name := range []string{"thread", "tree-items", "report", "agents"} {
 		v := p.Versions[name]
 		if len(v) != 24 || !strings.Contains(page.Body.String(), `data-version="`+v+`"`) {
 			t.Errorf("%s: version %q not on the page", name, v)
@@ -393,7 +397,7 @@ func TestRender_FragmentVersions(t *testing.T) {
 	}
 
 	// The page shows each fragment as it was rendered for its version, once.
-	for name, id := range map[string]string{"thread": `id="thread-inner"`, "tree-items": `class="tree-items"`, "report": `class="report-inner"`} {
+	for name, id := range map[string]string{"thread": `id="thread-inner"`, "tree-items": `class="tree-items"`, "report": `class="report-inner"`, "agents": `class="agents-inner"`} {
 		got := string(p.Rendered[name])
 		if got == "" || !strings.Contains(page.Body.String(), got) || strings.Count(page.Body.String(), id) != 1 {
 			t.Errorf("%s: not shown once as rendered for its version", name)
@@ -442,6 +446,40 @@ func TestRender_WorkingLineNamesTheAgents(t *testing.T) {
 	}
 }
 
+// The Agents panel: a row per participant, its stop naming the turn it
+// shows, Tout arrêter asking first; no button the viewer may not use. The
+// thread's Arrêter shows only to who may stop a turn.
+func TestRender_AgentsPanel(t *testing.T) {
+	p := testPage("thread")
+	p.Participants.Error = "<refusé>"
+	page := render(t, "page", p)
+	for _, want := range []string{
+		`id="agents" hx-get="/s/fork/agents"`,
+		`hx-trigger="` + mustReloadOn(t, "agents") + `"`,
+		`id="agent-default"`, `id="agent-smith"`,
+		`hx-post="/s/fork/participants/default/stop"`, `name="turn" value="m2.default"`,
+		`hx-post="/s/fork/participants/default/clear"`, `hx-confirm="Arrêter Default Agent et jeter 1 message de sa file, ceux des autres membres compris ?"`,
+		"Répond à Bob", "1 message en file", "&lt;refusé&gt;",
+		`hx-post="/s/fork/cancel"`,
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("page lacks %s", want)
+		}
+	}
+	if strings.Contains(page, "participants/smith/") {
+		t.Error("a button on an idle agent")
+	}
+
+	p.Participants.Rows[0].CanClear, p.Participants.Rows[0].CanStop, p.Participants.CanStop = false, false, false
+	page = render(t, "page", p)
+	if strings.Contains(page, "/participants/") || strings.Contains(page, "/cancel") {
+		t.Error("buttons the viewer may not use")
+	}
+	if !strings.Contains(page, "travaille…") {
+		t.Error("the working line went with the button")
+	}
+}
+
 func mustReloadOn(t *testing.T, pane string) string {
 	t.Helper()
 	got, err := reloadOn(pane)
@@ -469,6 +507,15 @@ func TestReloadOn(t *testing.T) {
 	}
 	if report := mustReloadOn(t, "report"); strings.Contains(report, "sse:tool_calls") || strings.Contains(report, "sse:notice") || !strings.Contains(report, "sse:fork_reported,") {
 		t.Errorf("report: %s", report)
+	}
+	agents := mustReloadOn(t, "agents")
+	for _, ev := range []string{"turn_started", "turn_done", "ask_user", session.EventUserMessage, "notice", "reload"} {
+		if !strings.Contains(agents, "sse:"+ev+",") {
+			t.Errorf("the Agents panel does not reload on %s: %s", ev, agents)
+		}
+	}
+	if strings.Contains(agents, "sse:tool_calls") || strings.Contains(agents, "sse:message,") {
+		t.Errorf("agents: %s", agents)
 	}
 	if tree := mustReloadOn(t, "tree"); tree != "sse:changed, sse:reload, every 60s" {
 		t.Errorf("tree: %s", tree)
