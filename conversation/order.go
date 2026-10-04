@@ -3,89 +3,76 @@ package conversation
 import (
 	"cmp"
 	"slices"
-	"sort"
 
 	"github.com/victor/temporal-agent/store"
 )
 
-// Order puts the turns answering one message together, and a message someone
-// stored while they ran after them, the rest in the order of their IDs.
-// People write to a shared session while agents work; read where it was
-// stored, such a message would sit before the turns' answer, or between a tool
-// call and its result, which the LLM API rejects, or between an agent's
-// results and its answer; and the next turn, the one answering it, would end
-// on that answer, which the API reads as a start to continue.
+// Order puts each turn, as one block, right after the message it answers,
+// its anchor (store.TurnAnchor): after the last message no turn wrote whose
+// ID is not above the anchor. The turns of one anchor (a relay) come in the
+// order of their first message, and the messages no turn wrote in the order
+// of their IDs.
 //
-// The turns of a message ran from their snapshot (store.TurnSnapshot) to
-// their last message: what someone else stored in between was written while
-// they ran. A group named without a snapshot runs from its first message.
+// Participants answer in parallel: Jarvis answers message 10 with IDs 11 to
+// 40 while Smith answers message 12 with IDs 13 to 20. Read by ID, Smith's
+// answer would sit inside Jarvis's turn, and message 12 between Jarvis's
+// call and its result, which the LLM API rejects. Placed by anchor, each
+// turn follows its question and stays whole: a tool call keeps its result
+// next to it, since a turn stores a call with its results.
 //
-// A tool call and its results are always written by one turn (a turn never
-// stores a call without its results), so no message can come between them
-// once each group of turns is in one piece.
+// The reading turn comes last: its anchor is the last message no turn wrote
+// that it reads (store.TurnReads), and a turn of another participant
+// anchored there has not ended, so it is not read. The conversation never
+// ends on another participant's answer. With one turn at a time, this is
+// the order of the IDs with each message stored during a turn released
+// after it, as it was when a session answered its messages one by one.
 func Order(messages []store.MessageWithID) []store.MessageWithID {
-	// span is a group's IDs: what lies strictly between was written meanwhile.
-	type span struct{ from, to int64 }
-	spans := map[string]*span{}
+	type block struct {
+		anchor, first int64
+		msgs          []store.MessageWithID
+	}
+	byTurn := map[string]*block{}
+	var blocks []*block
+	var plain []store.MessageWithID
 	for _, m := range messages {
-		g, ok := group(m)
+		turn, ok := store.TurnOf(m.Key)
 		if !ok {
+			plain = append(plain, m)
 			continue
 		}
-		s := spans[g]
-		if s == nil {
-			s = &span{from: m.ID - 1}
-			if upTo, ok := store.TurnSnapshot(g); ok {
-				s.from = upTo
-			}
-			spans[g] = s
+		b := byTurn[turn]
+		if b == nil {
+			anchor, _ := store.TurnAnchor(turn) // a turn always has one
+			b = &block{anchor: anchor, first: m.ID}
+			byTurn[turn] = b
+			blocks = append(blocks, b)
 		}
-		s.to = m.ID
+		b.first = min(b.first, m.ID)
+		b.msgs = append(b.msgs, m)
 	}
+	byID := func(a, b store.MessageWithID) int { return cmp.Compare(a.ID, b.ID) }
+	slices.SortStableFunc(plain, byID)
+	slices.SortStableFunc(blocks, func(a, b *block) int {
+		return cmp.Or(cmp.Compare(a.anchor, b.anchor), cmp.Compare(a.first, b.first))
+	})
 
-	// By start, with the furthest end among those starting at or before each:
-	// a message falls in a span when one starting before it ends after it,
-	// and is released after the furthest such end.
-	sorted := make([]span, 0, len(spans))
-	for _, s := range spans {
-		sorted = append(sorted, *s)
-	}
-	slices.SortFunc(sorted, func(a, b span) int { return cmp.Compare(a.from, b.from) })
-	furthest := make([]int64, len(sorted))
-	for i, s := range sorted {
-		furthest[i] = s.to
-		if i > 0 {
-			furthest[i] = max(furthest[i], furthest[i-1])
-		}
-	}
-	releasedAfter := func(id int64) int64 {
-		n := sort.Search(len(sorted), func(i int) bool { return sorted[i].from >= id })
-		if n > 0 && furthest[n-1] > id {
-			return furthest[n-1]
-		}
-		return 0
-	}
-
-	release := map[int64][]store.MessageWithID{}
 	out := make([]store.MessageWithID, 0, len(messages))
-	for _, m := range messages {
-		if _, ok := group(m); !ok {
-			if after := releasedAfter(m.ID); after > 0 {
-				release[after] = append(release[after], m)
-				continue
-			}
+	next := 0
+	for _, p := range plain {
+		// The blocks anchored before p follow the message before it.
+		for ; next < len(blocks) && blocks[next].anchor < p.ID; next++ {
+			out = append(out, sortedBlock(blocks[next].msgs, byID)...)
 		}
-		out = append(out, m)
-		out = append(out, release[m.ID]...)
+		out = append(out, p)
+	}
+	for ; next < len(blocks); next++ {
+		out = append(out, sortedBlock(blocks[next].msgs, byID)...)
 	}
 	return out
 }
 
-// group returns the group of turns that wrote m; false when no turn did.
-func group(m store.MessageWithID) (string, bool) {
-	turn, ok := store.TurnOf(m.Key)
-	if !ok {
-		return "", false
-	}
-	return store.TurnGroup(turn), true
+// sortedBlock is a turn's messages in the order it wrote them.
+func sortedBlock(msgs []store.MessageWithID, byID func(a, b store.MessageWithID) int) []store.MessageWithID {
+	slices.SortStableFunc(msgs, byID)
+	return msgs
 }

@@ -109,14 +109,14 @@ func TestConvert_OtherAgentsToolsAsText(t *testing.T) {
 	}
 	var s stored
 	s.add("", store.Message{Role: store.RoleUser, Content: `"@jarvis cherche, @smith juge"`, Author: "Alice"}).
-		add("r-1.0", store.Message{Role: store.RoleAssistant, Content: `"je cherche"`, AgentID: "jarvis", Author: "Jarvis", ToolCalls: []store.ToolCall{
+		add("m1.jarvis", store.Message{Role: store.RoleAssistant, Content: `"je cherche"`, AgentID: "jarvis", Author: "Jarvis", ToolCalls: []store.ToolCall{
 			{ID: "t1", Name: "web_search", Input: json.RawMessage(`{"q":"temporal"}`)},
 			{ID: "t2", Name: "save_user_memory", Input: json.RawMessage(`{"content":"Alice's secret"}`)},
 		}}).
-		add("r-1.0", store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "t1", Content: "found " + strings.Repeat("x", 3000)}}).
+		add("m1.jarvis", store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "t1", Content: "found " + strings.Repeat("x", 3000)}}).
 		add("", store.Message{Role: store.RoleUser, Content: `"meanwhile"`, Author: "Bob"}).
-		add("r-1.0", store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "t2", Content: "Current version: Alice's other secret", IsError: true}}).
-		add("r-1.0", store.Message{Role: store.RoleAssistant, Content: `"voici"`, AgentID: "jarvis", Author: "Jarvis"})
+		add("m1.jarvis", store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "t2", Content: "Current version: Alice's other secret", IsError: true}}).
+		add("m1.jarvis", store.Message{Role: store.RoleAssistant, Content: `"voici"`, AgentID: "jarvis", Author: "Jarvis"})
 	msgs := s.read(view)
 
 	if len(msgs) != 1 || msgs[0].Role != "user" {
@@ -155,14 +155,14 @@ func TestConvert_KeepsItsOwnToolPairing(t *testing.T) {
 	view := View{Self: "smith", Agents: map[string]Label{"jarvis": {Name: "Jarvis", Mention: "jarvis"}}}
 	var s stored
 	s.add("", store.Message{Role: store.RoleUser, Content: `"@smith lis le dépôt"`, Author: "Alice"}).
-		add("r-1.0", store.Message{Role: store.RoleAssistant, AgentID: "smith", ToolCalls: []store.ToolCall{{ID: "s1", Name: "read_file"}}}).
+		add("m1.smith", store.Message{Role: store.RoleAssistant, AgentID: "smith", ToolCalls: []store.ToolCall{{ID: "s1", Name: "read_file"}}}).
 		add("", store.Message{Role: store.RoleUser, Content: `"meanwhile"`, Author: "Bob"}).
-		add("r-1.0", store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "s1", Content: "main.go"}}).
-		add("r-1.0", store.Message{Role: store.RoleAssistant, Content: `"lu"`, AgentID: "smith"}).
+		add("m1.smith", store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "s1", Content: "main.go"}}).
+		add("m1.smith", store.Message{Role: store.RoleAssistant, Content: `"lu"`, AgentID: "smith"}).
 		add("", store.Message{Role: store.RoleUser, Content: `"@jarvis cherche, @smith juge"`, Author: "Alice"}).
-		add("r-3.0", store.Message{Role: store.RoleAssistant, AgentID: "jarvis", ToolCalls: []store.ToolCall{{ID: "j1", Name: "web_search"}}}).
-		add("r-3.0", store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "j1", Content: "found"}}).
-		add("r-3.0", store.Message{Role: store.RoleAssistant, Content: `"voici"`, AgentID: "jarvis"})
+		add("m6.jarvis", store.Message{Role: store.RoleAssistant, AgentID: "jarvis", ToolCalls: []store.ToolCall{{ID: "j1", Name: "web_search"}}}).
+		add("m6.jarvis", store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "j1", Content: "found"}}).
+		add("m6.jarvis", store.Message{Role: store.RoleAssistant, Content: `"voici"`, AgentID: "jarvis"})
 	msgs := s.read(view)
 
 	want := []struct{ role, content, call, result string }{
@@ -199,13 +199,13 @@ func TestConvert_OwnTurnsForAnotherUserHidePrivateCalls(t *testing.T) {
 	private := tool.PrivateSet{"save_user_memory": true}
 	var s stored
 	s.add("", store.Message{Role: store.RoleUser, Content: `"je bois du thé"`, UserID: "u-alice", Author: "Alice"}).
-		add("r-1.0", store.Message{Role: store.RoleAssistant, AgentID: "smith", UserID: "u-alice", ToolCalls: []store.ToolCall{
+		add("m1.smith", store.Message{Role: store.RoleAssistant, AgentID: "smith", UserID: "u-alice", ToolCalls: []store.ToolCall{
 			{ID: "s1", Name: "save_user_memory", Input: json.RawMessage(`{"content":"Alice's secret"}`)},
 			{ID: "s2", Name: "web_search", Input: json.RawMessage(`{"q":"thé"}`)},
 		}}).
-		add("r-1.0", store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "s1", Content: "Alice's other secret", IsError: true}}).
-		add("r-1.0", store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "s2", Content: "found"}}).
-		add("r-1.0", store.Message{Role: store.RoleAssistant, Content: `"noté"`, AgentID: "smith", UserID: "u-alice"}).
+		add("m1.smith", store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "s1", Content: "Alice's other secret", IsError: true}}).
+		add("m1.smith", store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "s2", Content: "found"}}).
+		add("m1.smith", store.Message{Role: store.RoleAssistant, Content: `"noté"`, AgentID: "smith", UserID: "u-alice"}).
 		add("", store.Message{Role: store.RoleUser, Content: `"que sais-tu d'Alice ?"`, UserID: "u-bob", Author: "Bob"})
 
 	// pairing checks the agent's own turn: one call message, then the result
@@ -240,7 +240,7 @@ func TestConvert_OwnTurnsForAnotherUserHidePrivateCalls(t *testing.T) {
 		var old stored
 		for _, m := range s.msgs {
 			m.Message.UserID = map[store.Role]string{store.RoleUser: m.UserID}[m.Role]
-			old.add(map[bool]string{true: "r-1.0"}[m.Role != store.RoleUser], m.Message)
+			old.add(map[bool]string{true: "m1.smith"}[m.Role != store.RoleUser], m.Message)
 		}
 		pairing(t, old.read(View{Self: "smith", User: "u-bob", Private: private}), `{"content":"Alice's secret"}`, "Alice's other secret")
 	})
@@ -290,13 +290,14 @@ func TestConvert_ResultWithoutItsCallIsPrivate(t *testing.T) {
 	}
 }
 
-// Why a turn failed is for the members: the model never sees it, or it would
-// answer the error instead of the user. The two user messages around it are
-// read as one.
-func TestConvert_SkipsTurnErrors(t *testing.T) {
+// A turn's end is for the members and the participants: the model never
+// sees it, with an error (it would answer the error instead of the user) or
+// without. The user messages around it are read as one.
+func TestConvert_SkipsTurnEnds(t *testing.T) {
 	msgs := Convert([]store.Message{
 		{Role: store.RoleUser, Content: `"analyse the repo"`},
-		{Role: store.RoleAssistant, Kind: store.KindTurnError, Content: `"call LLM: credit balance is too low"`},
+		store.TurnEnd("default", "call LLM: credit balance is too low"),
+		store.TurnEnd("smith", ""),
 		{Role: store.RoleUser, Content: `"try again"`},
 	}, View{Self: "default"})
 	if len(msgs) != 1 || textOf(msgs[0]) != "analyse the repo\n\ntry again" {

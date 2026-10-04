@@ -285,9 +285,13 @@ func BuildThread(msgs []store.MessageWithID, viewerID string, forks map[int64][]
 		case m.Kind == store.KindForkSummary:
 			closeAgent()
 			items = append(items, ThreadItem{Kind: ItemBrief, ID: m.ID, Time: m.CreatedAt, HTML: Markdown(text(m.Content))})
-		case m.Kind == store.KindTurnError:
+		case m.Kind == store.KindTurnEnd:
+			// A turn's end shows only when it says why the turn failed; it
+			// still closes the turn's item.
 			closeAgent()
-			items = append(items, ThreadItem{Kind: ItemError, ID: m.ID, Time: m.CreatedAt, Text: text(m.Content), Agent: agents.Signer(m.Message)})
+			if reason := store.TurnEndError(m.Message); reason != "" {
+				items = append(items, ThreadItem{Kind: ItemError, ID: m.ID, Time: m.CreatedAt, Text: reason, Agent: agents.Signer(m.Message)})
+			}
 		case m.Kind == store.KindForkReport:
 			closeAgent()
 			items = append(items, ThreadItem{

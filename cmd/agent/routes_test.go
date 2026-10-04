@@ -544,11 +544,13 @@ func TestRoutes_HistoryHidesPrivateInputs(t *testing.T) {
 	}
 }
 
-// Why a turn failed is listed as such, not as an answer of the agent.
+// Why a turn failed is listed as such, not as an answer of the agent; the
+// end of a turn that did not fail is not listed.
 func TestRoutes_HistoryListsATurnErrorApart(t *testing.T) {
 	h, st := newRouteTest(t)
 	st.messages = map[string][]store.MessageWithID{"s1": {
-		{ID: 1, Message: store.Message{Role: store.RoleAssistant, Kind: store.KindTurnError, Content: `"call LLM: credit balance is too low"`}},
+		{ID: 1, Message: store.TurnEnd("default", "call LLM: credit balance is too low")},
+		{ID: 2, Message: store.TurnEnd("default", "")},
 	}}
 	bob := logIn(t, h, "bob@example.com")
 	w := call(t, h, http.MethodGet, "/sessions/s1/history", "", bob)

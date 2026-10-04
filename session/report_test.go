@@ -82,7 +82,7 @@ func TestReportToParent_Refusals(t *testing.T) {
 		}, ErrSummaryPending},
 		"nothing new": {func(st *memStore, _ *fakeTemporal) {
 			st.session.LastReportedMessageID = 3
-			st.messages = append(st.messages, store.MessageWithID{ID: 4, Message: store.Message{Role: store.RoleAssistant, Kind: store.KindTurnError, Content: `"boom"`}})
+			st.messages = append(st.messages, store.MessageWithID{ID: 4, Message: store.Message{Role: store.RoleAssistant, Kind: store.KindTurnEnd, Content: `"boom"`}})
 		}, ErrNothingToReport},
 		"only the brief": {func(st *memStore, _ *fakeTemporal) { st.messages = st.messages[:1] }, ErrNothingToReport},
 		// The summary would find nothing in it either (activity.Reportable).
@@ -206,8 +206,8 @@ func TestReportToParent_StopsBeforeAPendingToolCall(t *testing.T) {
 	st := forkStore()
 	st.messages = append(st.messages,
 		human(4, "fetch the spec"),
-		call(5, "t2.0:0", "c1", "c2"),
-		result(6, "t2.0:1", "c1"),
+		call(5, "m4.default:0", "c1", "c2"),
+		result(6, "m4.default:1", "c1"),
 		human(7, "and the changelog"), // a member writes during the turn
 	)
 	if got, err := upTo(st); err != nil || got != 4 {
@@ -221,7 +221,7 @@ func TestReportToParent_StopsBeforeAPendingToolCall(t *testing.T) {
 	st.session.LastReportedMessageID = 0
 
 	// The result is in: the whole turn, and the message after it.
-	st.messages = append(st.messages, result(8, "t2.0:2", "c2"))
+	st.messages = append(st.messages, result(8, "m4.default:2", "c2"))
 	if got, err := upTo(st); err != nil || got != 8 {
 		t.Errorf("turn answered: up to %d, %v; want 8", got, err)
 	}
@@ -229,9 +229,9 @@ func TestReportToParent_StopsBeforeAPendingToolCall(t *testing.T) {
 	// An earlier turn left c0 unanswered: it is over, nothing waits on it.
 	st = forkStore()
 	st.messages = append(st.messages,
-		call(4, "t1.0:0", "c0"),
+		call(4, "m3.default:0", "c0"),
 		human(5, "go on"),
-		store.MessageWithID{ID: 6, Key: "t2.0:0", Message: store.Message{Role: store.RoleAssistant, Content: `"done"`}},
+		store.MessageWithID{ID: 6, Key: "m5.default:0", Message: store.Message{Role: store.RoleAssistant, Content: `"done"`}},
 	)
 	if got, err := upTo(st); err != nil || got != 6 {
 		t.Errorf("an old unanswered call: up to %d, %v; want 6", got, err)
@@ -278,8 +278,8 @@ func TestReportToParent_DuringATurn(t *testing.T) {
 	st := forkStore()
 	st.messages = append(st.messages,
 		store.MessageWithID{ID: 4, Key: store.HumanMessageKey("h4"), Message: store.Message{Role: store.RoleUser, Content: `"fetch the spec"`}},
-		store.MessageWithID{ID: 5, Key: "t2.0:0", Message: store.Message{Role: store.RoleAssistant, ToolCalls: []store.ToolCall{{ID: "c1", Name: "web_fetch"}}}},
-		store.MessageWithID{ID: 6, Key: "t2.0:1", Message: store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "c1", Content: "spec"}}},
+		store.MessageWithID{ID: 5, Key: "m4.default:0", Message: store.Message{Role: store.RoleAssistant, ToolCalls: []store.ToolCall{{ID: "c1", Name: "web_fetch"}}}},
+		store.MessageWithID{ID: 6, Key: "m4.default:1", Message: store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "c1", Content: "spec"}}},
 	)
 	working := func() *fakeTemporal {
 		return &fakeTemporal{byType: map[string][]string{"AgentWorkflow": {sid + "-turn-2"}}}
@@ -294,7 +294,7 @@ func TestReportToParent_DuringATurn(t *testing.T) {
 
 	// Posted; the turn goes on, and ends.
 	st.session.LastReportedMessageID = 6
-	st.messages = append(st.messages, store.MessageWithID{ID: 7, Key: "t2.0:2", Message: store.Message{Role: store.RoleAssistant, Content: `"the spec says CSV"`}})
+	st.messages = append(st.messages, store.MessageWithID{ID: 7, Key: "m4.default:2", Message: store.Message{Role: store.RoleAssistant, Content: `"the spec says CSV"`}})
 	tc = working()
 	if err := newTest(st, tc).ReportToParent(context.Background(), sid, victor); err != nil {
 		t.Fatalf("next report: %v", err)

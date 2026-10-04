@@ -47,10 +47,11 @@ func (s *memConversation) add(key string, m store.Message) int64 {
 	return id
 }
 
-func (s *memConversation) LoadConversation(_ context.Context, _ string, upTo int64, turnKeys []string) ([]store.MessageWithID, error) {
+func (s *memConversation) LoadConversation(_ context.Context, _ string, scope store.TurnScope) ([]store.MessageWithID, error) {
+	ends := store.TurnEndIDs(s.messages)
 	var out []store.MessageWithID
 	for _, m := range s.messages {
-		if store.TurnReads(m.ID, m.Key, upTo, turnKeys) {
+		if store.TurnReads(m.ID, m.Key, scope, ends) {
 			out = append(out, m)
 		}
 	}
@@ -132,15 +133,14 @@ func TestCallLLM_TranslatesTheRetry(t *testing.T) {
 	}
 }
 
-// A turn reads the session as it was when its message started, the turns
-// that answered it before, and its own messages: a person's message written
-// meanwhile is not read, it is the next one to answer.
+// A turn reads the session up to the message it answers, the turns that
+// answered it before (a relay), and its own messages: a person's message
+// written meanwhile is not read, it is the next one to answer.
 func TestCallLLM_ReadsTheTurnFromItsSnapshot(t *testing.T) {
 	st := &memConversation{}
 	st.add(store.HumanMessageKey("old"), store.Message{Role: store.RoleUser, Content: text("earlier")})
 	upTo := st.add(store.HumanMessageKey("q"), store.Message{Role: store.RoleUser, Content: text("@jarvis cherche, @smith juge"), Author: "Alice"})
-	group := store.TurnGroupKey("run-1", upTo)
-	jarvis, smith := store.TurnKey(group, 0), store.TurnKey(group, 1)
+	jarvis, smith := store.TurnKey(upTo, "jarvis"), store.TurnKey(upTo, "smith")
 	st.add(store.TurnMessageKey(jarvis, 0), store.Message{Role: store.RoleAssistant, Content: text("trouvé"), AgentID: "jarvis", Author: "Jarvis"})
 	st.add(store.HumanMessageKey("m"), store.Message{Role: store.RoleUser, Content: text("meanwhile"), Author: "Bob"})
 	st.add(store.TurnMessageKey(smith, 0), store.Message{Role: store.RoleAssistant, AgentID: "smith", ToolCalls: []store.ToolCall{{ID: "t1", Name: "web_fetch"}}})
@@ -148,7 +148,7 @@ func TestCallLLM_ReadsTheTurnFromItsSnapshot(t *testing.T) {
 
 	model := &recordingModel{}
 	_, err := newLLM(model, st).CallLLM(context.Background(), LLMTurnRequest{AgentID: "smith", History: &TurnHistory{
-		SessionID: "s1", UpTo: upTo, EarlierTurns: []string{jarvis}, TurnKey: smith,
+		SessionID: "s1", EarlierTurns: []string{jarvis}, TurnKey: smith,
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -165,7 +165,7 @@ func TestCallLLM_ReadsTheTurnFromItsSnapshot(t *testing.T) {
 func TestCallLLM_ReadsTheUnwrittenTailOnce(t *testing.T) {
 	st := &memConversation{}
 	upTo := st.add(store.HumanMessageKey("q"), store.Message{Role: store.RoleUser, Content: text("go")})
-	turn := "run-1.0"
+	turn := store.TurnKey(upTo, "default")
 	call := store.Message{Role: store.RoleAssistant, ToolCalls: []store.ToolCall{{ID: "t1", Name: "web_fetch"}}}
 	result := store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "t1", Content: "page"}}
 	answer := store.Message{Role: store.RoleAssistant, Content: text("read")}
@@ -175,7 +175,7 @@ func TestCallLLM_ReadsTheUnwrittenTailOnce(t *testing.T) {
 
 	model := &recordingModel{}
 	_, err := newLLM(model, st).CallLLM(context.Background(), LLMTurnRequest{AgentID: "default", History: &TurnHistory{
-		SessionID: "s1", UpTo: upTo, TurnKey: turn, Tail: []store.Message{result, answer}, TailStart: 1,
+		SessionID: "s1", TurnKey: turn, Tail: []store.Message{result, answer}, TailStart: 1,
 	}})
 	if err != nil {
 		t.Fatal(err)

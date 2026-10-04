@@ -292,10 +292,13 @@ func (a *api) getHistory(w http.ResponseWriter, r *http.Request) {
 			history = append(history, historyEntry{ID: msg.ID, Type: "fork_summary", Content: content})
 		case msg.Kind == store.KindForkReport:
 			history = append(history, historyEntry{ID: msg.ID, Type: "fork_report", Content: content, UserID: msg.UserID, Author: msg.Author, Fork: msg.Fork})
-		case msg.Kind == store.KindTurnError:
-			// The system's words, not the agent's: an assistant role would pass
-			// the error off as its answer.
-			history = append(history, historyEntry{ID: msg.ID, Type: "turn_error", Content: content})
+		case msg.Kind == store.KindTurnEnd:
+			// A turn's end shows only when it says why the turn failed: the
+			// system's words, not the agent's, which an assistant role would
+			// pass off as its answer.
+			if reason := store.TurnEndError(msg.Message); reason != "" {
+				history = append(history, historyEntry{ID: msg.ID, Type: "turn_error", Content: reason})
+			}
 		case msg.Role == store.RoleUser:
 			history = append(history, historyEntry{ID: msg.ID, Type: "message", Role: "user", Content: content, UserID: msg.UserID, Author: msg.Author})
 		case msg.Role == store.RoleAssistant:

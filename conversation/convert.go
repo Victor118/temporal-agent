@@ -124,8 +124,8 @@ func Convert(messages []store.Message, view View) []provider.ChatMessage {
 
 	result := make([]provider.ChatMessage, 0, len(messages))
 	for _, msg := range messages {
-		if msg.Kind == store.KindTurnError {
-			continue // for the members: the model is not told about its failures
+		if msg.Kind == store.KindTurnEnd {
+			continue // for the members and the participants: never the model's
 		}
 		if view.other(msg) {
 			result = appendUserText(result, view.otherTurn(msg))

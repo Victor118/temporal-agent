@@ -64,7 +64,7 @@ type Store interface {
 	LoadMessagesWithID(ctx context.Context, sessionID string) ([]MessageWithID, error)
 	LoadMessagesUpTo(ctx context.Context, sessionID string, lastID int64) ([]MessageWithID, error)
 	LastMessageID(ctx context.Context, sessionID string) (int64, error)
-	LoadConversation(ctx context.Context, sessionID string, upTo int64, turnKeys []string) ([]MessageWithID, error)
+	LoadConversation(ctx context.Context, sessionID string, scope TurnScope) ([]MessageWithID, error)
 	// AppendMessages appends the messages a turn produced, keyed by
 	// TurnMessageKey(turnKey, startIndex+i). Re-writing a message already stored
 	// is a no-op, so a replayed activity never duplicates or renumbers.

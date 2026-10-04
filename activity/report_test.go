@@ -23,7 +23,7 @@ var forkThread = []store.MessageWithID{
 	{ID: 5, Message: store.Message{Role: store.RoleAssistant, Content: text("switched to commas"),
 		ToolCalls: []store.ToolCall{{ID: "m1", Name: "save_user_memory", Input: json.RawMessage(`{"content":"Victor's secret"}`)}}}},
 	{ID: 6, Message: store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "m1", Content: "saved: Victor's secret"}}},
-	{ID: 7, Message: store.Message{Role: store.RoleAssistant, Kind: store.KindTurnError, Content: text("call LLM: boom")}},
+	{ID: 7, Message: store.Message{Role: store.RoleAssistant, Kind: store.KindTurnEnd, Content: text("call LLM: boom")}},
 }
 
 func sentText(t *testing.T, llm *fakeLLM) string {
@@ -168,7 +168,7 @@ func TestReportable(t *testing.T) {
 		"tool result":        {store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "c", Content: "page"}}, true},
 		"earlier report":     {store.Message{Role: store.RoleUser, Kind: store.KindForkReport, Content: text("## Fait")}, true},
 		"empty assistant":    {store.Message{Role: store.RoleAssistant}, false},
-		"turn error":         {store.Message{Role: store.RoleAssistant, Kind: store.KindTurnError, Content: text("boom")}, false},
+		"turn error":         {store.Message{Role: store.RoleAssistant, Kind: store.KindTurnEnd, Content: text("boom")}, false},
 		"the brief":          {store.Message{Role: store.RoleUser, Kind: store.KindForkSummary, Content: text("plan")}, false},
 		"a kind unknown yet": {store.Message{Role: store.RoleUser, Kind: "later", Content: text("x")}, false},
 	} {

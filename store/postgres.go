@@ -310,22 +310,54 @@ func (s *PostgresStore) LastMessageID(ctx context.Context, sessionID string) (in
 	return id, err
 }
 
-// LoadConversation returns what a turn reads of its session (TurnReads): the
-// messages up to upTo, the one it answers, then what the turns of earlier
-// messages and those of turnKeys wrote, whenever they did. A message someone
-// wrote after upTo is left out: it gets a turn of its own. The rows past upTo,
-// written since that message, are few: they are picked here rather than by
-// SQL, which would have to parse their keys. No index on msg_key: the rows up
-// to upTo are nearly all of the session's.
-func (s *PostgresStore) LoadConversation(ctx context.Context, sessionID string, upTo int64, turnKeys []string) ([]MessageWithID, error) {
-	rows, err := s.db.QueryContext(ctx,
+// LoadConversation returns what the turn of scope reads of its session
+// (TurnReads): the messages up to the one it answers, its own turn and its
+// relay's, its participant's turns anchored there, and the turns of the
+// others that ended by then. The ends are read first, the messages then, in
+// one snapshot: whether another participant's turn is read depends on its
+// end, written after its messages. No index on msg_key: the rows up to UpTo
+// are nearly all of the session's, and the ends few.
+func (s *PostgresStore) LoadConversation(ctx context.Context, sessionID string, scope TurnScope) ([]MessageWithID, error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	ends, err := turnEnds(ctx, tx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := tx.QueryContext(ctx,
 		"SELECT id, created_at, msg_key, data FROM messages WHERE session_id = $1 ORDER BY id", sessionID)
 	if err != nil {
 		return nil, err
 	}
 	return scanMessages(rows, func(id int64, key string) bool {
-		return TurnReads(id, key, upTo, turnKeys)
+		return TurnReads(id, key, scope, ends)
 	})
+}
+
+// turnEnds is the ID of each turn's end in a session, by turn (TurnEndIDs).
+func turnEnds(ctx context.Context, tx *sql.Tx, sessionID string) (map[string]int64, error) {
+	rows, err := tx.QueryContext(ctx,
+		"SELECT id, msg_key FROM messages WHERE session_id = $1 AND msg_key LIKE $2", sessionID, "%:"+turnEndSuffix)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ends := map[string]int64{}
+	for rows.Next() {
+		var id int64
+		var key string
+		if err := rows.Scan(&id, &key); err != nil {
+			return nil, err
+		}
+		if IsTurnEnd(key) {
+			turn, _ := TurnOf(key)
+			ends[turn] = id
+		}
+	}
+	return ends, rows.Err()
 }
 
 // scanMessages reads rows of id, created_at, msg_key and data, and closes them.

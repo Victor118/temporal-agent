@@ -97,13 +97,14 @@ func (s *memSession) LastMessageID(context.Context, string) (int64, error) {
 	return int64(len(s.messages)), nil
 }
 
-func (s *memSession) LoadConversation(_ context.Context, _ string, upTo int64, turnKeys []string) ([]store.MessageWithID, error) {
+func (s *memSession) LoadConversation(_ context.Context, _ string, scope store.TurnScope) ([]store.MessageWithID, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.loads++
+	ends := store.TurnEndIDs(s.messages)
 	var out []store.MessageWithID
 	for _, m := range s.messages {
-		if store.TurnReads(m.ID, m.Key, upTo, turnKeys) {
+		if store.TurnReads(m.ID, m.Key, scope, ends) {
 			out = append(out, m)
 		}
 	}

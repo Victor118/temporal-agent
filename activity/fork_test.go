@@ -37,7 +37,7 @@ func TestBuildTranscript(t *testing.T) {
 			ToolCalls: []store.ToolCall{{ID: "m1", Name: "save_user_memory", Input: json.RawMessage(`{"content":"Alice's secret"}`)}}}},
 		// The result may repeat the input: it is as private.
 		{ID: 61, Message: store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "m1", Content: "Current version: Alice's other secret", IsError: true}}},
-		{ID: 7, Message: store.Message{Role: store.RoleAssistant, Kind: store.KindTurnError, Content: text("call LLM: boom")}},
+		{ID: 7, Message: store.Message{Role: store.RoleAssistant, Kind: store.KindTurnEnd, Content: text("call LLM: boom")}},
 		// Several agents answer in a session: each is named.
 		{ID: 8, Message: store.Message{Role: store.RoleAssistant, Content: text("it fits"), AgentID: "smith", Author: "Agent Smith",
 			ToolCalls: []store.ToolCall{{Name: "web_search", Input: json.RawMessage(`{"q":"temporal"}`)}}}},

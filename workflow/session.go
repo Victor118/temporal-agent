@@ -2,12 +2,10 @@ package workflow
 
 import (
 	"cmp"
-	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
@@ -200,7 +198,6 @@ func processMessage(actCtx, ctx workflow.Context, input SessionWorkflowInput, us
 	// session, which a resumed session would otherwise reuse. It holds the
 	// snapshot, so that a message stored while they run is read after them.
 	// Each agent the message addresses has a turn of its own in it.
-	group := store.TurnGroupKey(fmt.Sprintf("%s-%d", workflow.GetInfo(ctx).WorkflowExecution.RunID, state.TurnCount+1), upTo)
 	var earlier []string
 
 	for i, a := range agents {
@@ -212,7 +209,7 @@ func processMessage(actCtx, ctx workflow.Context, input SessionWorkflowInput, us
 		turn := agentTurn{
 			agentID:   a.ID,
 			agentName: a.Name,
-			key:       store.TurnKey(group, i),
+			key:       store.TurnKey(upTo, a.ID),
 			upTo:      upTo,
 			earlier:   slices.Clone(earlier),
 			partNote:  partNote(agents, i, userMessage),
@@ -318,20 +315,17 @@ func processTurn(actCtx, ctx workflow.Context, input SessionWorkflowInput, userM
 		SessionID: input.SessionID,
 		// The turn answers its author: their memory is loaded, tools act for
 		// them.
-		UserID:            userMessage.UserID,
-		UserName:          userMessage.UserName,
-		AgentID:           turn.agentID,
-		TurnKey:           turnKey,
-		HistoryUpTo:       turn.upTo,
-		EarlierTurns:      turn.earlier,
-		UserMessage:       userMessage.Text,
-		UserMessageStored: userMessage.Stored,
-		SystemPrompt:      turn.systemPrompt,
-		Model:             input.Model,
-		Channel:           input.Channel,
-		ChannelID:         input.ChannelID,
-		PartNote:          turn.partNote,
-		SignReply:         turn.signReply,
+		UserID:       userMessage.UserID,
+		UserName:     userMessage.UserName,
+		AgentID:      turn.agentID,
+		TurnKey:      turnKey,
+		EarlierTurns: turn.earlier,
+		SystemPrompt: turn.systemPrompt,
+		Model:        input.Model,
+		Channel:      input.Channel,
+		ChannelID:    input.ChannelID,
+		PartNote:     turn.partNote,
+		SignReply:    turn.signReply,
 	})
 
 	// Listen for cancel signal in parallel
@@ -371,7 +365,7 @@ func processTurn(actCtx, ctx workflow.Context, input SessionWorkflowInput, userM
 	// on every channel and after a reload, not only in a notification.
 	messages := result.NewMessages
 	if !cancelled && result.Error != "" {
-		messages = append(messages, store.Message{Role: store.RoleAssistant, Kind: store.KindTurnError, AgentID: turn.agentID, Content: turnErrorContent(result.Error)})
+		messages = append(messages, store.TurnEnd(turn.agentID, result.Error))
 	}
 	if len(messages) > 0 {
 		if err := workflow.ExecuteActivity(actCtx, memAct.PersistContext, activity.PersistContextInput{
@@ -419,22 +413,4 @@ var turnNotifyOptions = workflow.ActivityOptions{
 // its failure neither fails nor holds the turn.
 func notifyTurn(ctx workflow.Context, sessionID, eventType string, e TurnEvent) {
 	notifySessionWith(ctx, turnNotifyOptions, sessionID, eventType, map[string]string{"agent_id": e.AgentID, "agent_name": e.AgentName, "turn": e.Turn})
-}
-
-// maxTurnErrorBytes bounds the error kept in the conversation: an API error can
-// carry a whole response body.
-const maxTurnErrorBytes = 2000
-
-// turnErrorContent is the stored content of a KindTurnError message: the error
-// as a JSON string, like any message's text.
-func turnErrorContent(reason string) string {
-	if len(reason) > maxTurnErrorBytes {
-		cut := maxTurnErrorBytes
-		for cut > 0 && !utf8.RuneStart(reason[cut]) {
-			cut--
-		}
-		reason = reason[:cut] + "…"
-	}
-	b, _ := json.Marshal(reason)
-	return string(b)
 }

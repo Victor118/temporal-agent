@@ -33,27 +33,25 @@ const maxToolResultBytes = 96 * 1024
 const toolScheduleToStartTimeout = 60 * time.Second
 
 type AgentWorkflowInput struct {
-	SessionID   string `json:"session_id"`
-	UserID      string `json:"user_id,omitempty"`   // Author of UserMessage: whose memory is loaded, who tools act for
-	UserName    string `json:"user_name,omitempty"` // Author's name, shown to the model
-	AgentID     string `json:"agent_id"`            // Required. Logical agent identity: prompt, skills and allowed tools
-	UserMessage string `json:"user_message"`
-	// UserMessageStored: the message is in the session's history already (the
-	// server stores human messages as they arrive), so the turn loads it with
-	// the rest instead of adding it.
-	UserMessageStored bool   `json:"user_message_stored,omitempty"`
-	SystemPrompt      string `json:"system_prompt"`
-	Model             string `json:"model"` // Explicit model; empty = the worker's default (LLM_MODEL)
-	// TurnKey identifies the session turn this run belongs to. When set, the
-	// agent persists its messages as it produces them under that key, so a
-	// crash, a cancel or a failed LLM call cannot lose the transcript. Sub-agents
-	// and scheduled runs leave it empty: they own no session history.
+	SessionID string `json:"session_id"`
+	UserID    string `json:"user_id,omitempty"`   // Author of UserMessage: whose memory is loaded, who tools act for
+	UserName  string `json:"user_name,omitempty"` // Author's name, shown to the model
+	AgentID   string `json:"agent_id"`            // Required. Logical agent identity: prompt, skills and allowed tools
+	// UserMessage is the task of a run with no turn key (a sub-agent, a
+	// scheduled task). A session turn has none: the message it answers is
+	// in the session's history already (the server stores every message
+	// before it is delivered), and the turn loads it with the rest.
+	UserMessage  string `json:"user_message,omitempty"`
+	SystemPrompt string `json:"system_prompt"`
+	Model        string `json:"model"` // Explicit model; empty = the worker's default (LLM_MODEL)
+	// TurnKey identifies the session turn this run is (store.TurnKey): the
+	// message it answers and its participant. When set, the agent persists
+	// its messages as it produces them under that key, so a crash, a cancel
+	// or a failed LLM call cannot lose the transcript. Sub-agents and
+	// scheduled runs leave it empty: they own no session history.
 	TurnKey string `json:"turn_key,omitempty"`
-	// HistoryUpTo and EarlierTurns are what a session turn reads besides its
-	// own messages: the session up to that message ID, where it stood when
-	// the message this turn answers started its turns, and the turns that
-	// answered it before this one (activity.TurnHistory).
-	HistoryUpTo  int64    `json:"history_up_to,omitempty"`
+	// EarlierTurns answered the turn's message before it (a relay): read
+	// whole, besides what the turn reads of the session (store.TurnReads).
 	EarlierTurns []string `json:"earlier_turns,omitempty"`
 	// LoadUserMemory gives UserID's memory to a run that has no turn key: a
 	// scheduled task answers its user directly, as a session turn does. A
@@ -159,7 +157,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 	// no-op and either one alone is enough.
 	persisted := 0
 
-	if !input.UserMessageStored {
+	if input.TurnKey == "" {
 		contentJSON, _ := json.Marshal(input.UserMessage)
 		turn = append(turn, store.Message{
 			Role:    store.RoleUser,
@@ -274,7 +272,6 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 		}
 		req.History = &activity.TurnHistory{
 			SessionID:    input.SessionID,
-			UpTo:         input.HistoryUpTo,
 			EarlierTurns: input.EarlierTurns,
 			TurnKey:      input.TurnKey,
 			Tail:         turn[persisted:],

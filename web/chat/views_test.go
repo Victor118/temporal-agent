@@ -2,6 +2,7 @@ package chat
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -79,7 +80,7 @@ func TestBuildThread(t *testing.T) {
 		{ID: 7, Message: store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "t2"}}},
 		{ID: 8, Message: store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "t3"}}},
 		{ID: 9, Message: store.Message{Role: store.RoleAssistant, Content: j("Done.")}},
-		{ID: 10, Message: store.Message{Role: store.RoleAssistant, Kind: store.KindTurnError, Content: j("call LLM: boom")}},
+		{ID: 10, Message: store.Message{Role: store.RoleAssistant, Kind: store.KindTurnEnd, Content: j("call LLM: boom")}},
 	}
 	forks := map[int64][]ForkLink{9: {{SessionID: "f1", Title: "Fork"}}}
 	questions := []Question{{WorkflowID: "s1-tool-ask_user-1-0", Text: "Which one?"}}
@@ -120,6 +121,27 @@ func TestBuildThread(t *testing.T) {
 	}
 }
 
+// A turn's end with no error is shown nowhere: it only closes the turn, so
+// the same agent's next turn is an item of its own.
+func TestBuildThread_HidesATurnEndWithoutError(t *testing.T) {
+	msgs := []store.MessageWithID{
+		{ID: 1, Message: store.Message{Role: store.RoleUser, Content: j("M1"), UserID: "u-me"}},
+		{ID: 2, Message: store.Message{Role: store.RoleUser, Content: j("M2"), UserID: "u-me"}},
+		{ID: 3, Message: store.Message{Role: store.RoleAssistant, Content: j("R1"), AgentID: "default"}},
+		{ID: 4, Message: store.TurnEnd("default", "")},
+		{ID: 5, Message: store.Message{Role: store.RoleAssistant, Content: j("R2"), AgentID: "default"}},
+		{ID: 6, Message: store.TurnEnd("default", "")},
+	}
+	items := BuildThread(msgs, "u-me", nil, nil, AgentDirectory{Session: AgentInfo{ID: "default"}})
+	var got []string
+	for _, it := range items {
+		got = append(got, fmt.Sprint(it.Kind, it.ID))
+	}
+	if want := "human1 human2 agent3 agent5"; strings.Join(got, " ") != want {
+		t.Errorf("items %v, want %s", got, want)
+	}
+}
+
 // Several agents answer one after another: an item per agent, each signed by
 // its agent as it is now, or by the name it had once it is gone.
 func TestBuildThread_SignsEachAgent(t *testing.T) {
@@ -133,7 +155,7 @@ func TestBuildThread_SignsEachAgent(t *testing.T) {
 		{ID: 5, Message: store.Message{Role: store.RoleAssistant, Content: j("Utile."), AgentID: "smith", Author: "Smith"}},
 		{ID: 6, Message: store.Message{Role: store.RoleAssistant, Content: j("Moi aussi."), AgentID: "gone", Author: "Ancien"}},
 		{ID: 7, Message: store.Message{Role: store.RoleAssistant, Content: j("Sans nom."), AgentID: "nameless"}},
-		{ID: 8, Message: store.Message{Role: store.RoleAssistant, Kind: store.KindTurnError, AgentID: "smith", Content: j("boom")}},
+		{ID: 8, Message: store.Message{Role: store.RoleAssistant, Kind: store.KindTurnEnd, AgentID: "smith", Content: j("boom")}},
 	}
 	items := BuildThread(msgs, "u-me", nil, nil, AgentDirectory{ByID: map[string]AgentInfo{"default": jarvis, "smith": smith}, Session: jarvis})
 

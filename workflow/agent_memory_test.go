@@ -81,7 +81,7 @@ func TestAgentWorkflow_SaveMemoryFromTheVersionTheModelRead(t *testing.T) {
 		name  string
 		input AgentWorkflowInput
 	}{
-		{"session turn", AgentWorkflowInput{SessionID: "s1", TurnKey: "run-1"}},
+		{"session turn", AgentWorkflowInput{SessionID: "s1", TurnKey: store.TurnKey(1, "default")}},
 		{"scheduled task", AgentWorkflowInput{SessionID: "schedule-1", LoadUserMemory: true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -102,6 +102,7 @@ func TestAgentWorkflow_SaveMemoryFromTheVersionTheModelRead(t *testing.T) {
 				return done, nil
 			})
 			f.session.memory["u-alice"] = store.Memory{Content: "likes tea", Version: 3}
+			f.session.add(store.HumanMessageKey("q"), store.Message{Role: store.RoleUser, Content: `"I like coffee too"`})
 			calls := registerMemoryTool(env, f)
 
 			in := tc.input
@@ -182,9 +183,10 @@ func TestAgentWorkflow_TwoSavesInOneAnswer(t *testing.T) {
 	f := registerLLM(env, answers(both, done))
 	f.session.memory["u-alice"] = store.Memory{Content: "likes tea", Version: 3}
 	calls := registerMemoryTool(env, f)
+	turn := store.TurnKey(f.session.add(store.HumanMessageKey("q"), store.Message{Role: store.RoleUser, Content: `"coffee and cake"`}), "default")
 
 	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{
-		SessionID: "s1", TurnKey: "run-1", UserID: "u-alice", UserName: "Alice", AgentID: "default", UserMessage: "coffee and cake",
+		SessionID: "s1", TurnKey: turn, UserID: "u-alice", UserName: "Alice", AgentID: "default",
 	})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
@@ -221,7 +223,7 @@ func TestAgentWorkflow_AnotherMembersSaveIsHidden(t *testing.T) {
 	upTo := alice.session.add(store.HumanMessageKey("a"), store.Message{Role: store.RoleUser, Content: `"I drink tea"`, UserID: "u-alice", Author: "Alice"})
 	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{
 		SessionID: "s1", UserID: "u-alice", UserName: "Alice", AgentID: "default",
-		UserMessage: "I drink tea", UserMessageStored: true, TurnKey: "run-1@1.0", HistoryUpTo: upTo,
+		TurnKey: store.TurnKey(upTo, "default"),
 	})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
@@ -246,7 +248,7 @@ func TestAgentWorkflow_AnotherMembersSaveIsHidden(t *testing.T) {
 	upTo = bob.session.add(store.HumanMessageKey("b"), store.Message{Role: store.RoleUser, Content: `"what about Alice?"`, UserID: "u-bob", Author: "Bob"})
 	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{
 		SessionID: "s1", UserID: "u-bob", UserName: "Bob", AgentID: "default",
-		UserMessage: "what about Alice?", UserMessageStored: true, TurnKey: "run-2@2.0", HistoryUpTo: upTo,
+		TurnKey: store.TurnKey(upTo, "default"),
 	})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)

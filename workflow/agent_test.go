@@ -146,9 +146,9 @@ func TestAgentWorkflow_ToolTimeoutFromTheCatalog(t *testing.T) {
 	}
 }
 
-// A run stopped before its loop returns what it produced, the message it was
+// A run stopped before its loop returns what it produced, the task it was
 // given: ended by an error, it would complete as cancelled, with no result
-// for the session to persist.
+// for its caller.
 func TestAgentWorkflow_CancelWhileLoadingReturnsTheTranscript(t *testing.T) {
 	var suite testsuite.WorkflowTestSuite
 	env := suite.NewTestWorkflowEnvironment()
@@ -161,14 +161,14 @@ func TestAgentWorkflow_CancelWhileLoadingReturnsTheTranscript(t *testing.T) {
 	}, sdkactivity.RegisterOptions{Name: "LoadSkillsForAgent"})
 	env.RegisterDelayedCallback(env.CancelWorkflow, time.Second)
 
-	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{SessionID: "s1", AgentID: "dev", UserMessage: "hello", TurnKey: "run-1"})
+	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{SessionID: "s1-tool-agent_dev-1", AgentID: "dev", UserMessage: "hello"})
 
 	var out AgentWorkflowOutput
 	if err := env.GetWorkflowResult(&out); err != nil {
 		t.Fatalf("cancelled run: %v, want its output", err)
 	}
 	if len(out.NewMessages) != 1 || out.NewMessages[0].Role != store.RoleUser {
-		t.Errorf("new messages %+v, want the user's message", out.NewMessages)
+		t.Errorf("new messages %+v, want the task", out.NewMessages)
 	}
 }
 
@@ -409,9 +409,9 @@ func executePage(env *testsuite.TestWorkflowEnvironment) {
 }
 
 // TestAgentWorkflow_PersistsTurnIncrementally checks that a turn is written as
-// it goes, in slices that are each replayable on their own: the user message,
-// then every assistant message carrying tool calls together with their results,
-// then the final answer.
+// it goes, in slices that are each replayable on their own: every assistant
+// message carrying tool calls together with their results, then the final
+// answer. The message it answers is the server's to store.
 func TestAgentWorkflow_PersistsTurnIncrementally(t *testing.T) {
 	var suite testsuite.WorkflowTestSuite
 	env := suite.NewTestWorkflowEnvironment()
@@ -419,22 +419,17 @@ func TestAgentWorkflow_PersistsTurnIncrementally(t *testing.T) {
 
 	f := registerLLM(env, fetchPage())
 	executePage(env)
+	turn := store.TurnKey(f.session.add(store.HumanMessageKey("q"), store.Message{Role: store.RoleUser, Content: `"hello"`}), "reviewer")
 
-	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{
-		SessionID:   "s1",
-		AgentID:     "reviewer",
-		UserMessage: "hello",
-		TurnKey:     "run-abc-3",
-	})
+	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{SessionID: "s1", AgentID: "reviewer", TurnKey: turn})
 
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatalf("workflow error: %v", err)
 	}
 
 	want := []persistCall{
-		{turnKey: "run-abc-3", startIndex: 0, roles: []string{"user"}},
-		{turnKey: "run-abc-3", startIndex: 1, roles: []string{"assistant", "tool"}},
-		{turnKey: "run-abc-3", startIndex: 3, roles: []string{"assistant"}},
+		{turnKey: turn, startIndex: 0, roles: []string{"assistant", "tool"}},
+		{turnKey: turn, startIndex: 2, roles: []string{"assistant"}},
 	}
 	if persists := f.session.persisted(); fmt.Sprint(persists) != fmt.Sprint(want) {
 		t.Errorf("persisted %v, want %v", persists, want)
@@ -444,8 +439,8 @@ func TestAgentWorkflow_PersistsTurnIncrementally(t *testing.T) {
 	if err := env.GetWorkflowResult(&out); err != nil {
 		t.Fatal(err)
 	}
-	if len(out.NewMessages) != 4 {
-		t.Errorf("NewMessages = %d messages, want 4 (the turn only, not the history)", len(out.NewMessages))
+	if len(out.NewMessages) != 3 {
+		t.Errorf("NewMessages = %d messages, want 3 (the turn only, not the history)", len(out.NewMessages))
 	}
 }
 
@@ -482,12 +477,8 @@ func TestAgentWorkflow_LLMFailureKeepsTranscript(t *testing.T) {
 		return provider.ChatResponse{}, &provider.PermanentAPIError{Err: errors.New("overloaded")}
 	})
 
-	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{
-		SessionID:   "s1",
-		AgentID:     "reviewer",
-		UserMessage: "hello",
-		TurnKey:     "run-abc-7",
-	})
+	f.session.add(store.HumanMessageKey("q"), store.Message{Role: store.RoleUser, Content: `"hello"`})
+	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{SessionID: "s1", AgentID: "reviewer", UserMessage: "hello"})
 
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatalf("workflow error: %v, want a completed workflow reporting the failure in its output", err)
@@ -502,11 +493,7 @@ func TestAgentWorkflow_LLMFailureKeepsTranscript(t *testing.T) {
 		t.Errorf("Error = %q, want the LLM failure's own message", out.Error)
 	}
 	if len(out.NewMessages) != 1 || out.NewMessages[0].Role != "user" {
-		t.Errorf("NewMessages = %+v, want the user message to survive", out.NewMessages)
-	}
-	want := []persistCall{{turnKey: "run-abc-7", startIndex: 0, roles: []string{"user"}}}
-	if persists := f.session.persisted(); fmt.Sprint(persists) != fmt.Sprint(want) {
-		t.Errorf("persisted %v, want %v", persists, want)
+		t.Errorf("NewMessages = %+v, want the task to survive", out.NewMessages)
 	}
 }
 
@@ -575,11 +562,11 @@ func TestAgentWorkflow_LoadsItsOwnHistory(t *testing.T) {
 	f := registerLLM(env, answers(done))
 	f.session.memory["victor"] = store.Memory{Content: "likes concise answers", Version: 1}
 	f.session.add(store.HumanMessageKey("a"), store.Message{Role: store.RoleUser, Content: `"earlier question"`})
-	upTo := f.session.add(store.TurnMessageKey("run-abc-3", 0), store.Message{Role: store.RoleAssistant, Content: `"earlier answer"`})
+	f.session.add(store.TurnMessageKey(store.TurnKey(1, "reviewer"), 0), store.Message{Role: store.RoleAssistant, Content: `"earlier answer"`})
+	upTo := f.session.add(store.HumanMessageKey("b"), store.Message{Role: store.RoleUser, Content: `"new question"`})
 
 	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{
-		SessionID: "s1", UserID: "victor", AgentID: "reviewer",
-		UserMessage: "new question", TurnKey: "run-abc-4", HistoryUpTo: upTo,
+		SessionID: "s1", UserID: "victor", AgentID: "reviewer", TurnKey: store.TurnKey(upTo, "reviewer"),
 	})
 
 	if err := env.GetWorkflowError(); err != nil {
@@ -587,7 +574,7 @@ func TestAgentWorkflow_LoadsItsOwnHistory(t *testing.T) {
 	}
 	seen := f.model.sent()[0]
 	if len(seen.Messages) != 3 || textOf(seen.Messages[2]) != "new question" {
-		t.Fatalf("model saw %+v, want the 2 stored plus the new one", seen.Messages)
+		t.Fatalf("model saw %+v, want the 3 stored", seen.Messages)
 	}
 	if !strings.Contains(seen.System, "likes concise answers") {
 		t.Errorf("system prompt lost the user memory: %q", seen.System)
@@ -597,8 +584,8 @@ func TestAgentWorkflow_LoadsItsOwnHistory(t *testing.T) {
 	if err := env.GetWorkflowResult(&out); err != nil {
 		t.Fatal(err)
 	}
-	if len(out.NewMessages) != 2 {
-		t.Errorf("NewMessages = %d, want only the turn's 2 messages, not the history", len(out.NewMessages))
+	if len(out.NewMessages) != 1 {
+		t.Errorf("NewMessages = %d, want only the turn's answer, not the history", len(out.NewMessages))
 	}
 }
 
@@ -630,8 +617,8 @@ func TestTruncateToolResult(t *testing.T) {
 	}
 }
 
-// A message the server stored already is loaded with the history, not added
-// by the turn a second time.
+// The message a turn answers is loaded with the history: the server stored
+// it, the turn never adds it.
 func TestAgentWorkflow_StoredMessageIsNotAddedAgain(t *testing.T) {
 	var suite testsuite.WorkflowTestSuite
 	env := suite.NewTestWorkflowEnvironment()
@@ -642,7 +629,7 @@ func TestAgentWorkflow_StoredMessageIsNotAddedAgain(t *testing.T) {
 
 	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{
 		SessionID: "s1", UserID: "u-bob", UserName: "Bob", AgentID: "reviewer",
-		UserMessage: "@agent sum it up", UserMessageStored: true, TurnKey: "run-1", HistoryUpTo: upTo,
+		TurnKey: store.TurnKey(upTo, "reviewer"),
 	})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
@@ -837,7 +824,7 @@ func TestAgentWorkflow_SignsItsMessages(t *testing.T) {
 			}, sdkactivity.RegisterOptions{Name: "NotifyStep"})
 
 			env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{
-				SessionID: "s1", AgentID: "smith", UserMessage: "go", UserMessageStored: true, TurnKey: "run-1",
+				SessionID: "s1", AgentID: "smith", TurnKey: store.TurnKey(f.session.add(store.HumanMessageKey("q"), store.Message{Role: store.RoleUser, Content: `"go"`}), "smith"),
 				Channel: "telegram", ChannelID: "42", PartNote: "\n## PART\n", SignReply: sign,
 			})
 			if err := env.GetWorkflowError(); err != nil {
@@ -893,7 +880,7 @@ func TestAgentWorkflow_LLMInputsStaySmall(t *testing.T) {
 
 	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{
 		SessionID: "s1", UserID: "victor", AgentID: "reviewer",
-		UserMessage: "go on", TurnKey: "run-1@150.0", HistoryUpTo: upTo,
+		TurnKey: store.TurnKey(upTo, "reviewer"),
 	})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
@@ -931,8 +918,7 @@ func TestAgentWorkflow_UnwrittenMessagesReachTheModel(t *testing.T) {
 			f.session.failPersists, f.session.writeThenFail = 3, writeThenFail
 
 			env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{
-				SessionID: "s1", AgentID: "reviewer", UserMessage: "read it", UserMessageStored: true,
-				TurnKey: "run-1@1.0", HistoryUpTo: upTo,
+				SessionID: "s1", AgentID: "reviewer", TurnKey: store.TurnKey(upTo, "reviewer"),
 			})
 			if err := env.GetWorkflowError(); err != nil {
 				t.Fatal(err)
@@ -995,7 +981,7 @@ func TestAgentWorkflow_AConversationTooLongEndsTheTurn(t *testing.T) {
 	upTo := f.session.add(store.HumanMessageKey("q"), store.Message{Role: store.RoleUser, Content: `"` + strings.Repeat("x", 3000) + `"`})
 
 	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{
-		SessionID: "s1", AgentID: "reviewer", UserMessage: "x", UserMessageStored: true, TurnKey: "run-1@1.0", HistoryUpTo: upTo,
+		SessionID: "s1", AgentID: "reviewer", TurnKey: store.TurnKey(upTo, "reviewer"),
 	})
 	var out AgentWorkflowOutput
 	if err := env.GetWorkflowResult(&out); err != nil {
@@ -1047,7 +1033,7 @@ func TestAgentWorkflow_SubAgentRunsInline(t *testing.T) {
 	f.catalog.SetAgents([]activity.AgentCatalogEntry{{ID: "default", Tools: []string{"agent_*"}}, {ID: "analyst", Name: "Analyst"}})
 	upTo := f.session.add(store.HumanMessageKey("q"), store.Message{Role: store.RoleUser, Content: `"CAC 40?"`})
 
-	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{SessionID: "s1", AgentID: "default", UserMessage: "CAC 40?", UserMessageStored: true, TurnKey: "run-1@1.0", HistoryUpTo: upTo})
+	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{SessionID: "s1", AgentID: "default", TurnKey: store.TurnKey(upTo, "default")})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}

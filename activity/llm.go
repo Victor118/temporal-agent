@@ -37,7 +37,7 @@ const ContextTooLongMessage = "La conversation est trop longue pour le modèle :
 // ConversationLoader is what the LLM call reads of the store: a turn's
 // conversation and its user's memory.
 type ConversationLoader interface {
-	LoadConversation(ctx context.Context, sessionID string, upTo int64, turnKeys []string) ([]store.MessageWithID, error)
+	LoadConversation(ctx context.Context, sessionID string, scope store.TurnScope) ([]store.MessageWithID, error)
 	LoadMemory(ctx context.Context, scope store.MemoryScope, scopeID string) (store.Memory, error)
 }
 
@@ -98,15 +98,14 @@ type PromptRef struct {
 	PartNote string `json:"part_note,omitempty"` // ends the prompt (several agents addressed)
 }
 
-// TurnHistory points at a session turn's conversation: the session up to
-// UpTo, the message the turn answers, what the turns answering the earlier
-// messages wrote, then this message's turns' (store.TurnReads). A message
-// someone stores after UpTo is not read: it gets its own turn.
+// TurnHistory points at a session turn's conversation: what its turn reads
+// of the session (store.TurnReads), from the turn's key, which names the
+// message it answers and its participant. A message someone stores after
+// that one is not read: it gets its own turn.
 type TurnHistory struct {
 	SessionID string `json:"session_id"`
-	UpTo      int64  `json:"up_to"`
-	// EarlierTurns answered the same message before this one: their answers
-	// are read.
+	// EarlierTurns answered the same message before this one (a relay):
+	// their answers are read.
 	EarlierTurns []string `json:"earlier_turns,omitempty"`
 	TurnKey      string   `json:"turn_key"`
 	// Tail is what the turn produced that it could not confirm written, from
@@ -253,12 +252,11 @@ func (a *LLMActivities) conversation(ctx context.Context, req LLMTurnRequest) ([
 	if len(req.Messages) > 0 {
 		return nil, temporal.NewNonRetryableApplicationError("a call gives its conversation inline or by reference, not both", "BadLLMRequest", nil)
 	}
-	turns := append(append([]string(nil), h.EarlierTurns...), h.TurnKey)
 	// Read and converted again on every call of the turn, the whole history:
 	// what it costs is not measured yet. If it shows, a worker cache of the
-	// ordered prefix keyed by (session, UpTo, EarlierTurns) would serve the
+	// ordered prefix keyed by (session, turn, EarlierTurns) would serve the
 	// turn's next calls (a retry elsewhere only misses it).
-	loaded, err := a.Store.LoadConversation(ctx, h.SessionID, h.UpTo, turns)
+	loaded, err := a.Store.LoadConversation(ctx, h.SessionID, store.ScopeOf(h.TurnKey, h.EarlierTurns))
 	if err != nil {
 		return nil, fmt.Errorf("load conversation: %w", err)
 	}

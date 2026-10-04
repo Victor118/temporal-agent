@@ -90,9 +90,8 @@ func TestSessionWorkflow_EachTurnAnswersItsAuthor(t *testing.T) {
 		t.Fatalf("ran %d turns, want 2", len(turns))
 	}
 	for i, want := range []struct{ id, name, text string }{{"u-alice", "Alice", "hello"}, {"u-bob", "Bob", "hi"}} {
-		if got := turns[i]; got.UserID != want.id || got.UserName != want.name || got.UserMessage != want.text {
-			t.Errorf("turn %d: user %q (%q), message %q; want %q (%q), %q",
-				i, got.UserID, got.UserName, got.UserMessage, want.id, want.name, want.text)
+		if got := turns[i]; got.UserID != want.id || got.UserName != want.name {
+			t.Errorf("turn %d: user %q (%q); want %q (%q)", i, got.UserID, got.UserName, want.id, want.name)
 		}
 	}
 }
@@ -110,14 +109,14 @@ func TestSessionWorkflow_RecordsWhyATurnFailed(t *testing.T) {
 		t.Fatalf("persisted %d times, want once", len(persisted))
 	}
 	msgs := persisted[0].Messages
-	if len(msgs) != 3 || msgs[0].ToolCalls == nil || msgs[1].ToolResult == nil || msgs[2].Kind != store.KindTurnError {
+	if len(msgs) != 3 || msgs[0].ToolCalls == nil || msgs[1].ToolResult == nil || msgs[2].Kind != store.KindTurnEnd {
 		t.Fatalf("persisted %+v, want the call, its result, then the error", msgs)
 	}
 	var reason string
 	if err := json.Unmarshal([]byte(msgs[2].Content), &reason); err != nil || !strings.HasPrefix(reason, "call LLM: é") {
 		t.Errorf("error content %q (%v), want the reason as a JSON string", msgs[2].Content, err)
 	}
-	if len(reason) > maxTurnErrorBytes+len("…") || !utf8.ValidString(reason) {
+	if len(reason) > 2000+len("…") || !utf8.ValidString(reason) {
 		t.Errorf("reason of %d bytes, valid UTF-8 %v: want it cut on a rune, under the bound", len(reason), utf8.ValidString(reason))
 	}
 	if len(notified) == 0 {
@@ -133,7 +132,7 @@ func TestSessionWorkflow_RecordsAFailureThatProducedNothing(t *testing.T) {
 	if len(persisted) != 1 {
 		t.Fatalf("persisted %d times, want once", len(persisted))
 	}
-	if msgs := persisted[0].Messages; len(msgs) != 1 || msgs[0].Kind != store.KindTurnError || msgs[0].Content != `"call LLM: credit balance is too low"` {
+	if msgs := persisted[0].Messages; len(msgs) != 1 || msgs[0].Kind != store.KindTurnEnd || msgs[0].Content != `"call LLM: credit balance is too low"` {
 		t.Errorf("persisted %+v, want the error alone", msgs)
 	}
 }
@@ -292,8 +291,8 @@ func TestSessionWorkflow_RunsTheAddressedAgentsInOrder(t *testing.T) {
 			t.Errorf("turn %d: agent %q, child %q, prompt %q, signed %v; want %q, %q, %q, %v",
 				i, got.in.AgentID, got.workflowID, got.in.SystemPrompt, got.in.SignReply, want.agent, want.id, want.prompt, want.sign)
 		}
-		if !got.in.UserMessageStored || got.in.UserID != "u-alice" {
-			t.Errorf("turn %d: stored %v, user %q: want the stored message, for its author", i, got.in.UserMessageStored, got.in.UserID)
+		if got.in.UserID != "u-alice" {
+			t.Errorf("turn %d: user %q: want the message's author", i, got.in.UserID)
 		}
 		for _, p := range want.part {
 			if !strings.Contains(got.in.PartNote, p) {
@@ -307,14 +306,13 @@ func TestSessionWorkflow_RunsTheAddressedAgentsInOrder(t *testing.T) {
 	if runs[0].in.TurnKey == runs[1].in.TurnKey || runs[1].in.TurnKey == runs[2].in.TurnKey {
 		t.Errorf("turn keys %q, %q, %q: want one per turn", runs[0].in.TurnKey, runs[1].in.TurnKey, runs[2].in.TurnKey)
 	}
-	// The two turns answering one message read the same snapshot, as one
-	// group, the second one the first's answer; the next message has its own.
+	// The two turns answering one message have its anchor; the next message
+	// has its own.
 	jarvis, smith, next := runs[0].in, runs[1].in, runs[2].in
-	if store.TurnGroup(jarvis.TurnKey) != store.TurnGroup(smith.TurnKey) || store.TurnGroup(smith.TurnKey) == store.TurnGroup(next.TurnKey) {
-		t.Errorf("turn keys %q, %q, %q: want the first two in one group", jarvis.TurnKey, smith.TurnKey, next.TurnKey)
-	}
-	if upTo, ok := store.TurnSnapshot(store.TurnGroup(jarvis.TurnKey)); !ok || upTo != 7 || jarvis.HistoryUpTo != 7 || smith.HistoryUpTo != 7 {
-		t.Errorf("snapshots %d (%v), %d, %d: want the conversation's end, 7", upTo, ok, jarvis.HistoryUpTo, smith.HistoryUpTo)
+	for _, k := range []string{jarvis.TurnKey, smith.TurnKey, next.TurnKey} {
+		if anchor, ok := store.TurnAnchor(k); !ok || anchor != 7 {
+			t.Errorf("turn key %q: anchor %d (%v), want the conversation's end, 7", k, anchor, ok)
+		}
 	}
 	if len(jarvis.EarlierTurns) != 0 || fmt.Sprint(smith.EarlierTurns) != fmt.Sprint([]string{jarvis.TurnKey}) || len(next.EarlierTurns) != 0 {
 		t.Errorf("earlier turns %v, %v, %v: want jarvis's for smith alone", jarvis.EarlierTurns, smith.EarlierTurns, next.EarlierTurns)
@@ -349,7 +347,7 @@ func TestSessionWorkflow_AFailureStopsTheRest(t *testing.T) {
 	if len(persisted) != 1 || len(persisted[0].Messages) != 1 {
 		t.Fatalf("persisted %+v, want the error alone", persisted)
 	}
-	if m := persisted[0].Messages[0]; m.Kind != store.KindTurnError || m.AgentID != "jarvis" {
+	if m := persisted[0].Messages[0]; m.Kind != store.KindTurnEnd || m.AgentID != "jarvis" {
 		t.Errorf("persisted %+v, want jarvis's turn error", m)
 	}
 	if len(notified) == 0 {
@@ -646,7 +644,7 @@ func TestSessionWorkflow_RecordsAConversationTooLong(t *testing.T) {
 	history := f.session.history()
 	last := history[len(history)-1]
 	want, _ := json.Marshal(activity.ContextTooLongMessage)
-	if last.Kind != store.KindTurnError || last.Content != string(want) {
+	if last.Kind != store.KindTurnEnd || last.Content != string(want) {
 		t.Errorf("last message %+v, want the turn error %s", last, want)
 	}
 }

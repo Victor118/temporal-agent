@@ -484,7 +484,7 @@ func TestMessagesKeepTheirAgent(t *testing.T) {
 
 	if err := s.AppendMessages(ctx, "zz-agents", "run-1", 0, []Message{
 		{Role: RoleAssistant, Content: `"résumé"`, AgentID: "jarvis", Author: "Jarvis"},
-		{Role: RoleAssistant, Kind: KindTurnError, Content: `"boom"`, AgentID: "smith"},
+		{Role: RoleAssistant, Kind: KindTurnEnd, Content: `"boom"`, AgentID: "smith"},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -607,10 +607,9 @@ func TestAppendMessage_ReturnsItsID(t *testing.T) {
 	}
 }
 
-// A turn reads its session up to the message it answers, what its own group
-// wrote, and what the turns of earlier messages wrote even after that
-// message; not a person's message stored after it, nor another turn's whose
-// key merely starts like its own.
+// A turn reads its session up to the message it answers, its own turn
+// whole, and another participant's turn once it ended by that message; not
+// a person's message stored after it, nor a turn still running.
 func TestLoadConversation(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
@@ -619,19 +618,15 @@ func TestLoadConversation(t *testing.T) {
 	cleanup()
 	t.Cleanup(cleanup)
 
-	if last, err := s.LastMessageID(ctx, sid); err != nil || last != 0 {
-		t.Fatalf("empty session: last %d, %v", last, err)
-	}
 	text := func(s string) Message { return Message{Role: RoleUser, Content: `"` + s + `"`} }
 	question, err := s.AppendMessage(ctx, sid, HumanMessageKey("q"), text("question"))
 	if err != nil || question == 0 {
 		t.Fatalf("question %d, %v", question, err)
 	}
-	turn := TurnKey(TurnGroupKey("run-1", question), 0)
-	s.AppendMessages(ctx, sid, turn, 0, []Message{{Role: RoleAssistant, Content: `"searching"`}})
+	jarvis := TurnKey(question, "jarvis")
+	s.AppendMessages(ctx, sid, jarvis, 0, []Message{{Role: RoleAssistant, Content: `"searching"`}})
 	meanwhile, _ := s.AppendMessage(ctx, sid, HumanMessageKey("m"), text("meanwhile"))
-	s.AppendMessages(ctx, sid, turn, 1, []Message{{Role: RoleAssistant, Content: `"found"`}})
-	s.AppendMessages(ctx, sid, turn+"1", 0, []Message{{Role: RoleAssistant, Content: `"another turn"`}})
+	s.AppendMessages(ctx, sid, jarvis, 1, []Message{{Role: RoleAssistant, Content: `"found"`}})
 
 	keys := func(got []MessageWithID) []string {
 		var seen []string
@@ -640,37 +635,40 @@ func TestLoadConversation(t *testing.T) {
 		}
 		return seen
 	}
-	got, err := s.LoadConversation(ctx, sid, question, []string{turn})
-	if err != nil {
+	load := func(scope TurnScope) []string {
+		t.Helper()
+		got, err := s.LoadConversation(ctx, sid, scope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return keys(got)
+	}
+	want := []string{`msg:q "question"`, jarvis + `:0 "searching"`, jarvis + `:1 "found"`}
+	if got := load(ScopeOf(jarvis, nil)); !reflect.DeepEqual(got, want) {
+		t.Errorf("jarvis loaded %q\nwant %q", got, want)
+	}
+
+	// Smith answers the message written meanwhile: Jarvis's turn runs, so
+	// none of it is read.
+	smith := TurnKey(meanwhile, "smith")
+	want = []string{`msg:q "question"`, `msg:m "meanwhile"`}
+	if got := load(ScopeOf(smith, nil)); !reflect.DeepEqual(got, want) {
+		t.Errorf("smith, jarvis running, loaded %q\nwant %q", got, want)
+	}
+
+	// Jarvis's turn ends; Smith's next turn, on a later message, reads it
+	// whole, never its end.
+	if _, err := s.AppendMessage(ctx, sid, TurnEndKey(jarvis), TurnEnd("jarvis", "")); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{`msg:q "question"`, turn + `:0 "searching"`, turn + `:1 "found"`}
-	if !reflect.DeepEqual(keys(got), want) {
-		t.Errorf("loaded %q\nwant %q", keys(got), want)
+	later, _ := s.AppendMessage(ctx, sid, HumanMessageKey("l"), text("later"))
+	want = []string{`msg:q "question"`, jarvis + `:0 "searching"`, `msg:m "meanwhile"`, jarvis + `:1 "found"`, `msg:l "later"`}
+	if got := load(ScopeOf(TurnKey(later, "smith"), nil)); !reflect.DeepEqual(got, want) {
+		t.Errorf("smith, jarvis ended, loaded %q\nwant %q", got, want)
 	}
-
-	// No turn: the message alone.
-	if got, _ := s.LoadConversation(ctx, sid, question, nil); len(got) != 1 {
-		t.Errorf("without turns: %q, want the question", keys(got))
-	}
-
-	// The turn answering the message written meanwhile reads all that the
-	// turns of the question wrote, after that message too. In ID order:
-	// conversation.Order moves the message after them.
-	next := TurnKey(TurnGroupKey("run-2", meanwhile), 0)
-	s.AppendMessages(ctx, sid, next, 0, []Message{{Role: RoleAssistant, Content: `"answer"`}})
-	got, _ = s.LoadConversation(ctx, sid, meanwhile, []string{next})
-	want = []string{`msg:q "question"`, turn + `:0 "searching"`, `msg:m "meanwhile"`, turn + `:1 "found"`, turn + `1:0 "another turn"`, next + `:0 "answer"`}
-	if !reflect.DeepEqual(keys(got), want) {
-		t.Errorf("the next turn loaded %q\nwant %q", keys(got), want)
-	}
-
-	// A later message's turns are not read by an earlier one's: the question
-	// read again stops before them.
-	got, _ = s.LoadConversation(ctx, sid, question, []string{turn})
-	want = []string{`msg:q "question"`, turn + `:0 "searching"`, turn + `:1 "found"`}
-	if !reflect.DeepEqual(keys(got), want) {
-		t.Errorf("the next turn loaded %q\nwant %q", keys(got), want)
+	// Ended after the message Smith answers: still not read.
+	if got := load(ScopeOf(smith, nil)); len(got) != 2 {
+		t.Errorf("smith on the message before jarvis ended loaded %q", got)
 	}
 }
 
