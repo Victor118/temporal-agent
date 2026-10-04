@@ -670,7 +670,7 @@ type AgentRow struct {
 
 // Status says where the participant stands, in words: "Disponible",
 // "Répond à Alice depuis 16:27", "Te répond depuis 16:27 · attend une
-// réponse".
+// réponse", "En cours" (at work, on a turn nothing described).
 func (r AgentRow) Status() string {
 	if !r.Working {
 		if r.Queued > 0 {
@@ -684,6 +684,8 @@ func (r AgentRow) Status() string {
 		line = "Te répond"
 	case r.Author != "":
 		line = "Répond à " + r.Author
+	case r.Since.IsZero():
+		line = "En cours" // at work, on a message nobody named
 	}
 	if !r.Since.IsZero() {
 		line += " depuis " + clock(r.Since)

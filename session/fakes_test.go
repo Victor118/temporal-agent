@@ -98,7 +98,8 @@ func (m *memStore) LoadMessagesUpTo(context.Context, string, int64) ([]store.Mes
 
 // fakeTemporal answers every list with running, the same workflow IDs, and
 // records the queries and signals. A workflow of running is described as
-// running, and answers a query with states, if set.
+// running, and answers a query with states, if set: a workflow listed
+// without one fails it (no worker answers), one not listed is not found.
 type fakeTemporal struct {
 	mu           sync.Mutex                                 // the statuses load in the background
 	running      []string                                   // workflow IDs the visibility queries return
@@ -118,6 +119,7 @@ type fakeTemporal struct {
 	startedAt    map[string]time.Time   // when the workflows listed started; zero if not set
 	states       map[string]interface{} // query answers, by workflow ID
 	queryErrs    map[string]error       // query failures, by workflow ID
+	listGate     chan struct{}          // set: every list waits for it to close
 	queried      []string               // workflow IDs queried
 	terminated   []string
 }
@@ -181,8 +183,25 @@ func (f *fakeTemporal) QueryWorkflow(_ context.Context, id, _, _ string, _ ...in
 	if state, ok := f.states[id]; ok {
 		return encodedState{state}, nil
 	}
+	if f.listed(id) {
+		return nil, errors.New("no worker answered") // running, with no answer set
+	}
 	return nil, serviceerror.NewNotFound("not running")
 }
+
+// listed reports whether the visibility queries list a workflow. Under f.mu.
+func (f *fakeTemporal) listed(id string) bool {
+	if slices.Contains(f.running, id) {
+		return true
+	}
+	for _, ids := range f.byType {
+		if slices.Contains(ids, id) {
+			return true
+		}
+	}
+	return false
+}
+
 func (f *fakeTemporal) DescribeWorkflowExecution(_ context.Context, id, _ string) (*workflowservice.DescribeWorkflowExecutionResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -204,6 +223,9 @@ func (f *fakeTemporal) DescribeWorkflowExecution(_ context.Context, id, _ string
 	}}, nil
 }
 func (f *fakeTemporal) ListWorkflow(_ context.Context, req *workflowservice.ListWorkflowExecutionsRequest) (*workflowservice.ListWorkflowExecutionsResponse, error) {
+	if f.listGate != nil {
+		<-f.listGate
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.lists = append(f.lists, req.Query)

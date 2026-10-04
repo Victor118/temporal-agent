@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"slices"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	enumspb "go.temporal.io/api/enums/v1"
+	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/api/workflowservice/v1"
 
 	"github.com/victor/temporal-agent/workflow"
@@ -79,6 +81,10 @@ type statusCache struct {
 	// ID, kept and dropped likewise: the Agents panel reads those the turn
 	// events do not tell of on every refresh.
 	states map[string]queriedState
+	// stateLoads are the state queries running, by workflow ID: each closed
+	// when its query ends. A request for a participant being read waits for
+	// that reading rather than ask again.
+	stateLoads map[string]chan struct{}
 	// now is the clock the states age by; nil = time.Now. Tests set it.
 	now func() time.Time
 }
@@ -98,11 +104,12 @@ type workflowState struct {
 	at     time.Time                       // when it was read
 }
 
-// queriedState is a participant's answer to its state query; ok false when
-// it gave none.
+// queriedState is a participant's answer to its state query: ok when it
+// gave one, gone when Temporal knows no such participant (it ended).
 type queriedState struct {
 	state workflow.ParticipantState
 	ok    bool
+	gone  bool
 	at    time.Time
 }
 
@@ -188,35 +195,59 @@ func (c *statusCache) workflow(ctx context.Context, id string, describe func(con
 }
 
 // participantState returns a participant's state, asked by query at most
-// once per statusesTTL, like workflow.
-func (c *statusCache) participantState(ctx context.Context, id string, query func(context.Context, string) (workflow.ParticipantState, error)) (workflow.ParticipantState, bool) {
-	c.mu.Lock()
-	if q, ok := c.states[id]; ok && c.clock().Sub(q.at) < statusesTTL {
-		c.mu.Unlock()
-		return q.state, q.ok
-	}
-	gen := c.gen
-	c.mu.Unlock()
-
-	at := c.clock()
-	st, err := query(ctx, id)
-	q := queriedState{state: st, ok: err == nil, at: at}
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.gen == gen {
-		now := c.clock()
-		for k, old := range c.states {
-			if now.Sub(old.at) >= statusesTTL {
-				delete(c.states, k)
+// once per statusesTTL, like workflow. One query per participant runs at a
+// time: a request for one being read waits for it, no longer than ctx
+// allows. A query that failed because its request went away is not kept:
+// the next request asks again.
+func (c *statusCache) participantState(ctx context.Context, id string, query func(context.Context, string) (workflow.ParticipantState, error)) queriedState {
+	for {
+		c.mu.Lock()
+		if q, ok := c.states[id]; ok && c.clock().Sub(q.at) < statusesTTL {
+			c.mu.Unlock()
+			return q
+		}
+		if done, ok := c.stateLoads[id]; ok {
+			c.mu.Unlock()
+			select {
+			case <-done: // read, or failed: look again
+			case <-ctx.Done():
+				return queriedState{}
 			}
+			continue
 		}
-		if c.states == nil {
-			c.states = map[string]queriedState{}
+		done := make(chan struct{})
+		if c.stateLoads == nil {
+			c.stateLoads = map[string]chan struct{}{}
 		}
-		c.states[id] = q
+		c.stateLoads[id] = done
+		gen := c.gen
+		c.mu.Unlock()
+
+		at := c.clock()
+		st, err := query(ctx, id)
+		var gone *serviceerror.NotFound
+		q := queriedState{state: st, ok: err == nil, gone: errors.As(err, &gone), at: at}
+
+		c.mu.Lock()
+		if c.gen == gen && ctx.Err() == nil { // not read before an action, nor cut short
+			now := c.clock()
+			for k, old := range c.states {
+				if now.Sub(old.at) >= statusesTTL {
+					delete(c.states, k)
+				}
+			}
+			if c.states == nil {
+				c.states = map[string]queriedState{}
+			}
+			c.states[id] = q
+		}
+		if c.stateLoads[id] == done { // not replaced after an invalidation
+			delete(c.stateLoads, id)
+		}
+		close(done)
+		c.mu.Unlock()
+		return q
 	}
-	return q.state, q.ok
 }
 
 // invalidate drops the cached states: after an action that changes them, the
@@ -228,6 +259,7 @@ func (c *statusCache) invalidate() {
 	c.value = nil
 	c.workflows = nil
 	c.states = nil
+	c.stateLoads = nil
 	c.gen++
 	// A running load now stores nothing; the next request starts its own.
 	c.loading = nil

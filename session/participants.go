@@ -44,8 +44,10 @@ type Participant struct {
 	// Background are its background tasks, as its state query says; none
 	// when the events told enough.
 	Background []string
-	// known: the turn events told of it.
+	// known: the turn events told of it; gone: it is not running, and
+	// nothing tells of it.
 	known bool
+	gone  bool
 }
 
 func (p Participant) working() Working {
@@ -55,25 +57,33 @@ func (p Participant) working() Working {
 // Participants are where the session's participants stand: those the turn
 // events told of in the last day, working or not, and those the visibility
 // queries see running. The events come first: they are on time, the
-// queries lag. A participant running that no event told of (after the
-// server restarted) answers its state query, all at once, each answer kept
-// statusesTTL. In the order of their names.
+// queries lag. A participant they leave unclear answers its state query, all
+// at once, each answer kept statusesTTL: one running that no event told of
+// (after the server restarted), or one working on a turn no event named (a
+// turn_started lost). One that Temporal knows no more has ended: shown idle
+// if the events told of it, not at all otherwise. In the order of their
+// names.
 func (s *Service) Participants(ctx context.Context, sessionID string) []Participant {
 	v := s.statuses.get(ctx, s.loadVisible)
 	ps := s.turns.snapshot(sessionID, v.runningIn(sessionID))
 	var wg sync.WaitGroup
 	for i := range ps {
-		if ps[i].known {
+		if ps[i].known && (!ps[i].Working || ps[i].Turn != "") {
 			continue
 		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			p := &ps[i]
-			st, ok := s.statuses.participantState(ctx, workflow.ParticipantWorkflowID(sessionID, p.Participant), s.queryState)
-			if !ok {
-				return // running, as far as anyone knows
+			q := s.statuses.participantState(ctx, workflow.ParticipantWorkflowID(sessionID, p.Participant), s.queryState)
+			switch {
+			case q.gone:
+				p.Working, p.Queued, p.gone = false, 0, !p.known
+				return
+			case !q.ok:
+				return // working, as far as anyone knows
 			}
+			st := q.state
 			p.Working, p.Queued, p.Background = st.Current != nil, st.Queued, st.Background
 			if c := st.Current; c != nil {
 				p.Turn, p.UserID, p.UserName, p.Since = c.Turn, c.UserID, c.UserName, c.Since
@@ -81,6 +91,7 @@ func (s *Service) Participants(ctx context.Context, sessionID string) []Particip
 		}()
 	}
 	wg.Wait()
+	ps = slices.DeleteFunc(ps, func(p Participant) bool { return p.gone })
 	asking := v.askingIn(sessionID)
 	for i := range ps {
 		ps[i].Waiting = ps[i].Working && slices.Contains(asking, ps[i].Participant)

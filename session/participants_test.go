@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
+
+	"go.temporal.io/api/serviceerror"
 
 	"github.com/victor/temporal-agent/activity"
 	"github.com/victor/temporal-agent/store"
@@ -256,4 +259,132 @@ func TestParticipants_AStalePendingMessage(t *testing.T) {
 		t.Errorf("still running: %+v", ps)
 	}
 	s.background.Wait()
+}
+
+// A participant's state is asked once per TTL, by one query at a time: a
+// request for one being read waits for that reading. Not found (it ended)
+// and failed answers are kept like the others; one cut short by its
+// request going away is not.
+func TestStatusCache_ParticipantState(t *testing.T) {
+	var c statusCache
+	now := time.Now()
+	c.now = func() time.Time { return now }
+	ctx := context.Background()
+	var mu sync.Mutex
+	queries := 0
+	var answer func(context.Context) (workflow.ParticipantState, error)
+	query := func(ctx context.Context, _ string) (workflow.ParticipantState, error) {
+		mu.Lock()
+		queries++
+		mu.Unlock()
+		return answer(ctx)
+	}
+	count := func() int { mu.Lock(); defer mu.Unlock(); return queries }
+
+	answer = func(context.Context) (workflow.ParticipantState, error) {
+		return workflow.ParticipantState{}, serviceerror.NewNotFound("gone")
+	}
+	if q := c.participantState(ctx, "p1", query); !q.gone || q.ok {
+		t.Errorf("not found: %+v", q)
+	}
+	answer = func(context.Context) (workflow.ParticipantState, error) {
+		return workflow.ParticipantState{}, errors.New("no worker")
+	}
+	if q := c.participantState(ctx, "p1", query); !q.gone || count() != 1 {
+		t.Errorf("within the TTL: %+v, %d queries", q, count())
+	}
+	if q := c.participantState(ctx, "p2", query); q.ok || q.gone || count() != 2 {
+		t.Errorf("failed: %+v", q)
+	}
+	c.participantState(ctx, "p2", query)
+	if count() != 2 {
+		t.Errorf("a failure asked again within the TTL: %d queries", count())
+	}
+
+	// Cut short by its request: not kept.
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	answer = func(ctx context.Context) (workflow.ParticipantState, error) {
+		return workflow.ParticipantState{}, ctx.Err()
+	}
+	c.participantState(cancelled, "p3", query)
+	answer = func(context.Context) (workflow.ParticipantState, error) {
+		return workflow.ParticipantState{Queued: 3}, nil
+	}
+	if q := c.participantState(ctx, "p3", query); !q.ok || q.state.Queued != 3 || count() != 4 {
+		t.Errorf("after a reading cut short: %+v, %d queries", q, count())
+	}
+
+	// Two requests for one participant: one query.
+	gate := make(chan struct{})
+	answer = func(context.Context) (workflow.ParticipantState, error) {
+		<-gate
+		return workflow.ParticipantState{Queued: 1}, nil
+	}
+	var wg sync.WaitGroup
+	got := make([]queriedState, 2)
+	for i := range got {
+		wg.Add(1)
+		go func() { defer wg.Done(); got[i] = c.participantState(ctx, "p4", query) }()
+	}
+	for count() != 5 {
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(10 * time.Millisecond) // the second request waits on the first
+	close(gate)
+	wg.Wait()
+	if count() != 5 || !got[0].ok || !got[1].ok || got[1].state.Queued != 1 {
+		t.Errorf("two requests: %d queries, %+v", count(), got)
+	}
+
+	c.invalidate()
+	c.participantState(ctx, "p4", query)
+	if count() != 6 {
+		t.Errorf("after an invalidation: %d queries", count())
+	}
+}
+
+// A participant the events leave unclear answers its state query: one
+// running that no event told of, one working on a turn no event named. One
+// Temporal knows no more has ended: idle if the events told of it, not
+// shown otherwise.
+func TestParticipants_StateQueriedWhenUnclear(t *testing.T) {
+	jarvis, smith, watson := sid+":p:jarvis", sid+":p:smith", sid+":p:watson"
+	tc := &fakeTemporal{
+		byType: map[string][]string{"ParticipantWorkflow": {jarvis, smith, watson}},
+		states: map[string]interface{}{jarvis: answering("jarvis", 3, bob.ID)},
+		queryErrs: map[string]error{
+			smith:  serviceerror.NewNotFound("ended"),
+			watson: serviceerror.NewNotFound("ended"),
+		},
+	}
+	s := newTest(&memStore{}, tc)
+	s.turns.expect(sid, "jarvis", 3) // delivered, its turn_started lost
+	s.turns.expect(sid, "watson", 5)
+	ps := s.Participants(context.Background(), sid)
+	if len(ps) != 2 {
+		t.Fatalf("participants %+v, want smith left out", ps)
+	}
+	if j := ps[0]; !j.Working || j.Turn != "m3.jarvis" || j.UserID != bob.ID {
+		t.Errorf("jarvis %+v", j)
+	}
+	if w := ps[1]; w.Participant != "watson" || w.Working || w.Queued != 0 {
+		t.Errorf("watson %+v", w)
+	}
+	s.background.Wait()
+}
+
+// The visibility queries unread (the request went away first): the panel
+// shows what the events tell.
+func TestParticipants_VisibilityUnread(t *testing.T) {
+	tc := &fakeTemporal{listGate: make(chan struct{})}
+	defer close(tc.listGate)
+	s := newTest(&memStore{}, tc)
+	s.Observe(sid, startedBy("jarvis", "Jarvis", 4, bob, "Bob"))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	ps := s.Participants(ctx, sid)
+	if len(ps) != 1 || !ps[0].Working || ps[0].Turn != "m4.jarvis" || ps[0].Waiting {
+		t.Errorf("participants %+v", ps)
+	}
 }

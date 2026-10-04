@@ -950,6 +950,11 @@ func TestBuildAgents(t *testing.T) {
 		t.Errorf("dave's panel %+v", dave)
 	}
 
+	// At work on a turn nothing described: no author, no start.
+	if got := (AgentRow{Working: true}).Status(); got != "En cours" {
+		t.Errorf("an undescribed turn: %q", got)
+	}
+
 	// The session's agent at work keeps its row, first.
 	ps[0].Participant, ps[0].AgentID = "jarvis", "jarvis"
 	if rows := BuildAgents(ps, sess, "u-bob", directory).Rows; len(rows) != 3 || rows[0].Participant != "jarvis" || !rows[0].Working {
