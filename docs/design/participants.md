@@ -1,6 +1,6 @@
 # Conception : des participants à la place du workflow de session
 
-Statut : **proposition, version 3**, prête pour la phase 1. Version 1 le 4 octobre 2026, révisée deux fois le même jour après deux relectures contre le code et le SDK Temporal (v1.33, API v1.44.1), la seconde avec un prototype de la règle de lecture et de l'ordre. Les points issus de la première relecture sont marqués *[rev. B1…]*, ceux de la seconde *[rev2 N1…]*.
+Statut : **version 3**, phases 1 et 2 faites (phase 2 : §10 bis). Version 1 le 4 octobre 2026, révisée deux fois le même jour après deux relectures contre le code et le SDK Temporal (v1.33, API v1.44.1), la seconde avec un prototype de la règle de lecture et de l'ordre. Les points issus de la première relecture sont marqués *[rev. B1…]*, ceux de la seconde *[rev2 N1…]*.
 
 ## 1. Pourquoi
 
@@ -111,7 +111,7 @@ boucle :
 | Signal | Effet |
 |---|---|
 | `message` | Ajoute un message à la boîte |
-| `stop-turn` | Annule le tour en cours, pas les messages en attente |
+| `stop-turn` | Annule le tour en cours, pas les messages en attente. *Phase 2 :* porte la clé du tour visé (`{turn_key}`) ; un stop pour un autre tour est ignoré, une clé vide vise le tour en cours, quel qu'il soit |
 | `clear` | Annule le tour en cours et vide la boîte (bouton « tout arrêter ») ; chaque message jeté reçoit un `turn_end` « annulé », pour qu'une relivraison tardive ne le rejoue pas *[rev2 N8]* |
 
 **Requête `state`** (remplace `session-state`) : le message en cours (ID, auteur, depuis quand), le nombre de messages en attente, l'éventuelle tâche de fond. C'est la source du panneau « Agents ».
@@ -174,7 +174,7 @@ Ce que le participant **abandonne** de la session : `GoalAchieved` (jamais utili
 
 La citation du message dans la note multi-agents (`partNote`) est chargée par le tour avec la conversation, ou clippée dans le signal.
 
-**Requête `state`** : `{current: {message_id, user_name, since} | null, queued: N, background: [...]}`.
+**Requête `state`** : `{current: {message_id, turn, user_id, user_name, since} | null, queued: N, background: [...]}` (*phase 2 :* `turn` et `user_id`, l'auteur, qui peut arrêter le tour).
 
 **Politiques de relance** :
 
@@ -228,7 +228,7 @@ La course documentée sur `TurnReads` (IDs pas dans l'ordre des commits) subsist
 
 **Arrêter** *[rev. I5]* :
 - **Phase 1** : le bouton actuel « Arrêter » (`Cancel(sessionID)`, appelé par `cmd/agent/ui.go` et `cmd/agent/api.go`) envoie `stop-turn` à **tous** les participants en cours de la session.
-- **Phase 2** : un bouton par participant, autorisé à l'auteur du message en cours ou au créateur de la session.
+- **Phase 2** : un bouton par participant, autorisé à l'auteur du message en cours ou au créateur de la session. *Fait*, voir §10 bis.
 
 **Supprimer ou quitter une session** *[rev. I7]* : `Delete` et le `Leave` du dernier membre **terminent tous les participants** de la session et leurs tours (aujourd'hui, ils ne terminent que le workflow de session). Sinon, un tour écrirait dans une session supprimée, et une question `ask_user` attendrait 72 h. La liste vient de la visibilité, qui a un léger retard, complétée par les participants que les événements de tour disent au travail : un participant démarré à l'instant peut encore survivre. *Corrigé à l'implémentation :* `messages` n'a pas de clé étrangère vers `sessions`, un tour en cours peut donc y laisser des lignes orphelines (sans lecteur : la session n'existe plus) ; au tour suivant, la vérification (`CheckTurn`) trouve la session absente et le participant s'arrête sans tour *[rev2 N15]*.
 
@@ -250,7 +250,7 @@ La course documentée sur `TurnReads` (IDs pas dans l'ordre des commits) subsist
 - La marque du dernier rapport d'un fork se place après le dernier élément affiché d'ID ≤ son dernier message (pour un tour, l'ID de son dernier texte) : un tour couvert en partie et fini après le rapport la tire sous des messages non rapportés, un tour en cours couvert la met en bas.
 - Morph : un bloc garde l'id `m<ID de son dernier texte>`. Il ne change qu'à l'arrivée d'un texte (en pratique juste avant la fin : le bloc est alors recréé) ; un tour qui finit sans nouveau texte remonte à sa place sans être dupliqué (idiomorph déplace par id).
 
-**Panneau « Agents »** (phase 2) dans le panneau de détails, une ligne par participant : disponible, répond (à qui, depuis quand), N messages en file, tâche de fond, attend une réponse, attend un worker. Avec « Arrêter » et « tout arrêter » selon les droits.
+**Panneau « Agents »** (phase 2) dans le panneau de détails, une ligne par participant : disponible, répond (à qui, depuis quand), N messages en file, tâche de fond, attend une réponse, attend un worker. Avec « Arrêter » et « tout arrêter » selon les droits. *Fait*, voir §10 bis.
 
 **Prompt et modèle de session** *[rev. m2]* : `SystemPrompt` et `Model` (`POST /sessions`) ne sont pas enregistrés en base et sont déjà perdus après 30 min de veille. On les **retire** de l'API, faute d'usage : le prompt vient de l'agent.
 
@@ -302,6 +302,20 @@ Proposée le 4 octobre 2026. Quand Jarvis est occupé (tâche longue, tour long)
 | **5** | Agents nés de la discussion, clones | Agents résidents |
 
 Chaque phase est livrable seule. **Le risque de la phase 1 est dans l'ordre des messages (§5) et dans l'état côté serveur (§6), pas dans le nommage** *[rev.]* : ces deux parties auront leurs propres tests purs avant tout branchement.
+
+## 10 bis. Phase 2 : ce qui est fait
+
+**Panneau « Agents »** (`#agents` dans le rail, fragment `/s/{id}/agents` versionné comme les autres, rechargé sur `session.AgentsEvents` : événements d'état, `user_message`, `notice`). Une ligne par participant : l'agent de la session toujours (« Disponible » s'il n'a pas de participant), ceux dont les événements de tour ont parlé depuis 24 h, ceux que la visibilité voit en cours. Elle dit : disponible ; répond à qui (« Te répond » pour soi), depuis quand (l'heure de `turn_started`) ; attend une réponse (une `AskUserWorkflow` de ce participant, que la requête de visibilité existante attribue maintenant à son participant) ; la note du tour (attend un worker) ; N messages en file ; les tâches de fond.
+
+Sources, dans l'ordre (`session.Participants`) : l'état en mémoire par participant ; pour un participant en cours que les événements ne décrivent pas (serveur redémarré), sa requête `state`, en parallèle, bornée à 3 s, gardée 3 s avec les états et invalidée avec eux. Aucune requête `state` quand les événements suffisent. Le panneau a son propre constructeur (`renderAgents`), sans `buildPage` ; la ligne « … travaille… » du fil en dérive.
+
+**Arrêt par participant.** Règles dans `session.Service` (`StopTurn`, `Clear`, `Cancel`, `MayStop`, `MayClear`), testées ; les adaptateurs ne font que traduire. « Arrêter » d'une ligne : `stop-turn` à ce seul participant, permis à l'auteur du message en cours ou au créateur. « Tout arrêter » : `clear`, au créateur seul (il jette les messages des autres), après confirmation. Le bouton porte la clé du tour affiché ; au clic, pour un autre que le créateur, l'auteur est relu par la requête `state` (pas l'état en mémoire) : tour fini → 409 côté JSON (rien côté UI, le panneau se recharge), auteur différent → 403 (`ErrStopNotAllowed`). Le signal nomme le tour : un tour commencé entre la lecture et le signal, peut-être d'un autre membre, n'est pas arrêté. Un stop arrivé avant `turn_started` reste jeté. Le créateur n'a pas de lecture à faire ; son « Arrêter » du fil envoie des stops sans clé (le tour en cours, quel qu'il soit), comme avant. Pour un autre membre, « Arrêter » du fil n'arrête que les tours qui répondent à ses messages, et ne s'affiche que s'il y en a un. JSON : `POST /sessions/{id}/participants/{agent}/stop` (`{"turn"}` optionnel) et `/clear`, sous `requireMember`.
+
+**Écarts et limites.**
+- Le nombre en file vient de l'état en mémoire (messages livrés par ce serveur, pas encore commencés) : un message relayé n'y est pas compté. Un message resté « en attente » faute d'événement ne compte que tant que le participant tourne, ou dans les 30 s de sa livraison.
+- Les tâches de fond ne s'affichent que pour un participant lu par sa requête `state` (aucune n'existe avant la phase 4).
+- Un « Arrêter » cliqué pendant `CheckTurn` (le tour n'est pas encore annoncé) est jeté, comme en phase 1 ; le bouton d'un membre n'apparaît qu'après `turn_started`, sauf après un redémarrage (requête `state`, qui donne le message dès sa vérification).
+- Changement du contrat du participant (charge de `stop-turn`, champs de `state` et des événements de tour) : sans nouvelle commande de workflow, mais la boucle change ; à terminer au déploiement comme toute modification du participant.
 
 ## 11. Tests (phase 1)
 

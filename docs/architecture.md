@@ -183,6 +183,13 @@ jamais comme ses propres messages ni comme des blocs d'outils. Une note en fin
 de prompt cite le message et dit à chacun sa part. Toute l'installation peut
 être appelée : restreindre les agents d'une session est à venir.
 
+Le panneau « Agents » de la session montre où en est chaque participant
+(disponible, à qui il répond et depuis quand, sa file, une question en
+attente, un worker attendu). Un tour s'arrête participant par participant :
+par l'auteur du message en cours ou le créateur de la session ; vider la file
+d'un participant est réservé au créateur. Le signal `stop-turn` nomme le tour
+visé, qu'un tour suivant ignore.
+
 ### Appel d'un outil
 
 1. Le LLM appelle `github_list_issues`.
