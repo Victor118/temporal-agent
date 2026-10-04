@@ -161,7 +161,7 @@ func TestAgentWorkflow_CancelWhileLoadingReturnsTheTranscript(t *testing.T) {
 	}, sdkactivity.RegisterOptions{Name: "LoadSkillsForAgent"})
 	env.RegisterDelayedCallback(env.CancelWorkflow, time.Second)
 
-	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{SessionID: "s1-tool-agent_dev-1", AgentID: "dev", UserMessage: "hello"})
+	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{SessionID: "s1:p:jarvis:m3:tool:agent_dev:1", AgentID: "dev", UserMessage: "hello"})
 
 	var out AgentWorkflowOutput
 	if err := env.GetWorkflowResult(&out); err != nil {
@@ -666,7 +666,7 @@ func TestAgentWorkflow_SubAgentRepliesToItsParentOnly(t *testing.T) {
 	}, sdkactivity.RegisterOptions{Name: "NotifyStep"})
 
 	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{
-		SessionID: "s1-tool-agent_analyst-1", AgentID: "analyst", UserMessage: "go",
+		SessionID: "s1:p:jarvis:m3:tool:agent_analyst:1", AgentID: "analyst", UserMessage: "go",
 		Channel: "telegram", ChannelID: "42", // inherited, no TurnKey: a sub-agent
 	})
 	if err := env.GetWorkflowError(); err != nil {
@@ -681,7 +681,7 @@ func TestAgentWorkflow_SubAgentRepliesToItsParentOnly(t *testing.T) {
 
 // ask_user gets the channel of the agent that asks, a sub-agent's included.
 func TestBuildChildInput_AskUserGetsTheChannel(t *testing.T) {
-	sub := AgentWorkflowInput{SessionID: "s1-tool-agent_analyst-1", Channel: "telegram", ChannelID: "42"}
+	sub := AgentWorkflowInput{SessionID: "s1:p:jarvis:m3:tool:agent_analyst:1", Channel: "telegram", ChannelID: "42"}
 	res := activity.ToolResolution{Kind: "workflow", WorkflowName: "AskUserWorkflow", NeedsCallContext: true}
 	_, in, err := buildChildInput(json.RawMessage(`{"question":"ok?","agent":"forged"}`), sub, "child", &res, callContext(sub, []string{"default", "analyst"}, "Analyst", "agent"), "analyst", "agent")
 	if err != nil {
@@ -782,7 +782,7 @@ func TestAgentWorkflow_RefusesADelegationLoop(t *testing.T) {
 	}}, done))
 
 	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{
-		SessionID: "s1-tool-agent_analyst-c0", AgentID: "analyst", AgentChain: []string{"root"}, UserMessage: "go",
+		SessionID: "s1:p:jarvis:m3:tool:agent_analyst:c0", AgentID: "analyst", AgentChain: []string{"root"}, UserMessage: "go",
 	})
 
 	if err := env.GetWorkflowError(); err != nil {

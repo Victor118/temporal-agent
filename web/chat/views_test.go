@@ -83,7 +83,7 @@ func TestBuildThread(t *testing.T) {
 		{ID: 10, Message: store.Message{Role: store.RoleAssistant, Kind: store.KindTurnEnd, Content: j("call LLM: boom")}},
 	}
 	forks := map[int64][]ForkLink{9: {{SessionID: "f1", Title: "Fork"}}}
-	questions := []Question{{WorkflowID: "s1-tool-ask_user-1-0", Text: "Which one?"}}
+	questions := []Question{{WorkflowID: "s1:p:default:m3:tool:ask_user:1-0", Text: "Which one?"}}
 
 	jarvis := AgentInfo{ID: "default", Name: "Jarvis", Mention: "jarvis"}
 	items := BuildThread(msgs, "u-me", forks, questions, AgentDirectory{Session: jarvis})
@@ -116,7 +116,7 @@ func TestBuildThread(t *testing.T) {
 	if items[4].Text != "call LLM: boom" || strings.Contains(string(agent.HTML), "boom") {
 		t.Errorf("error %+v", items[4])
 	}
-	if items[5].WorkflowID != "s1-tool-ask_user-1-0" {
+	if items[5].WorkflowID != "s1:p:default:m3:tool:ask_user:1-0" {
 		t.Errorf("question %+v", items[5])
 	}
 }

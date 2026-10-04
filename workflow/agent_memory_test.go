@@ -153,7 +153,7 @@ func TestAgentWorkflow_SubAgentCannotSaveMemoryBlind(t *testing.T) {
 	calls := registerMemoryTool(env, f)
 
 	env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{
-		SessionID: "s1-tool-agent_helper-1", UserID: "u-alice", AgentID: "helper", UserMessage: "remember coffee",
+		SessionID: "s1:p:jarvis:m3:tool:agent_helper:1", UserID: "u-alice", AgentID: "helper", UserMessage: "remember coffee",
 		AgentChain: []string{"default"},
 	})
 	if err := env.GetWorkflowError(); err != nil {

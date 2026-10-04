@@ -37,7 +37,7 @@ func testPage(view string) *Page {
 		{ID: 2, Message: store.Message{Role: store.RoleUser, Content: j("@agent <b>hi</b>"), UserID: "u2", Author: "Bob"}},
 		{ID: 9, Message: store.Message{Role: store.RoleAssistant, Content: j("**ok**"), ToolCalls: []store.ToolCall{{Name: "grep"}}}},
 		{ID: 10, Message: store.Message{Role: store.RoleAssistant, Content: j("useful"), AgentID: "smith", Author: "Smith"}},
-	}, "u1", map[int64][]ForkLink{9: {{SessionID: "f2", Title: "F2"}}}, []Question{{WorkflowID: "fork-tool-ask_user-1", Text: "Which?", AgentChain: []string{"default"}}},
+	}, "u1", map[int64][]ForkLink{9: {{SessionID: "f2", Title: "F2"}}}, []Question{{WorkflowID: "f1:p:default:m3:tool:ask_user:c1", Text: "Which?", AgentChain: []string{"default"}}},
 		AgentDirectory{ByID: map[string]AgentInfo{"smith": smith}, Session: p.Agent})
 	if view == "map" {
 		m := BuildMap(Root(node))
@@ -68,7 +68,7 @@ func TestRender_Pages(t *testing.T) {
 		`<span class="tool">grep</span>`,
 		`name="message_id" value="9"`, // fork from a message
 		`href="/s/f2"`,                // a fork of a message
-		`name="workflow_id" value="fork-tool-ask_user-1"`,
+		`name="workflow_id" value="f1:p:default:m3:tool:ask_user:c1"`,
 		`href="/s/root#m3"`, // back to the message forked from
 		"Jarvis travaille…",
 		"@jarvis pour le solliciter, la mention d'un autre agent pour l'appeler", // other agents can be called
@@ -96,7 +96,7 @@ func TestRender_Pages(t *testing.T) {
 		`hx-swap="morph:innerHTML">`, // the tree
 		`hx-target="#rail" hx-swap="morph"`,
 		`id="composer-text"`, // focus comes back to it after a morph
-		`id="q-fork-tool-ask_user-1"`,
+		`id="q-f1:p:default:m3:tool:ask_user:c1"`,
 	} {
 		if !strings.Contains(page, want) {
 			t.Errorf("page lacks %q", want)

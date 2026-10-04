@@ -283,7 +283,7 @@ func TestRoutes_AnswerBelongsToTheSession(t *testing.T) {
 	bob := logIn(t, h, "bob@example.com")
 	// Bob is a member of s1, not of s2: an s2 question cannot be answered
 	// through s1.
-	w := call(t, h, http.MethodPost, "/sessions/s1/answer", `{"workflow_id":"s2-tool-ask_user-1-0","answer":"yes"}`, bob)
+	w := call(t, h, http.MethodPost, "/sessions/s1/answer", `{"workflow_id":"s2:p:default:m3:tool:ask_user:1-0","answer":"yes"}`, bob)
 	if w.Code != http.StatusForbidden {
 		t.Errorf("answering another session's question: %d", w.Code)
 	}

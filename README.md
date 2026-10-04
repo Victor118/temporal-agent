@@ -58,7 +58,7 @@ The system runs in three modes:
 
 ### Workflows
 
-- **SessionWorkflow** — Long-lived orchestration managing context persistence (load/persist via PostgreSQL)
+- **ParticipantWorkflow** — An agent in a session: answers its messages in order, one at a time, in parallel with the other agents, and runs only while it has messages (a session has no workflow of its own)
 - **AgentWorkflow** — ReAct loop: calls LLM, executes tools, repeats until done. Loads the prompt, skills and allowed tools of its agent (`agent_id`)
 - **Sub-agents** — One-shot AgentWorkflows with isolated context; the parent only sees the final response
 
@@ -66,7 +66,7 @@ The system runs in three modes:
 
 - **Agents** live in the `agents` table (source of truth). `agents.yaml` only seeds agents missing from the DB. Each agent has skills and an optional tool allowlist (globs, e.g. `github_*`).
 - **Task queues are capabilities**: each worker declares in its `worker.yaml` the queue it serves and the tools it exposes there, and publishes them to the `tools` table. Every tool call is routed to its tool's queue. Every tool call becomes a Temporal activity task, persisted on the queue of the capability it needs and picked up by any worker in that pool. A tool scales by adding workers to its pool; a call is never lost — if the worker running it dies, Temporal hands it to another one. Delivery is at-least-once, so tools with side effects are expected to be idempotent.
-- **Workflows** (sessions, agents, LLM calls) run on a dedicated queue (`WORKFLOW_QUEUE`).
+- **Workflows** (participants, agents, LLM calls) run on a dedicated queue (`WORKFLOW_QUEUE`).
 
 See [docs/architecture.md](docs/architecture.md) for the full model.
 
@@ -142,7 +142,7 @@ A worker that stops ends its coding runs first, then gives the tasks under way 3
 | `SUMMARY_MODEL` | Model that summarizes a session for a fork (default: `LLM_MODEL`) |
 | `LLM_MAX_CONTEXT_BYTES` | Worker: largest request one LLM call may send (system prompt, tools and conversation, as JSON bytes; default `2000000`, about 600K tokens or less, under the 1M-token window of `claude-sonnet-5`; about `400000` for a 200K-token model). Past it, the turn fails without retrying and tells the members to fork the session; the model's own "prompt is too long" is reported the same way. Not a positive number = the worker does not start |
 | `HTTP_ADDR` | Public HTTP server address |
-| `WORKFLOW_QUEUE` | Task queue for sessions, agents and LLM calls (default `agent`) |
+| `WORKFLOW_QUEUE` | Task queue for participants, agents and LLM calls (default `agent`) |
 | `DEFAULT_AGENT_ID` | Agent used when a session doesn't name one (default `default`) |
 | `AGENT_DEFINITIONS_FILE` | Agents seed file (default `./agents.yaml`) |
 | `WORKER_CONFIG` | Worker config: tool queue, exposed tools, MCP servers (default `./worker.yaml`, see `worker.example.yaml`) |
@@ -181,7 +181,7 @@ agent/
 ├── store/          # PostgreSQL persistence (messages, memory, task logs)
 ├── tool/           # Tool implementations (fs, web, exec, spawn, schedule)
 ├── web/            # Web UI: chat (web/chat) and back-office (web/admin)
-└── workflow/       # Temporal workflows (session, agent, scheduled)
+└── workflow/       # Temporal workflows (participant, agent, scheduled)
 ```
 
 ## Security notes

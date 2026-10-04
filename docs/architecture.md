@@ -22,7 +22,8 @@ aux redémarrages, aux pannes de workers et aux attentes longues.
 | **Tool** | Une action exécutable : nom, description, schéma d'entrée (JSON Schema). Codé en Go ou découvert via un serveur MCP. | Déclaré par les workers, publié dans la table `tools`. |
 | **Worker** | Un processus qui expose un ensemble d'outils sur **une queue**. | Sa propre config locale (`worker.yaml`). |
 | **Queue** | Une **capacité** : un pool de workers équivalents capables d'exécuter les mêmes outils. | Déclarée par la config worker. |
-| **Session** | Une conversation et son historique (`SessionWorkflow`, long-lived). | Temporal + table `messages`. |
+| **Session** | Une conversation et son historique ; aucun workflow à elle. | Table `messages` (+ `sessions`). |
+| **Participant** | Un agent dans une session : il traite ses messages un à la fois, en parallèle des autres (`ParticipantWorkflow`, seulement tant qu'il a du travail). | Temporal. |
 | **Exécution** | Un tour d'agent (`AgentWorkflow`) et ses enfants : sous-agents, questions, workflows déterministes (ex. Claude Code). | Temporal + arbre d'exécution en base (prévu). |
 
 ## Règles
@@ -68,7 +69,7 @@ flowchart LR
     S <--> DB[(PostgreSQL)]
 
     subgraph WF[Workers — queue workflows]
-        SW[SessionWorkflow]
+        SW[ParticipantWorkflow]
         AW[AgentWorkflow]
         LLM[CallLLM]
     end
@@ -144,11 +145,14 @@ tools: [github_*]
 
 ### Tour de conversation
 
-1. L'utilisateur envoie un message → le serveur le stocke et signale
-   `SessionWorkflow`.
-2. `SessionWorkflow` prend pour instantané l'ID du message (dans le signal)
-   et lance `AgentWorkflow(agentID)` avec une clé de tour. L'historique ne
-   passe jamais par les workflows.
+1. L'utilisateur envoie un message → le serveur résout les agents appelés,
+   refuse au-delà de cinq messages en attente chez le premier, stocke le
+   message puis fait un `SignalWithStart` sur le participant du premier
+   agent (`<session>:p:<agent>`) avec l'ID du message, sans texte.
+2. Le participant vérifie en base la session, l'agent et que le message n'a
+   pas déjà sa fin de tour (`CheckTurn`), puis lance `AgentWorkflow(agentID)`
+   (`<participant>:m<id>`) avec la clé de tour `m<id>.<agent>`. L'historique
+   ne passe jamais par les workflows.
 3. `AgentWorkflow` charge le nom de l'agent et la liste des outils
    autorisés : `tools` ∩ allowlist, triée par nom (préfixe de cache stable).
 4. Boucle ReAct : `CallLLM` → appels d'outils → résultats → `CallLLM`…
@@ -157,18 +161,22 @@ tools: [github_*]
    chargé et ordonné, définitions d'outils et prompt système relus du
    catalogue. Une requête trop grosse (`LLM_MAX_CONTEXT_BYTES`) arrête le
    tour : il faut forker. L'agent écrit ses messages au fil du tour.
-5. Réponse finale → `SessionWorkflow` réécrit le tour (sans effet si déjà
-   écrit) → SSE.
+5. Réponse finale → le participant réécrit le tour (sans effet si déjà
+   écrit), écrit sa fin (`turn_end`, toujours, erreur éventuelle comprise),
+   relaie le message à l'agent suivant s'il y en a un, puis passe au message
+   suivant de sa boîte, ou se termine.
 
 ### Plusieurs agents dans une session
 
 Un message appelle les agents qu'il mentionne (`@<mention>`, au plus trois),
 résolus par le serveur ; sans mention, l'agent de la session selon son mode.
-`SessionWorkflow` lance un tour par agent, l'un après l'autre, sur le même
-instantané : chacun lit aussi les tours précédents du message, et voit donc
-leurs réponses. Un message écrit pendant ces tours n'est lu ni par eux ni
-entre eux : il vient après le bloc qu'ils forment, et attend son tour. Un échec ou un arrêt
-coupe la suite. Chaque agent lit les tours des autres comme du texte signé
+Le serveur ne livre qu'au premier ; son participant relaie le message au
+suivant une fois son tour réussi (activity `Relay`), avec les clés des tours
+précédents : chacun lit les réponses des agents d'avant. Un échec ou un arrêt
+coupe la suite. Des agents différents travaillent en parallèle sur des
+messages différents ; un tour ne lit un tour d'un autre participant qu'une
+fois celui-ci terminé, et entier (`store.TurnReads`), et la conversation est
+présentée par ancre (`conversation.Order`). Chaque agent lit les tours des autres comme du texte signé
 (`[agent Nom (@mention)]`, appels d'outils et résultats tronqués compris),
 jamais comme ses propres messages ni comme des blocs d'outils. Une note en fin
 de prompt cite le message et dit à chacun sa part. Toute l'installation peut
