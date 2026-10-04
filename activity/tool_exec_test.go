@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
+
+	"go.temporal.io/sdk/testsuite"
 
 	"github.com/victor/temporal-agent/store"
 	"github.com/victor/temporal-agent/tool"
@@ -63,5 +66,36 @@ func TestExecuteTool_MemoryVersionComesFromTheCallNotTheModel(t *testing.T) {
 	out, _ = a.ExecuteTool(context.Background(), ExecuteToolInput{Name: "save_user_memory", Input: forged, UserID: "u-alice"})
 	if !out.IsError || !strings.Contains(out.Content, "does not say which version") || len(saver.expected) != 1 {
 		t.Errorf("without one: %+v; saves %v, want the forged version refused", out, saver.expected)
+	}
+}
+
+// A tool call knows when the workflow scheduled it, the same for each
+// attempt; outside an activity, it does not.
+func TestExecuteTool_GivesTheCallTime(t *testing.T) {
+	r := tool.NewRegistry()
+	r.Register(&tool.Tool{Name: "probe", Kind: tool.ToolKindActivity,
+		Execute: func(ctx context.Context, _ json.RawMessage) (string, error) {
+			return tool.CallTimeFromContext(ctx).Format(time.RFC3339), nil
+		}})
+	a := &ToolActivities{Registry: r}
+
+	var env testsuite.WorkflowTestSuite
+	act := env.NewTestActivityEnvironment()
+	act.RegisterActivity(a)
+	val, err := act.ExecuteActivity(a.ExecuteTool, ExecuteToolInput{Name: "probe", Input: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out ExecuteToolOutput
+	if err := val.Get(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Content == (time.Time{}).Format(time.RFC3339) {
+		t.Errorf("in an activity: no call time (%q)", out.Content)
+	}
+
+	out, _ = a.ExecuteTool(context.Background(), ExecuteToolInput{Name: "probe", Input: json.RawMessage(`{}`)})
+	if out.Content != (time.Time{}).Format(time.RFC3339) {
+		t.Errorf("outside one: %q", out.Content)
 	}
 }
