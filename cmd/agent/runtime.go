@@ -96,6 +96,10 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 	if err != nil {
 		return nil, fmt.Errorf("LLM_MAX_CONTEXT_BYTES: %w", err)
 	}
+	maxFile, err := parseFileBytes(cfg.FilesMaxBytes)
+	if err != nil {
+		return nil, fmt.Errorf("FILES_MAX_BYTES: %w", err)
+	}
 
 	maxRuns, err := parseMaxRuns(cfg.ClaudeCodeMaxConcurrentRuns)
 	if err != nil {
@@ -146,7 +150,7 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 	}
 
 	workerConf := loadWorkerConfig(cfg)
-	registry := buildRegistry(cfg, st, tc, runAs, runs, auth, queueWait)
+	registry := buildRegistry(cfg, st, tc, runAs, runs, auth, queueWait, &tool.Publisher{Store: st, MaxBytes: maxFile})
 
 	skills := loadSkills(opts.skills)
 	catalog := initCatalog(st)
@@ -302,12 +306,13 @@ func withCodingSessions(wopts *worker.Options, runs bool, maxRuns int) {
 // buildRegistry registers the built-in tools this process can run. Which of
 // them it exposes is the worker config's decision (exposeTools); the MCP
 // servers' come after (discoverMCPServers).
-func buildRegistry(cfg *config.Config, st store.Store, tc client.Client, runAs *subproc.Identity, runs *subproc.Runs, auth claudecode.Auth, queueWait time.Duration) *tool.Registry {
+func buildRegistry(cfg *config.Config, st store.Store, tc client.Client, runAs *subproc.Identity, runs *subproc.Runs, auth claudecode.Auth, queueWait time.Duration, pub *tool.Publisher) *tool.Registry {
 	registry := tool.NewRegistry()
 	tool.RegisterFilesystemTools(registry, cfg.WorkspacePath, runAs)
 	tool.RegisterGrepTool(registry, cfg.WorkspacePath)
 	tool.RegisterGlobTool(registry, cfg.WorkspacePath)
-	tool.RegisterExecTool(registry, cfg.WorkspacePath, runAs, runs)
+	tool.RegisterExecTool(registry, cfg.WorkspacePath, runAs, runs, pub)
+	tool.RegisterPublishFileTool(registry, pub)
 	tool.RegisterWebTools(registry)
 	tool.RegisterWebSearchTool(registry, cfg.BraveSearchAPIKey)
 	tool.RegisterEmailTool(registry, tool.SMTPConfig{
@@ -461,6 +466,20 @@ func parseContextBytes(raw string) (int, error) {
 		return 0, nil
 	}
 	v, err := strconv.Atoi(raw)
+	if err != nil || v <= 0 {
+		return 0, fmt.Errorf("%q is not a positive number of bytes", raw)
+	}
+	return v, nil
+}
+
+// parseFileBytes reads FILES_MAX_BYTES: empty is tool.DefaultMaxFileBytes,
+// and a value that is no positive number stops the worker rather than lift
+// the bound.
+func parseFileBytes(raw string) (int64, error) {
+	if raw == "" {
+		return tool.DefaultMaxFileBytes, nil
+	}
+	v, err := strconv.ParseInt(raw, 10, 64)
 	if err != nil || v <= 0 {
 		return 0, fmt.Errorf("%q is not a positive number of bytes", raw)
 	}

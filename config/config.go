@@ -106,6 +106,10 @@ type Config struct {
 	// (CLAUDE_CONFIG_DIR), the worker's alone: each run works on a copy of
 	// its own (claudecode.SeedConfigDir).
 	ClaudeConfigDir string
+	// FilesMaxBytes bounds a file an agent publishes, in bytes
+	// (tool.DefaultMaxFileBytes when empty). Read by the workers, which
+	// refuse to start on what is not a positive number.
+	FilesMaxBytes string
 	// SSH identity a coding worker uses for git: cloning a private repository,
 	// and pushing when the identity allows it. What the worker can do is a
 	// property of the identity it is given, not of the code — the read-only
@@ -196,6 +200,7 @@ func Load() *Config {
 		ClaudeConfigDir:     os.Getenv("CLAUDE_CONFIG_DIR"),
 		RunAsUID:            os.Getenv("RUN_AS_UID"),
 		RunAsGID:            os.Getenv("RUN_AS_GID"),
+		FilesMaxBytes:       os.Getenv("FILES_MAX_BYTES"),
 		ClaudeCodeRepos:     splitList(os.Getenv("CLAUDE_CODE_REPOS")),
 
 		ClaudeCodeModel:             os.Getenv("CLAUDE_CODE_MODEL"),

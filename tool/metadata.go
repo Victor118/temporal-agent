@@ -59,9 +59,10 @@ func DisplayResult(private bool, content string) string {
 // CallContext is what a tool flagged NeedsCallContext receives besides the
 // model's input: what the run knows of the call and the model must not
 // forge. Who called (the chain of agents), where its user is (the channel),
-// how to sign, what the model read of the user's memory. Set by the workflow,
-// never taken from the model's input (WithCallContext replaces any such
-// field); a value the model could choose belongs in the tool's input instead.
+// how to sign, what the model read of the user's memory, which session turn
+// it works for. Set by the workflow, never taken from the model's input
+// (WithCallContext replaces any such field); a value the model could choose
+// belongs in the tool's input instead.
 type CallContext struct {
 	AgentChain []string `json:"agent_chain,omitempty"`
 	Channel    string   `json:"channel,omitempty"`
@@ -82,6 +83,11 @@ type CallContext struct {
 	// not be read (MemoryVersion is nil). False with no version: the run is
 	// given no memory, a sub-agent.
 	MemoryUnread bool `json:"memory_unread,omitempty"`
+	// Turn is the session turn the call works for, where a file it
+	// publishes is attached: the run's own turn, or for a sub-agent, which
+	// has none, the session turn that launched it. Nil: the run belongs to
+	// no session turn (a scheduled task).
+	Turn *TurnRef `json:"turn,omitempty"`
 }
 
 // callContextKeys are the input keys CallContext's fields decode from: its

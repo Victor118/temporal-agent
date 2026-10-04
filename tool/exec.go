@@ -45,7 +45,14 @@ type Holder interface {
 // environment leaves out. It is still not a sandbox: it can leave the
 // workspace, and read whatever that user can. A worker running as root with
 // no runAs refuses every command (subproc.CheckRunAs): they would run as root.
-func RegisterExecTool(r *Registry, workspacePath string, runAs *subproc.Identity, runs Holder) {
+//
+// Once the command is over, its process group gone, the files its publish
+// parameter lists are published (pub): in the same activity, on the worker
+// whose workspace holds them, read through the workspace's os.Root. A file
+// that cannot be published leaves the command's output as it is: the result
+// says which were and which were not.
+func RegisterExecTool(r *Registry, workspacePath string, runAs *subproc.Identity, runs Holder, pub *Publisher) {
+	ws := newWorkspace(workspacePath, runAs)
 	r.Register(&Tool{
 		Name:        "exec",
 		Description: "Execute a shell command in the workspace. The command runs with the workspace as the working directory. Processes it starts in the background are stopped when it returns.",
@@ -53,17 +60,21 @@ func RegisterExecTool(r *Registry, workspacePath string, runAs *subproc.Identity
 			"type": "object",
 			"properties": {
 				"command": {"type": "string", "description": "Shell command to execute"},
-				"timeout_seconds": {"type": "integer", "description": "Timeout in seconds (default: ` + fmt.Sprint(execDefaultTimeout.Seconds()) + `, max: ` + fmt.Sprint(execMaxTimeout.Seconds()) + `)"}
+				"timeout_seconds": {"type": "integer", "description": "Timeout in seconds (default: ` + fmt.Sprint(execDefaultTimeout.Seconds()) + `, max: ` + fmt.Sprint(execMaxTimeout.Seconds()) + `)"},
+				"publish": {"type": "array", "items": {"type": "string"}, "description": "Files to publish to the session once the command is over, as paths relative to the workspace (at most ` + fmt.Sprint(maxPublishPaths) + `, ` + FormatSize(pub.maxBytes()) + ` each): the session's members see them attached to your answer and can download them. Use it for a file the command produced that the user should keep (a PDF, a chart, an archive)."}
 			},
 			"required": ["command"]
 		}`),
 		Kind:      ToolKindActivity,
 		Sensitive: true,
 		Timeout:   execMaxTimeout + TimeoutMargin,
+		// The session turn a published file is attached to (CallContext.Turn).
+		NeedsCallContext: true,
 		Execute: func(ctx context.Context, input json.RawMessage) (string, error) {
 			var params struct {
-				Command        string `json:"command"`
-				TimeoutSeconds int    `json:"timeout_seconds"`
+				Command        string   `json:"command"`
+				TimeoutSeconds int      `json:"timeout_seconds"`
+				Publish        []string `json:"publish"`
 			}
 			if err := json.Unmarshal(input, &params); err != nil {
 				return "", err
@@ -81,6 +92,9 @@ func RegisterExecTool(r *Registry, workspacePath string, runAs *subproc.Identity
 				timeout = execDefaultTimeout
 			}
 
+			// The files are published on the call's context: the command's
+			// timeout is the command's.
+			callCtx := ctx
 			ctx, cancel := context.WithTimeout(ctx, timeout)
 			defer cancel()
 
@@ -105,17 +119,22 @@ func RegisterExecTool(r *Registry, workspacePath string, runAs *subproc.Identity
 
 			if err != nil {
 				if ctx.Err() == context.DeadlineExceeded {
+					if len(params.Publish) > 0 {
+						return "", fmt.Errorf("exec: command timed out after %s; nothing was published", timeout)
+					}
 					return "", fmt.Errorf("exec: command timed out after %s", timeout)
 				}
-				// Return error output to the LLM so it can reason about it
-				return fmt.Sprintf("Command failed: %s\n%s", err.Error(), result), nil
+				// Return error output to the LLM so it can reason about it.
+				// What it asked to publish is published all the same: the
+				// files may be what tells it why the command failed.
+				return fmt.Sprintf("Command failed: %s\n%s", err.Error(), result) + pub.publishFromWorkspace(callCtx, ws, params.Publish), nil
 			}
 
 			if len(result) > 50000 {
 				result = result[:50000] + "\n... (output truncated)"
 			}
 
-			return strings.TrimSpace(result), nil
+			return strings.TrimSpace(result) + pub.publishFromWorkspace(callCtx, ws, params.Publish), nil
 		},
 	})
 }

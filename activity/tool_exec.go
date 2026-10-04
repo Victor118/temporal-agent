@@ -28,6 +28,10 @@ type ExecuteToolInput struct {
 type ExecuteToolOutput struct {
 	Content string `json:"content"`
 	IsError bool   `json:"is_error"`
+	// Files are the files the call published (publish_file, exec's
+	// publish), by reference: their content went to the store, never
+	// through Temporal.
+	Files []tool.FileRef `json:"files,omitempty"`
 }
 
 // ToolResolution tells the workflow how to dispatch a tool call.
@@ -76,16 +80,19 @@ func (a *ToolActivities) ExecuteTool(ctx context.Context, input ExecuteToolInput
 	if input.Call != nil {
 		ctx = tool.WithCall(ctx, *input.Call)
 	}
+	ctx, published := tool.WithPublished(ctx)
 	result, err := a.Registry.Execute(ctx, input.Name, input.Input)
 	if err != nil {
 		// Return error as content to the LLM, not as a Temporal error
 		return ExecuteToolOutput{
 			Content: err.Error(),
 			IsError: true,
+			Files:   published.Files(),
 		}, nil
 	}
 	return ExecuteToolOutput{
 		Content: result,
 		IsError: false,
+		Files:   published.Files(),
 	}, nil
 }

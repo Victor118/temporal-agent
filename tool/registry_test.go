@@ -284,7 +284,7 @@ func TestClaudeCodeToolsSayWhatARunCosts(t *testing.T) {
 // call would return nothing of what it did.
 func TestTool_TimeoutCoversItsOwnLimit(t *testing.T) {
 	r := NewRegistry()
-	RegisterExecTool(r, t.TempDir(), nil, nil)
+	RegisterExecTool(r, t.TempDir(), nil, nil, nil)
 	RegisterWebTools(r)
 	RegisterGrepTool(r, t.TempDir())
 	f := newFakeMCP(t, nil)

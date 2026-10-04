@@ -14,6 +14,7 @@ import (
 	"github.com/victor/temporal-agent/claudecode"
 	"github.com/victor/temporal-agent/config"
 	"github.com/victor/temporal-agent/subproc"
+	"github.com/victor/temporal-agent/tool"
 )
 
 // At startup, the user exec runs as gets its home and the workspace, existing
@@ -107,6 +108,20 @@ func TestParseContextBytes(t *testing.T) {
 	for _, raw := range []string{"2MB", "0", "-1", "1.5"} {
 		if _, err := parseContextBytes(raw); err == nil {
 			t.Errorf("parseContextBytes(%q) accepted", raw)
+		}
+	}
+}
+
+// A file bound the operator mistyped stops the worker, as the context's.
+func TestParseFileBytes(t *testing.T) {
+	for raw, want := range map[string]int64{"": tool.DefaultMaxFileBytes, "1048576": 1 << 20} {
+		if got, err := parseFileBytes(raw); err != nil || got != want {
+			t.Errorf("parseFileBytes(%q) = %d, %v; want %d", raw, got, err, want)
+		}
+	}
+	for _, raw := range []string{"20MB", "0", "-1", "1.5"} {
+		if _, err := parseFileBytes(raw); err == nil {
+			t.Errorf("parseFileBytes(%q) accepted", raw)
 		}
 	}
 }

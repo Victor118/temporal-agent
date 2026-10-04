@@ -84,6 +84,9 @@ type Store interface {
 	DeleteMessage(ctx context.Context, sessionID string, id int64) error
 	DeleteMessagesBySession(ctx context.Context, sessionID string) error
 
+	// Files agents published in sessions
+	FileStore
+
 	// Agent memory. Every write is conditional (SaveMemory): there is no
 	// last-write-wins path.
 	LoadMemory(ctx context.Context, scope MemoryScope, scopeID string) (Memory, error)

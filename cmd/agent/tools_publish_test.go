@@ -37,7 +37,7 @@ func (p *publishedTools) DeleteTool(_ context.Context, name, queue string) (bool
 func TestPublishTools_CarriesTheProperties(t *testing.T) {
 	r := tool.NewRegistry()
 	tool.RegisterMemoryTools(r, nil)
-	tool.RegisterExecTool(r, t.TempDir(), nil, nil)
+	tool.RegisterExecTool(r, t.TempDir(), nil, nil, nil)
 	tool.RegisterAskUserTool(r, func() {})
 	p := &publishedTools{records: map[string]store.ToolRecord{}}
 	publishTools(context.Background(), p, nil, r.All(), "tools")

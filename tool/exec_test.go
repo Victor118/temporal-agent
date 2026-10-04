@@ -22,7 +22,7 @@ func setupExecWorkspace(t *testing.T) (string, *Registry) {
 	id := subproctest.Identity(t)
 	dir := subproctest.Dir(t, id)
 	r := NewRegistry()
-	RegisterExecTool(r, dir, id, subproc.NewRuns(id))
+	RegisterExecTool(r, dir, id, subproc.NewRuns(id), nil)
 	return dir, r
 }
 
@@ -156,7 +156,7 @@ func TestExec_RefusesToRunAsRoot(t *testing.T) {
 		t.Skip("only a worker running as root refuses")
 	}
 	r := NewRegistry()
-	RegisterExecTool(r, t.TempDir(), nil, nil)
+	RegisterExecTool(r, t.TempDir(), nil, nil, nil)
 	_, err := execExec(t, r, map[string]interface{}{"command": "touch /tmp/ran-as-root"})
 	if !errors.Is(err, subproc.ErrRootWithoutIdentity) {
 		t.Errorf("err = %v, want a refusal", err)
@@ -234,7 +234,7 @@ func TestExec_LeavesNothingRunning(t *testing.T) {
 func TestExec_RefusesAnIdentityWithoutRuns(t *testing.T) {
 	r := NewRegistry()
 	me := uint32(os.Geteuid())
-	RegisterExecTool(r, t.TempDir(), &subproc.Identity{UID: me, GID: me, Home: t.TempDir()}, nil)
+	RegisterExecTool(r, t.TempDir(), &subproc.Identity{UID: me, GID: me, Home: t.TempDir()}, nil, nil)
 	if _, err := execExec(t, r, map[string]interface{}{"command": "true"}); err == nil || !strings.Contains(err.Error(), "subproc.Runs") {
 		t.Errorf("err = %v, want a refusal", err)
 	}

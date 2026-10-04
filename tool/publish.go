@@ -1,0 +1,342 @@
+package tool
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"mime"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"unicode"
+	"unicode/utf8"
+
+	"github.com/google/uuid"
+
+	"github.com/victor/temporal-agent/store"
+)
+
+// DefaultMaxFileBytes bounds a published file when the worker sets no
+// FILES_MAX_BYTES.
+const DefaultMaxFileBytes = 20 << 20
+
+// maxFileNameBytes bounds a published file's name, as most file systems do.
+const maxFileNameBytes = 255
+
+// maxPublishPaths bounds the files one exec call publishes.
+const maxPublishPaths = 20
+
+// TurnRef is the session turn a run works for: what it publishes is
+// attached there.
+type TurnRef struct {
+	SessionID string `json:"session_id"`
+	TurnKey   string `json:"turn_key"`
+}
+
+// FileRef is a published file as the workflow sees it: never its content.
+type FileRef struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	ContentType string `json:"content_type"`
+	Size        int64  `json:"size"`
+	SHA256      string `json:"sha256"`
+}
+
+// FileSaver stores a published file (store.FileStore).
+type FileSaver interface {
+	SaveFile(ctx context.Context, f store.File, content []byte) (store.File, error)
+}
+
+// Publisher publishes files for the tools of a worker: publish_file, and
+// exec's publish. The content goes from the tool to the store directly;
+// the call's result, and so Temporal, only carries its reference.
+type Publisher struct {
+	Store    FileSaver
+	MaxBytes int64 // a file's largest size; DefaultMaxFileBytes when not positive
+}
+
+func (p *Publisher) maxBytes() int64 {
+	if p == nil || p.MaxBytes <= 0 {
+		return DefaultMaxFileBytes
+	}
+	return p.MaxBytes
+}
+
+// Published collects the files a tool call publishes, for the activity to
+// return their references (ExecuteToolOutput.Files).
+type Published struct {
+	mu    sync.Mutex
+	files []FileRef
+}
+
+type publishedKey struct{}
+
+// WithPublished gives a tool call a collector of the files it publishes.
+func WithPublished(ctx context.Context) (context.Context, *Published) {
+	p := &Published{}
+	return context.WithValue(ctx, publishedKey{}, p), p
+}
+
+// Files are the files published so far, in order.
+func (p *Published) Files() []FileRef {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]FileRef(nil), p.files...)
+}
+
+func recordPublished(ctx context.Context, f FileRef) {
+	if p, ok := ctx.Value(publishedKey{}).(*Published); ok {
+		p.mu.Lock()
+		p.files = append(p.files, f)
+		p.mu.Unlock()
+	}
+}
+
+// errNoTurn refuses a file from a run that belongs to no session turn: a
+// scheduled task, for one. Its members could not see it anywhere.
+var errNoTurn = errors.New("Cannot publish: this run belongs to no session turn (a scheduled task, for instance), so there is no session to attach a file to. Put the content in your answer instead.")
+
+// publish stores content as a file named name, attached to the session turn
+// the call works for (CallContext.Turn), and returns it.
+func (p *Publisher) publish(ctx context.Context, name string, content []byte) (store.File, error) {
+	if p == nil || p.Store == nil {
+		return store.File{}, errors.New("Cannot publish: this worker has no file store")
+	}
+	call, ok := CallFromContext(ctx)
+	if !ok || call.Turn == nil || call.Turn.SessionID == "" || call.Turn.TurnKey == "" {
+		return store.File{}, errNoTurn
+	}
+	name, err := CleanFileName(name)
+	if err != nil {
+		return store.File{}, err
+	}
+	if max := p.maxBytes(); int64(len(content)) > max {
+		return store.File{}, fmt.Errorf("%s is too large: at most %s may be published", name, FormatSize(max))
+	}
+	sum := sha256.Sum256(content)
+	f, err := p.Store.SaveFile(ctx, store.File{
+		ID:          uuid.NewString(),
+		SessionID:   call.Turn.SessionID,
+		TurnKey:     call.Turn.TurnKey,
+		AgentID:     AgentIDFromContext(ctx),
+		UserID:      UserIDFromContext(ctx),
+		Name:        name,
+		ContentType: contentType(name, content),
+		Size:        int64(len(content)),
+		SHA256:      hex.EncodeToString(sum[:]),
+	}, content)
+	if errors.Is(err, store.ErrFileSessionGone) {
+		return store.File{}, errors.New("Cannot publish: the session was deleted")
+	}
+	if err != nil {
+		return store.File{}, fmt.Errorf("publish %s: %w", name, err)
+	}
+	recordPublished(ctx, FileRef{ID: f.ID, Name: f.Name, ContentType: f.ContentType, Size: f.Size, SHA256: f.SHA256})
+	return f, nil
+}
+
+// published is how the model reads a file it published.
+func published(f store.File) string {
+	return fmt.Sprintf("%s (%s, id %s)", f.Name, FormatSize(f.Size), f.ID)
+}
+
+// CleanFileName is name as a published file takes it: trimmed, a name and
+// not a path (no separator, not "." nor ".."), with no control or format
+// character (a right-to-left override would show "exe.pdf" for "fdp.exe"),
+// valid UTF-8, at most maxFileNameBytes. Anything else is refused, not
+// mended: the model chose it and can choose another.
+func CleanFileName(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	switch {
+	case name == "":
+		return "", errors.New("the file needs a name")
+	case name == "." || name == "..":
+		return "", fmt.Errorf("%q is not a file name", name)
+	case strings.ContainsAny(name, `/\`):
+		return "", fmt.Errorf("%q is a path: give a file name, with no / or \\", name)
+	case !utf8.ValidString(name):
+		return "", errors.New("the file name is not valid UTF-8")
+	case len(name) > maxFileNameBytes:
+		return "", fmt.Errorf("the file name is too long: at most %d bytes", maxFileNameBytes)
+	}
+	for _, r := range name {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return "", fmt.Errorf("the file name %q holds a control or invisible character", name)
+		}
+	}
+	return name, nil
+}
+
+// fileTypes are the types of the files an agent publishes most, which the
+// system's table may lack.
+var fileTypes = map[string]string{
+	".md":       "text/markdown; charset=utf-8",
+	".markdown": "text/markdown; charset=utf-8",
+	".csv":      "text/csv; charset=utf-8",
+	".tsv":      "text/tab-separated-values; charset=utf-8",
+	".txt":      "text/plain; charset=utf-8",
+	".log":      "text/plain; charset=utf-8",
+	".json":     "application/json",
+	".yaml":     "application/yaml",
+	".yml":      "application/yaml",
+	".svg":      "image/svg+xml",
+	".pdf":      "application/pdf",
+	".png":      "image/png",
+	".jpg":      "image/jpeg",
+	".jpeg":     "image/jpeg",
+	".gif":      "image/gif",
+	".webp":     "image/webp",
+	".zip":      "application/zip",
+	".html":     "text/html; charset=utf-8",
+	".xml":      "application/xml",
+}
+
+// contentType is what a file says it is: from its name's extension, else
+// from its first bytes. Informative: how a file is served does not trust it.
+func contentType(name string, content []byte) string {
+	ext := strings.ToLower(filepath.Ext(name))
+	if t, ok := fileTypes[ext]; ok {
+		return t
+	}
+	if t := mime.TypeByExtension(ext); t != "" {
+		return t
+	}
+	return http.DetectContentType(content)
+}
+
+// FormatSize is a size as the model reads it: 820 B, 12.4 KB, 3.1 MB.
+func FormatSize(n int64) string {
+	switch {
+	case n < 1024:
+		return fmt.Sprintf("%d B", n)
+	case n < 1024*1024:
+		return fmt.Sprintf("%.1f KB", float64(n)/1024)
+	}
+	return fmt.Sprintf("%.1f MB", float64(n)/(1024*1024))
+}
+
+// RegisterPublishFileTool registers publish_file: a text the model writes
+// (Markdown, CSV, SVG, JSON…) becomes a file the session's members download,
+// attached to the turn. It reads no disk: any worker with the store runs it.
+func RegisterPublishFileTool(r *Registry, p *Publisher) {
+	r.Register(&Tool{
+		Name: "publish_file",
+		Description: `Publish a file to the session: its members see it attached to your answer and can download it. Use it for a deliverable the user should keep as a file — a report in Markdown, a table in CSV, a diagram in SVG, data in JSON — rather than pasting it into your answer. The content is text you write. To publish a file a command produced in the workspace, use exec's publish parameter instead.
+Mention the file by its name in your answer; do not repeat its content.`,
+		InputSchema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"name": {"type": "string", "description": "File name with its extension, e.g. report.md. A name, not a path."},
+				"content": {"type": "string", "description": "The file's content, as text (at most ` + FormatSize(p.maxBytes()) + `)."}
+			},
+			"required": ["name", "content"]
+		}`),
+		Kind: ToolKindActivity,
+		// The session turn the file is attached to (CallContext.Turn).
+		NeedsCallContext: true,
+		Execute: func(ctx context.Context, input json.RawMessage) (string, error) {
+			var params struct {
+				Name    string `json:"name"`
+				Content string `json:"content"`
+			}
+			if err := json.Unmarshal(input, &params); err != nil {
+				return "", fmt.Errorf("parse input: %w", err)
+			}
+			f, err := p.publish(ctx, params.Name, []byte(params.Content))
+			if err != nil {
+				return "", err
+			}
+			return "Published " + published(f) + ". The session's members can download it from your answer.", nil
+		},
+	})
+}
+
+// publishFromWorkspace publishes the files at paths in the workspace, after
+// a command: each one read through root, so that a link leading out of the
+// workspace is refused, and only a regular file is read (a FIFO would block).
+// It returns what to append to the command's output: what was published,
+// and why the others were not. A failure is no error: the command ran, and
+// its output stands.
+func (p *Publisher) publishFromWorkspace(ctx context.Context, ws workspace, paths []string) string {
+	if len(paths) == 0 {
+		return ""
+	}
+	var done, failed []string
+	fail := func(path string, err error) { failed = append(failed, fmt.Sprintf("- %s: %v", path, err)) }
+	if len(paths) > maxPublishPaths {
+		for _, path := range paths[maxPublishPaths:] {
+			fail(path, fmt.Errorf("at most %d files per command", maxPublishPaths))
+		}
+		paths = paths[:maxPublishPaths]
+	}
+	root, err := ws.open()
+	if err != nil {
+		for _, path := range paths {
+			fail(path, err)
+		}
+		return publishReport(done, failed)
+	}
+	defer root.Close()
+	for _, path := range paths {
+		content, err := p.readPublished(root, path)
+		if err != nil {
+			fail(path, err)
+			continue
+		}
+		f, err := p.publish(ctx, filepath.Base(filepath.Clean(path)), content)
+		if err != nil {
+			fail(path, err)
+			continue
+		}
+		done = append(done, "- "+published(f))
+	}
+	return publishReport(done, failed)
+}
+
+// readPublished reads the file at path, relative to the workspace, up to
+// one byte past the largest size: enough to refuse a larger one without
+// reading it whole. An absolute path is refused, not taken relative to the
+// workspace as the file tools do: a command's /tmp/out.csv is not the
+// workspace's tmp/out.csv.
+func (p *Publisher) readPublished(root *os.Root, path string) ([]byte, error) {
+	if filepath.IsAbs(path) {
+		return nil, errors.New("absolute path: give a path relative to the workspace")
+	}
+	rel, err := relPath(path)
+	if err != nil {
+		return nil, err
+	}
+	f, err := openRegular(root, rel, os.O_RDONLY)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	max := p.maxBytes()
+	content, err := io.ReadAll(io.LimitReader(f, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(content)) > max {
+		return nil, fmt.Errorf("too large: at most %s may be published", FormatSize(max))
+	}
+	return content, nil
+}
+
+func publishReport(done, failed []string) string {
+	var b strings.Builder
+	if len(done) > 0 {
+		b.WriteString("\n\nFiles published (the session's members can download them from your answer):\n")
+		b.WriteString(strings.Join(done, "\n"))
+	}
+	if len(failed) > 0 {
+		b.WriteString("\n\nFiles not published:\n")
+		b.WriteString(strings.Join(failed, "\n"))
+	}
+	return b.String()
+}
