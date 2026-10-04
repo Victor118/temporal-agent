@@ -31,8 +31,12 @@ const (
 	claudeCodeHeartbeat = 2 * time.Minute
 	// prepareTimeout bounds the clone.
 	prepareTimeout = 15 * time.Minute
-	// gitHeartbeatTimeout must exceed the interval the git activity beats at.
-	gitHeartbeatTimeout = 60 * time.Second
+	// gitHeartbeatTimeout bounds the silence of the clone, inspection and
+	// push, which beat every 10s, the wait for a run's CLI included
+	// (activity.DefaultRunEndWait): the SDK sends one heartbeat per 0.8 ×
+	// this timeout at most (60s at most), so 2 min leaves a minute of
+	// margin, as for the run itself (claudeCodeHeartbeat).
+	gitHeartbeatTimeout = 2 * time.Minute
 	// cleanupTimeout covers the wait for a run given up on to be gone from
 	// its worker (activity.DefaultRunEndWait), as inspectTimeout and
 	// pushTimeout do.
