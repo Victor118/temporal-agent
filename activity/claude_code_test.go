@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"go.temporal.io/sdk/temporal"
+	"go.temporal.io/sdk/testsuite"
 
 	"github.com/victor/temporal-agent/claudecode"
 	"github.com/victor/temporal-agent/subproc"
@@ -1347,5 +1348,49 @@ func TestAwaitRunEndCancelled(t *testing.T) {
 	var canceled *temporal.CanceledError
 	if !errors.As(err, &canceled) {
 		t.Errorf("err = %v, want a cancellation", err)
+	}
+}
+
+// The steps' errors reach the workflow with their type, and are retried or
+// not as they say: through the SDK's converter, an application error wrapped
+// in another error would arrive as a retryable one of no type.
+func TestStepErrorsKeepTheirType(t *testing.T) {
+	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: t.TempDir(), RunEndWait: 100 * time.Millisecond}
+	dir := filepath.Join(a.Root, "run-1")
+	if err := os.Mkdir(dir, 0o755); err != nil { // no .git: tampered with
+		t.Fatal(err)
+	}
+	var suite testsuite.WorkflowTestSuite
+	for _, c := range []struct {
+		name, typ string
+		busy      bool
+	}{
+		{"still active", ErrRunStillActive, true},
+		{"tampered", "WorkspaceTampered", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if c.busy {
+				defer a.live.hold(dir)()
+			}
+			for step, run := range map[string]func(env *testsuite.TestActivityEnvironment) error{
+				"inspect": func(env *testsuite.TestActivityEnvironment) error {
+					_, err := env.ExecuteActivity(a.InspectWorkspace, InspectWorkspaceInput{Dir: dir, Base: "HEAD"})
+					return err
+				},
+				"push": func(env *testsuite.TestActivityEnvironment) error {
+					_, err := env.ExecuteActivity(a.PushBranch, PushBranchInput{Dir: dir,
+						Remote: filepath.Join(t.TempDir(), "remote"), Branch: "agent/x", Commit: strings.Repeat("a", 40)})
+					return err
+				},
+			} {
+				env := suite.NewTestActivityEnvironment()
+				env.RegisterActivity(a)
+				err := run(env)
+				var appErr *temporal.ApplicationError
+				if !errors.As(err, &appErr) || appErr.Type() != c.typ || !appErr.NonRetryable() {
+					t.Errorf("%s: %v, want a non-retryable %s", step, err, c.typ)
+				}
+			}
+		})
 	}
 }

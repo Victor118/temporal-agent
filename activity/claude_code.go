@@ -299,6 +299,22 @@ func (a *ClaudeCodeActivities) awaitRunEnd(ctx context.Context, dir string) erro
 		fmt.Sprintf("the run's CLI still runs on this worker after %s", limit), ErrRunStillActive, nil)
 }
 
+// stepError is err, prefixed with what failed, unless the SDK reads it by its
+// kind: an application error (wrapped, it would reach the workflow as a
+// retryable error of no type, its details lost) or a cancellation, which go
+// as they are.
+func stepError(what string, err error) error {
+	var appErr *temporal.ApplicationError
+	if errors.As(err, &appErr) {
+		return appErr
+	}
+	var canceled *temporal.CanceledError
+	if errors.As(err, &canceled) {
+		return canceled
+	}
+	return fmt.Errorf("%s: %w", what, err)
+}
+
 // hasType tells whether err is an application error of type typ.
 func hasType(err error, typ string) bool {
 	var appErr *temporal.ApplicationError
@@ -361,7 +377,7 @@ func (a *ClaudeCodeActivities) PrepareWorkspace(ctx context.Context, in PrepareW
 		return PrepareWorkspaceOutput{}, err
 	}
 	if err := a.checkRepo(in.Repo); err != nil {
-		return PrepareWorkspaceOutput{}, fmt.Errorf("prepare workspace: %w", err)
+		return PrepareWorkspaceOutput{}, stepError("prepare workspace", err)
 	}
 	if strings.HasPrefix(in.Ref, "-") || strings.HasPrefix(in.Branch, "-") {
 		return PrepareWorkspaceOutput{}, temporal.NewNonRetryableApplicationError(
@@ -371,10 +387,10 @@ func (a *ClaudeCodeActivities) PrepareWorkspace(ctx context.Context, in PrepareW
 	// A retried attempt finds the previous one's half-written clone. Start over
 	// rather than trying to repair it.
 	if err := removeWorkspace(dir); err != nil {
-		return PrepareWorkspaceOutput{}, fmt.Errorf("prepare workspace: %w", err)
+		return PrepareWorkspaceOutput{}, stepError("prepare workspace", err)
 	}
 	if err := os.MkdirAll(a.Root, 0o755); err != nil {
-		return PrepareWorkspaceOutput{}, fmt.Errorf("prepare workspace: %w", err)
+		return PrepareWorkspaceOutput{}, stepError("prepare workspace", err)
 	}
 
 	// The clone is the only step that reaches the network, and a private
@@ -414,12 +430,12 @@ func (a *ClaudeCodeActivities) PrepareWorkspace(ctx context.Context, in PrepareW
 		}
 	}
 	if err := keepGitConfig(dir); err != nil {
-		return PrepareWorkspaceOutput{}, fmt.Errorf("prepare workspace: %w", err)
+		return PrepareWorkspaceOutput{}, stepError("prepare workspace", err)
 	}
 	// The run works, and commits, as RunAs: the clone is its own. Root and the
 	// configuration's copy stay the worker's.
 	if err := a.RunAs.Give(dir); err != nil {
-		return PrepareWorkspaceOutput{}, fmt.Errorf("prepare workspace: %w", err)
+		return PrepareWorkspaceOutput{}, stepError("prepare workspace", err)
 	}
 	return PrepareWorkspaceOutput{Dir: dir, Commit: strings.TrimSpace(commit), Branch: in.Branch}, nil
 }
@@ -629,7 +645,7 @@ func (a *ClaudeCodeActivities) CleanupWorkspace(ctx context.Context, in CleanupW
 			log.Printf("Warning: claude code: %s is not deleted, a command of its run still runs: "+
 				"it goes at this worker's next start (RootClaim.Sweep)", want)
 		}
-		return fmt.Errorf("cleanup: %w", err)
+		return stepError("cleanup", err)
 	}
 	return removeWorkspace(want)
 }
@@ -676,7 +692,7 @@ func (a *ClaudeCodeActivities) RunClaudeCode(ctx context.Context, in RunClaudeCo
 	}
 	dir, err := a.workspaceDir(in.Dir)
 	if err != nil {
-		return claudecode.Result{}, fmt.Errorf("claude code: %w", err)
+		return claudecode.Result{}, stepError("claude code", err)
 	}
 	// A configuration of the run's own, made afresh on every attempt: what an
 	// earlier run, or attempt, wrote in one is never read by another. Without
@@ -686,7 +702,7 @@ func (a *ClaudeCodeActivities) RunClaudeCode(ctx context.Context, in RunClaudeCo
 	if claudecode.OwnConfig(a.ClaudeConfigDir, a.RunAs) {
 		configDir = cliConfigDir(dir)
 		if err := claudecode.SeedConfigDir(configDir, a.ClaudeConfigDir, a.RunAs); err != nil {
-			return claudecode.Result{}, fmt.Errorf("claude code: configuration: %w", err)
+			return claudecode.Result{}, stepError("claude code: configuration", err)
 		}
 		defer func() {
 			// The CLI's environment is the worker's, filtered: whether it has
@@ -859,15 +875,15 @@ func (a *ClaudeCodeActivities) InspectWorkspace(ctx context.Context, in InspectW
 	}
 	dir, err := a.workspaceDir(in.Dir)
 	if err != nil {
-		return InspectWorkspaceOutput{}, fmt.Errorf("inspect workspace: %w", err)
+		return InspectWorkspaceOutput{}, stepError("inspect workspace", err)
 	}
 	if err := a.awaitRunEnd(ctx, dir); err != nil {
-		return InspectWorkspaceOutput{}, fmt.Errorf("inspect workspace: %w", err)
+		return InspectWorkspaceOutput{}, stepError("inspect workspace", err)
 	}
 	var out InspectWorkspaceOutput
 	changed, err := a.restoreGitConfig(in.Dir)
 	if err != nil {
-		return out, fmt.Errorf("inspect workspace: %w", err)
+		return out, stepError("inspect workspace", err)
 	}
 	out.GitConfigChanged = changed
 
@@ -926,7 +942,7 @@ func (a *ClaudeCodeActivities) PushBranch(ctx context.Context, in PushBranchInpu
 			"push: dir, remote, branch and commit are required", "InvalidInput", nil)
 	}
 	if err := a.checkRepo(in.Remote); err != nil {
-		return fmt.Errorf("push: %w", err)
+		return stepError("push", err)
 	}
 	if strings.HasPrefix(in.Branch, "-") {
 		return temporal.NewNonRetryableApplicationError(fmt.Sprintf("push: invalid branch %q", in.Branch), "InvalidInput", nil)
@@ -936,15 +952,15 @@ func (a *ClaudeCodeActivities) PushBranch(ctx context.Context, in PushBranchInpu
 	}
 	dir, err := a.workspaceDir(in.Dir)
 	if err != nil {
-		return fmt.Errorf("push: %w", err)
+		return stepError("push", err)
 	}
 	if err := a.awaitRunEnd(ctx, dir); err != nil {
-		return fmt.Errorf("push: %w", err)
+		return stepError("push", err)
 	}
 	// InspectWorkspace restored the configuration already: a change now was
 	// made after it, by something the run left running.
 	if changed, err := a.restoreGitConfig(in.Dir); err != nil {
-		return fmt.Errorf("push: %w", err)
+		return stepError("push", err)
 	} else if changed {
 		return temporal.NewNonRetryableApplicationError(
 			"push: the clone's git configuration changed since the inspection", "WorkspaceTampered", nil)
