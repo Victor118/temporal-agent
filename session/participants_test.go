@@ -65,7 +65,9 @@ func TestStopTurn_Rights(t *testing.T) {
 		stopped string // the stop sent, "" for none
 		queried bool
 	}{
-		"the creator, any turn, unread": {me: alice, turn: "m4.jarvis", stopped: jarvis + "=m4.jarvis"},
+		"the creator, another's turn":   {me: alice, state: ptr(answering("jarvis", 4, "u-carol")), turn: "m4.jarvis", stopped: jarvis + "=m4.jarvis", queried: true},
+		"the creator, the turn changed": {me: alice, state: ptr(answering("jarvis", 6, bob.ID)), turn: "m4.jarvis", err: ErrTurnOver, queried: true},
+		"the creator, nothing runs":     {me: alice, turn: "m4.jarvis", err: ErrTurnOver, queried: true},
 		"the creator, whichever runs":   {me: alice, stopped: jarvis + "="},
 		"the author":                    {me: bob, state: ptr(answering("jarvis", 4, bob.ID)), turn: "m4.jarvis", stopped: jarvis + "=m4.jarvis", queried: true},
 		"the author, no turn named":     {me: bob, state: ptr(answering("jarvis", 4, bob.ID)), stopped: jarvis + "=m4.jarvis", queried: true},
@@ -94,8 +96,14 @@ func TestStopTurn_Rights(t *testing.T) {
 
 	// A name that is no participant's names no workflow of the session.
 	tc := &fakeTemporal{}
-	if err := newTest(&memStore{}, tc).StopTurn(ctx, creatorSession(), "jarvis:m4:tool:ask_user:1", "", alice); !errors.Is(err, ErrNothingToStop) || len(tc.signals) != 0 {
+	s := newTest(&memStore{}, tc)
+	if err := s.StopTurn(ctx, creatorSession(), "jarvis:m4:tool:ask_user:1", "", alice); !errors.Is(err, ErrNothingToStop) || len(tc.signals) != 0 {
 		t.Errorf("StopTurn on a forged name: %v, signalled %v", err, tc.signals)
+	}
+	for _, forged := range []string{"jarvis:m4:tool:ask_user:1", ""} {
+		if err := s.Clear(ctx, creatorSession(), forged, alice); !errors.Is(err, ErrNothingToStop) || len(tc.signals) != 0 {
+			t.Errorf("Clear on %q: %v, signalled %v", forged, err, tc.signals)
+		}
 	}
 }
 
@@ -152,6 +160,17 @@ func TestCancel_Rights(t *testing.T) {
 	tc = &fakeTemporal{byType: running, states: states}
 	if err := newTest(&memStore{}, tc).Cancel(ctx, creatorSession(), &store.User{ID: "u-dave"}); !errors.Is(err, ErrStopNotAllowed) || len(tc.signals) != 0 {
 		t.Errorf("dave: %v, signalled %v", err, tc.signals)
+	}
+
+	// A participant that cannot be read is left running: not an error when
+	// another stop went, one when none did.
+	tc = &fakeTemporal{byType: running, states: states, queryErrs: map[string]error{smith: errors.New("no worker")}}
+	if err := newTest(&memStore{}, tc).Cancel(ctx, creatorSession(), bob); err != nil || fmt.Sprint(stopsSent(tc)) != fmt.Sprintf("[%s=m4.jarvis]", jarvis) {
+		t.Errorf("bob, smith unreadable: %v, stops %v", err, stopsSent(tc))
+	}
+	tc = &fakeTemporal{byType: running, states: states, queryErrs: map[string]error{jarvis: errors.New("no worker")}}
+	if err := newTest(&memStore{}, tc).Cancel(ctx, creatorSession(), bob); err == nil || errors.Is(err, ErrStopNotAllowed) || len(tc.signals) != 0 {
+		t.Errorf("bob, his turn unreadable: %v, signalled %v", err, tc.signals)
 	}
 }
 

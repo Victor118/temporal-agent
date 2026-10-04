@@ -117,6 +117,7 @@ type fakeTemporal struct {
 	startErr     error                  // fails every SignalWithStart
 	startedAt    map[string]time.Time   // when the workflows listed started; zero if not set
 	states       map[string]interface{} // query answers, by workflow ID
+	queryErrs    map[string]error       // query failures, by workflow ID
 	queried      []string               // workflow IDs queried
 	terminated   []string
 }
@@ -174,6 +175,9 @@ func (f *fakeTemporal) QueryWorkflow(_ context.Context, id, _, _ string, _ ...in
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.queried = append(f.queried, id)
+	if err, ok := f.queryErrs[id]; ok {
+		return nil, err
+	}
 	if state, ok := f.states[id]; ok {
 		return encodedState{state}, nil
 	}

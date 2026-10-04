@@ -1132,6 +1132,13 @@ func TestRoutes_StopAParticipant(t *testing.T) {
 	if w := call(t, h, http.MethodPost, stop, `{"turn":"m4.jarvis"}`, bob); w.Code != http.StatusConflict {
 		t.Errorf("a turn over: %d", w.Code)
 	}
+	// The creator names a turn as well: over, it is told the same.
+	if w := call(t, h, http.MethodPost, stop, `{"turn":"m4.jarvis"}`, alice); w.Code != http.StatusConflict {
+		t.Errorf("the creator, a turn over: %d", w.Code)
+	}
+	if w := call(t, h, http.MethodPost, "/sessions/"+liveSID+"/participants/smith/stop", `{"turn":"m4.smith"}`, alice); w.Code != http.StatusConflict {
+		t.Errorf("the creator, a participant not running: %d", w.Code)
+	}
 	if w := call(t, h, http.MethodPost, stop, "", bob); w.Code != http.StatusAccepted {
 		t.Errorf("bob stopping his turn: %d %s", w.Code, w.Body)
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"slices"
 	"strings"
 	"sync"
@@ -112,11 +113,12 @@ func participantID(sessionID, participant string) (string, bool) {
 
 // StopTurn stops a participant's turn, turn: the one the member saw. Only
 // the author of the message it answers may, or the session's creator
-// (MayStop). The author is read now, from the participant itself: the turn
-// may have changed since the member saw it. The stop names the turn, which
-// the participant stops only if it still runs it: a turn started meanwhile,
+// (MayStop). The turn is read now, from the participant itself: it may have
+// changed since the member saw it. The stop names the turn, which the
+// participant stops only if it still runs it: a turn started meanwhile,
 // another member's maybe, goes on. With no turn named, the turn running is
-// stopped, whichever it is (the JSON API).
+// stopped, whichever it is; the creator, who may stop any, then needs no
+// reading.
 //
 // ErrStopNotAllowed: the turn answers another member, and the user did not
 // create the session. ErrTurnOver: the turn named is over. ErrNothingToStop:
@@ -132,7 +134,7 @@ func (s *Service) StopTurn(ctx context.Context, sess *store.Session, participant
 	if turn != "" {
 		over = ErrTurnOver
 	}
-	if sess.CreatedBy != me.ID {
+	if turn != "" || sess.CreatedBy != me.ID {
 		st, err := s.queryState(ctx, id)
 		var gone *serviceerror.NotFound
 		switch {
@@ -189,11 +191,13 @@ func (s *Service) signalParticipant(ctx context.Context, id, signal string, arg 
 // Cancel stops the turns running in the session that the user may stop
 // (MayStop): all of them for its creator, whichever turn each runs; for
 // another member, those answering their messages, read now from each
-// participant, all at once, each stop naming its turn. It stops turns, not
-// the messages waiting.
+// participant, all at once, each stop naming its turn. A participant that
+// cannot be read is logged and left running, as if its turn were another
+// member's. It stops turns, not the messages waiting.
 //
-// ErrStopNotAllowed: turns run, none of them the user's.
-// ErrNothingToStop: none runs.
+// An error only when no stop went: the stops that went are what the user
+// asked for, as far as could be done. ErrStopNotAllowed: turns run, none of
+// them the user's (or readable). ErrNothingToStop: none runs.
 func (s *Service) Cancel(ctx context.Context, sess *store.Session, me *store.User) error {
 	defer s.statuses.invalidate()
 	ids, err := s.participants(ctx, sess.SessionID)
@@ -214,7 +218,9 @@ func (s *Service) Cancel(ctx context.Context, sess *store.Session, me *store.Use
 			switch {
 			case errors.As(qerrs[i], &gone), qerrs[i] == nil && st.Current == nil:
 			case qerrs[i] != nil:
+				log.Printf("Session %s: read the turn of %s: %v", sess.SessionID, ids[i], qerrs[i])
 				errs = append(errs, fmt.Errorf("read the turn of %s: %w", ids[i], qerrs[i]))
+				others++
 			case MayStop(sess, st.Current.UserID, me.ID):
 				stops[i] = &workflow.StopTurn{TurnKey: st.Current.Turn}
 			default:
@@ -235,12 +241,15 @@ func (s *Service) Cancel(ctx context.Context, sess *store.Session, me *store.Use
 		}
 	}
 	switch {
+	case stopped > 0:
+		if len(errs) > 0 {
+			log.Printf("Session %s: %d turns stopped, not all: %v", sess.SessionID, stopped, errors.Join(errs...))
+		}
+		return nil
 	case len(errs) > 0:
 		return errors.Join(errs...)
-	case stopped == 0 && others > 0:
+	case others > 0:
 		return ErrStopNotAllowed
-	case stopped == 0:
-		return ErrNothingToStop
 	}
-	return nil
+	return ErrNothingToStop
 }
