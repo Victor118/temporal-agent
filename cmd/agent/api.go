@@ -264,11 +264,9 @@ type stopRequest struct {
 // it answers, or the session's creator. Its body is optional.
 func (a *api) stopParticipant(w http.ResponseWriter, r *http.Request) {
 	var req stopRequest
-	if r.ContentLength != 0 {
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid request body", http.StatusBadRequest)
-			return
-		}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
 	}
 	sess, err := a.sessions.Get(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
