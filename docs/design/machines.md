@@ -1,6 +1,6 @@
 # Conception : des machines hors du réseau privé
 
-Statut : **version 2**, proposition, rien n'est fait. Version 1 le 5 octobre 2026, révisée le même jour après une relecture contre le code et le SDK Temporal (v1.33). Les points issus de la relecture sont marqués *[rev. 1…15]*.
+Statut : **version 2.1**, proposition, rien n'est fait. Version 1 le 5 octobre 2026, révisée le même jour après deux relectures contre le code et le SDK Temporal (v1.33). Les points de la première sont marqués *[rev. 1…15]*, ceux de la seconde *[rev2 A…J]*.
 
 Origine : une note proposait d'exposer Temporal aux machines des utilisateurs (sans base de données pour elles). L'option retenue est différente : une passerelle, Temporal et la base restent privés (§3).
 
@@ -64,9 +64,11 @@ Machine d'Alice (Linux)                       Notre infra (réseau privé)
 
 - `analyze_repo` et `implement_feature` deviennent des workflow-tools publiés par le **worker principal** (`WORKFLOW_QUEUE`) quand les machines sont activées sur l'installation, ou qu'une queue de repli est configurée. Leur workflow, `CodingRunWorkflow`, commence par l'activity `PickMachine` (une machine en ligne de l'auteur du tour, `CallContext.UserID`, avec la capacité) ;
 - machine trouvée : `RunOnMachine` ;
-- sinon : l'`AnalyzeRepoWorkflow` / `ImplementFeatureWorkflow` d'aujourd'hui, **inchangé**, en enfant sur la queue de repli (`CLAUDE_CODE_QUEUE`, celle des conteneurs Claude Code), avec sa session Temporal, sa sonde et son attente ; ou une erreur claire au modèle si l'installation n'a pas de repli.
+- sinon : l'`AnalyzeRepoWorkflow` / `ImplementFeatureWorkflow` d'aujourd'hui, **inchangé**, en enfant sur la queue de repli **de cet outil** (`CLAUDE_CODE_ANALYZE_QUEUE`, `CLAUDE_CODE_IMPLEMENT_QUEUE` : une par outil, pour garder la séparation actuelle des identifiants, clé git en lecture seule d'un côté, clé de push de l'autre *[rev2 A]*), avec sa session Temporal, sa sonde et son attente ; ou une erreur claire au modèle si l'installation n'a pas de repli.
+- Avant l'enfant, `CodingRunWorkflow` lance lui-même `ProbeRunWorker` sur la queue de repli (`ScheduleToStartTimeout` 1 min, comme `openRun`) : si personne ne la sert, l'enfant ne démarrerait jamais et la sonde, qui vit dans l'enfant, ne tournerait pas. « Pas de worker » devient une erreur claire, comme « pas de machine » *[rev2 B]*.
+- L'enfant garde un ID préfixé par la session (dérivé de celui du parent, `<session>:…`) pour `query_workflow` et `SessionOf` *[rev2 I]*. Le `CallContext` passe tel quel à l'enfant : avis d'attente, session et `runQueue` ne changent pas.
 
-Les conteneurs Claude Code ne publient plus `analyze_repo` ni `implement_feature` : ils servent seulement leurs workflows sur leur queue. « Queue = capacité » reste vrai pour nos workers ; les machines sont une couche de routage au-dessus, dans `CodingRunWorkflow`, et `runQueue` reste le choix d'une queue de workers à l'intérieur du repli.
+Les conteneurs Claude Code ne publient plus `analyze_repo` ni `implement_feature` : ils servent seulement leurs workflows sur leur queue. Les descriptions de ces outils, composées aujourd'hui dans le conteneur (`auth.CostNote()`, attente d'un worker) et publiées seulement là où la CLI est installée, sont récrites pour le worker principal (« sur ta machine, avec ton abonnement ; sinon le repli de l'installation ») et publiées sans condition sur la CLI *[rev2 G]*. « Queue = capacité » reste vrai pour nos workers ; les machines sont une couche de routage au-dessus, dans `CodingRunWorkflow`, et `runQueue` reste le choix d'une queue de workers à l'intérieur du repli.
 
 ## 5. Inscription et connexion
 
@@ -82,19 +84,25 @@ Ce que la machine n'a pas : `DATABASE_URL`, `TEMPORAL_HOST`, `INTERNAL_API_KEY`,
 ## 6. Une directive, de bout en bout
 
 1. `CodingRunWorkflow` a choisi une machine (`PickMachine`, §9). Il planifie `RunOnMachine` sur sa propre queue, avec la directive (petite : dépôt, ref, tâche, options ; jamais un gros contenu).
-2. `RunOnMachine` (n'importe quel worker) écrit la directive en base (`machine_directives` : id, machine, utilisateur, session, tour, appel, nature, **jeton de tâche** de l'activity, état, échéance), puis la remet à la passerelle par l'API interne (`POST /internal/machines/directives`, `Authorization: Bearer $INTERNAL_API_KEY`, comme `/internal/notify`), et rend `activity.ErrResultPending` : **complétion asynchrone**, aucun emplacement de worker tenu pendant un run *[rev. 5]*.
+2. `RunOnMachine` (n'importe quel worker) complète la directive que `PickMachine` a créée (§9) avec le **jeton de tâche** de l'activity, puis la remet à la passerelle par l'API interne (`POST /internal/machines/directives`, `Authorization: Bearer $INTERNAL_API_KEY`, comme `/internal/notify`), et rend `activity.ErrResultPending` : **complétion asynchrone**, aucun emplacement de worker tenu pendant un run *[rev. 5]*.
 3. La passerelle envoie la directive à la machine (sur la réplique qui tient sa connexion, §12). Le jeton de tâche **ne part jamais** vers la machine : elle ne connaît que l'ID de directive. Qui détient ce jeton et un client du namespace peut terminer l'activity avec n'importe quel résultat *[rev. 11]*.
-4. **Heartbeats portés par la passerelle** *[rev. 6]* : toutes les 30 s pour chaque directive en cours, tant que la connexion de la machine répond au ping (`client.RecordActivityHeartbeat` avec le jeton). Les `progress` de la machine sont regroupés (le dernier seulement, 1 Kio au plus, ils finissent dans l'historique) et joints au heartbeat suivant ; ils alimentent aussi la note du tour (« Analyse sur la machine de Victor — 34 outils »), par la queue du tour comme les avis d'aujourd'hui.
+4. **Heartbeats portés par la passerelle** *[rev. 6]* : toutes les 30 s pour chaque directive en cours, tant que la connexion de la machine répond au ping (`client.RecordActivityHeartbeat` avec le jeton : un appel client pur, que le serveur fait avec son client Temporal ; hors d'un contexte d'activity la requête part sans namespace, le serveur Temporal le lit dans le jeton, à couvrir par le test de la phase 0). Les `progress` de la machine sont regroupés (le dernier seulement, 1 Kio au plus, ils finissent dans l'historique) et joints au heartbeat suivant. Ils alimentent aussi la note du tour (« Analyse sur la machine de Victor — 34 outils ») : la passerelle est le serveur, elle appelle directement `session.Service.Observe`, donc **web seulement** ; une session Telegram n'a pas cet avis *[rev2 E]*.
 5. **Arrêt** : la réponse à un heartbeat rend `CanceledError` quand le workflow a annulé l'activity (vérifié dans le SDK : `recordActivityHeartbeat`), ou `NotFound` quand le workflow n'existe plus (session supprimée) : dans les deux cas, `cancel` à la machine. `activity_paused` est ignoré. Comme les heartbeats partent toutes les 30 s, un « Arrêter » arrive en 30 s au plus, même quand la CLI se tait.
 6. **Résultat** : la passerelle termine l'activity (`client.CompleteActivity`), avec le rapport et la progression. Un résultat pour une directive que la base ne tient plus pour ouverte est jeté.
 
-**Options de `RunOnMachine`** *[rev. 2]* : `MaximumAttempts: 1` (un run n'est jamais rejoué : il se paie, et un second `implement_feature` produirait d'autres commits) ; `StartToCloseTimeout` = la durée d'un run (45 min pour une analyse) ; `HeartbeatTimeout` = **5 min**, au-delà d'un redémarrage du serveur ; `WaitForCancellation: true`, pour que l'annulation du workflow devienne `cancel_requested` côté activity.
+**Options de `RunOnMachine`** *[rev. 2]* : `MaximumAttempts: 1` (un run n'est jamais rejoué : il se paie, et un second `implement_feature` produirait d'autres commits) ; `StartToCloseTimeout` = la durée d'un run (45 min pour une analyse) ; `HeartbeatTimeout` = **5 min**, au-delà d'un redémarrage du serveur ; `WaitForCancellation: true`, pour que le workflow attende la réponse finale de la machine (son rapport partiel, l'assurance que la CLI est arrêtée) au lieu de rendre `CanceledError` aussitôt. L'annulation elle-même devient `cancel_requested` dans tous les cas.
+
+**Un choix assumé** *[rev2 F]* : 5 min de silence = machine perdue. Un portable qu'on ferme 10 min perd son run, même si la CLI aurait repris au réveil (la passerelle lui envoie alors `cancel`). C'est le prix d'une détection rapide d'une machine vraiment morte ; `StartToCloseTimeout` borne de toute façon le run.
 
 **Garanties** *[rev. 7]* : une directive de run est exécutée **au plus une fois** ; perdue, c'est un échec clair au modèle (« la machine de Victor a décroché pendant le run ; rien n'a été poussé ; relancer repart de zéro et se paie à nouveau »), jamais une relance automatique. Seul ce qui est idempotent est « au moins une fois » : upload d'un fichier, `CompleteActivity`.
 
-**Redémarrage de la passerelle (déploiement)** *[rev. 2]* : les connexions tombent, les directives restent en base avec leur jeton. La machine se reconnecte et son `hello` liste ses directives en cours ; la passerelle rattache celles que la base attribue à cette machine (jamais une autre : le `hello` ne ressuscite rien *[rev. 13]*) et reprend leurs heartbeats. Sans reconnexion dans les 5 min, l'activity expire : échec clair, comme ci-dessus.
+**Redémarrage de la passerelle (déploiement)** *[rev. 2]* : les connexions tombent, les directives restent en base avec leur jeton. La machine se reconnecte et son `hello` liste ses directives **en cours** et ses directives **finies non acquittées** ; la passerelle rattache celles que la base attribue à cette machine et tient pour ouvertes (jamais une autre : le `hello` ne ressuscite rien *[rev. 13]*), reprend leurs heartbeats, et accepte les résultats en attente. Une directive listée que la base a close reçoit `cancel`. Sans reconnexion dans les 5 min, l'activity expire : échec clair, comme ci-dessus.
 
-**Directive orpheline** *[rev. 11]* : écrite en base mais dont l'activity a échoué avant `ErrResultPending`. La passerelle le découvre au premier heartbeat (`NotFound`) et l'annule ; un balayage périodique couvre celles jamais remises.
+**Un résultat n'est jamais perdu par une déconnexion** *[rev2 C]* : la machine garde chaque résultat (sur disque) jusqu'à l'`ack` de la passerelle, qui ne l'envoie qu'après `CompleteActivity`. Un run fini pendant les trois minutes d'un déploiement rend donc son rapport à la reconnexion, au lieu de 45 min payées pour rien.
+
+**Directive orpheline** *[rev. 11]* : créée en base mais dont l'activity a échoué avant `ErrResultPending`, ou réservée par `PickMachine` dans un workflow annulé avant `RunOnMachine`. La passerelle le découvre au premier heartbeat (`NotFound`) et la ferme ; un balayage ferme celles sans jeton dont l'échéance de remise est passée, et toutes celles dont l'échéance est passée.
+
+**Révocation** *[rev2 H]* : la passerelle ferme la connexion, envoie `cancel`, et termine elle-même l'activity de chaque directive ouverte (`CompleteActivity` avec l'erreur « machine révoquée »), plutôt que de laisser le tour attendre 5 min.
 
 **Arrêt d'`agent connect`** : comme `RunStop` aujourd'hui, la machine tue ses runs et répond `machine_stopping` à chaque directive ; l'activity échoue avec ce type, lu comme une machine perdue.
 
@@ -115,8 +123,9 @@ Phase 1 : **Linux**, sous l'utilisateur courant, sans root.
 ## 9. Qui exécute quoi
 
 - **Règle** : un tour tourne pour l'humain qui l'a demandé, sur **sa** machine. `PickMachine` ne regarde que les machines de l'auteur du message du tour.
-- **Choix** : parmi ses machines en ligne qui ont la capacité, la moins occupée, réservée en base en une seule requête (`UPDATE machines SET running = running + 1 WHERE … AND running < plafond … RETURNING`), pour que deux runs simultanés ne dépassent pas le plafond d'une machine *[rev. 14]*.
-- **Aucune machine** : repli sur `CLAUDE_CODE_QUEUE` si l'installation en a un et le permet, sinon « ta machine n'est pas connectée ». Qui paie le repli (la clé de l'installation) est une politique de l'installation, à afficher dans « Mes machines ».
+- **Choix** : parmi ses machines en ligne qui ont la capacité, la moins occupée, sous le plafond qu'elle a annoncé *[rev. 14]*.
+- **Pas de compteur** *[rev2 D]* : la charge d'une machine est le nombre de ses lignes ouvertes dans `machine_directives`. `PickMachine` **crée la directive** dans la transaction qui choisit (verrou sur la ligne de la machine, `SELECT … FOR UPDATE`, compte des directives ouvertes, insertion), idempotente sur `(run du workflow, appel)` : une `PickMachine` rejouée retrouve sa ligne au lieu d'en réserver une seconde. Réservation et directive sont la même ligne ; toute fin (résultat, échec, `cancel` acquitté, `NotFound`, révocation, orpheline, échéance) est un seul `UPDATE` de son état. Rien à décrémenter, rien qui dérive.
+- **Aucune machine** : repli sur la queue de l'outil (`CLAUDE_CODE_ANALYZE_QUEUE`, `CLAUDE_CODE_IMPLEMENT_QUEUE`) si l'installation en a une et le permet, sinon « ta machine n'est pas connectée ». Qui paie le repli (la clé de l'installation) est une politique de l'installation, à afficher dans « Mes machines ».
 - **Plus tard** : un membre publie un de ses agents au groupe ; il tourne alors sur sa machine même quand d'autres l'appellent, en mode API seulement (consentement et plafond).
 
 ## 10. Plus tard : le modèle sur la machine, et la CLI comme moteur
@@ -147,13 +156,13 @@ Le pont tourne sous le même utilisateur que la CLI : le jeton de run de la sock
 
 Ce qu'un worker touche aujourd'hui et que la machine n'aura pas *[rev. 12]* :
 - **PostgreSQL** : publication des outils (`publishTools`), catalogue et queues rechargés toutes les 30 s (`pollCatalog`, `pollActivityQueues`), `skills_version`, publication de fichiers (`tool.Publisher`), outils de mémoire, de planification et de documents.
-- **Temporal** : tous les workflows et activities sur chaque queue (`workerWorkflows`), `query_workflow`, client des tâches planifiées, relais, sessions de run (`openRun`, `ProbeRunWorker`, `CLAUDE_CODE_QUEUE_WAIT`, remplacés côté machine par le routage), avis par `CallContext.NotifyQueue` (remplacés par les `progress`).
+- **Temporal** : tous les workflows et activities sur chaque queue (`workerWorkflows`), `query_workflow`, client des tâches planifiées, relais, sessions de run (`openRun`, `ProbeRunWorker`, `CLAUDE_CODE_QUEUE_WAIT`, remplacés côté machine par le routage), avis par `CallContext.NotifyQueue` (remplacés par les `progress`, web seulement).
 - **Processus** : `subproc.Runs`, `claimRunsRoot` et son verrou, `CLAUDE_CONFIG_DIR`/`SeedConfigDir`, `cliRuns`, `RunStop` (équivalent : `machine_stopping`).
 - **Configuration** : `CLAUDE_CODE_AUTH`/`ResolveAuth` reste utile sur la machine (abonnement ou clé de l'utilisateur), lu chez elle.
 
 Nouveau :
 - côté serveur : la passerelle (`/machines/connect`, `/machines/files`, `/internal/machines/directives`), les tables `machines` et `machine_directives`, la page « Mes machines » ;
-- côté workers : `CodingRunWorkflow`, les activities `PickMachine` et `RunOnMachine`, la queue de repli `CLAUDE_CODE_QUEUE` ;
+- côté workers : `CodingRunWorkflow`, les activities `PickMachine` et `RunOnMachine`, les queues de repli par outil (`CLAUDE_CODE_ANALYZE_QUEUE`, `CLAUDE_CODE_IMPLEMENT_QUEUE`), les descriptions récrites d'`analyze_repo` et `implement_feature` ;
 - côté machine : le mode `agent connect`, sans base ni Temporal.
 
 **Plusieurs répliques du serveur** *[rev. 5]* : la machine est connectée à une réplique (`machines.connected_to`) ; `/internal/machines/directives` arrive sur n'importe laquelle, qui transmet à la bonne (adresse interne de la réplique, ou LISTEN/NOTIFY). Heartbeats et `CompleteActivity` partent de la réplique qui tient la connexion, avec le jeton lu en base. Phases 0 à 2 : une seule réplique.
@@ -173,8 +182,8 @@ C'est une couche au-dessus d'`agent connect` : aucun protocole nouveau, sauf le 
 
 | Phase | Contenu | Résultat |
 |---|---|---|
-| **0** | Passerelle (une réplique), inscription par jeton, tables, `RunOnMachine` avec complétion asynchrone, une directive triviale (`echo`), un test `RealServer` : complétion, heartbeat par client, `cancel`, redémarrage de la passerelle et rattachement, machine perdue | Le mécanisme est prouvé contre le vrai serveur |
-| **1** | `CodingRunWorkflow`, `PickMachine`, repli `CLAUDE_CODE_QUEUE`, `analyze_repo` sur la machine (Linux), « Mes machines » | Alice lance une analyse avec son abonnement, depuis chez elle, sans VPN |
+| **0** | Passerelle (une réplique), inscription par jeton, tables, `PickMachine` et `RunOnMachine` avec complétion asynchrone, une directive triviale (`echo`), un test `RealServer` sur la base jetable du `CLAUDE.md` *[rev2 J]* : heartbeat **et** complétion par client depuis le serveur, `cancel`, redémarrage de la passerelle avec rattachement et résultat rendu après reconnexion (`ack`), machine perdue, révocation, réservations concurrentes au plafond | Le mécanisme est prouvé contre le vrai serveur |
+| **1** | `CodingRunWorkflow`, repli par outil avec sonde, `analyze_repo` sur la machine (Linux), « Mes machines » | Alice lance une analyse avec son abonnement, depuis chez elle, sans VPN |
 | **1 bis** | Client de bureau (Linux d'abord) | Une seule chose à lancer |
 | **2** | Upload de fichiers depuis la machine ; `implement_feature` sur la machine (push avec ses identifiants) | Les runs rendent des fichiers ; le code part de sa machine |
 | **3** | `CallLLM` sur la machine, avec sa conception et la politique par agent (§10) | Un utilisateur sans clé sur le serveur a un agent |
@@ -184,6 +193,6 @@ C'est une couche au-dessus d'`agent connect` : aucun protocole nouveau, sauf le 
 ## 15. Questions ouvertes
 
 1. Transport : WebSocket (le plus simple derrière un reverse proxy), flux gRPC ou HTTP/2 en long-poll ? À confirmer avec le proxy visé.
-2. Repli sur `CLAUDE_CODE_QUEUE` quand la machine de l'auteur est hors ligne : permis par défaut ou non ?
+2. Repli sur les queues de l'installation quand la machine de l'auteur est hors ligne : permis par défaut ou non ?
 3. Une machine pour plusieurs utilisateurs (serveur d'équipe) : exclu en phase 1.
 4. Liste locale des dépôts : vide par défaut (tout refusé, comme aujourd'hui), ou proposée à l'inscription ?
