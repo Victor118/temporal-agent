@@ -142,9 +142,10 @@
 {{end}}
 
 {{/* The files a turn published: each one downloads (/files/{id}, members
-     of the session only, always as an attachment). */}}
+     of the session only, always as an attachment). Not boosted: htmx would
+     fetch the file and swap it into the page instead of downloading it. */}}
 {{define "files"}}
-{{with .}}<div class="files">{{range .}}<a class="file" id="file-{{.ID}}" href="{{.Href}}" download="{{.Name}}" title="Télécharger {{.Name}}">↓ <span class="file-name">{{.Name}}</span> <span class="file-size">{{.Size}}{{with .Via}} · via {{.}}{{end}}</span></a>{{end}}</div>{{end}}
+{{with .}}<div class="files">{{range .}}<a class="file" id="file-{{.ID}}" href="{{.Href}}" download="{{.Name}}" hx-boost="false" title="Télécharger {{.Name}}">↓ <span class="file-name">{{.Name}}</span> <span class="file-size">{{.Size}}{{with .Via}} · via {{.}}{{end}}</span></a>{{end}}</div>{{end}}
 {{end}}
 
 {{define "forks"}}

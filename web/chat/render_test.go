@@ -586,6 +586,9 @@ func TestRender_Files(t *testing.T) {
 	if !strings.Contains(out, link) || !strings.Contains(out, "10 o") {
 		t.Fatalf("thread lacks the file link: %s", out)
 	}
+	if !strings.Contains(out, link+` hx-boost="false"`) {
+		t.Error("the file link is boosted: htmx would swap the file into the page")
+	}
 	if i, j := strings.Index(out, `id="m9"`), strings.Index(out, link); !(i >= 0 && i < j) {
 		t.Errorf("the file is not under the answer: %d, %d", i, j)
 	}
