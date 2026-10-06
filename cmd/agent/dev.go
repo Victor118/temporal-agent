@@ -43,7 +43,11 @@ func runDev(cmd *cobra.Command, args []string) {
 	// Skills — dev mode loads from the local filesystem, and the back-office
 	// shows the same ones.
 	skillStore := &skill.FileStore{Dir: "./skills"}
-	rt, err := newWorkerRuntime(cfg, st, temporalClient, workerOptions{web: activity.HubNotifier{Hub: hub}, skills: skillStore})
+	// The machines' gateway is in this process: directives reach it in
+	// memory, like the notifications reach the hub.
+	machines := newGateway(cfg, st, temporalClient, hub)
+	rt, err := newWorkerRuntime(cfg, st, temporalClient, workerOptions{web: activity.HubNotifier{Hub: hub}, skills: skillStore,
+		machines: st, handoff: machines})
 	if err != nil {
 		log.Fatalf("Worker: %v", err)
 	}
@@ -53,6 +57,7 @@ func runDev(cmd *cobra.Command, args []string) {
 	srv := newHTTPServer(cfg.HTTPAddr, newHTTPHandler(cfg, st, temporalClient, hub, httpOptions{
 		skills:       func() []skill.Skill { return rt.skills },
 		skillsSource: skillStore.Dir,
+		machines:     machines,
 	}))
 
 	go func() {
@@ -61,6 +66,7 @@ func runDev(cmd *cobra.Command, args []string) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		srv.Shutdown(ctx)
+		machines.Close()
 		rt.shutdown()
 	}()
 

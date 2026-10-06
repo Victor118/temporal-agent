@@ -103,6 +103,7 @@ func TestWorkerActivities_AreTheActivities(t *testing.T) {
 		"LoadSkillsForAgent",
 		"NotifyStep",
 		"PersistContext",
+		"PickMachine",
 		"PostForkReport",
 		"PostForkSummary",
 		"PrepareWorkspace",
@@ -110,6 +111,7 @@ func TestWorkerActivities_AreTheActivities(t *testing.T) {
 		"PushBranch",
 		"Relay",
 		"RunClaudeCode",
+		"RunOnMachine",
 		"SummarizeConversation",
 		"SummarizeForkReport",
 	}

@@ -281,3 +281,8 @@ button, input, textarea, select { font-family: inherit; font-size: inherit; colo
   .composer { padding: 0 12px 12px; }
   .topbar { padding: 0 12px; }
 }
+.machine-actions { display: flex; gap: 8px; flex-wrap: wrap; margin: 14px 0 8px; }
+.machine-token { margin: 12px 0; }
+.machine-token pre { overflow-x: auto; font-size: 12px; margin: 6px 0; }
+.notif.machine { align-items: flex-start; }
+.notif.machine .grow { flex-grow: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }

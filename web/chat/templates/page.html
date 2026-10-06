@@ -161,6 +161,7 @@ if (!window.chatWired) {
     <button class="btn only-narrow rail-toggle" type="button" onclick="document.getElementById('app').classList.toggle('show-rail')">Détails</button>
     {{end}}
     {{if .Notifications}}<a class="btn" href="/notifications">Notifications · {{.Notifications}}</a>{{end}}
+    <a class="btn ghost" href="/machines">Machines</a>
     {{if .IsAdmin}}<a class="btn ghost" href="/admin/" hx-boost="false">Configuration</a>{{end}}
     <span class="me">{{.Me.Name}}</span>
     <form method="post" action="/logout"><button class="btn ghost" type="submit">Déconnexion</button></form>

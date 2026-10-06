@@ -1,0 +1,82 @@
+{{define "machines"}}<!doctype html>
+<html lang="fr">
+<head><title>Mes machines · temporal-agent</title>{{template "head"}}</head>
+<body hx-boost="true">
+<main class="page">
+  <p><a href="/">← Retour aux sessions</a></p>
+  <h1 style="font-size:20px">Mes machines</h1>
+  <p class="note">Une machine exécute, chez toi et avec tes propres identifiants, les tâches que tes agents lui confient. C'est elle qui se connecte au serveur : rien ne se connecte à elle.</p>
+  {{with .Flash}}<p class="note"><strong>{{.}}</strong></p>{{end}}
+  {{with .Error}}<div class="error">{{.}}</div>{{end}}
+  <div class="machine-actions">
+    <a class="btn primary" href="/machines/activer">Ajouter une machine</a>
+    <form method="post" action="/machines/enrollment-token"><button class="btn" type="submit">Créer un jeton d'inscription</button></form>
+  </div>
+  <p class="note">Sur la machine : <code>agent connect --join {{.Server}}</code>, puis saisis ici, avec « Ajouter une machine », le code qu'elle affiche.</p>
+  {{with .EnrollmentToken}}
+  <div class="card machine-token">
+    <div class="ttl">Jeton d'inscription</div>
+    <p class="note">Il inscrit une seule machine, jusqu'à {{clock $.TokenExpires}}, et ne sera plus affiché. Donne-le sur l'entrée standard, jamais en argument :</p>
+    <pre><code>agent connect --join {{$.Server}} --token-stdin</code></pre>
+    <pre><code>{{.}}</code></pre>
+  </div>
+  {{end}}
+  {{range .Machines}}
+  <div class="notif machine" id="machine-{{.ID}}">
+    <div class="grow">
+      <div><strong>{{.Name}}</strong>
+        {{if .Revoked}}<span class="tag idle">révoquée</span>{{else if .Online}}<span class="tag working">en ligne</span>{{else}}<span class="tag idle">hors ligne</span>{{end}}</div>
+      <div class="note">{{with .OS}}{{.}} · {{end}}capacités : {{.CapabilitiesText}} · directives en cours : {{.OpenDirectives}} sur {{.MaxDirectives}}</div>
+      <div class="note">inscrite {{.Enrolled}}{{with .Seen}} · vue {{.}}{{end}}{{with .LastAddr}} · depuis {{.}}{{end}}{{with .AgentVersion}} · agent {{.}}{{end}}</div>
+      {{if .Revoked}}<div class="note">Révoquée : {{.RevokedReason}}.</div>{{end}}
+    </div>
+    {{if not .Revoked}}
+    <form method="post" action="/machines/{{.ID}}/revoke" hx-confirm="Révoquer « {{.Name}} » ? Sa connexion est coupée, ses tâches en cours arrêtées, et il faudra l'inscrire à nouveau.">
+      <button class="btn danger" type="submit">Révoquer</button>
+    </form>
+    {{end}}
+  </div>
+  {{else}}
+  <p class="note">Aucune machine.</p>
+  {{end}}
+</main>
+</body>
+</html>{{end}}
+
+{{define "machine-activate"}}<!doctype html>
+<html lang="fr">
+<head><title>Ajouter une machine · temporal-agent</title>{{template "head"}}</head>
+<body hx-boost="true">
+<main class="center">
+  <div class="logo"></div>
+  <h1>Ajouter une machine</h1>
+  {{with .Request}}
+  <p class="note">Une machine demande à être inscrite sur ton compte :</p>
+  <div class="card">
+    <div class="ttl">{{.Name}}</div>
+    <div class="meta">
+      <span>Système : {{.OS}}</span>
+      <span>Capacités : {{.CapabilitiesText}}</span>
+      <span>Adresse : {{if .ClientAddr}}{{.ClientAddr}}{{else}}inconnue{{end}}</span>
+      <span>Demandée à {{clock .CreatedAt}}, valable jusqu'à {{clock .ExpiresAt}}</span>
+    </div>
+  </div>
+  <div class="error">N'approuve qu'un code que tu viens de voir sur ta propre machine. Si quelqu'un d'autre t'a donné ce code, n'approuve pas : sa machine recevrait les tâches de tes agents.</div>
+  <form method="post" action="/machines/activer/approve">
+    <input type="hidden" name="request" value="{{.ID}}">
+    <input type="hidden" name="code" value="{{.Code}}">
+    <button class="btn primary" type="submit">Approuver cette machine</button>
+  </form>
+  <p><a href="/machines">Annuler</a></p>
+  {{else}}
+  <p class="note">Saisis le code qu'affiche <code>agent connect --join</code> sur ta machine.</p>
+  {{with .Error}}<div class="error">{{.}}</div>{{end}}
+  <form method="post" action="/machines/activer">
+    <input class="input" name="code" value="{{.Code}}" placeholder="KX4-92M" autocomplete="off" autocapitalize="characters" spellcheck="false" required autofocus>
+    <button class="btn primary" type="submit">Continuer</button>
+  </form>
+  <p><a href="/machines">← Mes machines</a></p>
+  {{end}}
+</main>
+</body>
+</html>{{end}}

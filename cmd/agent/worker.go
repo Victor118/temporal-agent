@@ -36,7 +36,9 @@ func runWorker(cmd *cobra.Command, args []string) {
 	// Notification bridge: POST to server's internal endpoint (SSE requires HTTP)
 	notifier := activity.NewHTTPNotifier(cfg.NotifyURL, cfg.InternalAPIKey)
 
-	opts := workerOptions{web: notifier}
+	// RunOnMachine hands its directives to the server's gateway, through
+	// the same internal API and key.
+	opts := workerOptions{web: notifier, machines: st, handoff: activity.NewHTTPDirectiveHandoff(cfg.NotifyURL, cfg.InternalAPIKey)}
 	if cfg.SkillsRepo != "" {
 		opts.skills = &skill.GitStore{
 			RepoURL:  cfg.SkillsRepo,

@@ -9,6 +9,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/spf13/cobra"
 
+	"github.com/victor/temporal-agent/activity"
 	"github.com/victor/temporal-agent/config"
 	"github.com/victor/temporal-agent/sse"
 )
@@ -40,15 +41,19 @@ func runServer(cmd *cobra.Command, args []string) {
 	// Back-office skills: the server and the workers reload the repo when
 	// skills_version moves.
 	skills, skillsSource := serverSkills(context.Background(), cfg, st)
+	machines := newGateway(cfg, st, temporalClient, hub)
 	handler := newHTTPHandler(cfg, st, temporalClient, hub, httpOptions{
 		skills:           skills,
 		skillsSource:     skillsSource,
 		skillsReloadable: cfg.SkillsRepo != "",
+		machines:         machines,
 	})
 
-	// Internal API (receives SSE notifications from workers)
+	// Internal API: the workers' notifications, and the directives their
+	// RunOnMachine hands to the machines' gateway.
 	internalRouter := chi.NewRouter()
 	internalRouter.Post("/internal/notify", handleInternalNotify(hub, cfg.InternalAPIKey))
+	internalRouter.Post(activity.DirectivePath, machines.ServeDirectives(cfg.InternalAPIKey))
 	if cfg.InternalAPIKey == "" {
 		log.Println("Warning: INTERNAL_API_KEY is not set, the internal API refuses every worker notification")
 	}
@@ -72,6 +77,8 @@ func runServer(cmd *cobra.Command, args []string) {
 		defer cancel()
 		publicSrv.Shutdown(ctx)
 		internalSrv.Shutdown(ctx)
+		// Hijacked, the machines' connections are none of Shutdown's.
+		machines.Close()
 	}()
 
 	log.Printf("Public API listening on %s", cfg.HTTPAddr)

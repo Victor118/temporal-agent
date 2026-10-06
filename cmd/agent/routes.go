@@ -9,6 +9,7 @@ import (
 
 	"github.com/victor/temporal-agent/auth"
 	"github.com/victor/temporal-agent/config"
+	"github.com/victor/temporal-agent/gateway"
 	"github.com/victor/temporal-agent/session"
 	"github.com/victor/temporal-agent/sse"
 	"github.com/victor/temporal-agent/web/chat"
@@ -45,6 +46,8 @@ type server struct {
 	channels []inboundChannel
 	skills   *skillsWebhook // nil = no secret, no route
 	admin    http.Handler   // the back-office, mounted under /admin
+	// machines is the machines' gateway; nil = no machine routes.
+	machines *gateway.Gateway
 }
 
 // newServer wires the adapters over one session service.
@@ -91,6 +94,15 @@ func (s *server) routes() http.Handler {
 		r.Post("/webhooks/"+c.Name(), c.ServeHTTP)
 	}
 
+	// Machines (agent connect): no browser, no login session. A machine
+	// authenticates with its token; enrolling, with its secrets.
+	if g := s.machines; g != nil {
+		r.Get("/machines/connect", g.ServeConnect)
+		r.Post("/machines/device", g.ServeDevice)
+		r.Post("/machines/device/token", g.ServeDeviceToken)
+		r.Post("/machines/enroll", g.ServeEnroll)
+	}
+
 	// Back-office: its own login page, open to admins only
 	r.Mount("/admin", s.admin)
 
@@ -115,6 +127,17 @@ func (s *server) routes() http.Handler {
 			// A published file: its session's members only, checked by the
 			// handler, which finds the session from the file.
 			r.Get("/files/{fileID}", u.fileDownload)
+			// "Mes machines": the user's own machines, and the approval of
+			// a machine's code.
+			if s.machines != nil {
+				m := &machinesUI{gw: s.machines}
+				r.Get("/machines", m.list)
+				r.Post("/machines/enrollment-token", m.enrollmentToken)
+				r.Post("/machines/{machineID}/revoke", m.revoke)
+				r.Get("/machines/activer", m.activatePage)
+				r.Post("/machines/activer", m.activate)
+				r.Post("/machines/activer/approve", m.approve)
+			}
 
 			r.Route("/s/{id}", func(r chi.Router) {
 				// The stream checks the membership itself: a page that is

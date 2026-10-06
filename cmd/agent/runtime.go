@@ -19,6 +19,7 @@ import (
 	"github.com/victor/temporal-agent/auth"
 	"github.com/victor/temporal-agent/claudecode"
 	"github.com/victor/temporal-agent/config"
+	"github.com/victor/temporal-agent/gateway"
 	"github.com/victor/temporal-agent/provider"
 	"github.com/victor/temporal-agent/skill"
 	"github.com/victor/temporal-agent/sse"
@@ -53,6 +54,11 @@ type workerOptions struct {
 	skills skill.Store
 	// watchSkills reloads them when skills_version moves (a git repository).
 	watchSkills bool
+	// machines holds the directives, and handoff gives them to the
+	// server's gateway: in process in dev mode, through the server's
+	// internal API otherwise.
+	machines activity.MachineStore
+	handoff  activity.DirectiveHandoff
 }
 
 // workerRuntime is what a process needs to serve Temporal: the tools it runs,
@@ -194,6 +200,7 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 	acts := workerActivities(activityDeps{
 		llm: llmProvider, store: st, catalog: catalog, skills: skillAct, maxContext: maxContext,
 		code: codeAct, registry: registry, notifiers: notifiers, web: opts.web, schedules: tc.ScheduleClient(), relay: tc,
+		machines: opts.machines, handoff: opts.handoff,
 	})
 	rt := &workerRuntime{queues: queues, workflows: workerConf.Workflows, skills: skills, endRuns: endRuns, releaseRuns: releaseRuns}
 	for _, queue := range queues {
@@ -249,6 +256,7 @@ func workerWorkflows() []any {
 		workflow.ScheduledAgentWorkflow,
 		workflow.ForkSessionWorkflow,
 		workflow.ReportToParentWorkflow,
+		workflow.MachineEchoWorkflow,
 	}
 }
 
@@ -265,6 +273,8 @@ type activityDeps struct {
 	web        activity.Notifier
 	schedules  activity.ScheduleHandles
 	relay      activity.SignalStarter
+	machines   activity.MachineStore
+	handoff    activity.DirectiveHandoff
 }
 
 // workerActivities are the activity structs every worker registers, on each
@@ -286,6 +296,7 @@ func workerActivities(d activityDeps) []any {
 		&activity.NotificationActivities{Notifiers: d.notifiers},
 		&activity.DeliveryActivities{Web: d.web, Store: d.store},
 		&activity.ScheduleActivities{Client: d.schedules, Store: d.store},
+		&activity.MachineActivities{Store: d.machines, Handoff: d.handoff},
 		d.skills,
 	}
 }
@@ -596,6 +607,8 @@ type httpOptions struct {
 	// skillsReloadable: the skills come from a repo that the server and the
 	// workers reload when skills_version moves.
 	skillsReloadable bool
+	// machines is the machines' gateway (newGateway).
+	machines *gateway.Gateway
 }
 
 // newHTTPHandler builds the public HTTP side: the back-office and the
@@ -620,7 +633,9 @@ func newHTTPHandler(cfg *config.Config, st store.Store, tc client.Client, hub *s
 		WorkflowQueue:    cfg.WorkflowQueue,
 	})
 	warnClosedWebhooks(cfg)
-	return newServer(cfg, st, tc, hub, authSvc, adminUI.Routes()).routes()
+	srv := newServer(cfg, st, tc, hub, authSvc, adminUI.Routes())
+	srv.machines = opts.machines
+	return srv.routes()
 }
 
 // dialTemporal connects to Temporal or ends the process.

@@ -170,6 +170,37 @@ func TestRender_Pages(t *testing.T) {
 	render(t, "notifications", NotificationsPage{Items: []Notification{{ID: 1, HTML: Markdown("done")}}})
 }
 
+func TestRender_Machines(t *testing.T) {
+	now := time.Now()
+	page := render(t, "machines", MachinesPage{Server: "https://agent.example.com", EnrollmentToken: "age_secret", TokenExpires: now,
+		Machines: []MachineRow{
+			{ID: "m1", Name: "maison <b>", OS: "linux/amd64", Capabilities: []string{"echo"}, Online: true, MaxDirectives: 1, CreatedAt: now, SeenAt: now},
+			{ID: "m2", Name: "vieux", Revoked: true, RevokedReason: "révoquée par son propriétaire", CreatedAt: now.Add(-48 * time.Hour)},
+		}})
+	for _, want := range []string{
+		`agent connect --join https://agent.example.com --token-stdin`, "age_secret",
+		"maison &lt;b&gt;", "en ligne", `action="/machines/m1/revoke"`, "hx-confirm=",
+		"révoquée", "capacités : echo", "vue à l&#39;instant", "il y a 2 jours",
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("machines page lacks %s", want)
+		}
+	}
+	if strings.Contains(page, `action="/machines/m2/revoke"`) {
+		t.Error("a revoked machine can be revoked again")
+	}
+	if !strings.Contains(render(t, "machine-activate", MachineActivatePage{Error: "Code inconnu"}), `name="code"`) {
+		t.Error("activation form")
+	}
+	approve := render(t, "machine-activate", MachineActivatePage{Request: &MachineRequest{ID: "r1", Code: "KX4-92M", Name: "maison",
+		OS: "linux", ClientAddr: "192.0.2.1", CreatedAt: now, ExpiresAt: now.Add(10 * time.Minute)}})
+	for _, want := range []string{`value="r1"`, `value="KX4-92M"`, "192.0.2.1", "propre machine", "Approuver"} {
+		if !strings.Contains(approve, want) {
+			t.Errorf("approval lacks %s", want)
+		}
+	}
+}
+
 // A session page leaves the session when its stream says it is no member
 // of it: the stream closes, the page goes home, with no script of its own.
 // Another member out, it reloads the members it shows. A page without a
