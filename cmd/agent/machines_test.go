@@ -152,6 +152,22 @@ func TestMachines_Routes(t *testing.T) {
 		t.Errorf("alice revokes hers: %d %v", w.Code, ms.revoked)
 	}
 
+	// An enrollment token: post, redirect, shown once to its user.
+	w = postForm(t, h, "/machines/enrollment-token", nil, alice)
+	loc := w.Header().Get("Location")
+	if w.Code != http.StatusSeeOther || !strings.HasPrefix(loc, "/machines?token=") {
+		t.Fatalf("enrollment token: %d %q", w.Code, loc)
+	}
+	if w := call(t, h, http.MethodGet, loc, "", logIn(t, h, "bob@example.com")); strings.Contains(w.Body.String(), "age_") {
+		t.Error("another user's page shows the token")
+	}
+	if w := call(t, h, http.MethodGet, loc, "", alice); !strings.Contains(w.Body.String(), "age_") || w.Header().Get("Cache-Control") != "no-store" {
+		t.Errorf("token page: %d", w.Code)
+	}
+	if w := call(t, h, http.MethodGet, loc, "", alice); strings.Contains(w.Body.String(), "age_") || !strings.Contains(w.Body.String(), "qu&#39;une fois") {
+		t.Error("a reload shows the token again")
+	}
+
 	// The code typed: the request it designates is shown, with its warning.
 	w = postForm(t, h, "/machines/activer", url.Values{"code": {strings.ToLower(grant.UserCode)}}, alice)
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "maison") || !strings.Contains(w.Body.String(), "propre machine") {

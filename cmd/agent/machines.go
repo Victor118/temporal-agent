@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -63,6 +64,54 @@ func machineAlerts(st notificationAppender, hub *sse.Hub) func(ctx context.Conte
 // logged-in user's own machines only. The rules are the gateway's.
 type machinesUI struct {
 	gw *gateway.Gateway
+
+	mu sync.Mutex
+	// tokens are the enrollment tokens just created, waiting for the one
+	// page that shows them, by a key of their own (post, redirect, get: a
+	// reload never creates a second token, nor shows this one again).
+	tokens map[string]shownToken
+}
+
+// shownToken is an enrollment token on its way to its page.
+type shownToken struct {
+	userID  string
+	token   string
+	expires time.Time // the token's own expiry
+	showBy  time.Time // past it, the page shows it no more
+}
+
+// tokenShowWindow is how long a created token waits for its page.
+const tokenShowWindow = time.Minute
+
+// keep holds a token for its page, and returns the key the page asks it by.
+func (m *machinesUI) keep(t shownToken) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.tokens == nil {
+		m.tokens = map[string]shownToken{}
+	}
+	now := time.Now()
+	for k, old := range m.tokens {
+		if now.After(old.showBy) {
+			delete(m.tokens, k)
+		}
+	}
+	key := newUUID()
+	t.showBy = now.Add(tokenShowWindow)
+	m.tokens[key] = t
+	return key
+}
+
+// take gives a kept token to its user's page, once.
+func (m *machinesUI) take(key, userID string) (shownToken, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	t, ok := m.tokens[key]
+	if !ok || t.userID != userID {
+		return shownToken{}, false
+	}
+	delete(m.tokens, key)
+	return t, time.Now().Before(t.showBy)
 }
 
 // serverURL is the server's address as the browser reached it, for the
@@ -108,17 +157,25 @@ func (m *machinesUI) list(w http.ResponseWriter, r *http.Request) {
 	case "revoked":
 		p.Flash = "Machine révoquée."
 	}
+	if key := r.URL.Query().Get("token"); key != "" {
+		if t, ok := m.take(key, auth.UserFrom(r.Context()).ID); ok {
+			p.EnrollmentToken, p.TokenExpires = t.token, t.expires
+		} else {
+			p.Flash = "Un jeton d'inscription n'est affiché qu'une fois : crée-en un autre au besoin."
+		}
+	}
 	m.page(w, r, p, http.StatusOK)
 }
 
 func (m *machinesUI) enrollmentToken(w http.ResponseWriter, r *http.Request) {
-	token, expires, err := m.gw.CreateEnrollmentToken(r.Context(), auth.UserFrom(r.Context()).ID)
+	me := auth.UserFrom(r.Context())
+	token, expires, err := m.gw.CreateEnrollmentToken(r.Context(), me.ID)
 	if err != nil {
 		log.Printf("ui: enrollment token: %v", err)
 		m.page(w, r, chat.MachinesPage{Error: "Erreur interne."}, http.StatusInternalServerError)
 		return
 	}
-	m.page(w, r, chat.MachinesPage{EnrollmentToken: token, TokenExpires: expires}, http.StatusOK)
+	goTo(w, r, "/machines?token="+m.keep(shownToken{userID: me.ID, token: token, expires: expires}))
 }
 
 func (m *machinesUI) revoke(w http.ResponseWriter, r *http.Request) {
