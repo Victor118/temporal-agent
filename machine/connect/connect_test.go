@@ -305,3 +305,87 @@ func slicesEqual(a, b []string) bool {
 	}
 	return true
 }
+
+func TestState_Lock(t *testing.T) {
+	s := State{Dir: t.TempDir()}
+	unlock, err := s.Lock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Lock(); !errors.Is(err, ErrLocked) {
+		t.Errorf("a second lock: %v", err)
+	}
+	unlock()
+	again, err := s.Lock()
+	if err != nil {
+		t.Errorf("after the release: %v", err)
+	} else {
+		again()
+	}
+}
+
+// A directive sent before the welcome is run, its progress and result sent
+// at once; progresses go out one per ProgressInterval at most, the latest
+// winning. A gateway that closes with 1011 is come back to, not given up.
+func TestClient_DirectiveBeforeWelcome_ProgressPace_Comeback(t *testing.T) {
+	f, url := newFakeGateway(t)
+	s := State{Dir: t.TempDir()}
+	s.Init()
+	s.Save(Config{Server: url, Token: "agm_one"})
+	c := &Client{State: s, Executors: map[string]Executor{machine.KindEcho: Echo}, MinBackoff: 50 * time.Millisecond,
+		MaxBackoff: 100 * time.Millisecond, StopWait: 100 * time.Millisecond}
+	ctx, stop := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- c.Run(ctx) }()
+
+	ws := <-f.conns
+	read(t, ws, machine.TypeHello)
+	in, _ := json.Marshal(machine.EchoInput{Text: "tôt", DurationMS: 1200, ProgressEveryMS: 100})
+	write(t, ws, machine.Message{Type: machine.TypeDirective, ID: "d-early", Kind: machine.KindEcho, Input: in})
+	progresses := 0
+	var last string
+	rctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for {
+		var m machine.Message
+		if err := wsjson.Read(rctx, ws, &m); err != nil {
+			t.Fatalf("no result before the welcome: %v", err)
+		}
+		if m.Type == machine.TypeProgress {
+			progresses++
+			last = m.Text
+		}
+		if m.Type == machine.TypeResult {
+			if m.Status != machine.StatusOK {
+				t.Errorf("result %+v", m)
+			}
+			break
+		}
+	}
+	// 11 progresses in 1.2 s, at most one per 250 ms out: 4 or 5.
+	if progresses < 3 || progresses > 6 || !strings.HasPrefix(last, "echo:") {
+		t.Errorf("%d progresses sent, last %q", progresses, last)
+	}
+
+	ws.Close(websocket.StatusInternalError, "try again later")
+	select {
+	case ws2 := <-f.conns:
+		read(t, ws2, machine.TypeHello)
+		go func() { // answers the close
+			for {
+				var m machine.Message
+				if wsjson.Read(context.Background(), ws2, &m) != nil {
+					return
+				}
+			}
+		}()
+	case err := <-done:
+		t.Fatalf("the client gave up on a 1011: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("no reconnection after a 1011")
+	}
+	stop()
+	if err := <-done; err != nil {
+		t.Errorf("run: %v", err)
+	}
+}

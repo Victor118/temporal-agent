@@ -58,6 +58,11 @@ type Client struct {
 type job struct {
 	cancel   context.CancelCauseFunc
 	progress string
+	// sentAt is when its last progress went out; flush sends the latest
+	// one when the interval is over; done: no progress goes out any more.
+	sentAt time.Time
+	flush  *time.Timer
+	done   bool
 }
 
 // Errors that end the client for good.
@@ -115,6 +120,8 @@ func (c *Client) Run(ctx context.Context) error {
 		start := time.Now()
 		err := c.session(ctx)
 		if ctx.Err() != nil {
+			// The session may have ended before its shutdown stopped them.
+			c.stopJobs()
 			c.jobsWG.Wait()
 			return nil
 		}
@@ -201,6 +208,9 @@ func (c *Client) session(ctx context.Context) error {
 	if err := c.write(ws, hello); err != nil {
 		return err
 	}
+	// From the hello on: a directive may come before the welcome, and its
+	// progress and result must go out.
+	c.setConn(ws)
 
 	sctx, stop := context.WithCancel(context.Background())
 	defer stop()
@@ -226,7 +236,6 @@ func (c *Client) session(ctx context.Context) error {
 		switch m.Type {
 		case machine.TypeWelcome:
 			c.logf("connect: connected to %s as %q", cfg.Server, m.Name)
-			c.setConn(ws)
 			// What finished while no gateway listened.
 			results, err := c.State.Results()
 			if err != nil {
@@ -387,15 +396,13 @@ func (c *Client) start(m machine.Message) {
 
 func (c *Client) run(ctx context.Context, m machine.Message, exec Executor, j *job) {
 	defer c.jobsWG.Done()
-	out, err := exec(ctx, m.Input, func(p string) {
-		p = machine.Cut(p, machine.MaxProgressBytes)
-		c.mu.Lock()
-		j.progress = p
-		c.mu.Unlock()
-		c.send(machine.Message{Type: machine.TypeProgress, ID: m.ID, Text: p})
-	})
+	out, err := exec(ctx, m.Input, func(p string) { c.progress(m.ID, j, p) })
 	j.cancel(nil)
 	c.mu.Lock()
+	j.done = true
+	if j.flush != nil {
+		j.flush.Stop()
+	}
 	r := machine.Message{Type: machine.TypeResult, ID: m.ID, Status: machine.StatusOK, Output: out, Text: j.progress}
 	c.mu.Unlock()
 	if err != nil {
@@ -422,6 +429,36 @@ func (c *Client) run(ctx context.Context, m machine.Message, exec Executor, j *j
 	c.mu.Unlock()
 	c.logf("connect: directive %s ended: %s", m.ID, r.Status)
 	c.send(r)
+}
+
+// progress records a directive's progress and sends it, one per
+// machine.ProgressInterval at most: within the interval, the latest waits
+// for its end and replaces those before it (the gateway keeps the last one
+// only, and limits what a machine sends).
+func (c *Client) progress(id string, j *job, p string) {
+	p = machine.Cut(p, machine.MaxProgressBytes)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	j.progress = p
+	if j.done || j.flush != nil {
+		return
+	}
+	wait := machine.ProgressInterval - time.Since(j.sentAt)
+	if wait <= 0 {
+		j.sentAt = time.Now()
+		go c.send(machine.Message{Type: machine.TypeProgress, ID: id, Text: p})
+		return
+	}
+	j.flush = time.AfterFunc(wait, func() {
+		c.mu.Lock()
+		j.flush = nil
+		latest, done := j.progress, j.done
+		j.sentAt = time.Now()
+		c.mu.Unlock()
+		if !done {
+			c.send(machine.Message{Type: machine.TypeProgress, ID: id, Text: latest})
+		}
+	})
 }
 
 // cancel stops a directive the gateway closed: a running one ends as

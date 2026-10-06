@@ -66,6 +66,14 @@ func runConnect(cmd *cobra.Command, args []string) {
 	if err := state.Init(); err != nil {
 		log.Fatalf("The machine's directory %s: %v", dir, err)
 	}
+	unlock, err := state.Lock()
+	if errors.Is(err, connect.ErrLocked) {
+		log.Fatalf("%v: one agent connect per machine (or give another --dir)", err)
+	}
+	if err != nil {
+		log.Fatalf("Lock the machine's directory %s: %v", dir, err)
+	}
+	defer unlock()
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
