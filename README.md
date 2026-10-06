@@ -46,7 +46,7 @@ happens to answer has locally.
 - **Built-in tools** — File system operations, web access, shell execution, user interaction, workflow queries, scheduling
 - **Published files** — An agent hands the members a file (`publish_file` for a text it writes, `exec`'s `publish` for a file a command made), attached to its answer and downloaded by the session's members only
 - **Documents** — `render_pdf` (Markdown or typst to PDF) and `make_slides` (Markdown to an editable pptx or a PDF deck), rendered by pandoc and typst on the main worker and published like any file
-- **Machines** (phase 0) — A user's own machine, outside the private network, connects to the server with `agent connect` (an outgoing WebSocket, no VPN, no database nor Temporal access) and runs the directives of their agents' turns; enrolled by a code typed in « Mes machines ». Phase 0 proves the mechanism with an `echo` directive: see [docs/design/machines.md](docs/design/machines.md)
+- **Machines** — A user's own machine, outside the private network, connects to the server with `agent connect` (an outgoing WebSocket, no VPN, no database nor Temporal access) and runs the directives of their agents' turns; enrolled by a code typed in « Mes machines ». `analyze_repo` runs there, with the user's own Claude Code login and git access, and falls back to the installation's coding workers when no machine of theirs is connected: see [docs/design/machines.md](docs/design/machines.md)
 - **Remote MCP servers** — A worker declares MCP servers in its `worker.yaml` (Streamable HTTP, or the older HTTP+SSE) and publishes their tools; a server that is down is retried in the background, and tools it adds or removes are picked up within 30 s
 
 ## Architecture
@@ -142,6 +142,25 @@ docker compose exec agent ./tmp/main machine-echo --email you@example.com --text
 `--dir`) and reconnects by itself; plain `http` is accepted only to this very
 host, `https` otherwise.
 
+To run `analyze_repo` on your machine (Linux; macOS should work, untested),
+install the `claude` CLI and log in (`claude`, then `/login`, or `claude
+setup-token`), then start `agent connect` with what it may do. These settings
+are the machine's, never the server's:
+
+| Flag (env) | Meaning |
+|---|---|
+| `--repos` (`AGENT_CONNECT_REPOS`) | Repositories an analysis may clone, comma-separated globs (`*` stops at a `/`), e.g. `git@github.com:me/*`. Empty = every analysis is refused |
+| `--max-budget-usd` (`AGENT_CONNECT_MAX_BUDGET_USD`) | What one run may spend, in dollars; 0 = no cap |
+| `--claude-auth` (`CLAUDE_CODE_AUTH`) | Who pays: `subscription` (your CLI's login or `CLAUDE_CODE_OAUTH_TOKEN`; an `ANTHROPIC_API_KEY` in your shell is then not passed to the CLI) or `api` (`ANTHROPIC_API_KEY`). Empty = the one credential set; both set = `agent connect` refuses to start |
+| `--claude-model` (`CLAUDE_CODE_MODEL`) | Model of the runs; empty = the CLI's default |
+| `--work-dir` | Where clones go, one per run, deleted after it (default: your cache, `agent/runs/<machine>`) |
+
+The machine announces Claude Code only when the CLI is there and a login is
+found without any paid call; a run refused for its login withdraws it until
+you log in again. An analysis is read-only (the CLI's `plan` mode), cloned
+with your git identity over ssh (`~/.ssh`, your ssh agent): your global git
+configuration, and so an HTTPS credential helper, is not used.
+
 Every worker of a coding queue (the queue `analyze_repo` and `implement_feature` are published on) must have the `claude` CLI installed. A worker without it on that queue still answers a run's first check, and the run fails at once saying so: with N workers there of which one lacks the CLI, about one run in N fails that way.
 
 A worker that stops ends its coding runs first, then gives the tasks under way 30 seconds to answer before it exits: each run's answer, that its worker stopped, is recorded by Temporal before the process ends, and read by the next worker of the queue (another replica, or this one once restarted). A stop takes 30 to 50 seconds in all. Give a worker's container a `stop_grace_period` of 60 seconds: Docker's default, 10 seconds, kills it before the answer goes out, and the workflow then waits a minute or two for the missed heartbeats.
@@ -178,6 +197,8 @@ A worker that stops ends its coding runs first, then gives the tasks under way 3
 | `CLAUDE_CODE_QUEUE_WAIT` | How long a coding run waits for a worker of its queue with a run to spare, as a Go duration (default `30m`). A run waiting more than a minute tells its user so on the turn's channel; past the wait it fails, saying the workers are busy. A run first checks that some worker answers on the queue: none within a minute, it fails at once saying no worker is available. Not a positive duration = the worker does not start |
 | `CLAUDE_CODE_STALL_TIMEOUT` | How long the CLI of a coding run may write nothing before the run is ended as stuck, as a Go duration (default `12m`, above the CLI's 10 min maximum for a Bash command; raise it with `BASH_MAX_TIMEOUT_MS`). `0` = never. The run's result then says how far it got. Not a duration = the worker does not start |
 | `CLAUDE_CODE_WORKSPACE` | Directory of a coding worker's clones, one per run, all of a run's steps on that worker (default `./claude-code-runs`); keep it apart from `WORKSPACE_PATH`. At startup the worker deletes the `run-*` entries a worker that died left there; if another live worker process shares the directory, only those older than a run's longest lifetime. Every worker process holds a lock on `.workers.lock` there; one that cannot take it does not start (one sweeping it is waited for up to 2 minutes, then the worker exits, to be restarted by whatever runs it) |
+| `MACHINES_ENABLED` | `true` (default) or `false`: coding runs go to the users' machines first, and the server serves their gateway (`/machines/*`). Anything else = the process does not start |
+| `CLAUDE_CODE_ANALYZE_QUEUE` | Main worker: where `analyze_repo` runs when no machine of the user's takes it, a coding queue serving `AnalyzeRepoWorkflow` (default `tools-claude-code-ro`, the read-only coding container's); `none` = no fallback (the run then fails saying the user's machine is not connected) |
 | `CLAUDE_CODE_AUTH` | How coding runs authenticate: `api` (bills `ANTHROPIC_API_KEY`) or `subscription` (`CLAUDE_CODE_OAUTH_TOKEN`, made with `claude setup-token`, or the CLI's login). The other mode's credential never reaches the CLI. Empty = the one credential set; both set = the worker does not start |
 | `CLAUDE_CODE_OAUTH_TOKEN` | A Claude subscription's long-lived token, for `CLAUDE_CODE_AUTH=subscription`. The runs then count against the subscription's usage limits, and the dollar cap is only an estimate |
 | `INTERNAL_ADDR` | Address of the internal API that receives worker notifications and the directives workers hand to the machines' gateway (default `:9999`). Keep it off the public network |

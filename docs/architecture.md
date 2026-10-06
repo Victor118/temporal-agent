@@ -82,7 +82,7 @@ flowchart LR
         TG1[MCP github_*]
     end
 
-    subgraph TCC[Worker — queue tools-claude-code]
+    subgraph TCC[Workers Claude Code — repli de analyze_repo, implement_feature]
         TCC1[ClaudeCodeWorkflow + activities]
     end
 
@@ -341,13 +341,15 @@ diagnostic.
   (aucun worker = échec immédiat), puis attend un worker libre jusqu'à
   `CLAUDE_CODE_QUEUE_WAIT` ; un seul run par worker tant que chaque run n'a pas
   son propre uid.
-- **Machines** : phase 0 faite (`docs/design/machines.md`, §16) : inscription
-  par code ou par jeton, rotation du jeton, passerelle WebSocket (une seule
-  réplique), `PickMachine` et `RunOnMachine` avec complétion asynchrone, une
-  directive triviale (`echo`, `agent machine-echo`). Rien encore sur Claude
-  Code : `CodingRunWorkflow`, repli par outil, fichiers depuis la machine sont
-  les phases suivantes. « Mes machines » ne règle ni la pause ni la priorité ;
-  les `progress` ne nourrissent pas encore la note du tour.
+- **Machines** : phases 0 et 1 faites (`docs/design/machines.md`, §16 et
+  §17) : inscription par code ou par jeton, rotation du jeton, passerelle
+  WebSocket (une seule réplique), `PickMachine` et `RunOnMachine` avec
+  complétion asynchrone ; `analyze_repo` = `CodingRunWorkflow` sur le worker
+  principal : la machine de l'auteur du tour (sa CLI, son abonnement), sinon
+  la queue de repli (`CLAUDE_CODE_ANALYZE_QUEUE`, `AnalyzeRepoWorkflow`
+  inchangé), sinon une erreur claire ; la note du tour suit la machine (web).
+  `implement_feature` reste sur son conteneur (phase 2), les fichiers depuis
+  la machine aussi.
 - **Tous les workflows et activities sont enregistrés sur toutes les queues**
   d'un worker, y compris sa queue d'outils. Les outils de type workflow
   (`ask_user`) tournent donc sur la queue de l'outil.
@@ -380,8 +382,9 @@ diagnostic.
 7. **`ClaudeCodeWorkflow`.**
 8. **Arbre d'exécution et questions utilisateur** (`agent_executions`,
    `user_questions`, refonte d'`AskUserWorkflow`).
-9. **Machines** ([design/machines.md](design/machines.md), §14) : phase 0
-   faite ; ensuite `CodingRunWorkflow` et `analyze_repo` sur la machine.
+9. **Machines** ([design/machines.md](design/machines.md), §14) : phases 0
+   et 1 faites ; ensuite `implement_feature` et les fichiers depuis la
+   machine (phase 2).
 
 ## Questions ouvertes
 
