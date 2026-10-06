@@ -156,10 +156,24 @@ are the machine's, never the server's:
 | `--work-dir` | Where clones go, one per run, deleted after it (default: your cache, `agent/runs/<machine>`) |
 
 The machine announces Claude Code only when the CLI is there and a login is
-found without any paid call; a run refused for its login withdraws it until
-you log in again. An analysis is read-only (the CLI's `plan` mode), cloned
-with your git identity over ssh (`~/.ssh`, your ssh agent): your global git
-configuration, and so an HTTPS credential helper, is not used.
+found without any paid call (`ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`,
+the CLI's login file, or the macOS keychain). Amazon Bedrock and Google
+Vertex AI are not supported on a machine: a CLI set up for them is taken for
+logged out. A run refused for its login withdraws Claude Code (you are told
+in your notifications): the machine announces it again as soon as its login
+file changes (a new `claude` then `/login`), and otherwise tries again by
+itself after 10 minutes or at its next connection; a run refused before it
+did anything goes to the installation's fallback, in the same request.
+
+An analysis is read-only (the CLI's `plan` mode), and loads your own Claude
+settings only, never the repository's (`--setting-sources user`,
+`--strict-mcp-config`: a branch's `.claude/settings.json` hooks or
+`.mcp.json` servers are not run). It clones with your git identity and your
+git configuration (credential helpers, ssh setup), but never waits on a
+prompt: a repository that asks for a password, or an ssh host not in your
+`known_hosts`, fails at once, saying what to do. Only ssh, https and local
+paths are cloned (never `ext::`, `git://` or plain `http://`); git hooks are
+off.
 
 Every worker of a coding queue (the queue `analyze_repo` and `implement_feature` are published on) must have the `claude` CLI installed. A worker without it on that queue still answers a run's first check, and the run fails at once saying so: with N workers there of which one lacks the CLI, about one run in N fails that way.
 
@@ -197,7 +211,7 @@ A worker that stops ends its coding runs first, then gives the tasks under way 3
 | `CLAUDE_CODE_QUEUE_WAIT` | How long a coding run waits for a worker of its queue with a run to spare, as a Go duration (default `30m`). A run waiting more than a minute tells its user so on the turn's channel; past the wait it fails, saying the workers are busy. A run first checks that some worker answers on the queue: none within a minute, it fails at once saying no worker is available. Not a positive duration = the worker does not start |
 | `CLAUDE_CODE_STALL_TIMEOUT` | How long the CLI of a coding run may write nothing before the run is ended as stuck, as a Go duration (default `12m`, above the CLI's 10 min maximum for a Bash command; raise it with `BASH_MAX_TIMEOUT_MS`). `0` = never. The run's result then says how far it got. Not a duration = the worker does not start |
 | `CLAUDE_CODE_WORKSPACE` | Directory of a coding worker's clones, one per run, all of a run's steps on that worker (default `./claude-code-runs`); keep it apart from `WORKSPACE_PATH`. At startup the worker deletes the `run-*` entries a worker that died left there; if another live worker process shares the directory, only those older than a run's longest lifetime. Every worker process holds a lock on `.workers.lock` there; one that cannot take it does not start (one sweeping it is waited for up to 2 minutes, then the worker exits, to be restarted by whatever runs it) |
-| `MACHINES_ENABLED` | `true` (default) or `false`: coding runs go to the users' machines first, and the server serves their gateway (`/machines/*`). Anything else = the process does not start |
+| `MACHINES_ENABLED` | `true` (default) or `false`: coding runs go to the users' machines first, and the server serves their gateway (`/machines/*`); `false` = no gateway, no machine route, no routing to machines. Set the same value on the server and every worker. Anything else = the process does not start |
 | `CLAUDE_CODE_ANALYZE_QUEUE` | Main worker: where `analyze_repo` runs when no machine of the user's takes it, a coding queue serving `AnalyzeRepoWorkflow` (default `tools-claude-code-ro`, the read-only coding container's); `none` = no fallback (the run then fails saying the user's machine is not connected) |
 | `CLAUDE_CODE_AUTH` | How coding runs authenticate: `api` (bills `ANTHROPIC_API_KEY`) or `subscription` (`CLAUDE_CODE_OAUTH_TOKEN`, made with `claude setup-token`, or the CLI's login). The other mode's credential never reaches the CLI. Empty = the one credential set; both set = the worker does not start |
 | `CLAUDE_CODE_OAUTH_TOKEN` | A Claude subscription's long-lived token, for `CLAUDE_CODE_AUTH=subscription`. The runs then count against the subscription's usage limits, and the dollar cap is only an estimate |
