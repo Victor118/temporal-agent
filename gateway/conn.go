@@ -34,13 +34,12 @@ type conn struct {
 	// tokenHash is the token this connection handed the machine: its
 	// `rotated` confirms it.
 	tokenHash string
+	// ready: welcomed, Deliver may send to it (under g.mu).
+	ready bool
 
 	mu sync.Mutex
 	// directives are the ones this connection heartbeats.
 	directives map[string]*attached
-	// completing are the directives whose result is being completed: no
-	// heartbeat may close them as gone meanwhile.
-	completing map[string]bool
 }
 
 // attached is a directive a connection carries.
@@ -51,12 +50,13 @@ type attached struct {
 	cancelSent bool
 }
 
-// Messages a machine may send per second, and in a burst: past them, the
-// connection ends.
-const (
-	messageRate  = 20
-	messageBurst = 100
-)
+// messageLimit is what a machine may send, per second and in a burst, past
+// which the connection ends: four progresses a second per directive (agent
+// connect sends one per 250 ms at most), its results, and room to spare.
+func messageLimit(maxDirectives int) (rate.Limit, int) {
+	perSecond := 4*maxDirectives + 10
+	return rate.Limit(perSecond), 4 * perSecond
+}
 
 // ServeConnect is /machines/connect: a machine's WebSocket, authenticated by
 // its token (Authorization: Bearer). A token replaced for good revokes its
@@ -101,7 +101,7 @@ func (g *Gateway) ServeConnect(w http.ResponseWriter, r *http.Request) {
 	ws.SetReadLimit(machine.MaxMessageBytes)
 	ctx, cancel := context.WithCancel(g.ctx)
 	c := &conn{g: g, id: "c-" + uuid.NewString(), m: *m, ws: ws, ctx: ctx, cancel: cancel, done: make(chan struct{}),
-		directives: map[string]*attached{}, completing: map[string]bool{}}
+		directives: map[string]*attached{}}
 	c.serve(presented, addr)
 }
 
@@ -132,16 +132,14 @@ func (c *conn) serve(presented, addr string) {
 	// presented stays valid until it confirms (`rotated`).
 	next := machine.NewMachineToken()
 	if err := c.g.Store.RotateMachineToken(c.ctx, c.m.ID, presented, machine.HashToken(next)); err != nil {
-		log.Printf("machines: rotate the token of %s: %v", c.m.ID, err)
-		c.closeWith(machine.CloseRevoked, "token refused")
+		c.refuseOrRetry("rotate the token", err)
 		return
 	}
 	c.tokenHash = machine.HashToken(next)
 	info := store.MachineInfo{OS: hello.OS, Capabilities: hello.Capabilities, MaxDirectives: hello.MaxDirectives, AgentVersion: hello.AgentVersion}
 	prevAddr, err := c.g.Store.MachineConnected(c.ctx, c.m.ID, c.g.id, addr, info)
 	if err != nil {
-		log.Printf("machines: record the connection of %s: %v", c.m.ID, err)
-		c.closeWith(machine.CloseRevoked, "machine refused")
+		c.refuseOrRetry("record the connection", err)
 		return
 	}
 	log.Printf("machines: machine %s (%s) connected from %q, protocol %d, %v, up to %d at a time",
@@ -152,10 +150,29 @@ func (c *conn) serve(presented, addr string) {
 	}
 	c.write(machine.Message{Type: machine.TypeWelcome, Protocol: machine.Protocol, MachineID: c.m.ID, Name: c.m.Name})
 	c.write(machine.Message{Type: machine.TypeRotate, Token: next})
+	// From here on Deliver may send to it: never before its welcome. What
+	// was handed over until now is unsent, and reconcile sends it.
+	c.g.mu.Lock()
+	c.ready = true
+	c.g.mu.Unlock()
 	c.reconcile(hello)
 
 	go c.heartbeats()
-	c.readLoop()
+	c.readLoop(hello.MaxDirectives)
+}
+
+// refuseOrRetry ends a connection the database could not admit: for good
+// (4001: the machine stops) only when its token is refused or it is
+// revoked; on any other error (the database away), with 1011, and the
+// machine comes back after its backoff.
+func (c *conn) refuseOrRetry(what string, err error) {
+	log.Printf("machines: %s of %s: %v", what, c.m.ID, err)
+	if errors.Is(err, store.ErrTokenRefused) || errors.Is(err, store.ErrMachineNotFound) {
+		c.write(machine.Message{Type: machine.TypeError, Code: machine.CodeRevoked, Text: "machine token refused"})
+		c.closeWith(machine.CloseRevoked, "token refused")
+		return
+	}
+	c.closeWith(int(websocket.StatusInternalError), "try again later")
 }
 
 func (c *conn) readHello() (machine.Message, error) {
@@ -192,8 +209,10 @@ func (g *Gateway) register(c *conn) bool {
 		c.write(machine.Message{Type: machine.TypeError, Code: machine.CodeDuplicate, Text: "another connection uses this machine's token"})
 		old.closeWith(machine.CloseDuplicate, "duplicate connection")
 		c.closeWith(machine.CloseDuplicate, "duplicate connection")
-		g.alert(c.ctx, c.m.UserID, fmt.Sprintf("Deux connexions simultanées de la machine « %s » : coupées toutes les deux. "+
-			"Si une copie de son jeton circule, révoque-la dans « Mes machines ».", c.m.Name))
+		if g.firstDuplicate(c.m.ID, time.Now()) {
+			g.alert(c.ctx, c.m.UserID, fmt.Sprintf("Deux connexions simultanées de la machine « %s » : coupées toutes les deux. "+
+				"Si une copie de son jeton circule, révoque-la dans « Mes machines ».", c.m.Name))
+		}
 		return false
 	}
 	old.ws.CloseNow()
@@ -208,6 +227,27 @@ func (g *Gateway) register(c *conn) bool {
 		return false
 	}
 	g.conns[c.m.ID] = c
+	return true
+}
+
+// duplicateAlertEvery: two copies of a token keep cutting each other; their
+// owner hears of it once an hour, not at every reconnection.
+const duplicateAlertEvery = time.Hour
+
+// firstDuplicate reports whether the duplicate connections of a machine
+// are the first in duplicateAlertEvery, and records them.
+func (g *Gateway) firstDuplicate(machineID string, now time.Time) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if last, ok := g.dupAlerts[machineID]; ok && now.Sub(last) < duplicateAlertEvery {
+		return false
+	}
+	g.dupAlerts[machineID] = now
+	for id, t := range g.dupAlerts {
+		if now.Sub(t) >= duplicateAlertEvery {
+			delete(g.dupAlerts, id)
+		}
+	}
 	return true
 }
 
@@ -368,8 +408,8 @@ func (c *conn) closeWith(code int, reason string) {
 
 // readLoop reads the machine's messages until the connection ends. Results
 // are completed apart: the reads go on meanwhile, pongs included.
-func (c *conn) readLoop() {
-	limit := rate.NewLimiter(messageRate, messageBurst)
+func (c *conn) readLoop(maxDirectives int) {
+	limit := rate.NewLimiter(messageLimit(maxDirectives))
 	for {
 		var m machine.Message
 		if err := wsjson.Read(c.ctx, c.ws, &m); err != nil {
@@ -401,11 +441,7 @@ func (c *conn) readLoop() {
 			}
 			c.mu.Unlock()
 		case machine.TypeResult:
-			c.mu.Lock()
-			busy := c.completing[m.ID]
-			c.completing[m.ID] = true
-			c.mu.Unlock()
-			if !busy {
+			if c.g.claim(m.ID) {
 				go c.result(m)
 			}
 		default:
@@ -450,12 +486,13 @@ func (c *conn) heartbeats() {
 		var beats []beat
 		c.mu.Lock()
 		for id, a := range c.directives {
-			if !c.completing[id] {
-				beats = append(beats, beat{id, a.token, a.progress})
-			}
+			beats = append(beats, beat{id, a.token, a.progress})
 		}
 		c.mu.Unlock()
 		for _, b := range beats {
+			if c.g.completing(b.id) {
+				continue // its result is being completed: no heartbeat may close it as gone
+			}
 			c.heartbeat(b.id, b.token, b.progress)
 		}
 	}
@@ -535,17 +572,17 @@ func closedState(status string) string {
 
 // result completes a directive's activity with the machine's result, closes
 // the directive, then acks: the machine keeps the result until then. A
-// result for a directive that is over is dropped (and acked).
+// result for a directive that is over is dropped (and acked). A completion
+// that fails (Temporal away) ends the connection: the machine sends the
+// result again when it is back, and the sweep retries it meanwhile from the
+// database.
 func (c *conn) result(m machine.Message) {
-	defer func() {
-		c.mu.Lock()
-		delete(c.completing, m.ID)
-		c.mu.Unlock()
-	}()
+	defer c.g.release(m.ID)
 	ack := func() { c.write(machine.Message{Type: machine.TypeAck, ID: m.ID}) }
 	d, err := c.g.Store.GetDirective(c.ctx, m.ID)
 	if err != nil {
 		log.Printf("machines: result of %s: %v", m.ID, err)
+		c.closeWith(int(websocket.StatusInternalError), "try again later")
 		return // kept by the machine, sent again on its next connection
 	}
 	if d == nil || d.MachineID != c.m.ID || d.State != store.DirectiveRunning {
@@ -561,18 +598,33 @@ func (c *conn) result(m machine.Message) {
 			ack()
 		} else {
 			log.Printf("machines: keep the result of %s: %v", m.ID, err)
+			c.closeWith(int(websocket.StatusInternalError), "try again later")
 		}
 		return
 	}
+	if err := c.g.finish(c.ctx, *d, m); err != nil {
+		log.Printf("machines: complete directive %s: %v; the machine sends it again on its next connection", m.ID, err)
+		c.closeWith(int(websocket.StatusInternalError), "completion failed, try again later")
+		return
+	}
+	c.detach(m.ID)
+	ack()
+}
+
+// finish completes a running directive's activity with its machine's result
+// m, and closes the directive. An activity already gone (NotFound) closes it
+// as gone: the result is dropped. Any other failure leaves it open, its
+// result kept, for the machine or the sweep to try again.
+func (g *Gateway) finish(ctx context.Context, d store.Directive, m machine.Message) error {
 	res, cerr := completion(m)
 	var result any
 	if cerr == nil {
 		result = res
 	}
-	err = c.g.complete(c.ctx, d.TaskToken, result, cerr)
+	err := g.complete(ctx, d.TaskToken, result, cerr)
 	if err != nil && isInvalidArgument(err) && m.Status == machine.StatusCanceled {
 		// Cancelled on the machine without the workflow asking: a failure.
-		err = c.g.complete(c.ctx, d.TaskToken, nil, temporal.NewNonRetryableApplicationError(
+		err = g.complete(ctx, d.TaskToken, nil, temporal.NewNonRetryableApplicationError(
 			"the directive was cancelled on the machine", machine.ErrTypeFailed, nil, res))
 	}
 	state := closedState(m.Status)
@@ -581,13 +633,13 @@ func (c *conn) result(m machine.Message) {
 	case isNotFound(err):
 		state = store.DirectiveGone
 	default:
-		log.Printf("machines: complete directive %s: %v", m.ID, err)
-		return // not acked: sent again on the machine's next connection
+		return err
 	}
-	if _, err := c.g.Store.CloseDirective(c.ctx, m.ID, state, m.Error); err != nil {
-		log.Printf("machines: close directive %s: %v", m.ID, err)
+	if _, err := g.Store.CloseDirective(ctx, d.ID, state, m.Error); err != nil {
+		// Completed: a close that failed leaves the row open until its
+		// deadline; the sweep's completion of it then finds it gone.
+		log.Printf("machines: close directive %s: %v", d.ID, err)
 	}
-	c.detach(m.ID)
-	log.Printf("machines: directive %s done on %s: %s", m.ID, c.m.ID, state)
-	ack()
+	log.Printf("machines: directive %s done on %s: %s", d.ID, d.MachineID, state)
+	return nil
 }

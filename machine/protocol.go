@@ -77,6 +77,10 @@ const (
 	MaxErrorBytes    = 4096
 )
 
+// ProgressInterval is how often a machine sends a directive's progress at
+// most; the gateway's limit on messages counts on it.
+const ProgressInterval = 250 * time.Millisecond
+
 // Message is one message of the WebSocket, in JSON. Which fields it carries
 // depends on its type; the others are empty.
 type Message struct {

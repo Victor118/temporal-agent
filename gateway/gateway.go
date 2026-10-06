@@ -51,6 +51,7 @@ type Store interface {
 	RevokeMachine(ctx context.Context, id, reason string) ([]store.Directive, error)
 
 	GetDirective(ctx context.Context, id string) (*store.Directive, error)
+	PendingDirectiveResults(ctx context.Context) ([]store.Directive, error)
 	MarkDirectiveSent(ctx context.Context, id, conn string) (bool, error)
 	OpenDirectives(ctx context.Context, machineID string) ([]store.Directive, error)
 	SaveDirectiveResult(ctx context.Context, id string, result json.RawMessage) error
@@ -115,8 +116,17 @@ type Gateway struct {
 
 	mu    sync.Mutex
 	conns map[string]*conn // by machine ID
-	ctx   context.Context  // the gateway's life: Run's
-	stop  context.CancelFunc
+	// claimed are the directives whose result is being completed, by a
+	// connection or by the sweep: one at a time.
+	claimed map[string]bool
+	// dupAlerts: when each machine's owner last heard of duplicate
+	// connections.
+	dupAlerts map[string]time.Time
+	ctx       context.Context // the gateway's life: Run's
+	stop      context.CancelFunc
+	// completeWait is the first wait between two tries of a completion
+	// (doubled each time); zero = 1 s. The tests shorten it.
+	completeWait time.Duration
 
 	// Wrong user codes, by user; device requests, by client address.
 	codeTries   *auth.Throttle
@@ -139,6 +149,8 @@ func (g *Gateway) Start(ctx context.Context) error {
 	g.ctx, g.stop = context.WithCancel(ctx)
 	g.id = "gw-" + uuid.NewString()
 	g.conns = map[string]*conn{}
+	g.claimed = map[string]bool{}
+	g.dupAlerts = map[string]time.Time{}
 	g.codeTries = auth.NewThrottle(10, 15*time.Minute)
 	g.deviceTries = auth.NewThrottle(20, 10*time.Minute)
 	// One replica: no connection is held anywhere but here.
@@ -211,10 +223,42 @@ func (g *Gateway) Deliver(ctx context.Context, directiveID string) error {
 	case d.State != store.DirectiveRunning:
 		return ErrDirectiveClosed
 	}
-	if c := g.conn(d.MachineID); c != nil {
+	if c := g.conn(d.MachineID); c != nil && g.isReady(c) {
 		c.send(*d)
 	}
 	return nil
+}
+
+// isReady reports a connection welcomed: before, its machine would get a
+// directive it cannot answer yet, and its reconcile sends what is unsent.
+func (g *Gateway) isReady(c *conn) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return c.ready
+}
+
+// claim reserves the completion of a directive's result; false when it is
+// under way already (a result sent twice, or the sweep at it).
+func (g *Gateway) claim(id string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.claimed[id] {
+		return false
+	}
+	g.claimed[id] = true
+	return true
+}
+
+func (g *Gateway) release(id string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.claimed, id)
+}
+
+func (g *Gateway) completing(id string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.claimed[id]
 }
 
 // Revoke revokes a machine of userID's: its connection is cut, its
@@ -263,17 +307,29 @@ func (g *Gateway) revoke(ctx context.Context, m store.Machine, reason string) er
 	return nil
 }
 
+// completeTries is how many times a completion is tried before it is left
+// to the machine's next connection and the sweep: 5 tries of up to 10 s,
+// 1+2+4+8 s apart, about 80 s at worst (Temporal unreachable), 15 s when
+// each try fails at once.
+const completeTries = 5
+
 // complete ends a directive's activity, retrying what may pass (Temporal
-// briefly away), for up to about half a minute. NotFound is final: the
-// activity is gone.
+// briefly away). NotFound is final: the activity is gone.
 func (g *Gateway) complete(ctx context.Context, token []byte, result any, err error) error {
+	first := g.completeWait
+	if first <= 0 {
+		first = time.Second
+	}
 	var last error
-	for i, wait := 0, time.Second; i < 5; i, wait = i+1, wait*2 {
+	for i, wait := 0, first; i < completeTries; i, wait = i+1, wait*2 {
 		cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		last = g.Temporal.CompleteActivity(cctx, token, result, err)
 		cancel()
 		if last == nil || isNotFound(last) || isInvalidArgument(last) {
 			return last
+		}
+		if i == completeTries-1 {
+			break
 		}
 		select {
 		case <-ctx.Done():
@@ -326,6 +382,35 @@ func (g *Gateway) sweep(ctx context.Context) {
 	}
 	if err := g.Store.DeleteExpiredEnrollments(ctx, time.Now()); err != nil {
 		log.Printf("machines: delete expired enrollments: %v", err)
+	}
+	g.retryResults(ctx)
+}
+
+// retryResults completes again the directives whose result is in the
+// database but whose completion failed (Temporal away): their machine may
+// not come back to send it again before the activity times out.
+func (g *Gateway) retryResults(ctx context.Context) {
+	pending, err := g.Store.PendingDirectiveResults(ctx)
+	if err != nil {
+		log.Printf("machines: directives with a pending result: %v", err)
+		return
+	}
+	for _, d := range pending {
+		if !g.claim(d.ID) {
+			continue // a connection completes it
+		}
+		var m machine.Message
+		if err := json.Unmarshal(d.Result, &m); err != nil || m.ID != d.ID {
+			log.Printf("machines: stored result of %s unreadable: %v", d.ID, err)
+			g.release(d.ID)
+			continue
+		}
+		if err := g.finish(ctx, d, m); err != nil {
+			log.Printf("machines: complete directive %s again: %v", d.ID, err)
+		} else if c := g.conn(d.MachineID); c != nil && c.detach(d.ID) {
+			c.write(machine.Message{Type: machine.TypeAck, ID: d.ID})
+		}
+		g.release(d.ID)
 	}
 }
 

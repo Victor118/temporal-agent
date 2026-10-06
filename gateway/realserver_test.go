@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 	"github.com/coder/websocket/wsjson"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	enumspb "go.temporal.io/api/enums/v1"
+	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/worker"
@@ -48,11 +50,13 @@ const (
 // smokeEnv is the test's world: the database, Temporal, a worker, and a
 // gateway served on a fixed address, which can be restarted.
 type smokeEnv struct {
-	t     *testing.T
-	st    *store.PostgresStore
-	db    *sql.DB       // removes the test's users
-	tc    client.Client // the worker's and the test's
-	gwTC  client.Client // the gateway's: completions carry its identity
+	t    *testing.T
+	st   *store.PostgresStore
+	db   *sql.DB       // removes the test's users
+	tc   client.Client // the worker's and the test's
+	gwTC client.Client // the gateway's: completions carry its identity
+	// flaky wraps it: its next completions can be made to fail.
+	flaky *flakyTemporal
 	queue string
 	addr  string
 	base  string
@@ -101,7 +105,7 @@ func newSmokeEnv(t *testing.T) *smokeEnv {
 	}
 	t.Cleanup(gwTC.Close)
 
-	e := &smokeEnv{t: t, st: st, db: db, tc: tc, gwTC: gwTC, queue: "smoke-machines-" + smokeRandom(t)}
+	e := &smokeEnv{t: t, st: st, db: db, tc: tc, gwTC: gwTC, flaky: &flakyTemporal{Temporal: gwTC}, queue: "smoke-machines-" + smokeRandom(t)}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -123,7 +127,7 @@ func newSmokeEnv(t *testing.T) *smokeEnv {
 
 // serve starts a gateway on ln.
 func (e *smokeEnv) serve(ln net.Listener) {
-	g := &Gateway{Store: e.st, Temporal: e.gwTC, HeartbeatEvery: smokeHeartbeatEvery, PingTimeout: time.Second, SweepEvery: 2 * time.Second,
+	g := &Gateway{Store: e.st, Temporal: e.flaky, completeWait: 50 * time.Millisecond, HeartbeatEvery: smokeHeartbeatEvery, PingTimeout: time.Second, SweepEvery: 2 * time.Second,
 		ClientAddr: func(r *http.Request) string { h, _, _ := net.SplitHostPort(r.RemoteAddr); return h }, AddrsKnown: true}
 	if err := g.Start(context.Background()); err != nil {
 		e.t.Fatal(err)
@@ -491,6 +495,40 @@ func TestMachines_RealServer(t *testing.T) {
 		}
 	})
 
+	t.Run("activity gone (NotFound at a heartbeat): the machine is told to stop, the directive closed", func(t *testing.T) {
+		m1.drain()
+		run := e.echo(alice, "terminé", 30*time.Second, 0, 5*time.Second)
+		m1.waitStarted(t)
+		asked := time.Now()
+		if err := e.tc.TerminateWorkflow(ctx, run.GetID(), "", "smoke: gone"); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case end := <-m1.ended:
+			if lag := end.at.Sub(asked); lag > smokeHeartbeatEvery+2*time.Second {
+				t.Errorf("the machine stopped %s after the termination", lag)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("the machine never stopped")
+		}
+		waitFor(t, "directive closed as gone", 5*time.Second, func() bool { _, s := e.directiveOf(run.GetID()); return s == store.DirectiveGone })
+		waitFor(t, "result dropped and acked", 5*time.Second, func() bool { return resultFiles(dir) == 0 })
+	})
+
+	t.Run("completion failing with the connection sound: the machine sends its result again", func(t *testing.T) {
+		m1.drain()
+		run := e.echo(alice, "encore", time.Second, 0, 10*time.Second)
+		e.flaky.failures.Store(completeTries) // every try of the first completion
+		out, err := result(t, run, 30*time.Second)
+		if err != nil || out.Text != "encore" {
+			t.Fatalf("result: %+v %v", out, err)
+		}
+		if n := e.flaky.failures.Load(); n > 0 {
+			t.Errorf("%d failures left: the completion never failed", n)
+		}
+		waitFor(t, "result acked", 5*time.Second, func() bool { return resultFiles(dir) == 0 })
+	})
+
 	t.Run("machine lost past the heartbeat timeout: a clear failure, not run again", func(t *testing.T) {
 		bob := e.user("bob")
 		_, token := e.enrollToken(bob, "portable", []string{machine.KindEcho}, 1)
@@ -610,6 +648,92 @@ func TestMachines_RealServer(t *testing.T) {
 		}
 	})
 
+	t.Run("completion failing, machine gone: the sweep completes it from the database", func(t *testing.T) {
+		frank := e.user("frank")
+		_, token := e.enrollToken(frank, "lointaine", []string{machine.KindEcho}, 1)
+		raw := dialRaw(t, e.base, token)
+		raw.hello(t, 1)
+		raw.expect(t, machine.TypeWelcome)
+		run := e.echo(frank, "balayé", time.Minute, 0, 15*time.Second)
+		d := raw.expect(t, machine.TypeDirective)
+		e.flaky.failures.Store(completeTries)
+		out, _ := json.Marshal(machine.EchoOutput{Text: "balayé"})
+		raw.send(t, machine.Message{Type: machine.TypeResult, ID: d.ID, Status: machine.StatusOK, Output: out})
+		// The completion fails, the connection is cut: this machine never
+		// comes back.
+		closed := raw.readInBackground()
+		select {
+		case code := <-closed:
+			if code != websocket.StatusInternalError {
+				t.Errorf("closed with %d", code)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("the connection outlived a failed completion")
+		}
+		res, err := result(t, run, 30*time.Second)
+		if err != nil || res.Text != "balayé" {
+			t.Fatalf("result: %+v %v", res, err)
+		}
+		if _, s := e.directiveOf(run.GetID()); s != store.DirectiveCompleted {
+			t.Errorf("directive %s", s)
+		}
+	})
+
+	t.Run("directive unknown to its machine after a reconnection: lost, not sent again", func(t *testing.T) {
+		gina := e.user("gina")
+		_, token := e.enrollToken(gina, "amnésique", []string{machine.KindEcho}, 1)
+		raw := dialRaw(t, e.base, token)
+		raw.hello(t, 1)
+		raw.expect(t, machine.TypeWelcome)
+		run := e.echo(gina, "oublié", time.Minute, 0, 15*time.Second)
+		raw.expect(t, machine.TypeDirective)
+		raw.ws.CloseNow()
+		// Back (its first token still pending: never confirmed), knowing
+		// nothing of it.
+		raw = dialRaw(t, e.base, token)
+		raw.hello(t, 1)
+		raw.expect(t, machine.TypeWelcome)
+		raw.readInBackground()
+		_, err := result(t, run, 20*time.Second)
+		if err == nil || !strings.Contains(err.Error(), "lost the directive") {
+			t.Fatalf("workflow: %v", err)
+		}
+		if _, s := e.directiveOf(run.GetID()); s != store.DirectiveLost {
+			t.Errorf("directive %s", s)
+		}
+	})
+
+	t.Run("sweep: orphaned and expired directives, the connected machine told to stop", func(t *testing.T) {
+		hugo := e.user("hugo")
+		id, token := e.enrollToken(hugo, "balayée", []string{machine.KindEcho}, 2)
+		raw := dialRaw(t, e.base, token)
+		raw.hello(t, 2)
+		raw.expect(t, machine.TypeWelcome)
+		run := e.echo(hugo, "trop long", time.Minute, 0, time.Minute)
+		d := raw.expect(t, machine.TypeDirective)
+		// A reservation whose RunOnMachine never came, and the running one
+		// past its deadline.
+		orphan, _, err := e.st.PickMachine(ctx, store.PickRequest{DirectiveID: "zz-orphan-" + smokeRandom(t), UserID: hugo, Capability: machine.KindEcho,
+			Kind: machine.KindEcho, Input: json.RawMessage(`{}`), WorkflowID: "nowhere", RunID: "nowhere-" + smokeRandom(t), CallKey: "c",
+			HandoffBy: time.Now().Add(-time.Second), Deadline: time.Now().Add(time.Hour), SeenAfter: time.Now().Add(-time.Minute)})
+		if err != nil || orphan.MachineID != id {
+			t.Fatalf("reservation: %+v %v", orphan, err)
+		}
+		if _, err := e.db.Exec("UPDATE machine_directives SET deadline = NOW() - INTERVAL '1 second' WHERE id = $1", d.ID); err != nil {
+			t.Fatal(err)
+		}
+		if c := raw.expect(t, machine.TypeCancel); c.ID != d.ID {
+			t.Errorf("cancel %+v", c)
+		}
+		if _, s := e.directiveOf(run.GetID()); s != store.DirectiveExpired {
+			t.Errorf("running past its deadline: %s", s)
+		}
+		waitFor(t, "reservation orphaned", 5*time.Second, func() bool {
+			got, _ := e.st.GetDirective(ctx, orphan.ID)
+			return got != nil && got.State == store.DirectiveOrphaned
+		})
+	})
+
 	t.Run("two live connections of one machine: both cut", func(t *testing.T) {
 		erin := e.user("erin")
 		_, token := e.enrollToken(erin, "double", []string{machine.KindEcho}, 1)
@@ -632,6 +756,26 @@ func TestMachines_RealServer(t *testing.T) {
 			t.Error("first still connected")
 		}
 	})
+}
+
+// flakyTemporal is the gateway's Temporal client, whose next completions
+// fail as Temporal out of reach would.
+type flakyTemporal struct {
+	Temporal
+	failures atomic.Int32
+}
+
+func (f *flakyTemporal) CompleteActivity(ctx context.Context, token []byte, result any, err error) error {
+	if f.failures.Add(-1) >= 0 {
+		return serviceerror.NewUnavailable("smoke: Temporal out of reach")
+	}
+	return f.Temporal.CompleteActivity(ctx, token, result, err)
+}
+
+// directiveOf is the state of the directive of a workflow, and its ID.
+func (e *smokeEnv) directiveOf(workflowID string) (id, state string) {
+	e.db.QueryRow("SELECT id, state FROM machine_directives WHERE workflow_id = $1", workflowID).Scan(&id, &state)
+	return id, state
 }
 
 // codeCatcher passes on the user code `agent connect` shows.
