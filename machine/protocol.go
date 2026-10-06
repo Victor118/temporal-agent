@@ -18,12 +18,13 @@ import (
 // machines run the binary their owner installed, the one place where two
 // versions of the project really meet.
 const (
-	Protocol    = 1
-	MinProtocol = 1
+	Protocol    = 2
+	MinProtocol = 2
 )
 
-// Message types. A machine sends hello, rotated, progress and result; the
-// gateway welcome, rotate, directive, cancel, ack and error.
+// Message types. A machine sends hello, rotated, progress, result and
+// capabilities; the gateway welcome, rotate, directive, cancel, ack and
+// error.
 const (
 	TypeHello     = "hello"
 	TypeWelcome   = "welcome"
@@ -35,6 +36,9 @@ const (
 	TypeCancel    = "cancel"
 	TypeAck       = "ack"
 	TypeError     = "error"
+	// TypeCapabilities: a machine's capabilities changed while connected (a
+	// login lost, or back).
+	TypeCapabilities = "capabilities"
 )
 
 // Result statuses: how a directive ended on the machine.
@@ -95,6 +99,9 @@ type Message struct {
 	MaxDirectives int      `json:"max_directives,omitempty"`
 	Running       []string `json:"running,omitempty"`
 	Finished      []string `json:"finished,omitempty"`
+	// ClaudeCode is the state of the machine's claude CLI (hello and
+	// capabilities): "ok", "logged_out", "absent" (claudecode.LoginStatus).
+	ClaudeCode string `json:"claude_code,omitempty"`
 
 	// welcome
 	MachineID string `json:"machine_id,omitempty"`
@@ -140,14 +147,6 @@ func CheckFromMachine(m *Message) error {
 		if m.Protocol <= 0 {
 			return bad("hello without a protocol version")
 		}
-		if len(m.Capabilities) > MaxCapabilities {
-			return bad("%d capabilities", len(m.Capabilities))
-		}
-		for _, c := range m.Capabilities {
-			if !capabilityPattern.MatchString(c) {
-				return bad("capability %q", c)
-			}
-		}
 		if m.MaxDirectives < 1 || m.MaxDirectives > MaxDirectives {
 			return bad("max_directives %d", m.MaxDirectives)
 		}
@@ -161,6 +160,13 @@ func CheckFromMachine(m *Message) error {
 		}
 		m.OS = Cut(m.OS, 64)
 		m.AgentVersion = Cut(m.AgentVersion, 64)
+		if err := checkStatus(m); err != nil {
+			return err
+		}
+	case TypeCapabilities:
+		if err := checkStatus(m); err != nil {
+			return err
+		}
 	case TypeRotated:
 	case TypeProgress:
 		if !idPattern.MatchString(m.ID) {
@@ -183,6 +189,25 @@ func CheckFromMachine(m *Message) error {
 		m.Text = Cut(m.Text, MaxProgressBytes)
 	default:
 		return bad("type %q from a machine", m.Type)
+	}
+	return nil
+}
+
+// checkStatus checks what a hello or capabilities message says the machine
+// can do.
+func checkStatus(m *Message) error {
+	if len(m.Capabilities) > MaxCapabilities {
+		return bad("%d capabilities", len(m.Capabilities))
+	}
+	for _, c := range m.Capabilities {
+		if !capabilityPattern.MatchString(c) {
+			return bad("capability %q", c)
+		}
+	}
+	switch m.ClaudeCode {
+	case "", "ok", "logged_out", "absent":
+	default:
+		return bad("claude_code %q", m.ClaudeCode)
 	}
 	return nil
 }

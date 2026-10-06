@@ -127,3 +127,46 @@ func TestEchoInput_Check(t *testing.T) {
 		}
 	}
 }
+
+func TestCapabilitiesMessage(t *testing.T) {
+	ok := Message{Type: TypeCapabilities, Capabilities: []string{"echo", CapClaudeCode}, ClaudeCode: "logged_out"}
+	if err := CheckFromMachine(&ok); err != nil {
+		t.Error(err)
+	}
+	for _, m := range []Message{
+		{Type: TypeCapabilities, ClaudeCode: "maybe"},
+		{Type: TypeCapabilities, Capabilities: []string{"Bad!"}},
+		{Type: TypeHello, Protocol: Protocol, MaxDirectives: 1, ClaudeCode: "yes"},
+	} {
+		if err := CheckFromMachine(&m); !errors.Is(err, ErrBadMessage) {
+			t.Errorf("%+v: %v", m, err)
+		}
+	}
+}
+
+func TestAnalyzeInput_Check(t *testing.T) {
+	if err := (AnalyzeInput{Repo: "git@github.com:me/app", Ref: "main", Task: "why"}).Check(); err != nil {
+		t.Error(err)
+	}
+	for _, in := range []AnalyzeInput{
+		{Task: "why"},
+		{Repo: "r"},
+		{Repo: "--upload-pack=touch /tmp/x", Task: "why"},
+		{Repo: "r\nx", Task: "why"},
+		{Repo: "r", Ref: "--output=x", Task: "why"},
+		{Repo: "r", Task: strings.Repeat("x", 70000)},
+	} {
+		if err := in.Check(); err == nil {
+			t.Errorf("%+v accepted", in)
+		}
+	}
+	if CapabilityOf(KindAnalyzeRepo) != CapClaudeCode || CapabilityOf(KindEcho) != KindEcho {
+		t.Error("capabilities of kinds")
+	}
+	if got := CodingProgress(34, "Grep"); got != "34 outils (dernier : Grep)" {
+		t.Errorf("progress %q", got)
+	}
+	if got := CodingProgress(1, ""); got != "1 outil" {
+		t.Errorf("progress %q", got)
+	}
+}
