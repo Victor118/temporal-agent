@@ -659,10 +659,7 @@ func newHTTPHandler(cfg *config.Config, st store.Store, tc client.Client, hub *s
 	})
 	warnClosedWebhooks(cfg)
 	srv := newServer(cfg, st, tc, hub, authSvc, adminUI.Routes())
-	// MACHINES_ENABLED=false: no machine reaches this server.
-	if on, _ := cfg.MachinesOn(); on {
-		srv.machines = opts.machines
-	}
+	srv.machines = opts.machines // nil when MACHINES_ENABLED=false
 	return srv.routes()
 }
 

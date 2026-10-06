@@ -833,10 +833,11 @@ EOF
 		var out workflow.ClaudeCodeOutput
 		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 		defer cancel()
+		// Refused before any tool ran: the same run goes to the fallback.
 		if err := e.analyze(t, uuid.NewString(), leo, repo).Get(ctx, &out); err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(out.Error, "login was refused") || out.Machine != "expiree" {
+		if !strings.HasPrefix(out.Report, "from the fallback") || !strings.Contains(out.Note, "login was refused") || out.Interrupted {
 			t.Errorf("output %+v", out)
 		}
 		waitFor(t, "Claude Code withdrawn", 10*time.Second, func() bool {
@@ -845,6 +846,22 @@ EOF
 		})
 		if err := e.analyze(t, uuid.NewString(), leo, repo).Get(ctx, &out); err != nil || !strings.HasPrefix(out.Report, "from the fallback") {
 			t.Errorf("the next run: %+v %v", out, err)
+		}
+	})
+
+	t.Run("analyze_repo refused by the machine (a repository it does not allow): the same run goes to the fallback", func(t *testing.T) {
+		mona := e.user("mona")
+		allowed, other := smokeGitRepo(t), smokeGitRepo(t)
+		e.startAnalyzer(t, mona, "prudente", allowed, analyzeOK)
+		var out workflow.ClaudeCodeOutput
+		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
+		if err := e.analyze(t, uuid.NewString(), mona, other).Get(ctx, &out); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasPrefix(out.Report, "from the fallback") || out.Machine != "" || out.Interrupted ||
+			!strings.Contains(out.Note, `your machine "prudente" turned it down`) || !strings.Contains(out.Note, "--repos") {
+			t.Errorf("output %+v", out)
 		}
 	})
 
@@ -886,6 +903,11 @@ EOF
 		}
 	})
 }
+
+// analyzeOK is a stand-in CLI's successful analysis.
+const analyzeOK = `echo '{"type":"system","subtype":"init","session_id":"s","apiKeySource":"none"}'
+echo '{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"s"}'
+`
 
 // smokeNote is a note the gateway put on a turn's line.
 type smokeNote struct{ session, participant, agent, text string }
@@ -930,6 +952,7 @@ func (e *smokeEnv) startAnalyzer(t *testing.T, userID, name, repo, script string
 		},
 		MaxDirectives: 1, OS: "linux", Version: "smoke", MinBackoff: 100 * time.Millisecond, MaxBackoff: 500 * time.Millisecond, StopWait: time.Second}
 	a.OnLoginRefused = c.Refresh
+	c.OnConnect = a.Retry
 	ctx, cancel := context.WithCancel(context.Background())
 	runErr := make(chan error, 1)
 	go func() { runErr <- c.Run(ctx) }()

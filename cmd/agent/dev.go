@@ -46,8 +46,11 @@ func runDev(cmd *cobra.Command, args []string) {
 	// The machines' gateway is in this process: directives reach it in
 	// memory, like the notifications reach the hub.
 	machines := newGateway(cfg, st, temporalClient, hub)
-	rt, err := newWorkerRuntime(cfg, st, temporalClient, workerOptions{web: activity.HubNotifier{Hub: hub}, skills: skillStore,
-		machines: st, handoff: machines})
+	opts := workerOptions{web: activity.HubNotifier{Hub: hub}, skills: skillStore, machines: st}
+	if machines != nil {
+		opts.handoff = machines
+	}
+	rt, err := newWorkerRuntime(cfg, st, temporalClient, opts)
 	if err != nil {
 		log.Fatalf("Worker: %v", err)
 	}
@@ -66,7 +69,9 @@ func runDev(cmd *cobra.Command, args []string) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		srv.Shutdown(ctx)
-		machines.Close()
+		if machines != nil {
+			machines.Close()
+		}
 		rt.shutdown()
 	}()
 

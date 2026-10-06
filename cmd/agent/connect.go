@@ -124,6 +124,7 @@ func runConnect(cmd *cobra.Command, args []string) {
 	}
 	if analyzer != nil {
 		analyzer.OnLoginRefused = c.Refresh
+		c.OnConnect = analyzer.Retry
 		if analyzer.WorkDir == "" {
 			cache, err := os.UserCacheDir()
 			if err != nil {

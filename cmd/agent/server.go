@@ -41,6 +41,7 @@ func runServer(cmd *cobra.Command, args []string) {
 	// Back-office skills: the server and the workers reload the repo when
 	// skills_version moves.
 	skills, skillsSource := serverSkills(context.Background(), cfg, st)
+	// MACHINES_ENABLED=false: no gateway, no sweep, no machine route.
 	machines := newGateway(cfg, st, temporalClient, hub)
 	handler := newHTTPHandler(cfg, st, temporalClient, hub, httpOptions{
 		skills:           skills,
@@ -53,7 +54,9 @@ func runServer(cmd *cobra.Command, args []string) {
 	// RunOnMachine hands to the machines' gateway.
 	internalRouter := chi.NewRouter()
 	internalRouter.Post("/internal/notify", handleInternalNotify(hub, cfg.InternalAPIKey))
-	internalRouter.Post(activity.DirectivePath, machines.ServeDirectives(cfg.InternalAPIKey))
+	if machines != nil {
+		internalRouter.Post(activity.DirectivePath, machines.ServeDirectives(cfg.InternalAPIKey))
+	}
 	if cfg.InternalAPIKey == "" {
 		log.Println("Warning: INTERNAL_API_KEY is not set, the internal API refuses every worker notification")
 	}
@@ -78,7 +81,9 @@ func runServer(cmd *cobra.Command, args []string) {
 		publicSrv.Shutdown(ctx)
 		internalSrv.Shutdown(ctx)
 		// Hijacked, the machines' connections are none of Shutdown's.
-		machines.Close()
+		if machines != nil {
+			machines.Close()
+		}
 	}()
 
 	log.Printf("Public API listening on %s", cfg.HTTPAddr)

@@ -29,14 +29,19 @@ import (
 // newGateway starts the machines' gateway of a server (docs/design/
 // machines.md): one per process, the only replica. It speaks to Temporal as
 // a client, and tells a machine's owner what they must know through their
-// notifications.
+// notifications. Nil when MACHINES_ENABLED=false: no gateway, no sweep.
 func newGateway(cfg *config.Config, st *store.PostgresStore, tc client.Client, hub *sse.Hub) *gateway.Gateway {
 	clients, err := auth.ParseClientAddrs(cfg.TrustedProxies)
 	if err != nil {
 		log.Fatalf("Invalid configuration: %v", err)
 	}
-	if _, err := cfg.MachinesOn(); err != nil {
+	on, err := cfg.MachinesOn()
+	if err != nil {
 		log.Fatalf("Invalid configuration: %v", err)
+	}
+	if !on {
+		log.Println("Machines are off (MACHINES_ENABLED=false): no gateway, no machine routes; set the same value on every worker")
+		return nil
 	}
 	g := &gateway.Gateway{Store: st, Temporal: tc, Alert: machineAlerts(st, hub), ClientAddr: clients.Of, AddrsKnown: clients.Known(),
 		Notice: machineNotices(hub)}
