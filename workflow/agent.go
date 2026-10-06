@@ -639,6 +639,7 @@ func callContext(input AgentWorkflowInput, chain []string, signer, queue string)
 		Agent:       signer,
 		NotifyQueue: queue,
 		Turn:        turn,
+		UserID:      input.UserID,
 	}
 }
 

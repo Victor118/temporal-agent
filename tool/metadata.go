@@ -91,6 +91,10 @@ type CallContext struct {
 	// CallID is the model's ID of this tool call: a file the call publishes
 	// again under the same name (a retried activity) is the one it stored.
 	CallID string `json:"call_id,omitempty"`
+	// UserID is the user the turn answers (the author of its message): the
+	// one whose machines a coding run may use. Empty: no user (a sub-agent
+	// of no turn has its parent's).
+	UserID string `json:"user_id,omitempty"`
 }
 
 // callContextKeys are the input keys CallContext's fields decode from: its

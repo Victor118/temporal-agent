@@ -42,6 +42,23 @@ type MachineActivities struct {
 	// longer is offline (a gateway that died without a word). Zero =
 	// DefaultMachineOnlineWindow.
 	OnlineWindow time.Duration
+	// Routing is where this worker sends coding runs (CodingRoute).
+	Routing CodingRouting
+}
+
+// CodingRouting is where a coding run goes, as the worker that publishes the
+// coding tools is configured: to the user's machine (Machines), and when
+// none takes it, to the fallback queue of its tool ("" = none).
+type CodingRouting struct {
+	Machines     bool   `json:"machines"`
+	AnalyzeQueue string `json:"analyze_queue,omitempty"`
+}
+
+// CodingRoute tells a coding run where it may go: the worker's
+// configuration, which a workflow cannot read itself, recorded in its
+// history.
+func (a *MachineActivities) CodingRoute(context.Context) (CodingRouting, error) {
+	return a.Routing, nil
 }
 
 const (
@@ -64,6 +81,11 @@ type PickMachineInput struct {
 	// Timeout is how long the directive may run (RunOnMachine's
 	// StartToCloseTimeout).
 	Timeout time.Duration `json:"timeout"`
+	// The turn the directive works for, whose line shows its progress
+	// (web only); empty: none.
+	SessionID   string `json:"session_id,omitempty"`
+	Participant string `json:"participant,omitempty"`
+	Agent       string `json:"agent,omitempty"`
 }
 
 // PickMachineOutput is the directive and its machine; NoMachine, with no
@@ -98,6 +120,9 @@ func (a *MachineActivities) PickMachine(ctx context.Context, in PickMachineInput
 		HandoffBy:   now.Add(machineHandoffWindow),
 		Deadline:    now.Add(machineHandoffWindow + in.Timeout),
 		SeenAfter:   now.Add(-window),
+		SessionID:   in.SessionID,
+		Participant: in.Participant,
+		Agent:       in.Agent,
 	})
 	if errors.Is(err, store.ErrNoMachine) {
 		return PickMachineOutput{NoMachine: fmt.Sprintf(
@@ -143,6 +168,9 @@ func (a *MachineActivities) RunOnMachine(ctx context.Context, in RunOnMachineInp
 
 // deliver tries the handoff a few times: the server may be restarting.
 func (a *MachineActivities) deliver(ctx context.Context, id string) error {
+	if a.Handoff == nil {
+		return fmt.Errorf("%w: this worker hands no directive (no gateway)", errHandoffRefused)
+	}
 	var err error
 	for i, wait := 0, time.Second; i < 4; i, wait = i+1, wait*2 {
 		if err = a.Handoff.Deliver(ctx, id); err == nil || errors.Is(err, errHandoffRefused) {

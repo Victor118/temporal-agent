@@ -90,7 +90,7 @@ func TestWithCallContext_AnyCase(t *testing.T) {
 }
 
 func TestCallContextKeys(t *testing.T) {
-	want := []string{"agent_chain", "channel", "channel_id", "agent", "notify_queue", "memory_version", "memory_unread", "turn", "call_id"}
+	want := []string{"agent_chain", "channel", "channel_id", "agent", "notify_queue", "memory_version", "memory_unread", "turn", "call_id", "user_id"}
 	if !slices.Equal(callContextKeys, want) {
 		t.Errorf("reserved keys %v, want %v", callContextKeys, want)
 	}

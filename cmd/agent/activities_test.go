@@ -94,6 +94,7 @@ func TestWorkerActivities_AreTheActivities(t *testing.T) {
 		"CallLLM",
 		"CheckTurn",
 		"CleanupWorkspace",
+		"CodingRoute",
 		"DeleteSchedule",
 		"DeliverResult",
 		"EndTurn",

@@ -12,6 +12,7 @@ import (
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/victor/temporal-agent/activity"
+	"github.com/victor/temporal-agent/machine"
 	"github.com/victor/temporal-agent/tool"
 )
 
@@ -44,17 +45,14 @@ const (
 
 	// analyzePermissionMode is what makes this workflow read-only. It is set
 	// here and never taken from the input: an agent asking for an analysis
-	// must not be able to talk its way into write access.
-	analyzePermissionMode = "plan"
+	// must not be able to talk its way into write access. The same on a
+	// user's machine (machine.AnalyzePermissionMode).
+	analyzePermissionMode = machine.AnalyzePermissionMode
 )
 
-// analyzeSystemPrompt tells the run what it is: the CLI otherwise behaves as
-// in an interactive session, and ends a report offering to make the changes
-// or asking what to do next — which no one will answer, and which the agent
-// reading the report repeats to its user as a promise.
-const analyzeSystemPrompt = `This is a one-shot, read-only analysis. Nothing you change is kept: the clone is deleted when you finish, and nothing can be committed or pushed.
-Your final message is a report read by another agent, not by a person, and no one will reply to it. End with the report: do not offer to make changes, to start on fixes, or to continue, and do not ask questions.
-If a command you need is refused, say that it was refused, not that a tool is missing.`
+// analyzeSystemPrompt tells the run what it is (machine.AnalyzeSystemPrompt,
+// which a machine's run gets too).
+const analyzeSystemPrompt = machine.AnalyzeSystemPrompt
 
 // AnalyzeRepoInput is what the calling agent gets to decide. Everything else —
 // permissions, timeouts, where the clone lives, that it is deleted afterwards —
@@ -82,6 +80,9 @@ type ClaudeCodeOutput struct {
 	Repo   string `json:"repo,omitempty"`
 	Ref    string `json:"ref,omitempty"`
 	Commit string `json:"commit,omitempty"`
+	// Machine is the user's machine the run went to (CodingRunWorkflow);
+	// empty: one of the installation's workers.
+	Machine string `json:"machine,omitempty"`
 
 	// Set by the workflows that write. Branch is named before the run starts,
 	// so it is reported even when nothing was pushed to it.
@@ -326,6 +327,9 @@ func (o ClaudeCodeOutput) Summary() string {
 	}
 	if o.Dirty {
 		sb.WriteString("note: the run left uncommitted changes, which were discarded with the clone\n")
+	}
+	if o.Machine != "" {
+		fmt.Fprintf(&sb, "machine: %q, the user's own (their Claude Code login, their git identity)\n", o.Machine)
 	}
 	ran := (time.Duration(o.DurationMS) * time.Millisecond).Round(time.Second)
 	if o.Interrupted {
