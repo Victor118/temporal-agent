@@ -257,14 +257,11 @@ func (a *Analyzer) Run(ctx context.Context, input json.RawMessage, progress func
 var gitEnvNames = []string{"SSH_AUTH_SOCK", "GIT_SSH_COMMAND", "XDG_CONFIG_HOME"}
 
 // gitEnv is the clone's environment: the owner's git configuration (their
-// credential helpers, their ssh setup), never a prompt (GIT_TERMINAL_PROMPT
-// off, ssh in batch mode unless they set GIT_SSH_COMMAND themselves).
+// credential helpers, their core.sshCommand), never a prompt
+// (GIT_TERMINAL_PROMPT off; ssh, with no terminal in its session, cannot
+// ask either).
 func gitEnv() []string {
-	env := subproc.GitEnvUser(os.Environ(), gitEnvNames...)
-	if os.Getenv("GIT_SSH_COMMAND") == "" {
-		env = append(env, "GIT_SSH_COMMAND=ssh -o BatchMode=yes")
-	}
-	return env
+	return subproc.GitEnvUser(os.Environ(), gitEnvNames...)
 }
 
 // gitHint says, after a clone that failed, what the owner can do about it.

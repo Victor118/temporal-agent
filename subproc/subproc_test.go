@@ -2,8 +2,10 @@ package subproc
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -70,4 +72,36 @@ func runs(pid int) bool {
 	// "pid (comm) S ...": the state follows the closing parenthesis.
 	i := strings.LastIndexByte(string(stat), ')')
 	return i < 0 || !strings.HasPrefix(string(stat[i+1:]), " Z")
+}
+
+// Under NewSession, KillGroup still ends what the command left running.
+func TestKillGroup_NewSession(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "pid")
+	cmd := exec.CommandContext(context.Background(), "sh", "-c", "sleep 60 & echo $! > "+pidFile+"; exit 0")
+	KillGroupOnCancel(cmd, syscall.SIGTERM, time.Second)
+	NewSession(cmd)
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, _ := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if pid <= 0 || syscall.Kill(pid, 0) != nil {
+		t.Fatalf("the sleep %d did not start", pid)
+	}
+	KillGroup(cmd)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		// Killed: gone, or a zombie waiting for its reaper.
+		data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+		if err != nil || strings.Contains(string(data), ") Z ") {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the sleep %d outlived KillGroup", pid)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }

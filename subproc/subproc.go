@@ -92,7 +92,9 @@ func KillGroupOnCancel(cmd *exec.Cmd, sig syscall.Signal, grace time.Duration) {
 // pid range went round. cmd must have been started with KillGroupOnCancel; a
 // cmd that never started is left alone.
 func KillGroup(cmd *exec.Cmd) {
-	if cmd.Process == nil || cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setpgid {
+	// A group of its own: by setpgid, or as the leader of its own session
+	// (NewSession).
+	if cmd.Process == nil || cmd.SysProcAttr == nil || !(cmd.SysProcAttr.Setpgid || cmd.SysProcAttr.Setsid) {
 		return
 	}
 	syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
