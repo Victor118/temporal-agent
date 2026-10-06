@@ -53,6 +53,9 @@ func (s *PostgresStore) migrate() error {
 	if _, err := tx.Exec(schema); err != nil {
 		return err
 	}
+	if _, err := tx.Exec(machineSchema); err != nil {
+		return fmt.Errorf("machines schema: %w", err)
+	}
 	return tx.Commit()
 }
 
