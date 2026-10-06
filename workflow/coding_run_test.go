@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/mock"
 	enumspb "go.temporal.io/api/enums/v1"
 	sdkactivity "go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/temporal"
@@ -54,7 +55,11 @@ func runCodingRun(t *testing.T, c *codingRunCase, in AnalyzeRepoInput) (ClaudeCo
 		c.childOn = sdkworkflow.GetInfo(ctx).TaskQueueName
 		return ClaudeCodeOutput{Report: "from the fallback", Repo: "r"}, nil
 	}, sdkworkflow.RegisterOptions{Name: "AnalyzeRepoWorkflow"})
-	raw, _ := tool.WithCallContext(mustJSON(map[string]string{"repo": in.Repo, "task": in.Task, "ref": in.Ref}), in.CallContext)
+	args := map[string]any{"repo": in.Repo, "task": in.Task, "ref": in.Ref}
+	if in.Probe != nil {
+		args["probe"] = in.Probe // what a model might add
+	}
+	raw, _ := tool.WithCallContext(mustJSON(args), in.CallContext)
 	env.ExecuteWorkflow(CodingRunWorkflow, raw)
 	var out ClaudeCodeOutput
 	err := env.GetWorkflowError()
@@ -147,5 +152,59 @@ func TestCodingRun_Nowhere(t *testing.T) {
 	c = &codingRunCase{route: activity.CodingRouting{Machines: true}}
 	if out, _ := runCodingRun(t, c, noUser); len(c.picks) != 0 || !strings.Contains(out.Error, "no user") {
 		t.Errorf("no user: %+v", out)
+	}
+}
+
+// A machine that turns the run down before anything ran: the same run goes
+// to the fallback, saying why; the probe's answer goes to the child, and a
+// model's "probe" never does.
+func TestCodingRun_RefusedThenFallback(t *testing.T) {
+	c := &codingRunCase{route: activity.CodingRouting{Machines: true, AnalyzeQueue: "fallback"},
+		pick: activity.PickMachineOutput{DirectiveID: "d-1", MachineName: "maison"},
+		run: func(activity.RunOnMachineInput) (machine.Result, error) {
+			return machine.Result{}, temporal.NewNonRetryableApplicationError(`repository "x" is not one this machine may use`, machine.ErrTypeRefused, nil)
+		}}
+	in := analyzeCall
+	in.Probe = &activity.ProbeRunWorkerOutput{QueueWaitSeconds: 1} // as a model would try
+	out, err := runCodingRun(t, c, in)
+	if err != nil || out.Report != "from the fallback" || out.Machine != "" || out.Interrupted ||
+		!strings.Contains(out.Note, `your machine "maison" turned it down`) || !strings.Contains(out.Content, "note: ") {
+		t.Fatalf("output %+v %v", out, err)
+	}
+	var child AnalyzeRepoInput
+	if json.Unmarshal(c.child[0], &child) != nil || child.Probe == nil || child.Probe.QueueWaitSeconds == 1 {
+		t.Errorf("the child's probe: %s", c.child[0])
+	}
+}
+
+// A machine lost before its CLI started: no "interrupted run" (no cost to
+// tell, nothing that a retry would pay again).
+func TestCodingRun_LostBeforeTheCLI(t *testing.T) {
+	c := &codingRunCase{route: activity.CodingRouting{Machines: true},
+		pick: activity.PickMachineOutput{DirectiveID: "d-1", MachineName: "maison"},
+		run: func(activity.RunOnMachineInput) (machine.Result, error) {
+			return machine.Result{}, temporal.NewNonRetryableApplicationError("clone failed", machine.ErrTypeFailed, nil,
+				machine.Result{Progress: machine.CloneProgress})
+		}}
+	out, err := runCodingRun(t, c, analyzeCall)
+	if err != nil || out.Interrupted || strings.Contains(out.Content, "cost unknown") || !strings.Contains(out.Error, "clone failed") {
+		t.Errorf("output %+v %v", out, err)
+	}
+}
+
+// Given the probe's answer, AnalyzeRepoWorkflow does not ask the queue again.
+func TestAnalyzeRepoWorkflow_ProbedOnce(t *testing.T) {
+	for _, probed := range []bool{false, true} {
+		a := newAnalyzeEnv(t, nil, claudeCodeResult{Report: "r", Subtype: "success"}, nil)
+		probes := 0
+		a.env.OnActivity(probeActivity, mock.Anything).Run(func(mock.Arguments) { probes++ }).
+			Return(activity.ProbeRunWorkerOutput{QueueWaitSeconds: 60}, nil)
+		in := AnalyzeRepoInput{Repo: "/src/repo", Task: "why"}
+		if probed {
+			in.Probe = &activity.ProbeRunWorkerOutput{QueueWaitSeconds: 60}
+		}
+		if out := a.run_(t, in); out.Report != "r" || (probes == 1) == probed {
+			t.Errorf("probed %v: %d probes, %+v", probed, probes, out)
+		}
 	}
 }

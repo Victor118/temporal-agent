@@ -64,6 +64,10 @@ type AnalyzeRepoInput struct {
 	// The caller's, never the model's (tool.WithCallContext): where to tell
 	// the user that the run waits for a worker.
 	tool.CallContext
+	// Probe is the fallback queue's answer to the probe, when
+	// CodingRunWorkflow asked it before starting this run there: it is not
+	// asked again. Set by CodingRunWorkflow alone, which drops a model's.
+	Probe *activity.ProbeRunWorkerOutput `json:"probe,omitempty"`
 }
 
 // ClaudeCodeOutput is what a coding workflow returns. Error carries a run that
@@ -83,6 +87,9 @@ type ClaudeCodeOutput struct {
 	// Machine is the user's machine the run went to (CodingRunWorkflow);
 	// empty: one of the installation's workers.
 	Machine string `json:"machine,omitempty"`
+	// Note is what the agent should know of where the run went (the
+	// user's machine refused it, it ran on the fallback).
+	Note string `json:"note,omitempty"`
 
 	// Set by the workflows that write. Branch is named before the run starts,
 	// so it is reported even when nothing was pushed to it.
@@ -149,7 +156,7 @@ func analyzeRepo(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCodeOutp
 	out := ClaudeCodeOutput{Repo: input.Repo, Ref: input.Ref}
 	var ccAct *activity.ClaudeCodeActivities
 
-	r, err := openRun(ctx, analyzeSessionTimeout, input.CallContext)
+	r, err := openRun(ctx, analyzeSessionTimeout, input.CallContext, input.Probe)
 	if err != nil {
 		out.Error = err.Error()
 		return out, nil
@@ -330,6 +337,9 @@ func (o ClaudeCodeOutput) Summary() string {
 	}
 	if o.Machine != "" {
 		fmt.Fprintf(&sb, "machine: %q, the user's own (their Claude Code login, their git identity)\n", o.Machine)
+	}
+	if o.Note != "" {
+		fmt.Fprintf(&sb, "note: %s\n", o.Note)
 	}
 	ran := (time.Duration(o.DurationMS) * time.Millisecond).Round(time.Second)
 	if o.Interrupted {

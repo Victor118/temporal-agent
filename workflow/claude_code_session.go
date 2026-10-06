@@ -91,21 +91,30 @@ type run struct {
 // answer within runProbeTimeout, no worker. Then the run waits for a slot,
 // as long as the worker that answered says (its CLAUDE_CODE_QUEUE_WAIT); past
 // runWaitNotice, its user is told (call: where the user is).
-func openRun(ctx workflow.Context, execution time.Duration, call tool.CallContext) (*run, error) {
+//
+// probed is the probe's answer when the caller made it already
+// (CodingRunWorkflow, before it starts the run on its fallback queue): the
+// queue is not asked twice.
+func openRun(ctx workflow.Context, execution time.Duration, call tool.CallContext, probed *activity.ProbeRunWorkerOutput) (*run, error) {
 	queue := runQueue(ctx)
 	logger := workflow.GetLogger(ctx)
 
 	var ccAct *activity.ClaudeCodeActivities
 	var probe activity.ProbeRunWorkerOutput
-	err := workflow.ExecuteActivity(
-		workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-			TaskQueue:              queue,
-			ScheduleToStartTimeout: runProbeTimeout,
-			StartToCloseTimeout:    10 * time.Second,
-			RetryPolicy:            &temporal.RetryPolicy{MaximumAttempts: 1},
-		}),
-		ccAct.ProbeRunWorker,
-	).Get(ctx, &probe)
+	var err error
+	if probed != nil {
+		probe = *probed
+	} else {
+		err = workflow.ExecuteActivity(
+			workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+				TaskQueue:              queue,
+				ScheduleToStartTimeout: runProbeTimeout,
+				StartToCloseTimeout:    10 * time.Second,
+				RetryPolicy:            &temporal.RetryPolicy{MaximumAttempts: 1},
+			}),
+			ccAct.ProbeRunWorker,
+		).Get(ctx, &probe)
+	}
 	switch {
 	case isScheduleToStartTimeout(err):
 		logger.Warn("No worker answered on the coding runs' queue: none is running", "queue", queue, "waited", runProbeTimeout)

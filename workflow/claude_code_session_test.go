@@ -504,7 +504,7 @@ func TestImplementFeatureWorkflow_WorkerLostAfterTheRun(t *testing.T) {
 // expiryWorkflow opens a run of the given bound, and runs one step that
 // fails as a lost worker's does, after the step's own time.
 func expiryWorkflow(ctx workflow.Context, execution time.Duration) (string, error) {
-	r, err := openRun(ctx, execution, tool.CallContext{})
+	r, err := openRun(ctx, execution, tool.CallContext{}, nil)
 	if err != nil {
 		return "", err
 	}

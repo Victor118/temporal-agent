@@ -44,6 +44,8 @@ func codingRun(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCodeOutput
 		return ClaudeCodeOutput{}, temporal.NewNonRetryableApplicationError(
 			"analyze_repo requires repo and task", "InvalidInput", nil)
 	}
+	// Probe is the workflow's to set for its fallback, never the model's.
+	input.Probe = nil
 	out := ClaudeCodeOutput{Repo: input.Repo, Ref: input.Ref}
 
 	var mAct *activity.MachineActivities
@@ -59,14 +61,18 @@ func codingRun(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCodeOutput
 	case input.UserID == "":
 		why = "the call has no user whose machine could run it"
 	default:
-		ran, err := analyzeOnMachine(ctx, input, &out)
+		ran, refused, err := analyzeOnMachine(ctx, input, &out)
 		if ran || err != nil {
 			return out, err
 		}
-		why = "no machine of yours is connected with Claude Code (logged in) and a run to spare"
+		why = refused
+		if why == "" {
+			why = "no machine of yours is connected with Claude Code (logged in) and a run to spare"
+		}
+		out.Machine = ""
 	}
 	if route.AnalyzeQueue != "" {
-		return analyzeOnFallback(ctx, rawInput, route.AnalyzeQueue, why, out)
+		return analyzeOnFallback(ctx, input, route.AnalyzeQueue, why, out)
 	}
 	switch {
 	case why != "":
@@ -78,12 +84,14 @@ func codingRun(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCodeOutput
 }
 
 // analyzeOnMachine runs the analysis on a machine of the turn's author, if
-// one takes it (ran). A cancelled workflow is its error: the rest goes into
-// out.
-func analyzeOnMachine(ctx workflow.Context, input AnalyzeRepoInput, out *ClaudeCodeOutput) (ran bool, err error) {
+// one takes it (ran). One that turns it down before anything ran (a
+// repository it does not allow, its login refused, a handoff that failed)
+// is refused, with why: the run goes elsewhere. A cancelled workflow is its
+// error: the rest goes into out.
+func analyzeOnMachine(ctx workflow.Context, input AnalyzeRepoInput, out *ClaudeCodeOutput) (ran bool, refused string, err error) {
 	raw, err := json.Marshal(machine.AnalyzeInput{Repo: input.Repo, Ref: input.Ref, Task: input.Task})
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	wfID := workflow.GetInfo(ctx).WorkflowExecution.ID
 	sessionID, _ := SessionOf(wfID)
@@ -96,39 +104,60 @@ func analyzeOnMachine(ctx workflow.Context, input AnalyzeRepoInput, out *ClaudeC
 			SessionID: sessionID, Participant: participant, Agent: input.Agent}).Get(ctx, &pick); err != nil {
 		// The machines' database away: the fallback may still answer.
 		workflow.GetLogger(ctx).Warn("No machine could be picked for an analysis", "error", err)
-		return false, nil
+		return false, "", nil
 	}
 	if pick.NoMachine != "" {
-		return false, nil
+		return false, "", nil
 	}
 	out.Machine = pick.MachineName
 	started := workflow.Now(ctx)
 	var res machine.Result
 	err = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, runOnMachineOptions(analyzeTimeout, 0)),
 		mAct.RunOnMachine, activity.RunOnMachineInput{DirectiveID: pick.DirectiveID}).Get(ctx, &res)
-	if err != nil {
-		if temporal.IsCanceledError(err) {
-			return true, err
-		}
-		// What the machine said along with its failure: a partial report,
-		// how far it got.
+	switch {
+	case err == nil:
+		out.fromMachine(res.Output)
+		return true, "", nil
+	case temporal.IsCanceledError(err):
+		return true, "", err
+	case hasErrorType(err, machine.ErrTypeRefused):
 		var appErr *temporal.ApplicationError
-		var partial machine.Result
-		if errors.As(err, &appErr) && appErr.HasDetails() && appErr.Details(&partial) == nil {
-			out.fromMachine(partial.Output)
-		}
-		var why *temporal.ApplicationError
-		if errors.As(machineError(err, pick.MachineName, analyzeTimeout, 0), &why) {
-			out.Error = "the analysis did not complete: " + why.Message()
-		}
-		if !out.Interrupted {
-			out.Interrupted = true
-			out.DurationMS = workflow.Now(ctx).Sub(started).Milliseconds()
-		}
-		return true, nil
+		errors.As(err, &appErr)
+		return false, fmt.Sprintf("your machine %q turned it down (%s)", pick.MachineName, appErr.Message()), nil
 	}
-	out.fromMachine(res.Output)
-	return true, nil
+	// What the machine said along with its failure: a partial report, how
+	// far it got.
+	var appErr *temporal.ApplicationError
+	var partial machine.Result
+	if errors.As(err, &appErr) && appErr.HasDetails() && appErr.Details(&partial) == nil {
+		out.fromMachine(partial.Output)
+	}
+	var why *temporal.ApplicationError
+	if errors.As(machineError(err, pick.MachineName, analyzeTimeout, 0), &why) {
+		out.Error = "the analysis did not complete: " + why.Message()
+	}
+	// Interrupted — its cost unknown, a retry starting over — only if the
+	// CLI ran: what the machine or its last heartbeat says.
+	if !out.Interrupted && cliRan(err, partial) {
+		out.Interrupted = true
+		out.DurationMS = workflow.Now(ctx).Sub(started).Milliseconds()
+	}
+	return true, "", nil
+}
+
+// cliRan tells whether a directive that failed with err had started its CLI:
+// its last progress, in the machine's last word (partial) or in the last
+// heartbeat of a timed out activity, went past the clone.
+func cliRan(err error, partial machine.Result) bool {
+	progress := partial.Progress
+	var timeoutErr *temporal.TimeoutError
+	if progress == "" && errors.As(err, &timeoutErr) && timeoutErr.HasLastHeartbeatDetails() {
+		var hb machine.Heartbeat
+		if timeoutErr.LastHeartbeatDetails(&hb) == nil {
+			progress = hb.Progress
+		}
+	}
+	return progress != "" && progress != machine.CloneProgress
 }
 
 // fromMachine fills o with what a machine's run says of itself (untrusted:
@@ -158,8 +187,10 @@ func (o *ClaudeCodeOutput) fromMachine(raw json.RawMessage) {
 // AnalyzeRepoWorkflow as it always was, a child whose ID keeps the session's
 // prefix (SessionOf, query_workflow), with the same input, call context
 // included. A probe first: with no worker on the queue, the child would
-// never start, and its own probe never run.
-func analyzeOnFallback(ctx workflow.Context, rawInput json.RawMessage, queue, noMachine string, out ClaudeCodeOutput) (ClaudeCodeOutput, error) {
+// never start, and its own probe never run; its answer goes to the child,
+// which does not ask again. noMachine says why no machine of the user's ran
+// it, for the agent.
+func analyzeOnFallback(ctx workflow.Context, input AnalyzeRepoInput, queue, noMachine string, out ClaudeCodeOutput) (ClaudeCodeOutput, error) {
 	prefix := ""
 	if noMachine != "" {
 		prefix = noMachine + ", and "
@@ -186,13 +217,21 @@ func analyzeOnFallback(ctx workflow.Context, rawInput json.RawMessage, queue, no
 		out.Error = prefix + fmt.Sprintf("could not reach the installation's fallback (%q): %v; nothing was done", queue, err)
 		return out, nil
 	}
+	input.Probe = &probe
+	raw, err := json.Marshal(input)
+	if err != nil {
+		return out, err
+	}
 	child := workflow.WithChildOptions(ctx, workflow.ChildWorkflowOptions{
 		WorkflowID: workflow.GetInfo(ctx).WorkflowExecution.ID + ":fallback",
 		TaskQueue:  queue,
 	})
 	var res ClaudeCodeOutput
-	if err := workflow.ExecuteChildWorkflow(child, AnalyzeRepoWorkflow, rawInput).Get(ctx, &res); err != nil {
+	if err := workflow.ExecuteChildWorkflow(child, AnalyzeRepoWorkflow, json.RawMessage(raw)).Get(ctx, &res); err != nil {
 		return res, err
+	}
+	if noMachine != "" {
+		res.Note = noMachine + "; it ran on the installation's coding workers instead"
 	}
 	return res, nil
 }

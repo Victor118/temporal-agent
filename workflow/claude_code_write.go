@@ -101,7 +101,7 @@ func implementFeature(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCod
 	out := ClaudeCodeOutput{Repo: input.Repo, Ref: input.Base, Branch: branch}
 	var ccAct *activity.ClaudeCodeActivities
 
-	r, err := openRun(ctx, implementSessionTimeout, input.CallContext)
+	r, err := openRun(ctx, implementSessionTimeout, input.CallContext, nil)
 	if err != nil {
 		out.Error = err.Error()
 		return out, nil
