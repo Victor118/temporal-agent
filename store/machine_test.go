@@ -443,3 +443,44 @@ func TestPickMachine_ConcurrentPicksKeepTheCap(t *testing.T) {
 		s.db.Exec(`UPDATE machine_directives SET state = 'completed' WHERE machine_id = 'zz-mach-one' AND run_id <> 'zz-c0'`)
 	}
 }
+
+func TestMachineSettingsAndStatus(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	machineUser(t, s, "zz-mach-erin")
+	enrollMachine(t, s, "zz-mach-erin", "zz-mach-set", "zz-set", []string{"echo"}, 2)
+	if _, err := s.MachineConnected(ctx, "zz-mach-set", "gw", "", MachineInfo{Capabilities: []string{"echo"}, MaxDirectives: 2, ClaudeCode: "absent"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateMachineStatus(ctx, "zz-mach-set", []string{"echo", "claude-code"}, "ok"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetMachinePaused(ctx, "someone-else", "zz-mach-set", true); !errors.Is(err, ErrMachineNotFound) {
+		t.Errorf("paused by another user: %v", err)
+	}
+	if err := s.SetMachinePriority(ctx, "zz-mach-erin", "zz-mach-set", 7); err != nil {
+		t.Fatal(err)
+	}
+	seen := time.Now().Add(-time.Minute)
+	req := pick("zz-mach-erin", "zz-set-run", "c", seen)
+	req.Capability, req.Kind = "claude-code", "analyze_repo"
+	req.SessionID, req.Participant, req.Agent = "sess-1", "jarvis", "Jarvis"
+	d, _, err := s.PickMachine(ctx, req)
+	if err != nil || d.SessionID != "sess-1" || d.Participant != "jarvis" || d.Agent != "Jarvis" {
+		t.Fatalf("pick: %+v %v", d, err)
+	}
+	ms, err := s.ListMachines(ctx, "zz-mach-erin")
+	if err != nil || len(ms) != 1 {
+		t.Fatalf("list: %+v %v", ms, err)
+	}
+	m := ms[0]
+	if m.ClaudeCode != "ok" || !m.Can("claude-code") || m.Priority != 7 || m.OpenDirectives != 1 || !slices.Equal(m.OpenKinds, []string{"analyze_repo"}) {
+		t.Errorf("machine %+v", m)
+	}
+	if err := s.SetMachinePaused(ctx, "zz-mach-erin", "zz-mach-set", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.PickMachine(ctx, pick("zz-mach-erin", "zz-set-run2", "c", seen)); !errors.Is(err, ErrNoMachine) {
+		t.Errorf("a paused machine was picked: %v", err)
+	}
+}

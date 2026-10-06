@@ -31,8 +31,13 @@ type Machine struct {
 	RevokedAt   *time.Time
 	// RevokedReason says why, for its owner ("jeton réutilisé"…).
 	RevokedReason string
-	// OpenDirectives is how many directives it holds: ListMachines only.
+	// ClaudeCode is the state of its claude CLI, as it last said:
+	// "ok", "logged_out", "absent"; "" = never said.
+	ClaudeCode string
+	// OpenDirectives is how many directives it holds, and OpenKinds their
+	// kinds: ListMachines only.
 	OpenDirectives int
+	OpenKinds      []string
 }
 
 // Online reports a machine a gateway holds and has heard from since since.
@@ -50,6 +55,7 @@ type MachineInfo struct {
 	Capabilities  []string
 	MaxDirectives int
 	AgentVersion  string
+	ClaudeCode    string
 }
 
 // Enrollment kinds: a device request, approved by its user code, or an
@@ -151,12 +157,17 @@ type Directive struct {
 	HandoffBy time.Time
 	Deadline  time.Time
 	// SentConn is the connection the gateway sent it on; "" = not sent.
-	SentConn  string
-	Result    json.RawMessage
-	Error     string
-	CreatedAt time.Time
-	StartedAt *time.Time
-	ClosedAt  *time.Time
+	SentConn string
+	// SessionID, Participant and Agent are the turn it works for, whose
+	// line shows its progress (empty: none).
+	SessionID   string
+	Participant string
+	Agent       string
+	Result      json.RawMessage
+	Error       string
+	CreatedAt   time.Time
+	StartedAt   *time.Time
+	ClosedAt    *time.Time
 }
 
 // Open reports a directive that is not over.
@@ -176,6 +187,10 @@ type PickRequest struct {
 	Deadline    time.Time
 	// SeenAfter: a machine not heard from since is offline.
 	SeenAfter time.Time
+	// The turn the directive works for (Directive.SessionID…).
+	SessionID   string
+	Participant string
+	Agent       string
 }
 
 const machineSchema = `
@@ -243,6 +258,13 @@ const machineSchema = `
 		-- A machine on its way in: a device request (user code, approved by a
 		-- logged-in user) or an enrollment token (created by one). Only the hash
 		-- of the machine's secret is kept.
+		-- What its claude CLI is ("ok", "logged_out", "absent"), as it says.
+		ALTER TABLE machines ADD COLUMN IF NOT EXISTS claude_code TEXT NOT NULL DEFAULT '';
+		-- The turn a directive works for: where its progress is shown.
+		ALTER TABLE machine_directives ADD COLUMN IF NOT EXISTS session_id TEXT NOT NULL DEFAULT '';
+		ALTER TABLE machine_directives ADD COLUMN IF NOT EXISTS participant TEXT NOT NULL DEFAULT '';
+		ALTER TABLE machine_directives ADD COLUMN IF NOT EXISTS agent TEXT NOT NULL DEFAULT '';
+
 		CREATE TABLE IF NOT EXISTS machine_enrollments (
 			id            TEXT PRIMARY KEY,
 			kind          TEXT NOT NULL CHECK (kind IN ('device', 'token')),
@@ -388,13 +410,13 @@ func (s *PostgresStore) DeleteExpiredEnrollments(ctx context.Context, now time.T
 // --- Machines ---
 
 const machineColumns = `m.id, m.user_id, m.name, m.os, m.capabilities, m.max_directives, m.priority, m.paused,
-	m.agent_version, m.connected_to, m.last_addr, m.created_at, m.seen_at, m.revoked_at, m.revoked_reason`
+	m.agent_version, m.connected_to, m.last_addr, m.created_at, m.seen_at, m.revoked_at, m.revoked_reason, m.claude_code`
 
 func scanMachine(row interface{ Scan(...any) error }, extra ...any) (Machine, error) {
 	var m Machine
 	var caps []byte
 	dest := append([]any{&m.ID, &m.UserID, &m.Name, &m.OS, &caps, &m.MaxDirectives, &m.Priority, &m.Paused,
-		&m.AgentVersion, &m.ConnectedTo, &m.LastAddr, &m.CreatedAt, &m.SeenAt, &m.RevokedAt, &m.RevokedReason}, extra...)
+		&m.AgentVersion, &m.ConnectedTo, &m.LastAddr, &m.CreatedAt, &m.SeenAt, &m.RevokedAt, &m.RevokedReason, &m.ClaudeCode}, extra...)
 	if err := row.Scan(dest...); err != nil {
 		return m, err
 	}
@@ -405,7 +427,8 @@ func scanMachine(row interface{ Scan(...any) error }, extra ...any) (Machine, er
 // open directives, the newest first.
 func (s *PostgresStore) ListMachines(ctx context.Context, userID string) ([]Machine, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT `+machineColumns+`,
-			(SELECT COUNT(*) FROM machine_directives d WHERE d.machine_id = m.id AND d.state IN ('reserved', 'running'))
+			(SELECT COALESCE(json_agg(d.kind ORDER BY d.created_at), '[]') FROM machine_directives d
+				WHERE d.machine_id = m.id AND d.state IN ('reserved', 'running'))
 		FROM machines m WHERE m.user_id = $1 ORDER BY m.revoked_at IS NOT NULL, m.created_at DESC, m.id`, userID)
 	if err != nil {
 		return nil, err
@@ -413,12 +436,15 @@ func (s *PostgresStore) ListMachines(ctx context.Context, userID string) ([]Mach
 	defer rows.Close()
 	var out []Machine
 	for rows.Next() {
-		var open int
-		m, err := scanMachine(rows, &open)
+		var kinds []byte
+		m, err := scanMachine(rows, &kinds)
 		if err != nil {
 			return nil, err
 		}
-		m.OpenDirectives = open
+		if err := json.Unmarshal(kinds, &m.OpenKinds); err != nil {
+			return nil, err
+		}
+		m.OpenDirectives = len(m.OpenKinds)
 		out = append(out, m)
 	}
 	return out, rows.Err()
@@ -568,14 +594,43 @@ func (s *PostgresStore) MachineConnected(ctx context.Context, id, gateway, addr 
 	}
 	err = s.db.QueryRowContext(ctx, `
 		UPDATE machines m SET connected_to = $2, seen_at = NOW(), os = $3, capabilities = $4,
-			max_directives = $5, agent_version = $6, last_addr = CASE WHEN $7 = '' THEN m.last_addr ELSE $7 END
+			max_directives = $5, agent_version = $6, last_addr = CASE WHEN $7 = '' THEN m.last_addr ELSE $7 END,
+			claude_code = $8
 		FROM machines old WHERE m.id = $1 AND old.id = m.id AND m.revoked_at IS NULL
 		RETURNING old.last_addr`,
-		id, gateway, hello.OS, caps, max(hello.MaxDirectives, 1), hello.AgentVersion, addr).Scan(&prevAddr)
+		id, gateway, hello.OS, caps, max(hello.MaxDirectives, 1), hello.AgentVersion, addr, hello.ClaudeCode).Scan(&prevAddr)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrMachineNotFound
 	}
 	return prevAddr, err
+}
+
+// UpdateMachineStatus records what a connected machine says it can do now
+// (a login lost, or back).
+func (s *PostgresStore) UpdateMachineStatus(ctx context.Context, id string, capabilities []string, claudeCode string) error {
+	caps, err := json.Marshal(nonNil(capabilities))
+	if err != nil {
+		return err
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE machines SET capabilities = $2, claude_code = $3
+		WHERE id = $1 AND revoked_at IS NULL`, id, caps, claudeCode)
+	return affectedOne(res, err, ErrMachineNotFound)
+}
+
+// SetMachinePaused pauses (or resumes) a machine of userID's: a paused
+// machine stays connected and gets no directive.
+func (s *PostgresStore) SetMachinePaused(ctx context.Context, userID, id string, paused bool) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE machines SET paused = $3
+		WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL`, id, userID, paused)
+	return affectedOne(res, err, ErrMachineNotFound)
+}
+
+// SetMachinePriority sets the priority of a machine of userID's: the
+// highest is chosen first.
+func (s *PostgresStore) SetMachinePriority(ctx context.Context, userID, id string, priority int) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE machines SET priority = $3
+		WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL`, id, userID, priority)
+	return affectedOne(res, err, ErrMachineNotFound)
 }
 
 // MachineDisconnected records that gateway no longer holds the machine.
@@ -638,13 +693,14 @@ func (s *PostgresStore) RevokeMachine(ctx context.Context, id, reason string) ([
 // --- Directives ---
 
 const directiveColumns = `id, machine_id, user_id, kind, input, workflow_id, run_id, activity_id, call_key, task_token,
-	state, handoff_by, deadline, sent_conn, result, error, created_at, started_at, closed_at`
+	state, handoff_by, deadline, sent_conn, result, error, created_at, started_at, closed_at, session_id, participant, agent`
 
 func scanDirective(row interface{ Scan(...any) error }) (Directive, error) {
 	var d Directive
 	var input, result []byte
 	err := row.Scan(&d.ID, &d.MachineID, &d.UserID, &d.Kind, &input, &d.WorkflowID, &d.RunID, &d.ActivityID, &d.CallKey,
-		&d.TaskToken, &d.State, &d.HandoffBy, &d.Deadline, &d.SentConn, &result, &d.Error, &d.CreatedAt, &d.StartedAt, &d.ClosedAt)
+		&d.TaskToken, &d.State, &d.HandoffBy, &d.Deadline, &d.SentConn, &result, &d.Error, &d.CreatedAt, &d.StartedAt, &d.ClosedAt,
+		&d.SessionID, &d.Participant, &d.Agent)
 	d.Input, d.Result = input, result
 	return d, err
 }
@@ -775,10 +831,11 @@ func (s *PostgresStore) PickMachine(ctx context.Context, req PickRequest) (Direc
 			}
 		}
 		d, err = scanDirective(tx.QueryRowContext(ctx, `
-			INSERT INTO machine_directives (id, machine_id, user_id, kind, input, workflow_id, run_id, call_key, handoff_by, deadline)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING `+directiveColumns,
+			INSERT INTO machine_directives (id, machine_id, user_id, kind, input, workflow_id, run_id, call_key, handoff_by, deadline,
+				session_id, participant, agent)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING `+directiveColumns,
 			req.DirectiveID, chosen, req.UserID, req.Kind, []byte(req.Input), req.WorkflowID, req.RunID, req.CallKey,
-			req.HandoffBy, req.Deadline))
+			req.HandoffBy, req.Deadline, req.SessionID, req.Participant, req.Agent))
 		return err
 	})
 	return d, m, err
