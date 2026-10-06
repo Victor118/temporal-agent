@@ -8,6 +8,7 @@ import (
 	"log"
 	"math/rand/v2"
 	"net/http"
+	"slices"
 	"sync"
 	"time"
 
@@ -41,6 +42,12 @@ type Client struct {
 	// StopWait bounds how long a stopping machine waits for the acks of
 	// its last results; zero = 5 s.
 	StopWait time.Duration
+	// Status says what the machine can do now; nil: the capability of each
+	// executor, always. StatusEvery is how often it is checked (and
+	// announced when it changed); zero = 30 s.
+	Status      func() Status
+	StatusEvery time.Duration
+	refresh     chan struct{}
 	// PingEvery is how often the machine pings the gateway: a network that
 	// dropped without a word otherwise leaves it waiting for ever. Zero =
 	// 30 s.
@@ -84,13 +91,75 @@ func (c *Client) logf(format string, args ...any) {
 	}
 }
 
-// Capabilities are the kinds the machine runs.
-func (c *Client) Capabilities() []string {
-	caps := make([]string, 0, len(c.Executors))
-	for k := range c.Executors {
-		caps = append(caps, k)
+// Status is what the machine can do now: the capabilities it announces, and
+// the state of its claude CLI ("ok", "logged_out", "absent"; "" = not
+// said).
+type Status struct {
+	Capabilities []string
+	ClaudeCode   string
+}
+
+func (s Status) equal(o Status) bool {
+	return s.ClaudeCode == o.ClaudeCode && slices.Equal(s.Capabilities, o.Capabilities)
+}
+
+// Capabilities are what the machine announces now: Status's when set,
+// else the capability of each kind it has an executor for.
+func (c *Client) Capabilities() []string { return c.status().Capabilities }
+
+func (c *Client) status() Status {
+	if c.Status != nil {
+		s := c.Status()
+		slices.Sort(s.Capabilities)
+		return s
 	}
-	return caps
+	var s Status
+	for k := range c.Executors {
+		if cap := machine.CapabilityOf(k); !slices.Contains(s.Capabilities, cap) {
+			s.Capabilities = append(s.Capabilities, cap)
+		}
+	}
+	slices.Sort(s.Capabilities)
+	return s
+}
+
+// Refresh asks the machine to check what it can do now, and to tell the
+// gateway at once if that changed (a run refused for its login).
+func (c *Client) Refresh() {
+	select {
+	case c.refresh <- struct{}{}:
+	default:
+	}
+}
+
+// statusLoop tells the gateway what the machine can do whenever it changes,
+// checked every StatusEvery and on Refresh: a login lost or back is
+// announced without a reconnection.
+func (c *Client) statusLoop(ctx context.Context, ws *websocket.Conn, sent Status) {
+	every := c.StatusEvery
+	if every <= 0 {
+		every = 30 * time.Second
+	}
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		case <-c.refresh:
+		}
+		now := c.status()
+		if now.equal(sent) {
+			continue
+		}
+		if err := c.write(ws, machine.Message{Type: machine.TypeCapabilities, Capabilities: now.Capabilities, ClaudeCode: now.ClaudeCode}); err != nil {
+			ws.CloseNow()
+			return
+		}
+		c.logf("connect: now running %v (Claude Code: %s)", now.Capabilities, now.ClaudeCode)
+		sent = now
+	}
 }
 
 // Run connects, and reconnects with a growing backoff, until ctx ends (the
@@ -111,6 +180,7 @@ func (c *Client) Run(ctx context.Context) error {
 		return err
 	}
 	c.jobs = map[string]*job{}
+	c.refresh = make(chan struct{}, 1)
 	c.runCtx, c.kill = context.WithCancelCause(context.Background())
 	if err := c.recover(); err != nil {
 		return err
@@ -195,8 +265,9 @@ func (c *Client) session(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	status := c.status()
 	hello := machine.Message{Type: machine.TypeHello, Protocol: machine.Protocol, AgentVersion: c.Version, OS: c.OS,
-		Capabilities: c.Capabilities(), MaxDirectives: c.MaxDirectives}
+		Capabilities: status.Capabilities, ClaudeCode: status.ClaudeCode, MaxDirectives: c.MaxDirectives}
 	c.mu.Lock()
 	for id := range c.jobs {
 		hello.Running = append(hello.Running, id)
@@ -222,6 +293,7 @@ func (c *Client) session(ctx context.Context) error {
 		}
 	}()
 	go c.pings(sctx, ws)
+	go c.statusLoop(sctx, ws, status)
 
 	for {
 		var m machine.Message
@@ -372,6 +444,9 @@ func (c *Client) start(m machine.Message) {
 	case exec == nil:
 		fail(fmt.Sprintf("this machine does not run %q directives", m.Kind))
 		return
+	case !slices.Contains(c.status().Capabilities, machine.CapabilityOf(m.Kind)):
+		fail(fmt.Sprintf("this machine cannot run %q directives now (no %s: see agent connect's log)", m.Kind, machine.CapabilityOf(m.Kind)))
+		return
 	case len(c.jobs) >= c.MaxDirectives:
 		fail(fmt.Sprintf("this machine runs %d directives at most", c.MaxDirectives))
 		return
@@ -406,7 +481,7 @@ func (c *Client) run(ctx context.Context, m machine.Message, exec Executor, j *j
 	r := machine.Message{Type: machine.TypeResult, ID: m.ID, Status: machine.StatusOK, Output: out, Text: j.progress}
 	c.mu.Unlock()
 	if err != nil {
-		r.Output = nil
+		// What the run produced, if anything, goes along: a partial report.
 		switch cause := context.Cause(ctx); {
 		case errors.Is(cause, errStopping):
 			r.Status = machine.StatusStopping
