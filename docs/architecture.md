@@ -93,8 +93,11 @@ flowchart LR
     WF <--> DB
     TC -->|publie ses tools| DB
     TG -->|publie ses tools| DB
-    TCC -->|publie ses tools| DB
 ```
+
+Les workers Claude Code ne publient aucun outil : `analyze_repo` et
+`implement_feature` sont publiés par le worker des workflows, qui les envoie à
+la machine de l'utilisateur, sinon à leur queue de repli.
 
 - **Serveur** : API HTTP, SSE, UI de configuration. Seul écrivain de la table
   `agents`. Importe `agents.yaml` si la table est vide ou sur commande explicite.
@@ -337,19 +340,23 @@ diagnostic.
   Temporal sur la queue de l'outil, toutes leurs étapes (nettoyage compris) sur
   le worker qui l'a prise. Un worker perdu en cours de run termine le run (rien
   n'est poussé), sans reprise ailleurs ; son clone est supprimé à son
-  redémarrage. Pas encore de queue de repli. Un run sonde d'abord la queue
+  redémarrage. Ces queues sont les replis des machines (voir ci-dessous). Un
+  run sonde d'abord la queue
   (aucun worker = échec immédiat), puis attend un worker libre jusqu'à
   `CLAUDE_CODE_QUEUE_WAIT` ; un seul run par worker tant que chaque run n'a pas
   son propre uid.
-- **Machines** : phases 0 et 1 faites (`docs/design/machines.md`, §16 et
-  §17) : inscription par code ou par jeton, rotation du jeton, passerelle
+- **Machines** : phases 0, 1 et 2 faites (`docs/design/machines.md`, §16 à
+  §18) : inscription par code ou par jeton, rotation du jeton, passerelle
   WebSocket (une seule réplique), `PickMachine` et `RunOnMachine` avec
-  complétion asynchrone ; `analyze_repo` = `CodingRunWorkflow` sur le worker
-  principal : la machine de l'auteur du tour (sa CLI, son abonnement), sinon
-  la queue de repli (`CLAUDE_CODE_ANALYZE_QUEUE`, `AnalyzeRepoWorkflow`
-  inchangé), sinon une erreur claire ; la note du tour suit la machine (web).
-  `implement_feature` reste sur son conteneur (phase 2), les fichiers depuis
-  la machine aussi.
+  complétion asynchrone ; `analyze_repo` = `CodingRunWorkflow` et
+  `implement_feature` = `ImplementRunWorkflow` sur le worker principal : la
+  machine de l'auteur du tour (sa CLI, son abonnement ; pour une
+  implémentation, son identité git, seulement avec `--allow-push`), sinon la
+  queue de repli de l'outil (`CLAUDE_CODE_ANALYZE_QUEUE`,
+  `CLAUDE_CODE_IMPLEMENT_QUEUE`), sinon une erreur claire ; la note du tour
+  suit la machine (web). Ce qu'un run laisse dans ses sorties est publié pour
+  le tour (machine : `PUT /machines/files` ; worker : son magasin de
+  fichiers). Pas encore : client de bureau, `CallLLM` sur la machine.
 - **Tous les workflows et activities sont enregistrés sur toutes les queues**
   d'un worker, y compris sa queue d'outils. Les outils de type workflow
   (`ask_user`) tournent donc sur la queue de l'outil.
@@ -382,9 +389,9 @@ diagnostic.
 7. **`ClaudeCodeWorkflow`.**
 8. **Arbre d'exécution et questions utilisateur** (`agent_executions`,
    `user_questions`, refonte d'`AskUserWorkflow`).
-9. **Machines** ([design/machines.md](design/machines.md), §14) : phases 0
-   et 1 faites ; ensuite `implement_feature` et les fichiers depuis la
-   machine (phase 2).
+9. **Machines** ([design/machines.md](design/machines.md), §14) : phases 0,
+   1 et 2 faites ; ensuite le client de bureau (1 bis) et `CallLLM` sur la
+   machine (phase 3).
 
 ## Questions ouvertes
 

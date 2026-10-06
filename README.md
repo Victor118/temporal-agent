@@ -46,7 +46,7 @@ happens to answer has locally.
 - **Built-in tools** — File system operations, web access, shell execution, user interaction, workflow queries, scheduling
 - **Published files** — An agent hands the members a file (`publish_file` for a text it writes, `exec`'s `publish` for a file a command made), attached to its answer and downloaded by the session's members only
 - **Documents** — `render_pdf` (Markdown or typst to PDF) and `make_slides` (Markdown to an editable pptx or a PDF deck), rendered by pandoc and typst on the main worker and published like any file
-- **Machines** — A user's own machine, outside the private network, connects to the server with `agent connect` (an outgoing WebSocket, no VPN, no database nor Temporal access) and runs the directives of their agents' turns; enrolled by a code typed in « Mes machines ». `analyze_repo` runs there, with the user's own Claude Code login and git access, and falls back to the installation's coding workers when no machine of theirs is connected: see [docs/design/machines.md](docs/design/machines.md)
+- **Machines** — A user's own machine, outside the private network, connects to the server with `agent connect` (an outgoing WebSocket, no VPN, no database nor Temporal access) and runs the directives of their agents' turns; enrolled by a code typed in « Mes machines ». `analyze_repo` and `implement_feature` run there, with the user's own Claude Code login and git identity (an implementation pushes its branch from their machine, only where they allowed it), and fall back to the installation's coding workers when no machine of theirs takes them; what a run leaves in its outputs is published to the session: see [docs/design/machines.md](docs/design/machines.md)
 - **Remote MCP servers** — A worker declares MCP servers in its `worker.yaml` (Streamable HTTP, or the older HTTP+SSE) and publishes their tools; a server that is down is retried in the background, and tools it adds or removes are picked up within 30 s
 
 ## Architecture
@@ -142,15 +142,16 @@ docker compose exec agent ./tmp/main machine-echo --email you@example.com --text
 `--dir`) and reconnects by itself; plain `http` is accepted only to this very
 host, `https` otherwise.
 
-To run `analyze_repo` on your machine (Linux; macOS should work, untested),
-install the `claude` CLI and log in (`claude`, then `/login`, or `claude
-setup-token`), then start `agent connect` with what it may do. These settings
-are the machine's, never the server's:
+To run `analyze_repo` and `implement_feature` on your machine (Linux; macOS
+should work, untested), install the `claude` CLI and log in (`claude`, then
+`/login`, or `claude setup-token`), then start `agent connect` with what it may
+do. These settings are the machine's, never the server's:
 
 | Flag (env) | Meaning |
 |---|---|
-| `--repos` (`AGENT_CONNECT_REPOS`) | Repositories an analysis may clone, comma-separated globs (`*` stops at a `/`), e.g. `git@github.com:me/*`. Empty = every analysis is refused |
-| `--max-budget-usd` (`AGENT_CONNECT_MAX_BUDGET_USD`) | What one run may spend, in dollars; 0 = no cap |
+| `--repos` (`AGENT_CONNECT_REPOS`) | Repositories a run may clone (and, with `--allow-push`, push to), comma-separated globs (`*` stops at a `/`), e.g. `git@github.com:me/*`. Empty = every run is refused |
+| `--allow-push` (`AGENT_CONNECT_ALLOW_PUSH=true`) | Run implementations here, and push their branch (`agent/…`, never another) with your git identity. Off (default): the machine does not announce `git-push`, and `implement_feature` goes to the installation's fallback (`CLAUDE_CODE_IMPLEMENT_QUEUE`), never here |
+| `--max-budget-usd` (`AGENT_CONNECT_MAX_BUDGET_USD`) | What one run may spend, in dollars; 0 = no cap. With a subscription, it also keeps one run from eating the usage limit your own Claude sessions share (`agent connect` reminds you at startup) |
 | `--claude-auth` (`CLAUDE_CODE_AUTH`) | Who pays: `subscription` (your CLI's login or `CLAUDE_CODE_OAUTH_TOKEN`; an `ANTHROPIC_API_KEY` in your shell is then not passed to the CLI) or `api` (`ANTHROPIC_API_KEY`). Empty = the one credential set; both set = `agent connect` refuses to start |
 | `--claude-model` (`CLAUDE_CODE_MODEL`) | Model of the runs; empty = the CLI's default |
 | `--work-dir` | Where clones go, one per run, deleted after it (default: your cache, `agent/runs/<machine>`) |
@@ -175,7 +176,26 @@ a prompt (git runs with no terminal): a repository that asks for a password, or 
 paths are cloned (never `ext::`, `git://` or plain `http://`); git hooks are
 off.
 
-Every worker of a coding queue (the queue `analyze_repo` and `implement_feature` are published on) must have the `claude` CLI installed. A worker without it on that queue still answers a run's first check, and the run fails at once saying so: with N workers there of which one lacks the CLI, about one run in N fails that way.
+An implementation, with `--allow-push`, runs as on the installation's coding
+workers: a clone at the base, on a branch `agent/<slug>-<id>` the server names;
+the CLI in `acceptEdits` mode with the git commands it needs to commit (never
+`git push`, `git remote`, `git config`), and the same prompt; then the machine
+inspects the clone and pushes the newest commit it listed
+(`<sha>:refs/heads/<branch>`) to the repository the call named, with your git
+identity. Nothing is pushed when the run made no commit, left HEAD on another
+branch, or changed the clone's `.git/config` (it is restored before the
+inspection and the push, a copy kept outside the clone). `agent connect` logs
+how far a directive is, a line a minute at most.
+
+A run (analysis or implementation, on a machine or a coding worker) may leave
+files for you in an `outputs` directory next to its clone, which its prompt
+names: once it is over, they are published to the session's turn (on a
+machine through `PUT /machines/files`, with its token), shown under the
+answer and listed for the agent. Regular files only (no link, no file another
+path shares), 20 at most, 4 levels deep, `FILES_MAX_BYTES` each (the
+server's).
+
+Every worker of a coding queue (the fallback queues `analyze_repo` and `implement_feature` run on) must have the `claude` CLI installed. A worker without it on that queue still answers a run's first check, and the run fails at once saying so: with N workers there of which one lacks the CLI, about one run in N fails that way.
 
 A worker that stops ends its coding runs first, then gives the tasks under way 30 seconds to answer before it exits: each run's answer, that its worker stopped, is recorded by Temporal before the process ends, and read by the next worker of the queue (another replica, or this one once restarted). A stop takes 30 to 50 seconds in all. Give a worker's container a `stop_grace_period` of 60 seconds: Docker's default, 10 seconds, kills it before the answer goes out, and the workflow then waits a minute or two for the missed heartbeats.
 
@@ -201,7 +221,7 @@ A worker that stops ends its coding runs first, then gives the tasks under way 3
 | `AGENT_DEFINITIONS_FILE` | Agents seed file (default `./agents.yaml`) |
 | `WORKER_CONFIG` | Worker config: tool queue, exposed tools, MCP servers (default `./worker.yaml`, see `worker.example.yaml`) |
 | `MCP_SERVERS` | JSON array of MCP servers (`name`, `url`, `api_key`, `transport`), used only without a worker config |
-| `FILES_MAX_BYTES` | Worker: largest file `exec` may publish (its `publish` parameter), and largest document `render_pdf` and `make_slides` render (and the most their `files` may weigh together), in bytes (default `20971520`, 20 MiB); `publish_file`, for a short text the model writes, has its own bound (1 MiB). Files are stored in PostgreSQL. Not a positive number = the worker does not start |
+| `FILES_MAX_BYTES` | Worker: largest file `exec` may publish (its `publish` parameter), that a coding run publishes from its outputs, and largest document `render_pdf` and `make_slides` render (and the most their `files` may weigh together), in bytes (default `20971520`, 20 MiB); `publish_file`, for a short text the model writes, has its own bound (1 MiB). Server: largest file a machine publishes (`PUT /machines/files`). Files are stored in PostgreSQL. Not a positive number = the process does not start |
 | `TYPST_PACKAGES` | Worker: directory of the typst packages a rendered document may import (default `/usr/local/share/typst/packages`, where the agent image puts touying). Typst never downloads one |
 | `RUN_AS_UID`, `RUN_AS_GID` | User (and group, default: the uid) that `exec`, the document tools and coding runs run as. Set to `10001` (`agent-run`) by both images. Empty on a worker running as root = `exec`, documents and coding runs are refused. Must be a uid of its own, used by one worker process per pid namespace (one container): its processes are killed whenever no command runs, and at the startup of a coding worker |
 | `CLAUDE_CODE_REPOS` | Comma-separated globs of the repositories a coding worker (`analyze_repo`, `implement_feature`) may clone and push to, e.g. `git@github.com:acme/*,https://github.com/acme/*` (`*` stops at a `/`). Empty = every repository is refused |
@@ -213,6 +233,7 @@ A worker that stops ends its coding runs first, then gives the tasks under way 3
 | `CLAUDE_CODE_WORKSPACE` | Directory of a coding worker's clones, one per run, all of a run's steps on that worker (default `./claude-code-runs`); keep it apart from `WORKSPACE_PATH`. At startup the worker deletes the `run-*` entries a worker that died left there; if another live worker process shares the directory, only those older than a run's longest lifetime. Every worker process holds a lock on `.workers.lock` there; one that cannot take it does not start (one sweeping it is waited for up to 2 minutes, then the worker exits, to be restarted by whatever runs it) |
 | `MACHINES_ENABLED` | `true` (default) or `false`: coding runs go to the users' machines first, and the server serves their gateway (`/machines/*`); `false` = no gateway, no machine route, no routing to machines. Set the same value on the server and every worker. Anything else = the process does not start |
 | `CLAUDE_CODE_ANALYZE_QUEUE` | Main worker: where `analyze_repo` runs when no machine of the user's takes it, a coding queue serving `AnalyzeRepoWorkflow` (default `tools-claude-code-ro`, the read-only coding container's); `none` = no fallback (the run then fails saying the user's machine is not connected) |
+| `CLAUDE_CODE_IMPLEMENT_QUEUE` | Main worker: where `implement_feature` runs when no machine of the user's takes it (none connected, or none with `--allow-push`), a coding queue serving `ImplementFeatureWorkflow` (default `tools-claude-code`, the writing coding container's, which holds the push key); `none` = no fallback |
 | `CLAUDE_CODE_AUTH` | How coding runs authenticate: `api` (bills `ANTHROPIC_API_KEY`) or `subscription` (`CLAUDE_CODE_OAUTH_TOKEN`, made with `claude setup-token`, or the CLI's login). The other mode's credential never reaches the CLI. Empty = the one credential set; both set = the worker does not start |
 | `CLAUDE_CODE_OAUTH_TOKEN` | A Claude subscription's long-lived token, for `CLAUDE_CODE_AUTH=subscription`. The runs then count against the subscription's usage limits, and the dollar cap is only an estimate |
 | `INTERNAL_ADDR` | Address of the internal API that receives worker notifications and the directives workers hand to the machines' gateway (default `:9999`). Keep it off the public network |
@@ -321,7 +342,12 @@ agent/
   standard input. What a machine sends is untrusted and bounded (256 KiB per
   message, a rate scaled to its number of directives). `agent connect` needs `https`, its certificate
   checked, except to this very host (development). Revoking a machine cuts it
-  and ends its directives at once.
+  and ends its directives at once. A file a machine publishes
+  (`PUT /machines/files`) needs its token and an open directive of its own,
+  goes to that directive's session turn only, is read up to
+  `FILES_MAX_BYTES`, and is listed in the run's result from the database,
+  never from the machine's word. A machine pushes only with `--allow-push`,
+  to a repository of its `--repos`, a branch under `agent/`.
 
 - **`web_fetch`** fetches a URL the model chose, so it only connects to public
   addresses: loopback, private, link-local (cloud metadata), CGNAT and reserved
