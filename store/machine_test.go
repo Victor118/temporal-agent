@@ -465,8 +465,16 @@ func TestMachineSettingsAndStatus(t *testing.T) {
 	req := pick("zz-mach-erin", "zz-set-run", "c", seen)
 	req.Capabilities, req.Kind = []string{"claude-code"}, "analyze_repo"
 	req.SessionID, req.Participant, req.Agent = "sess-1", "jarvis", "Jarvis"
+	req.TurnKey, req.CallID, req.AgentID = "m7.jarvis", "call-1", "jarvis"
+	// Every capability is needed: this machine does not push.
+	pushing := req
+	pushing.Capabilities, pushing.RunID = []string{"claude-code", "git-push"}, "zz-set-push"
+	if _, _, err := s.PickMachine(ctx, pushing); !errors.Is(err, ErrNoMachine) {
+		t.Errorf("a machine without git-push picked: %v", err)
+	}
 	d, _, err := s.PickMachine(ctx, req)
-	if err != nil || d.SessionID != "sess-1" || d.Participant != "jarvis" || d.Agent != "Jarvis" {
+	if err != nil || d.SessionID != "sess-1" || d.Participant != "jarvis" || d.Agent != "Jarvis" ||
+		d.TurnKey != "m7.jarvis" || d.CallID != "call-1" || d.AgentID != "jarvis" {
 		t.Fatalf("pick: %+v %v", d, err)
 	}
 	ms, err := s.ListMachines(ctx, "zz-mach-erin")

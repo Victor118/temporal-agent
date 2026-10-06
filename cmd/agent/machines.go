@@ -43,8 +43,12 @@ func newGateway(cfg *config.Config, st *store.PostgresStore, tc client.Client, h
 		log.Println("Machines are off (MACHINES_ENABLED=false): no gateway, no machine routes; set the same value on every worker")
 		return nil
 	}
+	maxFile, err := parseFileBytes(cfg.FilesMaxBytes)
+	if err != nil {
+		log.Fatalf("Invalid configuration: FILES_MAX_BYTES: %v", err)
+	}
 	g := &gateway.Gateway{Store: st, Temporal: tc, Alert: machineAlerts(st, hub), ClientAddr: clients.Of, AddrsKnown: clients.Known(),
-		Notice: machineNotices(hub)}
+		Notice: machineNotices(hub), FilesPublished: machineFiles(hub), MaxFileBytes: maxFile}
 	if err := g.Start(context.Background()); err != nil {
 		log.Fatalf("Machines gateway: %v", err)
 	}
@@ -59,6 +63,16 @@ func machineNotices(hub *sse.Hub) func(sessionID, participant, agent, text strin
 	return func(sessionID, participant, agent, text string) {
 		data, _ := json.Marshal(map[string]string{"type": activity.EventNotice, "text": text, "agent": agent, "participant": participant})
 		hub.Publish(sessionID, activity.SSEEvent{Type: activity.EventNotice, Data: data})
+	}
+}
+
+// machineFiles tells a session's pages that a machine published files for a
+// turn: the event a step that published files sends (workflow notifyFiles),
+// which reloads the thread. Web only.
+func machineFiles(hub *sse.Hub) func(sessionID, turnKey, agentID string, fileIDs []string) {
+	return func(sessionID, turnKey, agentID string, fileIDs []string) {
+		data, _ := json.Marshal(map[string]any{"type": activity.EventFilePublished, "turn": turnKey, "agent_id": agentID, "files": fileIDs})
+		hub.Publish(sessionID, activity.SSEEvent{Type: activity.EventFilePublished, Data: data})
 	}
 }
 

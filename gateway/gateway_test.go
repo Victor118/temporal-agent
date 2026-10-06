@@ -65,15 +65,15 @@ func TestReconcile(t *testing.T) {
 
 func TestCompletion(t *testing.T) {
 	out := json.RawMessage(`{"text":"hi"}`)
-	res, err := completion(machine.Message{Status: machine.StatusOK, Output: out, Text: "done"})
+	res, err := completion(machine.Message{Status: machine.StatusOK, Output: out, Text: "done"}, nil)
 	if err != nil || string(res.Output) != string(out) || res.Progress != "done" {
 		t.Errorf("ok: %+v %v", res, err)
 	}
-	if _, err := completion(machine.Message{Status: machine.StatusCanceled}); !temporal.IsCanceledError(err) {
+	if _, err := completion(machine.Message{Status: machine.StatusCanceled}, nil); !temporal.IsCanceledError(err) {
 		t.Errorf("canceled: %v", err)
 	}
 	for status, typ := range map[string]string{machine.StatusStopping: machine.ErrTypeStopping, machine.StatusError: machine.ErrTypeFailed} {
-		_, err := completion(machine.Message{Status: status, Error: "boom"})
+		_, err := completion(machine.Message{Status: status, Error: "boom"}, nil)
 		var appErr *temporal.ApplicationError
 		if !errors.As(err, &appErr) || appErr.Type() != typ || !appErr.NonRetryable() {
 			t.Errorf("%s: %v", status, err)

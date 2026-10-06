@@ -10,6 +10,7 @@ import (
 	"github.com/victor/temporal-agent/auth"
 	"github.com/victor/temporal-agent/config"
 	"github.com/victor/temporal-agent/gateway"
+	"github.com/victor/temporal-agent/machine"
 	"github.com/victor/temporal-agent/session"
 	"github.com/victor/temporal-agent/sse"
 	"github.com/victor/temporal-agent/web/chat"
@@ -101,6 +102,7 @@ func (s *server) routes() http.Handler {
 		r.Post("/machines/device", g.ServeDevice)
 		r.Post("/machines/device/token", g.ServeDeviceToken)
 		r.Post("/machines/enroll", g.ServeEnroll)
+		r.Put(machine.FilesPath, g.ServeFiles)
 	}
 
 	// Back-office: its own login page, open to admins only

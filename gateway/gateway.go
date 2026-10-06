@@ -60,6 +60,9 @@ type Store interface {
 	SaveDirectiveResult(ctx context.Context, id string, result json.RawMessage) error
 	CloseDirective(ctx context.Context, id, state, errText string) (bool, error)
 	SweepDirectives(ctx context.Context, now time.Time) ([]store.Directive, error)
+
+	SaveFile(ctx context.Context, f store.File, content []byte) (store.File, error)
+	ListCallFiles(ctx context.Context, sessionID, turnKey, callID string) ([]store.File, error)
 }
 
 // Temporal is the gateway's side of Temporal: a client, never a worker.
@@ -113,6 +116,13 @@ type Gateway struct {
 	// (the event activity.EventNotice, through session.Service.Observe):
 	// what a directive of its turn does. Web only. Nil: none.
 	Notice func(sessionID, participant, agent, text string)
+	// FilesPublished tells a session's pages that a machine published files
+	// for a turn (the event activity.EventFilePublished): its thread shows
+	// them. Nil: none.
+	FilesPublished func(sessionID, turnKey, agentID string, fileIDs []string)
+	// MaxFileBytes is the largest file a machine publishes
+	// (FILES_MAX_BYTES); zero = tool.DefaultMaxFileBytes.
+	MaxFileBytes int64
 
 	HeartbeatEvery time.Duration
 	PingTimeout    time.Duration
@@ -483,6 +493,8 @@ func kindLabel(kind string) string {
 	switch kind {
 	case machine.KindAnalyzeRepo:
 		return "Analyse"
+	case machine.KindImplementFeature:
+		return "Implémentation"
 	}
 	return "Tâche « " + kind + " »"
 }

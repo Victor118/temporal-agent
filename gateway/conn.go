@@ -580,9 +580,10 @@ func (c *conn) heartbeat(id string, token []byte, progress string) {
 }
 
 // completion is what a machine's result makes of its activity: a result, or
-// an error a workflow can read.
-func completion(m machine.Message) (machine.Result, error) {
-	res := machine.Result{Output: m.Output, Progress: m.Text}
+// an error a workflow can read, both with the files published for the
+// directive (as the database lists them).
+func completion(m machine.Message, files []machine.FileRef) (machine.Result, error) {
+	res := machine.Result{Output: m.Output, Progress: m.Text, Files: files}
 	switch m.Status {
 	case machine.StatusOK:
 		return res, nil
@@ -671,7 +672,7 @@ func (c *conn) result(m machine.Message) {
 // as gone: the result is dropped. Any other failure leaves it open, its
 // result kept, for the sweep to try again.
 func (g *Gateway) finish(ctx context.Context, tries int, d store.Directive, m machine.Message) error {
-	res, cerr := completion(m)
+	res, cerr := completion(m, g.callFiles(ctx, d))
 	var result any
 	if cerr == nil {
 		result = res

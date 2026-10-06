@@ -133,12 +133,28 @@ func (s *PostgresStore) ReadFileContent(ctx context.Context, id string) ([]byte,
 	return data, err
 }
 
+// ListCallFiles returns the files one tool call of a session turn published,
+// oldest first: what a machine's directive published (the gateway lists them
+// itself rather than take the machine's word).
+func (s *PostgresStore) ListCallFiles(ctx context.Context, sessionID, turnKey, callID string) ([]File, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+fileColumns+` FROM files
+		WHERE session_id = $1 AND turn_key = $2 AND call_id = $3 ORDER BY created_at, id`, sessionID, turnKey, callID)
+	if err != nil {
+		return nil, err
+	}
+	return scanFiles(rows)
+}
+
 func (s *PostgresStore) ListSessionFiles(ctx context.Context, sessionID string) ([]File, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+fileColumns+` FROM files WHERE session_id = $1 ORDER BY created_at, id`, sessionID)
 	if err != nil {
 		return nil, err
 	}
+	return scanFiles(rows)
+}
+
+func scanFiles(rows *sql.Rows) ([]File, error) {
 	defer rows.Close()
 	var files []File
 	for rows.Next() {

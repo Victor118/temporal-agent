@@ -155,7 +155,7 @@ func (p *Publisher) publish(ctx context.Context, name string, content []byte, ma
 		AgentID:     AgentIDFromContext(ctx),
 		UserID:      UserIDFromContext(ctx),
 		Name:        name,
-		ContentType: contentType(name, content),
+		ContentType: ContentType(name, content),
 		Size:        int64(len(content)),
 		SHA256:      hex.EncodeToString(sum[:]),
 	}, content)
@@ -248,9 +248,9 @@ var fileTypes = map[string]string{
 	".xml":      "application/xml",
 }
 
-// contentType is what a file says it is: from its name's extension, else
+// ContentType is what a file says it is: from its name's extension, else
 // from its first bytes. Informative: how a file is served does not trust it.
-func contentType(name string, content []byte) string {
+func ContentType(name string, content []byte) string {
 	ext := strings.ToLower(filepath.Ext(name))
 	if t, ok := fileTypes[ext]; ok {
 		return t

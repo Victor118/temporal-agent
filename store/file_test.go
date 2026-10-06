@@ -50,6 +50,14 @@ func TestFiles(t *testing.T) {
 	if data, _ := s.ReadFileContent(ctx, "zz-file-1"); !bytes.Equal(data, content) {
 		t.Errorf("content after a retry %q", data)
 	}
+	// A call's files: what a machine's directive published.
+	if files, err := s.ListCallFiles(ctx, "zz-file-s1", "m7.jarvis", "toolu_1"); err != nil || len(files) != 1 || files[0].ID != "zz-file-1" {
+		t.Errorf("the call's files: %+v %v", files, err)
+	}
+	if files, err := s.ListCallFiles(ctx, "zz-file-s1", "m7.jarvis", "toolu_2"); err != nil || len(files) != 0 {
+		t.Errorf("another call's files: %+v %v", files, err)
+	}
+
 	// The same name with other content, from the same call (two paths with
 	// one base name): refused, never the first file in its place.
 	clash := f
