@@ -28,7 +28,7 @@
       <div><strong>{{.Name}}</strong>
         {{if .Revoked}}<span class="tag idle">révoquée</span>{{else if .Online}}<span class="tag working">en ligne</span>{{else}}<span class="tag idle">hors ligne</span>{{end}}
         {{if and .Paused (not .Revoked)}}<span class="tag idle">en pause</span>{{end}}</div>
-      <div class="note">{{with .OS}}{{.}} · {{end}}capacités : {{.CapabilitiesText}}{{with .ClaudeCodeText}} · {{.}}{{end}}</div>
+      <div class="note">{{with .OS}}{{.}} · {{end}}capacités : {{.CapabilitiesText}}{{with .ClaudeCodeText}} · {{.}}{{end}}{{with .PushText}} · {{.}}{{end}}</div>
       <div class="note">directives en cours ({{.OpenDirectives}} sur {{.MaxDirectives}}) : {{.OpenText}}{{if not .Revoked}} · priorité {{.Priority}}{{end}}</div>
       <div class="note">inscrite {{.Enrolled}}{{with .Seen}} · vue {{.}}{{end}}{{with .LastAddr}} · depuis {{.}}{{end}}{{with .AgentVersion}} · agent {{.}}{{end}}</div>
       {{if .Revoked}}<div class="note">Révoquée : {{.RevokedReason}}.</div>{{end}}

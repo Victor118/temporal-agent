@@ -176,6 +176,8 @@ func TestRender_Machines(t *testing.T) {
 		Machines: []MachineRow{
 			{ID: "m1", Name: "maison <b>", OS: "linux/amd64", Capabilities: []string{"echo", "claude-code"}, Online: true, MaxDirectives: 2, CreatedAt: now, SeenAt: now,
 				ClaudeCode: "ok", Paused: true, Priority: 3, OpenKinds: []string{"analyze_repo", "analyze_repo"}, OpenDirectives: 2},
+			{ID: "m3", Name: "atelier", Capabilities: []string{"claude-code", "git-push"}, Online: true, MaxDirectives: 1, CreatedAt: now,
+				ClaudeCode: "ok", OpenKinds: []string{"implement_feature"}, OpenDirectives: 1},
 			{ID: "m2", Name: "vieux", Revoked: true, RevokedReason: "révoquée par son propriétaire", CreatedAt: now.Add(-48 * time.Hour)},
 		}})
 	for _, want := range []string{
@@ -183,6 +185,7 @@ func TestRender_Machines(t *testing.T) {
 		"maison &lt;b&gt;", "en ligne", `action="/machines/m1/revoke"`, "hx-confirm=",
 		"révoquée", "capacités : echo, claude-code", "vue à l&#39;instant", "il y a 2 jours",
 		"Claude Code : connecté", "2 × analyse de dépôt", "en pause", "Reprendre", `name="priority"`, `value="3"`,
+		"implémentations : non (agent connect --allow-push)", "implémentations : oui", "implémentation",
 	} {
 		if !strings.Contains(page, want) {
 			t.Errorf("machines page lacks %s", want)

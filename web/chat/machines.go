@@ -57,7 +57,22 @@ func (m MachineRow) ClaudeCodeText() string {
 }
 
 // kindNames are the directives' kinds, in words.
-var kindNames = map[string]string{"analyze_repo": "analyse de dépôt", "echo": "echo"}
+var kindNames = map[string]string{"analyze_repo": "analyse de dépôt", "implement_feature": "implémentation", "echo": "echo"}
+
+// PushText says whether the machine runs implementations, which push their
+// branch with its owner's git identity (agent connect --allow-push): only
+// said of a machine that has Claude Code.
+func (m MachineRow) PushText() string {
+	if m.ClaudeCode != "ok" {
+		return ""
+	}
+	for _, c := range m.Capabilities {
+		if c == "git-push" {
+			return "implémentations : oui, poussées avec ton identité git"
+		}
+	}
+	return "implémentations : non (agent connect --allow-push), elles vont au repli de l'installation"
+}
 
 // OpenText lists its open directives by kind: "2 analyses de dépôt, 1 echo".
 func (m MachineRow) OpenText() string {
