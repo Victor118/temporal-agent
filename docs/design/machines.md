@@ -1,6 +1,6 @@
 # Conception : des machines hors du réseau privé
 
-Statut : **version 2.1**, proposition, rien n'est fait. Version 1 le 5 octobre 2026, révisée le même jour après deux relectures contre le code et le SDK Temporal (v1.33). Les points de la première sont marqués *[rev. 1…15]*, ceux de la seconde *[rev2 A…J]*.
+Statut : **version 2.2**, proposition, rien n'est fait. Version 1 le 5 octobre 2026, révisée le même jour après deux relectures contre le code et le SDK Temporal (v1.33) : les points de la première sont marqués *[rev. 1…15]*, ceux de la seconde *[rev2 A…J]*. La 2.2 (6 octobre) ajoute ce qu'une discussion a précisé : inscription par code, jetons, exécutable natif, plusieurs machines, transport.
 
 Origine : une note proposait d'exposer Temporal aux machines des utilisateurs (sans base de données pour elles). L'option retenue est différente : une passerelle, Temporal et la base restent privés (§3).
 
@@ -72,10 +72,25 @@ Les conteneurs Claude Code ne publient plus `analyze_repo` ni `implement_feature
 
 ## 5. Inscription et connexion
 
-1. Dans « Mes machines » (nouvelle page), l'utilisateur crée un **jeton d'inscription** : 15 min, à usage unique.
-2. Sur sa machine : `agent connect --join <url>`, qui lit le jeton sur l'entrée standard (jamais en argument : il resterait dans l'historique du shell) *[rev. 13]*. Le serveur rend un **jeton machine** (long, révocable, propre à cette machine), gardé dans le dossier de configuration (0600). Seul son hash est en base (`machines` : id, utilisateur, nom, capacités, plafond, version, créée, vue pour la dernière fois, réplique qui tient la connexion, révoquée).
-3. Ensuite, `agent connect` : connexion WSS à `/machines/connect`, certificat du serveur vérifié (aucune option pour s'en passer hors dev), puis `hello` (version du protocole, capacités, plafond, directives en cours).
-4. « Mes machines » liste les machines, en ligne ou non, leurs capacités et leurs directives ; on peut en révoquer une (connexion coupée, jeton refusé, directives en cours annulées).
+**Inscription par code** (flux « par appareil », RFC 8628, celui de `gh auth login` et des télés connectées) : aucun navigateur sur la machine.
+1. `agent connect --join <url> [--name "serveur maison"]` (nom par défaut : le nom d'hôte) se déclare au serveur avec son nom, son système et ses capacités. Le serveur crée une demande en attente (10 min) et rend deux codes : un **code utilisateur** court (`KX4-92M`), fait pour être tapé, et un **secret de demande** long, que la machine garde pour elle.
+2. La machine affiche : « Ouvre `<url>/machines/activer` et saisis le code KX4-92M », puis interroge le serveur toutes les 5 s avec le secret de demande.
+3. L'utilisateur, connecté au front (portable, téléphone), saisit le code dans « Mes machines › Ajouter une machine ». La page montre la demande désignée : nom, système, capacités, adresse IP, heure, et l'avertissement « n'approuve qu'un code que tu viens de voir sur ta propre machine ». Il approuve.
+4. À l'interrogation suivante, le serveur rend le **jeton machine**, une seule fois ; le secret de demande est consommé.
+
+Le code va toujours **de la machine vers l'utilisateur** : c'est sa saisie dans **sa** session qui rattache la demande à son compte. « Mes machines » n'affiche jamais de demandes en attente : au moment de la demande, personne ne sait à qui elle appartient. Le code utilisateur ne permet qu'approuver ; seul le détenteur du secret de demande récupère le jeton. Deux secrets plutôt qu'un : ce qui circule pendant l'attente ne vaut plus rien après, et l'identifiant durable n'est créé qu'après l'approbation d'un humain. Risque connu du flux, l'hameçonnage (« approuve ce code » envoyé par quelqu'un d'autre) : page d'approbation explicite, 10 min, essais de saisie limités, notification de chaque machine inscrite. Pour un script, un **jeton d'inscription** créé dans « Mes machines » (15 min, usage unique) reste possible, lu sur l'entrée standard, jamais en argument *[rev. 13]*.
+
+**Le jeton machine.** Long, révocable, propre à cette machine ; seul son hash est en base (`machines` : id, utilisateur, nom, capacités, plafond, priorité, en pause, version, créée, vue pour la dernière fois, réplique qui tient la connexion, révoquée). Sur la machine, dans le trousseau du système quand il existe, sinon un fichier 0600 du dossier de configuration (comme une clé SSH, ou le login de la CLI Claude) : `agent connect` doit se reconnecter seul. Ce qui limite un vol :
+- **sa portée** : les directives de son propriétaire, rien d'autre ; il n'ouvre **jamais** de session web (voir §13) ;
+- **une rotation en deux temps** à chaque connexion : le serveur remet J2, J1 reste valide jusqu'à ce que la machine confirme avoir écrit J2, puis J1 est invalidé (une machine qui plante entre les deux se reconnecte avec J1) ;
+- **la détection de réutilisation** : un jeton remplacé qui se représente révèle une copie ; le serveur révoque la machine et prévient son propriétaire, qui la ré-inscrit ;
+- **une seule connexion par jeton** : deux connexions simultanées coupent les deux, avec la même alerte ;
+- **une notification** à chaque connexion depuis une nouvelle adresse, pour réduire la fenêtre où un voleur se connecte pendant que la vraie machine est éteinte.
+Plus tard, avant la phase 3 (où des conversations passent par la machine) : une **paire de clés** plutôt qu'un jeton, la clé privée générée à l'inscription et jamais transmise, dans une puce sécurisée (Secure Enclave, TPM) quand le trousseau le permet ; la connexion signe un défi du serveur.
+
+**Connexion.** `agent connect` ouvre une WebSocket TLS sur `/machines/connect` (certificat du serveur vérifié, aucune option pour s'en passer hors dev), puis envoie `hello` (version du protocole, capacités, plafond, directives en cours et finies non acquittées). « Mes machines » liste les machines, en ligne ou non, leurs capacités, leurs directives ; on peut en mettre une en pause, changer sa priorité, la révoquer (connexion coupée, jeton refusé, directives ouvertes terminées en erreur).
+
+**Transport : WebSocket**, pas un flux gRPC. gRPC apporterait un schéma typé et le contrôle de flux, et ses dépendances sont déjà là (SDK Temporal). Mais il exige HTTP/2 de bout en bout, que des box, des proxys d'entreprise et des CDN cassent, alors que les machines se connectent depuis des réseaux qu'on ne maîtrise pas ; une WebSocket est du HTTP/1.1 sur le port 443, comme le front, servie par le même serveur, le même routeur, le même TLS. Les messages sont peu nombreux et petits (les gros contenus passent par l'API HTTP), le contrôle de flux n'apporterait guère. Messages JSON versionnés (`protocol` du `hello`) ; du protobuf dans la WebSocket reste possible si un schéma typé devient utile.
 
 Ce que la machine n'a pas : `DATABASE_URL`, `TEMPORAL_HOST`, `INTERNAL_API_KEY`, la clé LLM du serveur, ni aucun jeton de tâche Temporal (§6).
 
@@ -114,16 +129,25 @@ Un run qui produit un fichier (un rapport, un patch) le publie de sa machine. Un
 
 ## 8. Ce qui tourne sur la machine *[rev. 8]*
 
-Phase 1 : **Linux**, sous l'utilisateur courant, sans root.
-- **La CLI tourne sous l'utilisateur**, avec **son** login (abonnement dans `~/.claude`, ou `claude setup-token`) : c'est ce qui rend l'abonnement utilisable, et c'est comme s'il la lançait lui-même. Pas de `RUN_AS_UID`, pas de `KillStrays`, pas de verrou de racine, pas de copie de configuration (`claudecode.OwnConfig`).
+`agent connect` est un **exécutable natif** sur l'hôte, sans conteneur : le binaire `agent` compilé pour le système, qui trouve `claude` et `git` dans le PATH et tourne sous le compte de l'utilisateur, sans root. Sans `claude`, il n'annonce pas la capacité `claude-code`.
+
+Phase 1 : **Linux**. Un utilisateur Windows passe par WSL2 (c'est la version Linux, sur son PC) ; un utilisateur Mac, en attendant, par un serveur maison ou un VPS. macOS ensuite : `Setpgid` et `kill(-pgid)`, sur lesquels repose `subproc`, y existent ; le coût est la distribution (signature et notarisation Apple, ou Homebrew). Windows natif plus tard, si la demande est là : `subproc` ne compile pas pour Windows (il faudrait des Job Objects et `CTRL_BREAK`), et Claude Code y dépend de Git Bash.
+
+- **La CLI tourne sous l'utilisateur**, avec **son** login : c'est ce qui rend l'abonnement utilisable, et c'est comme s'il la lançait lui-même. Pas de `RUN_AS_UID`, pas de `KillStrays`, pas de verrou de racine.
+- **Le login existant suffit** : celui de `claude` en interactif (`~/.claude/.credentials.json`, ou le trousseau sous macOS), que la CLI renouvelle elle-même. Pas besoin de `claude setup-token` ni de `CLAUDE_CODE_OAUTH_TOKEN`, sauf sur une machine sans navigateur où c'est le plus simple (`/login` en SSH marche aussi : la CLI donne une URL à ouvrir ailleurs). Donc **aucune copie de configuration** (`claudecode.OwnConfig`) : la CLI écrit son jeton renouvelé dans le `~/.claude` de l'utilisateur, partagé avec ses terminaux ; et le filtrage d'environnement garde ce dont elle a besoin pour le trouver (`HOME`, `XDG_*`). Le login reste sur la machine, jamais envoyé au serveur.
+- **Qui paie, sans surprise** : la logique actuelle s'applique chez lui. `CLAUDE_CODE_AUTH=subscription` retire `ANTHROPIC_API_KEY` de l'environnement de la CLI (`Auth.Filter`) : sinon une clé présente dans son shell ferait facturer ses runs à l'API sans qu'il le sache ; les deux présents sans mode = `agent connect` refuse de démarrer ; il affiche au démarrage qui paie.
+- **Login vérifié avant d'annoncer la capacité** : un login dans `~/.claude` ou le trousseau, `CLAUDE_CODE_OAUTH_TOKEN`, ou `ANTHROPIC_API_KEY` avec son mode, constatés sans appel payant. Sans aucun, pas de capacité `claude-code`, et un message clair (« lance `claude` puis /login, ou `claude setup-token` »), repris dans « Mes machines » (« Claude Code : pas connecté »). Un run qui échoue sur une erreur d'authentification retire la capacité, le signale, et elle revient avec le login.
 - **Garde-fous**, réglés chez lui et jamais par le serveur : les modes de permission de la CLI (une analyse reste en lecture seule, mêmes options qu'aujourd'hui), une liste locale de dépôts autorisés (vide = tout refusé, comme `CLAUDE_CODE_REPOS`), un plafond de dépense local, un dossier de travail sous son cache.
 - **Réutilisé tel quel** : `claudecode.Runner` (lecture du flux, minuterie de heartbeat qui devient les `progress`, détection de blocage), `subproc.KillGroup`, le filtrage d'environnement, la logique de clone, d'inspection et de push des activities de code (sans `Reclaim`, `Identity.Apply`, `SeedConfigDir`).
 - **Un run = une seule directive** : clone avec ses identifiants git, run, inspection, push si demandé, nettoyage, rapport. Plus d'affinité entre étapes à garantir.
+- **Ce que ça implique** : une analyse reste en lecture seule ; mais `implement_feature` laisse la CLI exécuter des commandes sur son poste avec ses droits, et l'utilisateur isolé de nos workers n'existe pas ici. Ce qui le protège : sa liste de dépôts, son plafond, les permissions de la CLI, et la règle qui ne lui envoie que les runs de **ses** tours. Reste le cas d'un serveur compromis qui ferait travailler sa machine : le client de bureau proposera « me demander avant chaque run ».
+- **Isolation en option, plus tard** : bubblewrap sous Linux (sans root sur la plupart des distributions : seul le clone en écriture, le reste du dossier personnel masqué sauf `~/.claude`), un mode `--docker` pour qui a Docker (en y faisant entrer le login de la CLI), `sandbox-exec` sous macOS (déprécié, fragile).
 
 ## 9. Qui exécute quoi
 
 - **Règle** : un tour tourne pour l'humain qui l'a demandé, sur **sa** machine. `PickMachine` ne regarde que les machines de l'auteur du message du tour.
-- **Choix** : parmi ses machines en ligne qui ont la capacité, la moins occupée, sous le plafond qu'elle a annoncé *[rev. 14]*.
+- **Plusieurs machines par utilisateur** : chacune fait tourner son `agent connect`, inscrite sur le même compte (portable et serveur maison, par exemple), avec ses propres réglages locaux (login Claude, identifiants git, dépôts autorisés, plafond de dépense). Elles partagent l'abonnement de l'utilisateur, donc sa limite d'utilisation : deux runs en parallèle consomment deux fois plus vite.
+- **Choix** : parmi ses machines en ligne, pas en pause, qui ont la capacité : la plus haute **priorité** (réglée dans « Mes machines » : « mon serveur d'abord, le portable s'il est éteint »), puis la moins occupée, sous le plafond qu'elle a annoncé *[rev. 14]*. Une machine **en pause** reste connectée sans rien recevoir.
 - **Pas de compteur** *[rev2 D]* : la charge d'une machine est le nombre de ses lignes ouvertes dans `machine_directives`. `PickMachine` **crée la directive** dans la transaction qui choisit (verrou sur la ligne de la machine, `SELECT … FOR UPDATE`, compte des directives ouvertes, insertion), idempotente sur `(run du workflow, appel)` : une `PickMachine` rejouée retrouve sa ligne au lieu d'en réserver une seconde. Réservation et directive sont la même ligne ; toute fin (résultat, échec, `cancel` acquitté, `NotFound`, révocation, orpheline, échéance) est un seul `UPDATE` de son état. Rien à décrémenter, rien qui dérive.
 - **Aucune machine** : repli sur la queue de l'outil (`CLAUDE_CODE_ANALYZE_QUEUE`, `CLAUDE_CODE_IMPLEMENT_QUEUE`) si l'installation en a une et le permet, sinon « ta machine n'est pas connectée ». Qui paie le repli (la clé de l'installation) est une politique de l'installation, à afficher dans « Mes machines ».
 - **Plus tard** : un membre publie un de ses agents au groupe ; il tourne alors sur sa machine même quand d'autres l'appellent, en mode API seulement (consentement et plafond).
@@ -170,7 +194,8 @@ Nouveau :
 ## 13. Le client de bureau
 
 Une application (Wails : Go, webview du système) qui embarque `agent connect` et affiche le front de l'installation dans une fenêtre. Une seule chose à lancer.
-- **Inscription sans copier-coller** : on se connecte dans la fenêtre, le serveur inscrit la machine dans la foulée (flux du type `gh auth login`) ; le jeton machine va dans le trousseau du système.
+- **Inscription sans code** : au premier lancement, la fenêtre affiche le login du front ; une fois connecté (le cookie est gardé par le webview, comme dans un navigateur), c'est cette session qui approuve directement l'inscription de sa machine. Le flux par code (§5) ne sert qu'à `agent connect` en ligne de commande. Le jeton machine va dans le trousseau du système.
+- **Le login donne le jeton machine, jamais l'inverse** : un point d'entrée qui échangerait le jeton machine contre une session web ferait d'un identifiant qui ne reçoit que des directives la clé de tout le compte (sessions, mémoire, fichiers, invitations). La session web garde sa propre durée de vie.
 - **Barre système** : en ligne ou non, runs en cours, CLI détectées (Claude Code, Codex) et ce qui manque ; démarrage automatique.
 - **Mise à jour automatique** : obligatoire, puisque le serveur refuse les machines trop vieilles (§5). Wails ne la fournit pas.
 - **Pas un verrou** : le web reste utilisable sans l'application (téléphone compris). Ce qui a besoin de la machine dit « ta machine n'est pas connectée » ; lire, écrire, forker marchent partout. Le serveur ne peut de toute façon pas distinguer l'application d'un navigateur.
@@ -182,7 +207,7 @@ C'est une couche au-dessus d'`agent connect` : aucun protocole nouveau, sauf le 
 
 | Phase | Contenu | Résultat |
 |---|---|---|
-| **0** | Passerelle (une réplique), inscription par jeton, tables, `PickMachine` et `RunOnMachine` avec complétion asynchrone, une directive triviale (`echo`), un test `RealServer` sur la base jetable du `CLAUDE.md` *[rev2 J]* : heartbeat **et** complétion par client depuis le serveur, `cancel`, redémarrage de la passerelle avec rattachement et résultat rendu après reconnexion (`ack`), machine perdue, révocation, réservations concurrentes au plafond | Le mécanisme est prouvé contre le vrai serveur |
+| **0** | Passerelle (une réplique) en WebSocket, inscription par code (et par jeton pour un script), rotation du jeton machine, tables, `PickMachine` et `RunOnMachine` avec complétion asynchrone, une directive triviale (`echo`), un test `RealServer` sur la base jetable du `CLAUDE.md` *[rev2 J]* : heartbeat **et** complétion par client depuis le serveur, `cancel`, redémarrage de la passerelle avec rattachement et résultat rendu après reconnexion (`ack`), machine perdue, révocation, réservations concurrentes au plafond | Le mécanisme est prouvé contre le vrai serveur |
 | **1** | `CodingRunWorkflow`, repli par outil avec sonde, `analyze_repo` sur la machine (Linux), « Mes machines » | Alice lance une analyse avec son abonnement, depuis chez elle, sans VPN |
 | **1 bis** | Client de bureau (Linux d'abord) | Une seule chose à lancer |
 | **2** | Upload de fichiers depuis la machine ; `implement_feature` sur la machine (push avec ses identifiants) | Les runs rendent des fichiers ; le code part de sa machine |
@@ -192,7 +217,6 @@ C'est une couche au-dessus d'`agent connect` : aucun protocole nouveau, sauf le 
 
 ## 15. Questions ouvertes
 
-1. Transport : WebSocket (le plus simple derrière un reverse proxy), flux gRPC ou HTTP/2 en long-poll ? À confirmer avec le proxy visé.
-2. Repli sur les queues de l'installation quand la machine de l'auteur est hors ligne : permis par défaut ou non ?
-3. Une machine pour plusieurs utilisateurs (serveur d'équipe) : exclu en phase 1.
-4. Liste locale des dépôts : vide par défaut (tout refusé, comme aujourd'hui), ou proposée à l'inscription ?
+1. Repli sur les queues de l'installation quand la machine de l'auteur est hors ligne : permis par défaut ou non ?
+2. Une machine pour plusieurs utilisateurs (serveur d'équipe) : exclu en phase 1.
+3. Liste locale des dépôts : vide par défaut (tout refusé, comme aujourd'hui), ou proposée à l'inscription ?
