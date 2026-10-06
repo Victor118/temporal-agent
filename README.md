@@ -284,7 +284,7 @@ agent/
   machines » (10 minutes, wrong codes limited per user, a warning against
   approving someone else's code), or by a single-use enrollment token read on
   standard input. What a machine sends is untrusted and bounded (256 KiB per
-  message, 20 per second). `agent connect` needs `https`, its certificate
+  message, a rate scaled to its number of directives). `agent connect` needs `https`, its certificate
   checked, except to this very host (development). Revoking a machine cuts it
   and ends its directives at once.
 
