@@ -368,7 +368,7 @@ func (c *conn) lose(d store.Directive) {
 	}
 	cerr := temporal.NewNonRetryableApplicationError(
 		fmt.Sprintf("machine %q lost the directive (it restarted during it); nothing was done twice", c.m.Name), machine.ErrTypeLost, nil)
-	if err := c.g.complete(c.ctx, d.TaskToken, nil, cerr); err != nil && !isNotFound(err) {
+	if err := c.g.complete(c.ctx, completeTries, d.TaskToken, nil, cerr); err != nil && !isNotFound(err) {
 		log.Printf("machines: end lost directive %s: %v", d.ID, err)
 	}
 }
@@ -573,13 +573,18 @@ func closedState(status string) string {
 // result completes a directive's activity with the machine's result, closes
 // the directive, then acks: the machine keeps the result until then. A
 // result for a directive that is over is dropped (and acked). A completion
-// that fails (Temporal away) ends the connection: the machine sends the
-// result again when it is back, and the sweep retries it meanwhile from the
-// database.
+// that fails (Temporal away) leaves the result in the database, unacked, the
+// directive carried on: the sweep completes it, then acks. The connection
+// stays: closing it would only rotate the token at every reconnection while
+// Temporal is away. A database error closes it (1011): the machine sends the
+// result again when it is back.
 func (c *conn) result(m machine.Message) {
 	defer c.g.release(m.ID)
+	// The gateway's context, not the connection's: a result that came in is
+	// handled even if its machine leaves meanwhile (sent, then gone).
+	ctx := c.g.ctx
 	ack := func() { c.write(machine.Message{Type: machine.TypeAck, ID: m.ID}) }
-	d, err := c.g.Store.GetDirective(c.ctx, m.ID)
+	d, err := c.g.Store.GetDirective(ctx, m.ID)
 	if err != nil {
 		log.Printf("machines: result of %s: %v", m.ID, err)
 		c.closeWith(int(websocket.StatusInternalError), "try again later")
@@ -592,7 +597,7 @@ func (c *conn) result(m machine.Message) {
 		return
 	}
 	raw, _ := json.Marshal(m)
-	if err := c.g.Store.SaveDirectiveResult(c.ctx, m.ID, raw); err != nil {
+	if err := c.g.Store.SaveDirectiveResult(ctx, m.ID, raw); err != nil {
 		if errors.Is(err, store.ErrDirectiveClosed) {
 			c.detach(m.ID)
 			ack()
@@ -602,9 +607,8 @@ func (c *conn) result(m machine.Message) {
 		}
 		return
 	}
-	if err := c.g.finish(c.ctx, *d, m); err != nil {
-		log.Printf("machines: complete directive %s: %v; the machine sends it again on its next connection", m.ID, err)
-		c.closeWith(int(websocket.StatusInternalError), "completion failed, try again later")
+	if err := c.g.finish(ctx, completeTries, *d, m); err != nil {
+		log.Printf("machines: complete directive %s: %v; the sweep tries again", m.ID, err)
 		return
 	}
 	c.detach(m.ID)
@@ -614,17 +618,17 @@ func (c *conn) result(m machine.Message) {
 // finish completes a running directive's activity with its machine's result
 // m, and closes the directive. An activity already gone (NotFound) closes it
 // as gone: the result is dropped. Any other failure leaves it open, its
-// result kept, for the machine or the sweep to try again.
-func (g *Gateway) finish(ctx context.Context, d store.Directive, m machine.Message) error {
+// result kept, for the sweep to try again.
+func (g *Gateway) finish(ctx context.Context, tries int, d store.Directive, m machine.Message) error {
 	res, cerr := completion(m)
 	var result any
 	if cerr == nil {
 		result = res
 	}
-	err := g.complete(ctx, d.TaskToken, result, cerr)
+	err := g.complete(ctx, tries, d.TaskToken, result, cerr)
 	if err != nil && isInvalidArgument(err) && m.Status == machine.StatusCanceled {
 		// Cancelled on the machine without the workflow asking: a failure.
-		err = g.complete(ctx, d.TaskToken, nil, temporal.NewNonRetryableApplicationError(
+		err = g.complete(ctx, tries, d.TaskToken, nil, temporal.NewNonRetryableApplicationError(
 			"the directive was cancelled on the machine", machine.ErrTypeFailed, nil, res))
 	}
 	state := closedState(m.Status)

@@ -515,8 +515,9 @@ func TestMachines_RealServer(t *testing.T) {
 		waitFor(t, "result dropped and acked", 5*time.Second, func() bool { return resultFiles(dir) == 0 })
 	})
 
-	t.Run("completion failing with the connection sound: the machine sends its result again", func(t *testing.T) {
+	t.Run("completion failing with the connection sound: the sweep completes it, the connection stays", func(t *testing.T) {
 		m1.drain()
+		before, _ := (connect.State{Dir: dir}).Load()
 		run := e.echo(alice, "encore", time.Second, 0, 10*time.Second)
 		e.flaky.failures.Store(completeTries) // every try of the first completion
 		out, err := result(t, run, 30*time.Second)
@@ -527,6 +528,10 @@ func TestMachines_RealServer(t *testing.T) {
 			t.Errorf("%d failures left: the completion never failed", n)
 		}
 		waitFor(t, "result acked", 5*time.Second, func() bool { return resultFiles(dir) == 0 })
+		// No reconnection: the token did not rotate.
+		if after, _ := (connect.State{Dir: dir}).Load(); after.Token != before.Token {
+			t.Error("the machine reconnected (its token rotated)")
+		}
 	})
 
 	t.Run("machine lost past the heartbeat timeout: a clear failure, not run again", func(t *testing.T) {
@@ -659,17 +664,8 @@ func TestMachines_RealServer(t *testing.T) {
 		e.flaky.failures.Store(completeTries)
 		out, _ := json.Marshal(machine.EchoOutput{Text: "balayé"})
 		raw.send(t, machine.Message{Type: machine.TypeResult, ID: d.ID, Status: machine.StatusOK, Output: out})
-		// The completion fails, the connection is cut: this machine never
-		// comes back.
-		closed := raw.readInBackground()
-		select {
-		case code := <-closed:
-			if code != websocket.StatusInternalError {
-				t.Errorf("closed with %d", code)
-			}
-		case <-time.After(10 * time.Second):
-			t.Fatal("the connection outlived a failed completion")
-		}
+		// Gone at once, never back: its result is the database's alone.
+		raw.ws.CloseNow()
 		res, err := result(t, run, 30*time.Second)
 		if err != nil || res.Text != "balayé" {
 			t.Fatalf("result: %+v %v", res, err)
