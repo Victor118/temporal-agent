@@ -719,6 +719,7 @@ func (a *ClaudeCodeActivities) RunClaudeCode(ctx context.Context, in RunClaudeCo
 	}
 	runner.RunAs = a.RunAs
 	runner.Auth = a.Auth
+	runner.OnBeat = func(ctx context.Context, p claudecode.Progress) { activity.RecordHeartbeat(ctx, p) }
 	if a.Runs != nil {
 		runner.Runs = a.Runs
 	}
@@ -818,7 +819,7 @@ func (a *ClaudeCodeActivities) sshEnv() []string {
 // not make git run a program. The configuration is restored before
 // (restoreGitConfig); these hold even if something was missed — no hooks, no
 // filesystem monitor.
-var gitSafeArgs = []string{"-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "submodule.recurse=false"}
+var gitSafeArgs = subproc.GitSafeArgs
 
 // gitEnv is git with extra environment entries for this command only. Anything
 // secret belongs here and never in the worker's own environment.
@@ -829,7 +830,7 @@ var gitSafeArgs = []string{"-c", "core.hooksPath=/dev/null", "-c", "core.fsmonit
 func (a *ClaudeCodeActivities) gitEnv(ctx context.Context, dir string, env []string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", append(append([]string(nil), gitSafeArgs...), args...)...)
 	cmd.Dir = dir
-	cmd.Env = append(subproc.Env(os.Environ(), nil, nil), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
+	cmd.Env = subproc.GitEnv(os.Environ())
 	cmd.Env = append(cmd.Env, env...)
 
 	defer heartbeatWhile(ctx, strings.Join(args, " "))()

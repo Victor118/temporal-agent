@@ -11,8 +11,6 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
-
-	"go.temporal.io/sdk/activity"
 )
 
 // streamLine is the envelope every line of --output-format stream-json shares.
@@ -260,13 +258,14 @@ func (r *Runner) monitor(ctx context.Context, w *watch, stall context.CancelCaus
 	}
 }
 
-// beat records a Temporal heartbeat when this code runs inside an activity,
-// and does nothing otherwise. The heartbeat is also what lets a run be
-// cancelled at all: the SDK learns of a cancellation, or of a timeout the
-// server saw, in a heartbeat's answer.
+// beat hands the run's progress to OnBeat, the caller's: a Temporal
+// heartbeat inside an activity (which is also what lets a run be cancelled
+// at all: the SDK learns of a cancellation, or of a timeout the server saw,
+// in a heartbeat's answer), a machine's progress in agent connect. This
+// package knows neither.
 func (r *Runner) beat(ctx context.Context, prog Progress) {
-	if activity.IsActivity(ctx) {
-		activity.RecordHeartbeat(ctx, prog)
+	if r.OnBeat != nil {
+		r.OnBeat(ctx, prog)
 	}
 }
 

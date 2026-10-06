@@ -176,10 +176,12 @@ type Runner struct {
 	OnEvent func(Event)
 	// MaxReportBytes caps Result.Report. Zero means 64 KiB.
 	MaxReportBytes int
-	// HeartbeatEvery is how often the run heartbeats, inside an activity,
-	// while the CLI lives, whether it writes or not. Zero means
-	// DefaultHeartbeatEvery.
+	// HeartbeatEvery is how often the run heartbeats (OnBeat) while the CLI
+	// lives, whether it writes or not. Zero means DefaultHeartbeatEvery.
 	HeartbeatEvery time.Duration
+	// OnBeat receives the run's progress every HeartbeatEvery: an
+	// activity's heartbeat, a machine's progress. Nil: none.
+	OnBeat func(ctx context.Context, p Progress)
 	// StallTimeout is how long the CLI may write nothing before the run is
 	// ended as stuck (StallError). Zero means DefaultStallTimeout; negative,
 	// never.
@@ -215,8 +217,8 @@ type Holder interface {
 // killGrace at most once it has exited, whatever still holds it open.
 //
 // A CLI that writes nothing for StallTimeout is ended the same way, and the
-// run returns a StallError. Inside an activity, the run heartbeats every
-// HeartbeatEvery while the CLI lives, with its Progress.
+// run returns a StallError. While the CLI lives, OnBeat gets its Progress
+// every HeartbeatEvery.
 func (r *Runner) Run(ctx context.Context, p Params) (Result, error) {
 	if p.Cwd == "" {
 		return Result{}, errors.New("claudecode: cwd is required")

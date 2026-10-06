@@ -504,7 +504,8 @@ while [ ! -e %q ]; do
 done
 echo '{"type":"result","subtype":"success","is_error":false,"result":"built","session_id":"s"}'
 `, flag)
-	r := &Runner{Binary: fakeCLI(t, script), HeartbeatEvery: time.Second}
+	r := &Runner{Binary: fakeCLI(t, script), HeartbeatEvery: time.Second,
+		OnBeat: func(ctx context.Context, p Progress) { activity.RecordHeartbeat(ctx, p) }}
 
 	var suite testsuite.WorkflowTestSuite
 	env := suite.NewTestActivityEnvironment()
