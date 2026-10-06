@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -50,7 +51,7 @@ func TestMachineEchoWorkflow(t *testing.T) {
 	}
 	p := (*picks)[0]
 	var in machine.EchoInput
-	if json.Unmarshal(p.Input, &in) != nil || in.DurationMS != 3000 || p.UserID != "u-1" || p.Capability != machine.KindEcho || p.Timeout != 3*time.Second+machineEchoMargin {
+	if json.Unmarshal(p.Input, &in) != nil || in.DurationMS != 3000 || p.UserID != "u-1" || !slices.Equal(p.Capabilities, []string{machine.KindEcho}) || p.Timeout != 3*time.Second+machineEchoMargin {
 		t.Errorf("pick %+v", p)
 	}
 }

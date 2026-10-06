@@ -744,7 +744,7 @@ func TestMachines_RealServer(t *testing.T) {
 		d := raw.expect(t, machine.TypeDirective)
 		// A reservation whose RunOnMachine never came, and the running one
 		// past its deadline.
-		orphan, _, err := e.st.PickMachine(ctx, store.PickRequest{DirectiveID: "zz-orphan-" + smokeRandom(t), UserID: hugo, Capability: machine.KindEcho,
+		orphan, _, err := e.st.PickMachine(ctx, store.PickRequest{DirectiveID: "zz-orphan-" + smokeRandom(t), UserID: hugo, Capabilities: []string{machine.KindEcho},
 			Kind: machine.KindEcho, Input: json.RawMessage(`{}`), WorkflowID: "nowhere", RunID: "nowhere-" + smokeRandom(t), CallKey: "c",
 			HandoffBy: time.Now().Add(-time.Second), Deadline: time.Now().Add(time.Hour), SeenAfter: time.Now().Add(-time.Minute)})
 		if err != nil || orphan.MachineID != id {

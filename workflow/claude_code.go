@@ -75,6 +75,14 @@ type AnalyzeFallbackInput struct {
 	Probe activity.ProbeRunWorkerOutput `json:"probe"`
 }
 
+// ImplementFallbackInput is what ImplementRunWorkflow starts
+// ImplementFallbackWorkflow with, as AnalyzeFallbackInput: the tool's input,
+// and the probe's answer.
+type ImplementFallbackInput struct {
+	Input json.RawMessage               `json:"input"`
+	Probe activity.ProbeRunWorkerOutput `json:"probe"`
+}
+
 // ClaudeCodeOutput is what a coding workflow returns. Error carries a run that
 // failed rather than failing the workflow, so a partial report survives — the
 // same reason AgentWorkflow reports its failures in its output.
@@ -103,6 +111,12 @@ type ClaudeCodeOutput struct {
 	Pushed  bool                  `json:"pushed,omitempty"`
 	// Dirty reports changes the run left uncommitted; they died with the clone.
 	Dirty bool `json:"dirty,omitempty"`
+
+	// Files are what the run left in its outputs directory and was
+	// published to the session's turn; Unpublished, what was not, and why
+	// ("name: reason").
+	Files       []tool.FileRef `json:"files,omitempty"`
+	Unpublished []string       `json:"unpublished,omitempty"`
 
 	CostUSD float64 `json:"cost_usd,omitempty"`
 	// PaidBy says what paid the run: "subscription" or "api" when the
@@ -345,6 +359,18 @@ func (o ClaudeCodeOutput) Summary() string {
 	}
 	if o.Dirty {
 		sb.WriteString("note: the run left uncommitted changes, which were discarded with the clone\n")
+	}
+	if len(o.Files) > 0 {
+		sb.WriteString("files published (attached to your answer; the session's members can download them; mention them by name):\n")
+		for _, f := range o.Files {
+			fmt.Fprintf(&sb, "  %s (%s, id %s)\n", f.Name, tool.FormatSize(f.Size), f.ID)
+		}
+	}
+	if len(o.Unpublished) > 0 {
+		sb.WriteString("files not published:\n")
+		for _, u := range o.Unpublished {
+			fmt.Fprintf(&sb, "  %s\n", u)
+		}
 	}
 	if o.Machine != "" {
 		fmt.Fprintf(&sb, "machine: %q, the user's own (their Claude Code login, their git identity)\n", o.Machine)

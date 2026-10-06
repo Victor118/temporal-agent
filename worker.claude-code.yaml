@@ -8,5 +8,9 @@ queue: tools-claude-code
 
 workflows: false
 
-tools:
-  - implement_feature
+# It publishes no tool: implement_feature is the main worker's
+# (ImplementRunWorkflow), which runs it on the user's machine when it allows
+# pushes, or here, as its fallback queue (CLAUDE_CODE_IMPLEMENT_QUEUE, this
+# queue by default): this worker serves ImplementFeatureWorkflow on it. At
+# startup it withdraws the row it published before.
+tools: []

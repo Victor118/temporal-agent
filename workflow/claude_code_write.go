@@ -11,6 +11,7 @@ import (
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/victor/temporal-agent/activity"
+	"github.com/victor/temporal-agent/machine"
 	"github.com/victor/temporal-agent/tool"
 )
 
@@ -23,36 +24,22 @@ const (
 	inspectAttempts  = 2
 	pushAttempts     = 2
 
-	// implementPermissionMode auto-accepts edits. It does not cover Bash,
-	// which is why the git commands below are named explicitly: without them
-	// the run edits files and its commit is denied, leaving changes that die
-	// with the workspace.
-	implementPermissionMode = "acceptEdits"
+	// What a run may do is set here, the same on a user's machine
+	// (machine.Implement*): never taken from the input.
+	implementPermissionMode = machine.ImplementPermissionMode
+	implementSystemPrompt   = machine.ImplementSystemPrompt
 
-	branchPrefix = "agent/"
+	branchPrefix = machine.BranchPrefix
 	maxSlugLen   = 32
 )
 
-// implementGitTools are the git commands the run needs to do its own
-// committing. Splitting the changes and writing the messages is the part worth
-// paying a coding agent for; publishing them is the workflow's job.
-var implementGitTools = []string{
-	"Bash(git add:*)",
-	"Bash(git commit:*)",
-	"Bash(git status:*)",
-	"Bash(git diff:*)",
-	"Bash(git log:*)",
-	"Bash(git show:*)",
-}
-
-// implementDeniedTools keeps publishing out of the run's hands. It is a guard
-// rail, not a wall: a run that can execute commands can reach a mounted key by
-// other means. What actually bounds the damage is the key's own scope.
-var implementDeniedTools = []string{
-	"Bash(git push:*)",
-	"Bash(git remote:*)",
-	"Bash(git config:*)",
-}
+// implementGitTools are the git commands the run needs to commit its own
+// work, and implementDeniedTools what keeps publishing out of its hands
+// (machine.ImplementAllowedTools, ImplementDeniedTools).
+var (
+	implementGitTools    = machine.ImplementAllowedTools
+	implementDeniedTools = machine.ImplementDeniedTools
+)
 
 // ImplementFeatureInput is what the calling agent decides: which repository,
 // from which base, and what to do. The branch, the permissions and whether
@@ -80,10 +67,17 @@ type ImplementFeatureInput struct {
 // push. That split is not stylistic: the push is the only step that holds a
 // credential, and it is the one step no LLM takes part in.
 func ImplementFeatureWorkflow(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCodeOutput, error) {
-	return withContent(implementFeature(ctx, rawInput))
+	return withContent(implementFeature(ctx, rawInput, nil))
 }
 
-func implementFeature(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCodeOutput, error) {
+// ImplementFallbackWorkflow is ImplementFeatureWorkflow as ImplementRunWorkflow
+// starts it on its fallback queue, after its probe: the queue is not asked
+// again.
+func ImplementFallbackWorkflow(ctx workflow.Context, in ImplementFallbackInput) (ClaudeCodeOutput, error) {
+	return withContent(implementFeature(ctx, in.Input, &in.Probe))
+}
+
+func implementFeature(ctx workflow.Context, rawInput json.RawMessage, probed *activity.ProbeRunWorkerOutput) (ClaudeCodeOutput, error) {
 	var input ImplementFeatureInput
 	if err := json.Unmarshal(rawInput, &input); err != nil {
 		return ClaudeCodeOutput{}, temporal.NewNonRetryableApplicationError(
@@ -101,7 +95,7 @@ func implementFeature(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCod
 	out := ClaudeCodeOutput{Repo: input.Repo, Ref: input.Base, Branch: branch}
 	var ccAct *activity.ClaudeCodeActivities
 
-	r, err := openRun(ctx, implementSessionTimeout, input.CallContext, nil)
+	r, err := openRun(ctx, implementSessionTimeout, input.CallContext, probed)
 	if err != nil {
 		out.Error = err.Error()
 		return out, nil
@@ -139,12 +133,13 @@ func implementFeature(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCod
 		}),
 		ccAct.RunClaudeCode,
 		activity.RunClaudeCodeInput{
-			Dir:             prepared.Dir,
-			Task:            input.Task,
-			PermissionMode:  implementPermissionMode,
-			AllowedTools:    implementGitTools,
-			DisallowedTools: implementDeniedTools,
-			MaxBudgetUSD:    input.MaxBudgetUSD,
+			Dir:                prepared.Dir,
+			Task:               input.Task,
+			PermissionMode:     implementPermissionMode,
+			AllowedTools:       implementGitTools,
+			DisallowedTools:    implementDeniedTools,
+			AppendSystemPrompt: implementSystemPrompt,
+			MaxBudgetUSD:       input.MaxBudgetUSD,
 		},
 	).Get(r.ctx, &result)
 	ran := workflow.Now(ctx).Sub(runStarted)

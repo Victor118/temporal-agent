@@ -52,7 +52,7 @@ func TestPickMachine(t *testing.T) {
 	env := suite.NewTestActivityEnvironment()
 	st := &fakeMachineStore{}
 	env.RegisterActivity(&MachineActivities{Store: st})
-	v, err := env.ExecuteActivity((&MachineActivities{}).PickMachine, PickMachineInput{UserID: "u-1", Capability: "echo", Kind: "echo",
+	v, err := env.ExecuteActivity((&MachineActivities{}).PickMachine, PickMachineInput{UserID: "u-1", Capabilities: []string{"echo"}, Kind: "echo",
 		Input: json.RawMessage(`{}`), CallKey: "c", Timeout: time.Hour})
 	var out PickMachineOutput
 	if err != nil || v.Get(&out) != nil || out.MachineName != "maison" || out.DirectiveID == "" {
@@ -64,7 +64,7 @@ func TestPickMachine(t *testing.T) {
 	}
 
 	st.pickErr = store.ErrNoMachine
-	v, err = env.ExecuteActivity((&MachineActivities{}).PickMachine, PickMachineInput{UserID: "u-1", Capability: "echo"})
+	v, err = env.ExecuteActivity((&MachineActivities{}).PickMachine, PickMachineInput{UserID: "u-1", Capabilities: []string{"echo"}})
 	out = PickMachineOutput{}
 	if err != nil || v.Get(&out) != nil || out.NoMachine == "" || out.DirectiveID != "" {
 		t.Errorf("no machine: %+v %v", out, err)

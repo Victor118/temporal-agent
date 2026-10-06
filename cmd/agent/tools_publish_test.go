@@ -95,7 +95,7 @@ func TestCatalogPublisher(t *testing.T) {
 // servers' (their discovery's to manage).
 func TestWithdrawUnoffered(t *testing.T) {
 	r := tool.NewRegistry()
-	tool.RegisterImplementFeatureTool(r, func() {}, "", time.Minute)
+	tool.RegisterImplementFeatureTool(r, func() {}, tool.CodingRoute{Fallback: true})
 	p := &publishedTools{records: map[string]store.ToolRecord{
 		"analyze_repo":      {Name: "analyze_repo", TaskQueue: "coding"},
 		"implement_feature": {Name: "implement_feature", TaskQueue: "coding"},
@@ -117,7 +117,7 @@ func TestWithdrawUnoffered(t *testing.T) {
 // go, whatever the order the workers start in.
 func TestKeepPublishing_UntilTheOtherQueueLetsGo(t *testing.T) {
 	r := tool.NewRegistry()
-	tool.RegisterAnalyzeRepoTool(r, func() {}, tool.AnalyzeRoute{Machines: true})
+	tool.RegisterAnalyzeRepoTool(r, func() {}, tool.CodingRoute{Machines: true})
 	p := &publishedTools{records: map[string]store.ToolRecord{"analyze_repo": {Name: "analyze_repo", TaskQueue: "coding"}}}
 	served := &servedQueues{queues: map[string]bool{"coding": true}}
 	left := publishTools(context.Background(), p, served, r.All(), "agent")

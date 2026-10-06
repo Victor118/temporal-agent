@@ -3,12 +3,14 @@ package workflow
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/mock"
 	enumspb "go.temporal.io/api/enums/v1"
 	sdkactivity "go.temporal.io/sdk/activity"
+	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 	sdkworkflow "go.temporal.io/sdk/workflow"
@@ -31,11 +33,12 @@ type codingRunCase struct {
 	childOn    string
 }
 
-func runCodingRun(t *testing.T, c *codingRunCase, in AnalyzeRepoInput) (ClaudeCodeOutput, error) {
+func codingEnv(t *testing.T, c *codingRunCase) *testsuite.TestWorkflowEnvironment {
 	t.Helper()
 	var suite testsuite.WorkflowTestSuite
 	env := suite.NewTestWorkflowEnvironment()
 	env.RegisterWorkflow(CodingRunWorkflow)
+	env.RegisterWorkflow(ImplementRunWorkflow)
 	env.RegisterActivityWithOptions(func(context.Context) (activity.CodingRouting, error) { return c.route, nil },
 		sdkactivity.RegisterOptions{Name: "CodingRoute"})
 	env.RegisterActivityWithOptions(func(_ context.Context, in activity.PickMachineInput) (activity.PickMachineOutput, error) {
@@ -58,6 +61,18 @@ func runCodingRun(t *testing.T, c *codingRunCase, in AnalyzeRepoInput) (ClaudeCo
 		c.childOn = sdkworkflow.GetInfo(ctx).TaskQueueName
 		return ClaudeCodeOutput{Report: "from the fallback", Repo: "r"}, nil
 	}, sdkworkflow.RegisterOptions{Name: "AnalyzeFallbackWorkflow"})
+	env.RegisterWorkflowWithOptions(func(ctx sdkworkflow.Context, in ImplementFallbackInput) (ClaudeCodeOutput, error) {
+		c.child = append(c.child, in.Input)
+		c.childProbe = in.Probe
+		c.childOn = sdkworkflow.GetInfo(ctx).TaskQueueName
+		return ClaudeCodeOutput{Report: "implemented by the fallback", Repo: "r", Pushed: true}, nil
+	}, sdkworkflow.RegisterOptions{Name: "ImplementFallbackWorkflow"})
+	return env
+}
+
+func runCodingRun(t *testing.T, c *codingRunCase, in AnalyzeRepoInput) (ClaudeCodeOutput, error) {
+	t.Helper()
+	env := codingEnv(t, c)
 	raw, _ := tool.WithCallContext(mustJSON(map[string]any{"repo": in.Repo, "task": in.Task, "ref": in.Ref}), in.CallContext)
 	env.ExecuteWorkflow(CodingRunWorkflow, raw)
 	var out ClaudeCodeOutput
@@ -91,7 +106,7 @@ func TestCodingRun_OnTheMachine(t *testing.T) {
 	p := c.picks[0]
 	var in machine.AnalyzeInput
 	json.Unmarshal(p.Input, &in)
-	if p.UserID != "u-alice" || p.Capability != machine.CapClaudeCode || p.Kind != machine.KindAnalyzeRepo || in.Repo != analyzeCall.Repo ||
+	if p.UserID != "u-alice" || !slices.Equal(p.Capabilities, []string{machine.CapClaudeCode}) || p.Kind != machine.KindAnalyzeRepo || in.Repo != analyzeCall.Repo ||
 		in.Ref != "main" || p.Agent != "Jarvis" || p.Timeout != analyzeTimeout {
 		t.Errorf("pick %+v %+v", p, in)
 	}
@@ -206,5 +221,110 @@ func TestAnalyzeFallbackWorkflow_ProbedOnce(t *testing.T) {
 		if err := a.env.GetWorkflowResult(&out); err != nil || out.Report != "r" || (probes == 1) == probed {
 			t.Errorf("probed %v: %d probes, %+v %v", probed, probes, out, err)
 		}
+	}
+}
+
+func runImplementRun(t *testing.T, c *codingRunCase, in ImplementFeatureInput) (ClaudeCodeOutput, error) {
+	t.Helper()
+	env := codingEnv(t, c)
+	raw, _ := tool.WithCallContext(mustJSON(map[string]any{"repo": in.Repo, "task": in.Task, "base": in.Base, "title": in.Title,
+		"max_budget_usd": in.MaxBudgetUSD}), in.CallContext)
+	env.ExecuteWorkflow(ImplementRunWorkflow, raw)
+	var out ClaudeCodeOutput
+	err := env.GetWorkflowError()
+	if err == nil {
+		env.GetWorkflowResult(&out)
+	}
+	return out, err
+}
+
+var implementCall = ImplementFeatureInput{Repo: "git@github.com:me/app", Task: "Add a health endpoint", Base: "main", Title: "health",
+	MaxBudgetUSD: 3, CallContext: tool.CallContext{UserID: "u-alice", Agent: "Jarvis", AgentChain: []string{"jarvis"}, CallID: "call-1",
+		Turn: &tool.TurnRef{SessionID: "s-1", TurnKey: "m7.jarvis"}}}
+
+// On the machine: it needs Claude Code and the right to push; its branch is
+// the workflow's; what it says of its commits, and the files the gateway
+// listed, reach the agent.
+func TestImplementRun_OnTheMachine(t *testing.T) {
+	var directive machine.ImplementInput
+	c := &codingRunCase{route: activity.CodingRouting{Machines: true, ImplementQueue: "fallback"},
+		pick: activity.PickMachineOutput{DirectiveID: "d-1", MachineName: "maison"}}
+	c.run = func(activity.RunOnMachineInput) (machine.Result, error) {
+		json.Unmarshal(c.picks[0].Input, &directive)
+		out, _ := json.Marshal(machine.CodingOutput{Report: "Added /health.", Commit: "base0000", Branch: directive.Branch,
+			Commits: []machine.Commit{{SHA: "c0ffee00c0ffee00", Subject: "Add /health"}}, Pushed: true, PaidBy: "subscription",
+			Unpublished: []string{"big.bin: too large"}})
+		return machine.Result{Output: out, Files: []machine.FileRef{{ID: "f-1", Name: "notes.md", Size: 120}}}, nil
+	}
+	// The session's turn, as the participant's child IDs carry it.
+	env := codingEnv(t, c)
+	env.SetStartWorkflowOptions(client.StartWorkflowOptions{ID: "s-1:p:jarvis:m7:tool:implement_feature:call-1"})
+	raw, _ := tool.WithCallContext(mustJSON(map[string]any{"repo": implementCall.Repo, "task": implementCall.Task, "base": "main",
+		"title": "health", "max_budget_usd": 3}), implementCall.CallContext)
+	env.ExecuteWorkflow(ImplementRunWorkflow, raw)
+	var out ClaudeCodeOutput
+	if err := env.GetWorkflowResult(&out); err != nil {
+		t.Fatal(err)
+	}
+	p := c.picks[0]
+	if !slices.Equal(p.Capabilities, []string{machine.CapClaudeCode, machine.CapGitPush}) || p.Kind != machine.KindImplementFeature ||
+		p.Timeout != implementMachineTimeout || p.TurnKey != "m7.jarvis" || p.CallID != "call-1" || p.AgentID != "jarvis" || p.SessionID != "s-1" {
+		t.Errorf("pick %+v", p)
+	}
+	if directive.Base != "main" || directive.MaxBudgetUSD != 3 || !strings.HasPrefix(directive.Branch, "agent/health-") || directive.Check() != nil {
+		t.Errorf("directive %+v", directive)
+	}
+	if !out.Pushed || out.Branch != directive.Branch || len(out.Commits) != 1 || out.Machine != "maison" || out.Error != "" ||
+		len(out.Files) != 1 || len(c.child) != 0 {
+		t.Fatalf("output %+v", out)
+	}
+	for _, want := range []string{"(pushed, 1 commits)", "Add /health", `machine: "maison"`, "notes.md (120 B, id f-1)", "files not published", "big.bin: too large"} {
+		if !strings.Contains(out.Content, want) {
+			t.Errorf("content lacks %q: %s", want, out.Content)
+		}
+	}
+}
+
+// A machine without --allow-push is never picked (its capabilities), and
+// one that turns the run down sends it to the implementation's own fallback
+// queue, in the same run.
+func TestImplementRun_RefusedThenFallback(t *testing.T) {
+	c := &codingRunCase{route: activity.CodingRouting{Machines: true, AnalyzeQueue: "ro", ImplementQueue: "rw"},
+		pick: activity.PickMachineOutput{DirectiveID: "d-1", MachineName: "maison"},
+		run: func(activity.RunOnMachineInput) (machine.Result, error) {
+			return machine.Result{}, temporal.NewNonRetryableApplicationError("this machine does not let its runs push (agent connect --allow-push)",
+				machine.ErrTypeRefused, nil)
+		}}
+	c.probeOut = activity.ProbeRunWorkerOutput{QueueWaitSeconds: 42}
+	out, err := runImplementRun(t, c, implementCall)
+	if err != nil || out.Report != "implemented by the fallback" || c.childOn != "rw" || c.childProbe.QueueWaitSeconds != 42 ||
+		!strings.Contains(out.Note, "--allow-push") {
+		t.Fatalf("output %+v %v, child on %q", out, err, c.childOn)
+	}
+	var in ImplementFeatureInput
+	if json.Unmarshal(c.child[0], &in) != nil || in.Repo != implementCall.Repo || in.UserID != "u-alice" || in.MaxBudgetUSD != 3 {
+		t.Errorf("the child's input: %s", c.child[0])
+	}
+
+	// No machine, no fallback: the agent learns what the user can do.
+	c = &codingRunCase{route: activity.CodingRouting{Machines: true, AnalyzeQueue: "ro"}, pick: activity.PickMachineOutput{NoMachine: "none"}}
+	out, err = runImplementRun(t, c, implementCall)
+	if err != nil || len(c.child) != 0 || !strings.Contains(out.Error, "--allow-push") || !strings.Contains(out.Error, "no fallback for implement_feature") {
+		t.Errorf("nowhere: %+v %v", out, err)
+	}
+}
+
+// A machine lost after its CLI ran, without a word: it may have pushed, the
+// agent is told where to look.
+func TestImplementRun_LostAfterTheRun(t *testing.T) {
+	c := &codingRunCase{route: activity.CodingRouting{Machines: true},
+		pick: activity.PickMachineOutput{DirectiveID: "d-1", MachineName: "maison"},
+		run: func(activity.RunOnMachineInput) (machine.Result, error) {
+			return machine.Result{}, temporal.NewNonRetryableApplicationError("gone", machine.ErrTypeStopping, nil,
+				machine.Result{Progress: "12 outils"})
+		}}
+	out, err := runImplementRun(t, c, implementCall)
+	if err != nil || out.Pushed || !out.Interrupted || !strings.Contains(out.Error, "check "+out.Branch) || !strings.Contains(out.Error, "stopped") {
+		t.Errorf("output %+v %v", out, err)
 	}
 }

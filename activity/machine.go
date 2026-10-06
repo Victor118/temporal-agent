@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -48,10 +49,12 @@ type MachineActivities struct {
 
 // CodingRouting is where a coding run goes, as the worker that publishes the
 // coding tools is configured: to the user's machine (Machines), and when
-// none takes it, to the fallback queue of its tool ("" = none).
+// none takes it, to the fallback queue of its tool ("" = none): one per
+// tool, so that the read-only identity and the one that pushes stay apart.
 type CodingRouting struct {
-	Machines     bool   `json:"machines"`
-	AnalyzeQueue string `json:"analyze_queue,omitempty"`
+	Machines       bool   `json:"machines"`
+	AnalyzeQueue   string `json:"analyze_queue,omitempty"`
+	ImplementQueue string `json:"implement_queue,omitempty"`
 }
 
 // CodingRoute tells a coding run where it may go: the worker's
@@ -71,10 +74,12 @@ const (
 
 // PickMachineInput is a directive to reserve on a machine of UserID's.
 type PickMachineInput struct {
-	UserID     string          `json:"user_id"`
-	Capability string          `json:"capability"`
-	Kind       string          `json:"kind"`
-	Input      json.RawMessage `json:"input"`
+	UserID string `json:"user_id"`
+	// Capabilities are what the machine must have announced, all of them
+	// (machine.CapabilitiesOf).
+	Capabilities []string        `json:"capabilities"`
+	Kind         string          `json:"kind"`
+	Input        json.RawMessage `json:"input"`
 	// CallKey tells the directive apart within its workflow run: a
 	// PickMachine made again with it finds its directive.
 	CallKey string `json:"call_key"`
@@ -86,6 +91,12 @@ type PickMachineInput struct {
 	SessionID   string `json:"session_id,omitempty"`
 	Participant string `json:"participant,omitempty"`
 	Agent       string `json:"agent,omitempty"`
+	// TurnKey, CallID and AgentID are where the files the machine
+	// publishes go (store.File): the session turn and tool call of the run,
+	// and its agent. Empty TurnKey: nowhere, they are refused.
+	TurnKey string `json:"turn_key,omitempty"`
+	CallID  string `json:"call_id,omitempty"`
+	AgentID string `json:"agent_id,omitempty"`
 }
 
 // PickMachineOutput is the directive and its machine; NoMachine, with no
@@ -109,24 +120,27 @@ func (a *MachineActivities) PickMachine(ctx context.Context, in PickMachineInput
 	}
 	now := time.Now()
 	d, m, err := a.Store.PickMachine(ctx, store.PickRequest{
-		DirectiveID: uuid.NewString(),
-		UserID:      in.UserID,
-		Capability:  in.Capability,
-		Kind:        in.Kind,
-		Input:       in.Input,
-		WorkflowID:  info.WorkflowExecution.ID,
-		RunID:       info.WorkflowExecution.RunID,
-		CallKey:     in.CallKey,
-		HandoffBy:   now.Add(machineHandoffWindow),
-		Deadline:    now.Add(machineHandoffWindow + in.Timeout),
-		SeenAfter:   now.Add(-window),
-		SessionID:   in.SessionID,
-		Participant: in.Participant,
-		Agent:       in.Agent,
+		DirectiveID:  uuid.NewString(),
+		UserID:       in.UserID,
+		Capabilities: in.Capabilities,
+		Kind:         in.Kind,
+		Input:        in.Input,
+		WorkflowID:   info.WorkflowExecution.ID,
+		RunID:        info.WorkflowExecution.RunID,
+		CallKey:      in.CallKey,
+		HandoffBy:    now.Add(machineHandoffWindow),
+		Deadline:     now.Add(machineHandoffWindow + in.Timeout),
+		SeenAfter:    now.Add(-window),
+		SessionID:    in.SessionID,
+		Participant:  in.Participant,
+		Agent:        in.Agent,
+		TurnKey:      in.TurnKey,
+		CallID:       in.CallID,
+		AgentID:      in.AgentID,
 	})
 	if errors.Is(err, store.ErrNoMachine) {
 		return PickMachineOutput{NoMachine: fmt.Sprintf(
-			"no machine of yours is connected with the %q capability and a directive to spare", in.Capability)}, nil
+			"no machine of yours is connected with %s and a directive to spare", strings.Join(in.Capabilities, ", "))}, nil
 	}
 	if err != nil {
 		return PickMachineOutput{}, err

@@ -122,7 +122,7 @@ func MachineEchoWorkflow(ctx workflow.Context, in MachineEchoInput) (MachineEcho
 	var acts *activity.MachineActivities
 	var pick activity.PickMachineOutput
 	if err := workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, pickMachineOptions), acts.PickMachine,
-		activity.PickMachineInput{UserID: in.UserID, Capability: machine.KindEcho, Kind: machine.KindEcho, Input: input,
+		activity.PickMachineInput{UserID: in.UserID, Capabilities: []string{machine.KindEcho}, Kind: machine.KindEcho, Input: input,
 			CallKey: "echo", Timeout: timeout}).Get(ctx, &pick); err != nil {
 		return MachineEchoOutput{}, err
 	}

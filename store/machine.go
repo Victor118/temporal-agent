@@ -48,6 +48,16 @@ func (m Machine) Online(since time.Time) bool {
 // Can reports a capability the machine announced.
 func (m Machine) Can(capability string) bool { return slices.Contains(m.Capabilities, capability) }
 
+// CanAll reports every one of capabilities announced (none: true).
+func (m Machine) CanAll(capabilities []string) bool {
+	for _, c := range capabilities {
+		if !m.Can(c) {
+			return false
+		}
+	}
+	return true
+}
+
 // MachineInfo is what a machine says of itself.
 type MachineInfo struct {
 	Name          string
@@ -164,11 +174,17 @@ type Directive struct {
 	SessionID   string
 	Participant string
 	Agent       string
-	Result      json.RawMessage
-	Error       string
-	CreatedAt   time.Time
-	StartedAt   *time.Time
-	ClosedAt    *time.Time
+	// TurnKey, CallID and AgentID are the session turn, tool call and agent
+	// the files the machine publishes for it are attached to (store.File):
+	// empty TurnKey, none can be.
+	TurnKey   string
+	CallID    string
+	AgentID   string
+	Result    json.RawMessage
+	Error     string
+	CreatedAt time.Time
+	StartedAt *time.Time
+	ClosedAt  *time.Time
 }
 
 // Open reports a directive that is not over.
@@ -178,20 +194,24 @@ func (d Directive) Open() bool { return d.State == DirectiveReserved || d.State 
 type PickRequest struct {
 	DirectiveID string // the new directive's ID, unless the call made one already
 	UserID      string
-	Capability  string
-	Kind        string
-	Input       json.RawMessage
-	WorkflowID  string
-	RunID       string
-	CallKey     string
-	HandoffBy   time.Time
-	Deadline    time.Time
+	// Capabilities are what the machine must have announced, all of them.
+	Capabilities []string
+	Kind         string
+	Input        json.RawMessage
+	WorkflowID   string
+	RunID        string
+	CallKey      string
+	HandoffBy    time.Time
+	Deadline     time.Time
 	// SeenAfter: a machine not heard from since is offline.
 	SeenAfter time.Time
 	// The turn the directive works for (Directive.SessionID…).
 	SessionID   string
 	Participant string
 	Agent       string
+	TurnKey     string
+	CallID      string
+	AgentID     string
 }
 
 const machineSchema = `
@@ -265,6 +285,10 @@ const machineSchema = `
 		ALTER TABLE machine_directives ADD COLUMN IF NOT EXISTS session_id TEXT NOT NULL DEFAULT '';
 		ALTER TABLE machine_directives ADD COLUMN IF NOT EXISTS participant TEXT NOT NULL DEFAULT '';
 		ALTER TABLE machine_directives ADD COLUMN IF NOT EXISTS agent TEXT NOT NULL DEFAULT '';
+		-- The turn, call and agent the files it publishes are attached to.
+		ALTER TABLE machine_directives ADD COLUMN IF NOT EXISTS turn_key TEXT NOT NULL DEFAULT '';
+		ALTER TABLE machine_directives ADD COLUMN IF NOT EXISTS call_id TEXT NOT NULL DEFAULT '';
+		ALTER TABLE machine_directives ADD COLUMN IF NOT EXISTS agent_id TEXT NOT NULL DEFAULT '';
 
 		CREATE TABLE IF NOT EXISTS machine_enrollments (
 			id            TEXT PRIMARY KEY,
@@ -694,14 +718,15 @@ func (s *PostgresStore) RevokeMachine(ctx context.Context, id, reason string) ([
 // --- Directives ---
 
 const directiveColumns = `id, machine_id, user_id, kind, input, workflow_id, run_id, activity_id, call_key, task_token,
-	state, handoff_by, deadline, sent_conn, result, error, created_at, started_at, closed_at, session_id, participant, agent`
+	state, handoff_by, deadline, sent_conn, result, error, created_at, started_at, closed_at, session_id, participant, agent,
+	turn_key, call_id, agent_id`
 
 func scanDirective(row interface{ Scan(...any) error }) (Directive, error) {
 	var d Directive
 	var input, result []byte
 	err := row.Scan(&d.ID, &d.MachineID, &d.UserID, &d.Kind, &input, &d.WorkflowID, &d.RunID, &d.ActivityID, &d.CallKey,
 		&d.TaskToken, &d.State, &d.HandoffBy, &d.Deadline, &d.SentConn, &result, &d.Error, &d.CreatedAt, &d.StartedAt, &d.ClosedAt,
-		&d.SessionID, &d.Participant, &d.Agent)
+		&d.SessionID, &d.Participant, &d.Agent, &d.TurnKey, &d.CallID, &d.AgentID)
 	d.Input, d.Result = input, result
 	return d, err
 }
@@ -820,7 +845,7 @@ func (s *PostgresStore) PickMachine(ctx context.Context, req PickRequest) (Direc
 		choices := make([]machineChoice, len(machines))
 		for i, mm := range machines {
 			choices[i] = machineChoice{ID: mm.ID, Priority: mm.Priority, Max: mm.MaxDirectives, Open: open[mm.ID],
-				Online: mm.Online(req.SeenAfter), Paused: mm.Paused, Can: mm.Can(req.Capability)}
+				Online: mm.Online(req.SeenAfter), Paused: mm.Paused, Can: mm.CanAll(req.Capabilities)}
 		}
 		chosen := chooseMachine(choices)
 		if chosen == "" {
@@ -833,10 +858,10 @@ func (s *PostgresStore) PickMachine(ctx context.Context, req PickRequest) (Direc
 		}
 		d, err = scanDirective(tx.QueryRowContext(ctx, `
 			INSERT INTO machine_directives (id, machine_id, user_id, kind, input, workflow_id, run_id, call_key, handoff_by, deadline,
-				session_id, participant, agent)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING `+directiveColumns,
+				session_id, participant, agent, turn_key, call_id, agent_id)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) RETURNING `+directiveColumns,
 			req.DirectiveID, chosen, req.UserID, req.Kind, []byte(req.Input), req.WorkflowID, req.RunID, req.CallKey,
-			req.HandoffBy, req.Deadline, req.SessionID, req.Participant, req.Agent))
+			req.HandoffBy, req.Deadline, req.SessionID, req.Participant, req.Agent, req.TurnKey, req.CallID, req.AgentID))
 		return err
 	})
 	return d, m, err

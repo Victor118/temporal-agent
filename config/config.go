@@ -122,6 +122,11 @@ type Config struct {
 	// runs when no machine of the user's takes it (AnalyzeRepoWorkflow on
 	// the coding workers of that queue). "none" = no fallback.
 	ClaudeCodeAnalyzeQueue string
+	// ClaudeCodeImplementQueue is implement_feature's fallback queue: where
+	// it runs when no machine of the user's takes it
+	// (ImplementFeatureWorkflow on the coding workers of that queue, which
+	// hold the push identity). "none" = no fallback.
+	ClaudeCodeImplementQueue string
 
 	// SSH identity a coding worker uses for git: cloning a private repository,
 	// and pushing when the identity allows it. What the worker can do is a
@@ -225,6 +230,7 @@ func Load() *Config {
 		ClaudeCodeAuth:              os.Getenv("CLAUDE_CODE_AUTH"),
 		MachinesEnabled:             os.Getenv("MACHINES_ENABLED"),
 		ClaudeCodeAnalyzeQueue:      envOr("CLAUDE_CODE_ANALYZE_QUEUE", DefaultAnalyzeQueue),
+		ClaudeCodeImplementQueue:    envOr("CLAUDE_CODE_IMPLEMENT_QUEUE", DefaultImplementQueue),
 
 		SkillsRepo:          os.Getenv("SKILLS_REPO"),
 		SkillsBranch:        envOr("SKILLS_BRANCH", "main"),
@@ -352,6 +358,11 @@ func envOr(key, fallback string) string {
 // the compose file (worker.claude-code-ro.yaml).
 const DefaultAnalyzeQueue = "tools-claude-code-ro"
 
+// DefaultImplementQueue is implement_feature's fallback queue when
+// CLAUDE_CODE_IMPLEMENT_QUEUE is not set: the writing coding container's of
+// the compose file (worker.claude-code.yaml).
+const DefaultImplementQueue = "tools-claude-code"
+
 // MachinesOn reads MACHINES_ENABLED: empty or "true" = on, "false" = off,
 // anything else an error (the process does not start on a typo).
 func (c *Config) MachinesOn() (bool, error) {
@@ -370,4 +381,12 @@ func (c *Config) AnalyzeQueue() string {
 		return ""
 	}
 	return c.ClaudeCodeAnalyzeQueue
+}
+
+// ImplementQueue is implement_feature's fallback queue; "" = none.
+func (c *Config) ImplementQueue() string {
+	if c.ClaudeCodeImplementQueue == "none" {
+		return ""
+	}
+	return c.ClaudeCodeImplementQueue
 }

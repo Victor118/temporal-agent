@@ -2,8 +2,6 @@ package tool
 
 import (
 	"encoding/json"
-	"fmt"
-	"time"
 )
 
 // The coding tools are backed by the Claude Code CLI. They are workflow-kind
@@ -13,9 +11,9 @@ import (
 // call's context (NeedsCallContext): whose machine may run it, and where to
 // tell its user what the run waits for.
 
-// AnalyzeRoute is where analyze_repo may run, as the worker that publishes
+// CodingRoute is where a coding tool may run, as the worker that publishes
 // it is configured: what its description tells the model.
-type AnalyzeRoute struct {
+type CodingRoute struct {
 	// Machines: on the user's own machine, when one is connected.
 	Machines bool
 	// Fallback: on the installation's coding workers otherwise.
@@ -27,7 +25,7 @@ type AnalyzeRoute struct {
 // fallback (route). It is read-only by construction: the permission mode is
 // set where the run happens, on a worker or a machine, and is not part of
 // this schema, so an agent cannot ask for write access.
-func RegisterAnalyzeRepoTool(registry *Registry, workflowFunc interface{}, route AnalyzeRoute) {
+func RegisterAnalyzeRepoTool(registry *Registry, workflowFunc interface{}, route CodingRoute) {
 	var where string
 	switch {
 	case route.Machines && route.Fallback:
@@ -46,6 +44,7 @@ func RegisterAnalyzeRepoTool(registry *Registry, workflowFunc interface{}, route
 			"It never modifies the repository: the clone is read-only and is deleted afterwards. " +
 			"It cannot fix what it finds: changing the code is implement_feature's job, if you have that tool. " +
 			"Ask a precise question — the answer comes back as a written report, and the agent cannot ask you for clarification mid-run. " +
+			"Files the coding agent leaves for the user (a report, a diagram) are published to the session. " +
 			where,
 		InputSchema: json.RawMessage(`{
 			"type": "object",
@@ -71,13 +70,23 @@ func RegisterAnalyzeRepoTool(registry *Registry, workflowFunc interface{}, route
 	})
 }
 
-// RegisterImplementFeatureTool registers implement_feature, run on the
-// installation's coding workers (phase 2 moves it to machines too).
-// costNote, from the worker's way of paying for runs, ends its description:
-// the model weighs a run against what it costs now, not what it remembers.
-// queueWait, how long a run waits for a free worker, is said too.
-func RegisterImplementFeatureTool(registry *Registry, workflowFunc interface{}, costNote string, queueWait time.Duration) {
-	wait := waitNote(queueWait)
+// RegisterImplementFeatureTool registers implement_feature, run by
+// workflowFunc (ImplementRunWorkflow): on the user's machine when it lets
+// its runs push, else on the installation's fallback (route). What a run may
+// do (permissions, the branch, the push) is set where it happens, not in
+// this schema.
+func RegisterImplementFeatureTool(registry *Registry, workflowFunc interface{}, route CodingRoute) {
+	var where string
+	switch {
+	case route.Machines && route.Fallback:
+		where = "It runs on the user's own machine when one is connected (agent connect) and lets its runs push, with their Claude Code login (their subscription or key) and their git identity, which pushes the branch; " +
+			"otherwise on the installation's coding workers, which may make it wait for a free one, paid as the installation's operator chose."
+	case route.Machines:
+		where = "It runs on the user's own machine (agent connect, which must let its runs push), with their Claude Code login (their subscription or key) and their git identity, which pushes the branch; " +
+			"when none is connected, it fails at once saying so."
+	default:
+		where = "It runs on the installation's coding workers, which may make it wait for a free one, paid as the installation's operator chose."
+	}
 	registry.Register(&Tool{
 		Name: "implement_feature",
 		Description: "Make a change to a Git repository and publish it as a branch, using a coding agent that writes and commits the change itself. " +
@@ -85,7 +94,8 @@ func RegisterImplementFeatureTool(registry *Registry, workflowFunc interface{}, 
 			"It branches from base, commits its own work, and pushes the branch — it never writes to the base branch and never opens a pull request. " +
 			"Describe the outcome you want and any constraint that matters; the agent cannot ask you for clarification mid-run. " +
 			"A run that produces no commit is reported as a failure. " +
-			wait + withSpace(costNote),
+			"Files the coding agent leaves for the user (a report, a diagram) are published to the session. " +
+			where,
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -107,7 +117,7 @@ func RegisterImplementFeatureTool(registry *Registry, workflowFunc interface{}, 
 				},
 				"max_budget_usd": {
 					"type": "number",
-					"description": "Stop the run once it has spent this much on API calls. It can only lower the cap the worker sets; leave unset for that cap."
+					"description": "Stop the run once it has spent this much on API calls. It can only lower the cap set where the run happens; leave unset for that cap."
 				}
 			},
 			"required": ["repo", "task"]
@@ -117,18 +127,4 @@ func RegisterImplementFeatureTool(registry *Registry, workflowFunc interface{}, 
 		WorkflowFunc:     workflowFunc,
 		NeedsCallContext: true,
 	})
-}
-
-// waitNote tells the model that a run may wait for a worker, and how long.
-func waitNote(wait time.Duration) string {
-	return fmt.Sprintf("When every coding worker is busy, the run waits up to %s for one to free up before it starts; "+
-		"if none does, it fails, and can be tried again later.", wait)
-}
-
-// withSpace prefixes a non-empty sentence with the space that joins it.
-func withSpace(s string) string {
-	if s == "" {
-		return ""
-	}
-	return " " + s
 }

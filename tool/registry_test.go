@@ -255,23 +255,23 @@ func TestRegistry_ConcurrentReadsAndWrites(t *testing.T) {
 	wg.Wait()
 }
 
-// implement_feature ends its description with what a run costs, when known,
-// says how long a run may wait for a worker, and gets the call's context (a
-// run that waits tells its user on the turn's channel).
-func TestImplementFeatureSaysWhatARunCosts(t *testing.T) {
-	r := NewRegistry()
-	RegisterImplementFeatureTool(r, func() {}, "Runs are paid by a subscription.", 20*time.Minute)
-	tl, ok := r.Get("implement_feature")
-	if !ok || !strings.HasSuffix(tl.Description, ". Runs are paid by a subscription.") {
-		t.Errorf("%q", tl.Description)
-	}
-	if !strings.Contains(tl.Description, "the run waits up to 20m0s for one to free up") || !tl.NeedsCallContext {
-		t.Errorf("does not say a run may wait, or no call context: %q", tl.Description)
-	}
-	r = NewRegistry()
-	RegisterImplementFeatureTool(r, func() {}, "", time.Minute)
-	if tl, _ := r.Get("implement_feature"); strings.HasSuffix(tl.Description, " ") {
-		t.Errorf("no note, trailing space: %q", tl.Description)
+// implement_feature says where it runs, as analyze_repo does, and gets the
+// call's context (whose machine, which turn its files go to).
+func TestImplementFeatureSaysWhereItRuns(t *testing.T) {
+	for _, c := range []struct {
+		route     CodingRoute
+		want, not string
+	}{
+		{CodingRoute{Machines: true, Fallback: true}, "lets its runs push", "fails at once"},
+		{CodingRoute{Machines: true}, "fails at once saying so", "coding workers"},
+		{CodingRoute{Fallback: true}, "installation's coding workers", "own machine"},
+	} {
+		r := NewRegistry()
+		RegisterImplementFeatureTool(r, func() {}, c.route)
+		tl, ok := r.Get("implement_feature")
+		if !ok || !tl.NeedsCallContext || !tl.Sensitive || !strings.Contains(tl.Description, c.want) || strings.Contains(tl.Description, c.not) {
+			t.Errorf("%+v: %q", c.route, tl.Description)
+		}
 	}
 }
 
@@ -279,12 +279,12 @@ func TestImplementFeatureSaysWhatARunCosts(t *testing.T) {
 // fallback, or both.
 func TestAnalyzeRepoSaysWhereItRuns(t *testing.T) {
 	for _, c := range []struct {
-		route     AnalyzeRoute
+		route     CodingRoute
 		want, not string
 	}{
-		{AnalyzeRoute{Machines: true, Fallback: true}, "user's own machine when one is connected", "fails at once"},
-		{AnalyzeRoute{Machines: true}, "fails at once saying so", "coding workers"},
-		{AnalyzeRoute{Fallback: true}, "installation's coding workers", "own machine"},
+		{CodingRoute{Machines: true, Fallback: true}, "user's own machine when one is connected", "fails at once"},
+		{CodingRoute{Machines: true}, "fails at once saying so", "coding workers"},
+		{CodingRoute{Fallback: true}, "installation's coding workers", "own machine"},
 	} {
 		r := NewRegistry()
 		RegisterAnalyzeRepoTool(r, func() {}, c.route)

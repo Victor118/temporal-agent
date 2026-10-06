@@ -151,7 +151,7 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 	if err != nil {
 		return nil, err
 	}
-	routing := activity.CodingRouting{Machines: machinesOn, AnalyzeQueue: cfg.AnalyzeQueue()}
+	routing := activity.CodingRouting{Machines: machinesOn, AnalyzeQueue: cfg.AnalyzeQueue(), ImplementQueue: cfg.ImplementQueue()}
 
 	// Before this worker offers a run: what a run left on this machine's
 	// disk when its worker died is reachable from here alone.
@@ -162,7 +162,7 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 		}
 	}
 
-	registry := buildRegistry(cfg, st, tc, runAs, runs, auth, queueWait, &tool.Publisher{Store: st, MaxBytes: maxFile},
+	registry := buildRegistry(cfg, st, tc, runAs, runs, &tool.Publisher{Store: st, MaxBytes: maxFile},
 		workerConf.Workflows, routing)
 
 	skills := loadSkills(opts.skills)
@@ -270,6 +270,8 @@ func workerWorkflows() []any {
 		workflow.MachineEchoWorkflow,
 		workflow.CodingRunWorkflow,
 		workflow.AnalyzeFallbackWorkflow,
+		workflow.ImplementRunWorkflow,
+		workflow.ImplementFallbackWorkflow,
 	}
 }
 
@@ -331,8 +333,8 @@ func withCodingSessions(wopts *worker.Options, runs bool, maxRuns int) {
 // buildRegistry registers the built-in tools this process can run. Which of
 // them it exposes is the worker config's decision (exposeTools); the MCP
 // servers' come after (discoverMCPServers).
-func buildRegistry(cfg *config.Config, st store.Store, tc client.Client, runAs *subproc.Identity, runs *subproc.Runs, auth claudecode.Auth,
-	queueWait time.Duration, pub *tool.Publisher, servesWorkflows bool, routing activity.CodingRouting) *tool.Registry {
+func buildRegistry(cfg *config.Config, st store.Store, tc client.Client, runAs *subproc.Identity, runs *subproc.Runs,
+	pub *tool.Publisher, servesWorkflows bool, routing activity.CodingRouting) *tool.Registry {
 	registry := tool.NewRegistry()
 	tool.RegisterFilesystemTools(registry, cfg.WorkspacePath, runAs)
 	tool.RegisterGrepTool(registry, cfg.WorkspacePath)
@@ -370,21 +372,27 @@ func buildRegistry(cfg *config.Config, st store.Store, tc client.Client, runAs *
 		}
 	}
 
-	// analyze_repo is the main worker's (it serves the workflows): it goes to
-	// the user's machine, or to its fallback queue, where the coding workers
-	// serve AnalyzeRepoWorkflow and publish nothing (CodingRunWorkflow). No
-	// CLI needed here.
+	// analyze_repo and implement_feature are the main worker's (it serves
+	// the workflows): each goes to the user's machine, or to its tool's
+	// fallback queue, where the coding workers serve AnalyzeRepoWorkflow
+	// and ImplementFeatureWorkflow and publish nothing (CodingRunWorkflow,
+	// ImplementRunWorkflow). No CLI needed here.
 	if servesWorkflows && (routing.Machines || routing.AnalyzeQueue != "") {
 		tool.RegisterAnalyzeRepoTool(registry, workflow.CodingRunWorkflow,
-			tool.AnalyzeRoute{Machines: routing.Machines, Fallback: routing.AnalyzeQueue != ""})
+			tool.CodingRoute{Machines: routing.Machines, Fallback: routing.AnalyzeQueue != ""})
 		log.Printf("analyze_repo runs on the users' machines: %v; its fallback queue: %q (MACHINES_ENABLED, CLAUDE_CODE_ANALYZE_QUEUE)",
 			routing.Machines, routing.AnalyzeQueue)
 	}
+	if servesWorkflows && (routing.Machines || routing.ImplementQueue != "") {
+		tool.RegisterImplementFeatureTool(registry, workflow.ImplementRunWorkflow,
+			tool.CodingRoute{Machines: routing.Machines, Fallback: routing.ImplementQueue != ""})
+		log.Printf("implement_feature runs on the users' machines that allow pushes: %v; its fallback queue: %q (MACHINES_ENABLED, CLAUDE_CODE_IMPLEMENT_QUEUE)",
+			routing.Machines, routing.ImplementQueue)
+	}
 
-	// implement_feature only where the CLI is installed: a worker that cannot
-	// run a coding session has none to offer.
+	// What the coding runs of this worker may do, where the CLI is installed
+	// (a fallback queue's worker).
 	if (&claudecode.Runner{}).Available() {
-		tool.RegisterImplementFeatureTool(registry, workflow.ImplementFeatureWorkflow, auth.CostNote(), queueWait)
 		if cfg.ClaudeCodeSSHKey != "" {
 			log.Printf("Coding runs use the git identity at %s", cfg.ClaudeCodeSSHKey)
 		}

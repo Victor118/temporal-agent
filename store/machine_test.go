@@ -256,7 +256,7 @@ func TestMachineToken_RotationAndRevocation(t *testing.T) {
 
 func pick(userID, run, call string, seenAfter time.Time) PickRequest {
 	now := time.Now()
-	return PickRequest{DirectiveID: fmt.Sprintf("zz-d-%s-%s", run, call), UserID: userID, Capability: "echo", Kind: "echo",
+	return PickRequest{DirectiveID: fmt.Sprintf("zz-d-%s-%s", run, call), UserID: userID, Capabilities: []string{"echo"}, Kind: "echo",
 		Input: json.RawMessage(`{"text":"hi"}`), WorkflowID: "wf", RunID: run, CallKey: call,
 		HandoffBy: now.Add(time.Minute), Deadline: now.Add(time.Hour), SeenAfter: seenAfter}
 }
@@ -280,7 +280,7 @@ func TestPickMachine(t *testing.T) {
 		}
 	}
 	s.db.Exec("UPDATE machines SET priority = 5 WHERE id = 'zz-mach-high'")
-	if _, _, err := s.PickMachine(ctx, PickRequest{UserID: "zz-mach-carol", Capability: "claude-code", RunID: "zz-r0", CallKey: "c", SeenAfter: seen}); !errors.Is(err, ErrNoMachine) {
+	if _, _, err := s.PickMachine(ctx, PickRequest{UserID: "zz-mach-carol", Capabilities: []string{"claude-code"}, RunID: "zz-r0", CallKey: "c", SeenAfter: seen}); !errors.Is(err, ErrNoMachine) {
 		t.Fatalf("no machine with the capability: %v", err)
 	}
 	d1, m1, err := s.PickMachine(ctx, pick("zz-mach-carol", "zz-r1", "c", seen))
@@ -463,7 +463,7 @@ func TestMachineSettingsAndStatus(t *testing.T) {
 	}
 	seen := time.Now().Add(-time.Minute)
 	req := pick("zz-mach-erin", "zz-set-run", "c", seen)
-	req.Capability, req.Kind = "claude-code", "analyze_repo"
+	req.Capabilities, req.Kind = []string{"claude-code"}, "analyze_repo"
 	req.SessionID, req.Participant, req.Agent = "sess-1", "jarvis", "Jarvis"
 	d, _, err := s.PickMachine(ctx, req)
 	if err != nil || d.SessionID != "sess-1" || d.Participant != "jarvis" || d.Agent != "Jarvis" {
