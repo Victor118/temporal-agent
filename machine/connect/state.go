@@ -14,7 +14,6 @@ import (
 	"regexp"
 	"slices"
 	"strings"
-	"syscall"
 
 	"github.com/victor/temporal-agent/machine"
 )
@@ -231,9 +230,10 @@ func (s State) list(dir string) ([]string, error) {
 // ErrLocked is a machine directory another agent connect runs on.
 var ErrLocked = errors.New("another agent connect runs on this machine's directory")
 
-// Lock takes the directory for this process (flock): two agent connect on
-// one directory would share one token, cut each other's connections and
-// race on its rotation. It returns the release.
+// Lock takes the directory for this process (flock under Unix, LockFileEx
+// under Windows): two agent connect on one directory would share one token,
+// cut each other's connections and race on its rotation. It returns the
+// release.
 func (s State) Lock() (func(), error) {
 	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
 		return nil, err
@@ -242,15 +242,18 @@ func (s State) Lock() (func(), error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if err := lockFile(f); err != nil {
 		f.Close()
-		if errors.Is(err, syscall.EWOULDBLOCK) {
+		if errors.Is(err, errLockHeld) {
 			return nil, fmt.Errorf("%w (%s)", ErrLocked, s.Dir)
 		}
 		return nil, err
 	}
 	return func() {
-		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		unlockFile(f)
 		f.Close()
 	}, nil
 }
+
+// errLockHeld is lockFile's: another process holds the lock.
+var errLockHeld = errors.New("lock held")

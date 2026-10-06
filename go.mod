@@ -15,6 +15,7 @@ require (
 	go.temporal.io/api v1.44.1
 	go.temporal.io/sdk v1.33.0
 	golang.org/x/crypto v0.48.0
+	golang.org/x/sys v0.41.0
 	golang.org/x/term v0.40.0
 	golang.org/x/time v0.3.0
 	google.golang.org/protobuf v1.34.2
@@ -40,7 +41,6 @@ require (
 	github.com/stretchr/objx v0.5.2 // indirect
 	golang.org/x/net v0.49.0 // indirect
 	golang.org/x/sync v0.19.0 // indirect
-	golang.org/x/sys v0.41.0 // indirect
 	golang.org/x/text v0.34.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20240827150818-7e3bb234dfed // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20240827150818-7e3bb234dfed // indirect
