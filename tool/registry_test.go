@@ -255,28 +255,43 @@ func TestRegistry_ConcurrentReadsAndWrites(t *testing.T) {
 	wg.Wait()
 }
 
-// The coding tools end their description with what a run costs, when known,
-// say how long a run may wait for a worker, and get the call's context (a
+// implement_feature ends its description with what a run costs, when known,
+// says how long a run may wait for a worker, and gets the call's context (a
 // run that waits tells its user on the turn's channel).
-func TestClaudeCodeToolsSayWhatARunCosts(t *testing.T) {
+func TestImplementFeatureSaysWhatARunCosts(t *testing.T) {
 	r := NewRegistry()
-	RegisterClaudeCodeTools(r, func() {}, func() {}, "Runs are paid by a subscription.", 20*time.Minute)
-	for _, name := range []string{"analyze_repo", "implement_feature"} {
-		tl, ok := r.Get(name)
-		if !ok || !strings.HasSuffix(tl.Description, ". Runs are paid by a subscription.") {
-			t.Errorf("%s: %q", name, tl.Description)
-		}
-		if !strings.Contains(tl.Description, "the run waits up to 20m0s for one to free up") {
-			t.Errorf("%s does not say a run may wait: %q", name, tl.Description)
-		}
-		if !tl.NeedsCallContext {
-			t.Errorf("%s gets no call context", name)
-		}
+	RegisterImplementFeatureTool(r, func() {}, "Runs are paid by a subscription.", 20*time.Minute)
+	tl, ok := r.Get("implement_feature")
+	if !ok || !strings.HasSuffix(tl.Description, ". Runs are paid by a subscription.") {
+		t.Errorf("%q", tl.Description)
+	}
+	if !strings.Contains(tl.Description, "the run waits up to 20m0s for one to free up") || !tl.NeedsCallContext {
+		t.Errorf("does not say a run may wait, or no call context: %q", tl.Description)
 	}
 	r = NewRegistry()
-	RegisterClaudeCodeTools(r, func() {}, func() {}, "", time.Minute)
-	if tl, _ := r.Get("analyze_repo"); strings.HasSuffix(tl.Description, " ") {
+	RegisterImplementFeatureTool(r, func() {}, "", time.Minute)
+	if tl, _ := r.Get("implement_feature"); strings.HasSuffix(tl.Description, " ") {
 		t.Errorf("no note, trailing space: %q", tl.Description)
+	}
+}
+
+// analyze_repo says where it runs: the user's machine, the installation's
+// fallback, or both.
+func TestAnalyzeRepoSaysWhereItRuns(t *testing.T) {
+	for _, c := range []struct {
+		route     AnalyzeRoute
+		want, not string
+	}{
+		{AnalyzeRoute{Machines: true, Fallback: true}, "user's own machine when one is connected", "fails at once"},
+		{AnalyzeRoute{Machines: true}, "fails at once saying so", "coding workers"},
+		{AnalyzeRoute{Fallback: true}, "installation's coding workers", "own machine"},
+	} {
+		r := NewRegistry()
+		RegisterAnalyzeRepoTool(r, func() {}, c.route)
+		tl, ok := r.Get("analyze_repo")
+		if !ok || !tl.NeedsCallContext || !strings.Contains(tl.Description, c.want) || strings.Contains(tl.Description, c.not) {
+			t.Errorf("%+v: %q", c.route, tl.Description)
+		}
 	}
 }
 

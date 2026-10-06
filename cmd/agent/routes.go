@@ -134,6 +134,8 @@ func (s *server) routes() http.Handler {
 				r.Get("/machines", m.list)
 				r.Post("/machines/enrollment-token", m.enrollmentToken)
 				r.Post("/machines/{machineID}/revoke", m.revoke)
+				r.Post("/machines/{machineID}/pause", m.pause)
+				r.Post("/machines/{machineID}/priority", m.priority)
 				r.Get("/machines/activer", m.activatePage)
 				r.Post("/machines/activer", m.activate)
 				r.Post("/machines/activer/approve", m.approve)

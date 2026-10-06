@@ -146,6 +146,13 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 
 	stopRuns := &activity.RunStop{}
 	codeAct := &activity.ClaudeCodeActivities{Root: cfg.ClaudeCodeWorkspace, SSHKeyPath: cfg.ClaudeCodeSSHKey, AllowedRepos: cfg.ClaudeCodeRepos, RunAs: runAs, Runs: runs, Runner: &claudecode.Runner{StallTimeout: stallTimeout}, ClaudeConfigDir: cfg.ClaudeConfigDir, Model: cfg.ClaudeCodeModel, MaxBudgetUSD: budget, Auth: auth, QueueWait: queueWait, Stopper: stopRuns}
+	workerConf := loadWorkerConfig(cfg)
+	machinesOn, err := cfg.MachinesOn()
+	if err != nil {
+		return nil, err
+	}
+	routing := activity.CodingRouting{Machines: machinesOn, AnalyzeQueue: cfg.AnalyzeQueue()}
+
 	// Before this worker offers a run: what a run left on this machine's
 	// disk when its worker died is reachable from here alone.
 	releaseRuns := func() {}
@@ -155,8 +162,8 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 		}
 	}
 
-	workerConf := loadWorkerConfig(cfg)
-	registry := buildRegistry(cfg, st, tc, runAs, runs, auth, queueWait, &tool.Publisher{Store: st, MaxBytes: maxFile})
+	registry := buildRegistry(cfg, st, tc, runAs, runs, auth, queueWait, &tool.Publisher{Store: st, MaxBytes: maxFile},
+		workerConf.Workflows, routing)
 
 	skills := loadSkills(opts.skills)
 	catalog := initCatalog(st)
@@ -172,7 +179,8 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 	exposeTools(registry, workerConf)
 	mcpServers := discoverMCPServers(registry, workerConf)
 	queues := workerQueues(cfg, workerConf)
-	publishTools(context.Background(), st, tc, registry.All(), workerConf.Queue)
+	unpublished := publishTools(context.Background(), st, tc, registry.All(), workerConf.Queue)
+	withdrawUnoffered(context.Background(), st, registry, workerConf.Queue, mcpPrefixes(workerConf))
 	refreshCatalog(st, catalog) // include the tools just published
 
 	// Notifiers, one per channel a session can reach its user on
@@ -200,7 +208,7 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 	acts := workerActivities(activityDeps{
 		llm: llmProvider, store: st, catalog: catalog, skills: skillAct, maxContext: maxContext,
 		code: codeAct, registry: registry, notifiers: notifiers, web: opts.web, schedules: tc.ScheduleClient(), relay: tc,
-		machines: opts.machines, handoff: opts.handoff,
+		machines: opts.machines, handoff: opts.handoff, routing: routing,
 	})
 	rt := &workerRuntime{queues: queues, workflows: workerConf.Workflows, skills: skills, endRuns: endRuns, releaseRuns: releaseRuns}
 	for _, queue := range queues {
@@ -230,6 +238,9 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 	rt.stop = stop
 	go pollActivityQueues(ctx, st, workerCfg, catalogRefresh)
 	go pollCatalog(ctx, st, catalog, catalogRefresh)
+	if len(unpublished) > 0 {
+		go keepPublishing(ctx, st, tc, registry, workerConf.Queue, unpublished, catalogRefresh)
+	}
 	// Started after the startup publish: from here on, this goroutine alone
 	// changes and publishes the MCP servers' tools.
 	go mcpServers.Run(ctx, catalogPublisher{st: st, tc: tc, queue: workerConf.Queue})
@@ -257,6 +268,7 @@ func workerWorkflows() []any {
 		workflow.ForkSessionWorkflow,
 		workflow.ReportToParentWorkflow,
 		workflow.MachineEchoWorkflow,
+		workflow.CodingRunWorkflow,
 	}
 }
 
@@ -275,6 +287,7 @@ type activityDeps struct {
 	relay      activity.SignalStarter
 	machines   activity.MachineStore
 	handoff    activity.DirectiveHandoff
+	routing    activity.CodingRouting
 }
 
 // workerActivities are the activity structs every worker registers, on each
@@ -296,7 +309,7 @@ func workerActivities(d activityDeps) []any {
 		&activity.NotificationActivities{Notifiers: d.notifiers},
 		&activity.DeliveryActivities{Web: d.web, Store: d.store},
 		&activity.ScheduleActivities{Client: d.schedules, Store: d.store},
-		&activity.MachineActivities{Store: d.machines, Handoff: d.handoff},
+		&activity.MachineActivities{Store: d.machines, Handoff: d.handoff, Routing: d.routing},
 		d.skills,
 	}
 }
@@ -317,7 +330,8 @@ func withCodingSessions(wopts *worker.Options, runs bool, maxRuns int) {
 // buildRegistry registers the built-in tools this process can run. Which of
 // them it exposes is the worker config's decision (exposeTools); the MCP
 // servers' come after (discoverMCPServers).
-func buildRegistry(cfg *config.Config, st store.Store, tc client.Client, runAs *subproc.Identity, runs *subproc.Runs, auth claudecode.Auth, queueWait time.Duration, pub *tool.Publisher) *tool.Registry {
+func buildRegistry(cfg *config.Config, st store.Store, tc client.Client, runAs *subproc.Identity, runs *subproc.Runs, auth claudecode.Auth,
+	queueWait time.Duration, pub *tool.Publisher, servesWorkflows bool, routing activity.CodingRouting) *tool.Registry {
 	registry := tool.NewRegistry()
 	tool.RegisterFilesystemTools(registry, cfg.WorkspacePath, runAs)
 	tool.RegisterGrepTool(registry, cfg.WorkspacePath)
@@ -355,10 +369,21 @@ func buildRegistry(cfg *config.Config, st store.Store, tc client.Client, runAs *
 		}
 	}
 
-	// The coding tools only where the CLI is installed: a worker that cannot
+	// analyze_repo is the main worker's (it serves the workflows): it goes to
+	// the user's machine, or to its fallback queue, where the coding workers
+	// serve AnalyzeRepoWorkflow and publish nothing (CodingRunWorkflow). No
+	// CLI needed here.
+	if servesWorkflows && (routing.Machines || routing.AnalyzeQueue != "") {
+		tool.RegisterAnalyzeRepoTool(registry, workflow.CodingRunWorkflow,
+			tool.AnalyzeRoute{Machines: routing.Machines, Fallback: routing.AnalyzeQueue != ""})
+		log.Printf("analyze_repo runs on the users' machines: %v; its fallback queue: %q (MACHINES_ENABLED, CLAUDE_CODE_ANALYZE_QUEUE)",
+			routing.Machines, routing.AnalyzeQueue)
+	}
+
+	// implement_feature only where the CLI is installed: a worker that cannot
 	// run a coding session has none to offer.
 	if (&claudecode.Runner{}).Available() {
-		tool.RegisterClaudeCodeTools(registry, workflow.AnalyzeRepoWorkflow, workflow.ImplementFeatureWorkflow, auth.CostNote(), queueWait)
+		tool.RegisterImplementFeatureTool(registry, workflow.ImplementFeatureWorkflow, auth.CostNote(), queueWait)
 		if cfg.ClaudeCodeSSHKey != "" {
 			log.Printf("Coding runs use the git identity at %s", cfg.ClaudeCodeSSHKey)
 		}
@@ -634,7 +659,10 @@ func newHTTPHandler(cfg *config.Config, st store.Store, tc client.Client, hub *s
 	})
 	warnClosedWebhooks(cfg)
 	srv := newServer(cfg, st, tc, hub, authSvc, adminUI.Routes())
-	srv.machines = opts.machines
+	// MACHINES_ENABLED=false: no machine reaches this server.
+	if on, _ := cfg.MachinesOn(); on {
+		srv.machines = opts.machines
+	}
 	return srv.routes()
 }
 
@@ -669,4 +697,13 @@ func waitForSignal() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh
+}
+
+// mcpPrefixes are the name prefixes of the tools of wc's MCP servers.
+func mcpPrefixes(wc *config.WorkerConfig) []string {
+	var prefixes []string
+	for _, s := range wc.MCP {
+		prefixes = append(prefixes, s.Name+"_")
+	}
+	return prefixes
 }

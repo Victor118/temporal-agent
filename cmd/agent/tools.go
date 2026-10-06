@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/victor/temporal-agent/config"
@@ -149,7 +150,8 @@ func publishTools(ctx context.Context, st toolPublisher, tc taskqueue.Describer,
 				served[prev.TaskQueue] = isServed
 			}
 			if isServed {
-				log.Printf("Error: tool %q is already served on queue %q; not publishing it on %q", t.Name, prev.TaskQueue, queue)
+				log.Printf("Error: tool %q is already served on queue %q; not publishing it on %q (tried again later)", t.Name, prev.TaskQueue, queue)
+				failed = append(failed, t.Name)
 				continue
 			}
 			log.Printf("Tool %q moves from unserved queue %q to %q", t.Name, prev.TaskQueue, queue)
@@ -213,4 +215,61 @@ func queueServed(ctx context.Context, tc taskqueue.Describer, queue string) bool
 		return true
 	}
 	return status.Served()
+}
+
+// withdrawUnoffered withdraws from queue the published rows of the tools this
+// worker no longer offers (registry): a tool moved to another worker (as
+// analyze_repo left the coding containers for the main worker), or dropped
+// from worker.yaml. Left in the table, it would stay in the agents' lists,
+// and keep its name from being published elsewhere. The tools of the
+// worker's MCP servers (mcpPrefixes, "<server>_") are left to their
+// discovery, which publishes and withdraws them, a server that is down
+// included.
+func withdrawUnoffered(ctx context.Context, st toolCatalog, registry *tool.Registry, queue string, mcpPrefixes []string) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	records, err := st.ListTools(ctx)
+	if err != nil {
+		log.Printf("Warning: failed to list published tools: %v", err)
+		return
+	}
+	for _, r := range records {
+		if r.TaskQueue != queue {
+			continue
+		}
+		if _, offered := registry.Get(r.Name); offered {
+			continue
+		}
+		if slices.ContainsFunc(mcpPrefixes, func(p string) bool { return strings.HasPrefix(r.Name, p) }) {
+			continue
+		}
+		if deleted, err := st.DeleteTool(ctx, r.Name, queue); err != nil {
+			log.Printf("Error: failed to withdraw tool %q from queue %q: %v", r.Name, queue, err)
+		} else if deleted {
+			log.Printf("Withdrew tool %q from queue %q: this worker no longer offers it", r.Name, queue)
+		}
+	}
+}
+
+// keepPublishing publishes again, every interval, the tools a publish left
+// out (another queue still serving one, the database away), until every one
+// is in: a tool moving between workers lands whatever the order they start
+// in.
+func keepPublishing(ctx context.Context, st toolPublisher, tc taskqueue.Describer, registry *tool.Registry, queue string, left []string, interval time.Duration) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for len(left) > 0 {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		var tools []*tool.Tool
+		for _, name := range left {
+			if tl, ok := registry.Get(name); ok {
+				tools = append(tools, tl)
+			}
+		}
+		left = publishTools(ctx, st, tc, tools, queue)
+	}
 }

@@ -70,6 +70,24 @@ func (f *machineStore) GetMachine(_ context.Context, id string) (*store.Machine,
 	}
 	return nil, nil
 }
+func (f *machineStore) SetMachinePaused(_ context.Context, userID, id string, paused bool) error {
+	for i, m := range f.machines {
+		if m.ID == id && m.UserID == userID {
+			f.machines[i].Paused = paused
+			return nil
+		}
+	}
+	return store.ErrMachineNotFound
+}
+func (f *machineStore) SetMachinePriority(_ context.Context, userID, id string, priority int) error {
+	for i, m := range f.machines {
+		if m.ID == id && m.UserID == userID {
+			f.machines[i].Priority = priority
+			return nil
+		}
+	}
+	return store.ErrMachineNotFound
+}
 func (f *machineStore) RevokeMachine(_ context.Context, id, _ string) ([]store.Directive, error) {
 	f.revoked = append(f.revoked, id)
 	return nil, nil
@@ -144,6 +162,19 @@ func TestMachines_Routes(t *testing.T) {
 	w = call(t, h, http.MethodGet, "/machines", "", alice)
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "maison") || strings.Contains(w.Body.String(), "bureau-de-bob") {
 		t.Errorf("alice's machines: %d", w.Code)
+	}
+	// Pause and priority: her machines only, in bounds.
+	if w := postForm(t, h, "/machines/m-alice/pause", url.Values{"paused": {"true"}}, alice); w.Code != http.StatusSeeOther || !ms.machines[0].Paused {
+		t.Errorf("pause: %d %+v", w.Code, ms.machines[0])
+	}
+	if w := postForm(t, h, "/machines/m-bob/pause", url.Values{"paused": {"true"}}, alice); w.Code != http.StatusNotFound || ms.machines[1].Paused {
+		t.Errorf("pause bob's: %d", w.Code)
+	}
+	if w := postForm(t, h, "/machines/m-alice/priority", url.Values{"priority": {"5"}}, alice); w.Code != http.StatusSeeOther || ms.machines[0].Priority != 5 {
+		t.Errorf("priority: %d %+v", w.Code, ms.machines[0])
+	}
+	if w := postForm(t, h, "/machines/m-alice/priority", url.Values{"priority": {"99"}}, alice); w.Code != http.StatusBadRequest {
+		t.Errorf("priority out of bounds: %d", w.Code)
 	}
 	if w := postForm(t, h, "/machines/m-bob/revoke", nil, alice); w.Code != http.StatusNotFound || len(ms.revoked) != 0 {
 		t.Errorf("alice revokes bob's machine: %d %v", w.Code, ms.revoked)

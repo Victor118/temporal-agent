@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"slices"
+	"strconv"
 	"sync"
 	"time"
 
@@ -34,11 +35,26 @@ func newGateway(cfg *config.Config, st *store.PostgresStore, tc client.Client, h
 	if err != nil {
 		log.Fatalf("Invalid configuration: %v", err)
 	}
-	g := &gateway.Gateway{Store: st, Temporal: tc, Alert: machineAlerts(st, hub), ClientAddr: clients.Of, AddrsKnown: clients.Known()}
+	if _, err := cfg.MachinesOn(); err != nil {
+		log.Fatalf("Invalid configuration: %v", err)
+	}
+	g := &gateway.Gateway{Store: st, Temporal: tc, Alert: machineAlerts(st, hub), ClientAddr: clients.Of, AddrsKnown: clients.Known(),
+		Notice: machineNotices(hub)}
 	if err := g.Start(context.Background()); err != nil {
 		log.Fatalf("Machines gateway: %v", err)
 	}
 	return g
+}
+
+// machineNotices shows what a directive does on its turn's line: a notice
+// event on the session's topic, which the server reads in passing
+// (session.Service.Observe, the participant's note) and the pages reload
+// on. Web only.
+func machineNotices(hub *sse.Hub) func(sessionID, participant, agent, text string) {
+	return func(sessionID, participant, agent, text string) {
+		data, _ := json.Marshal(map[string]string{"type": activity.EventNotice, "text": text, "agent": agent, "participant": participant})
+		hub.Publish(sessionID, activity.SSEEvent{Type: activity.EventNotice, Data: data})
+	}
 }
 
 // notificationAppender stores a notification.
@@ -137,7 +153,8 @@ func (m *machinesUI) page(w http.ResponseWriter, r *http.Request, p chat.Machine
 	for _, v := range views {
 		row := chat.MachineRow{ID: v.ID, Name: v.Name, OS: v.OS, Capabilities: slices.Clone(v.Capabilities), Online: v.Online,
 			OpenDirectives: v.OpenDirectives, MaxDirectives: v.MaxDirectives, CreatedAt: v.CreatedAt, Revoked: v.RevokedAt != nil,
-			RevokedReason: v.RevokedReason, LastAddr: v.LastAddr, AgentVersion: v.AgentVersion}
+			RevokedReason: v.RevokedReason, LastAddr: v.LastAddr, AgentVersion: v.AgentVersion,
+			Paused: v.Paused, Priority: v.Priority, ClaudeCode: v.ClaudeCode, OpenKinds: v.OpenKinds}
 		if v.SeenAt != nil {
 			row.SeenAt = *v.SeenAt
 		}
@@ -156,6 +173,12 @@ func (m *machinesUI) list(w http.ResponseWriter, r *http.Request) {
 		p.Flash = "Machine approuvée : elle reçoit son jeton et se connecte d'elle-même."
 	case "revoked":
 		p.Flash = "Machine révoquée."
+	case "paused":
+		p.Flash = "Machine mise en pause : elle ne reçoit plus rien."
+	case "resumed":
+		p.Flash = "Machine reprise."
+	case "priority":
+		p.Flash = "Priorité enregistrée."
 	}
 	if key := r.URL.Query().Get("token"); key != "" {
 		if t, ok := m.take(key, auth.UserFrom(r.Context()).ID); ok {
@@ -188,6 +211,41 @@ func (m *machinesUI) revoke(w http.ResponseWriter, r *http.Request) {
 		m.page(w, r, chat.MachinesPage{Error: "Erreur interne."}, http.StatusInternalServerError)
 	default:
 		goTo(w, r, "/machines?ok=revoked")
+	}
+}
+
+func (m *machinesUI) pause(w http.ResponseWriter, r *http.Request) {
+	paused := r.FormValue("paused") == "true"
+	err := m.gw.SetPaused(r.Context(), auth.UserFrom(r.Context()).ID, chi.URLParam(r, "machineID"), paused)
+	switch {
+	case errors.Is(err, gateway.ErrMachineNotFound):
+		http.Error(w, "Not found", http.StatusNotFound)
+	case err != nil:
+		log.Printf("ui: pause: %v", err)
+		m.page(w, r, chat.MachinesPage{Error: "Erreur interne."}, http.StatusInternalServerError)
+	case paused:
+		goTo(w, r, "/machines?ok=paused")
+	default:
+		goTo(w, r, "/machines?ok=resumed")
+	}
+}
+
+func (m *machinesUI) priority(w http.ResponseWriter, r *http.Request) {
+	prio, err := strconv.Atoi(r.FormValue("priority"))
+	if err != nil || prio < gateway.MinPriority || prio > gateway.MaxPriority {
+		m.page(w, r, chat.MachinesPage{Error: fmt.Sprintf("Priorité : un nombre entre %d et %d.", gateway.MinPriority, gateway.MaxPriority)},
+			http.StatusBadRequest)
+		return
+	}
+	err = m.gw.SetPriority(r.Context(), auth.UserFrom(r.Context()).ID, chi.URLParam(r, "machineID"), prio)
+	switch {
+	case errors.Is(err, gateway.ErrMachineNotFound):
+		http.Error(w, "Not found", http.StatusNotFound)
+	case err != nil:
+		log.Printf("ui: priority: %v", err)
+		m.page(w, r, chat.MachinesPage{Error: "Erreur interne."}, http.StatusInternalServerError)
+	default:
+		goTo(w, r, "/machines?ok=priority")
 	}
 }
 

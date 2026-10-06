@@ -114,6 +114,15 @@ type Config struct {
 	// import are (TYPST_PACKAGES; empty = tool.DefaultTypstPackages, where
 	// the image puts them).
 	TypstPackages string
+	// MachinesEnabled routes coding runs to the users' machines and serves
+	// their gateway ("true", the default, or "false"; read by
+	// MachinesOn, which refuses anything else).
+	MachinesEnabled string
+	// ClaudeCodeAnalyzeQueue is the fallback queue of analyze_repo: where it
+	// runs when no machine of the user's takes it (AnalyzeRepoWorkflow on
+	// the coding workers of that queue). "none" = no fallback.
+	ClaudeCodeAnalyzeQueue string
+
 	// SSH identity a coding worker uses for git: cloning a private repository,
 	// and pushing when the identity allows it. What the worker can do is a
 	// property of the identity it is given, not of the code — the read-only
@@ -214,6 +223,8 @@ func Load() *Config {
 		ClaudeCodeQueueWait:         os.Getenv("CLAUDE_CODE_QUEUE_WAIT"),
 		ClaudeCodeStallTimeout:      os.Getenv("CLAUDE_CODE_STALL_TIMEOUT"),
 		ClaudeCodeAuth:              os.Getenv("CLAUDE_CODE_AUTH"),
+		MachinesEnabled:             os.Getenv("MACHINES_ENABLED"),
+		ClaudeCodeAnalyzeQueue:      envOr("CLAUDE_CODE_ANALYZE_QUEUE", DefaultAnalyzeQueue),
 
 		SkillsRepo:          os.Getenv("SKILLS_REPO"),
 		SkillsBranch:        envOr("SKILLS_BRANCH", "main"),
@@ -334,4 +345,29 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// DefaultAnalyzeQueue is analyze_repo's fallback queue when
+// CLAUDE_CODE_ANALYZE_QUEUE is not set: the read-only coding container's of
+// the compose file (worker.claude-code-ro.yaml).
+const DefaultAnalyzeQueue = "tools-claude-code-ro"
+
+// MachinesOn reads MACHINES_ENABLED: empty or "true" = on, "false" = off,
+// anything else an error (the process does not start on a typo).
+func (c *Config) MachinesOn() (bool, error) {
+	switch c.MachinesEnabled {
+	case "", "true":
+		return true, nil
+	case "false":
+		return false, nil
+	}
+	return false, fmt.Errorf("MACHINES_ENABLED=%q: want true or false", c.MachinesEnabled)
+}
+
+// AnalyzeQueue is analyze_repo's fallback queue; "" = none.
+func (c *Config) AnalyzeQueue() string {
+	if c.ClaudeCodeAnalyzeQueue == "none" {
+		return ""
+	}
+	return c.ClaudeCodeAnalyzeQueue
 }

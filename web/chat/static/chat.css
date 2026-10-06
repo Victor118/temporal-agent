@@ -286,3 +286,6 @@ button, input, textarea, select { font-family: inherit; font-size: inherit; colo
 .machine-token pre { overflow-x: auto; font-size: 12px; margin: 6px 0; }
 .notif.machine { align-items: flex-start; }
 .notif.machine .grow { flex-grow: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.machine-settings { display: flex; flex-direction: column; gap: 6px; }
+.machine-priority { display: flex; gap: 4px; }
+.machine-priority .input { width: 64px; }

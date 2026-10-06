@@ -11,5 +11,9 @@ queue: tools-claude-code-ro
 # queue and nothing else.
 workflows: false
 
-tools:
-  - analyze_repo
+# It publishes no tool: analyze_repo is the main worker's (CodingRunWorkflow),
+# which runs it on the user's machine, or here, as its fallback queue
+# (CLAUDE_CODE_ANALYZE_QUEUE, this queue by default): this worker serves
+# AnalyzeRepoWorkflow on it. At startup it withdraws the row it published
+# before.
+tools: []

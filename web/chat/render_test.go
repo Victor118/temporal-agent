@@ -174,13 +174,15 @@ func TestRender_Machines(t *testing.T) {
 	now := time.Now()
 	page := render(t, "machines", MachinesPage{Server: "https://agent.example.com", EnrollmentToken: "age_secret", TokenExpires: now,
 		Machines: []MachineRow{
-			{ID: "m1", Name: "maison <b>", OS: "linux/amd64", Capabilities: []string{"echo"}, Online: true, MaxDirectives: 1, CreatedAt: now, SeenAt: now},
+			{ID: "m1", Name: "maison <b>", OS: "linux/amd64", Capabilities: []string{"echo", "claude-code"}, Online: true, MaxDirectives: 2, CreatedAt: now, SeenAt: now,
+				ClaudeCode: "ok", Paused: true, Priority: 3, OpenKinds: []string{"analyze_repo", "analyze_repo"}, OpenDirectives: 2},
 			{ID: "m2", Name: "vieux", Revoked: true, RevokedReason: "révoquée par son propriétaire", CreatedAt: now.Add(-48 * time.Hour)},
 		}})
 	for _, want := range []string{
 		`agent connect --join https://agent.example.com --token-stdin`, "age_secret",
 		"maison &lt;b&gt;", "en ligne", `action="/machines/m1/revoke"`, "hx-confirm=",
-		"révoquée", "capacités : echo", "vue à l&#39;instant", "il y a 2 jours",
+		"révoquée", "capacités : echo, claude-code", "vue à l&#39;instant", "il y a 2 jours",
+		"Claude Code : connecté", "2 × analyse de dépôt", "en pause", "Reprendre", `name="priority"`, `value="3"`,
 	} {
 		if !strings.Contains(page, want) {
 			t.Errorf("machines page lacks %s", want)
