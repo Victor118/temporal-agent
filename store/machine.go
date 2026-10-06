@@ -128,6 +128,7 @@ const (
 	DirectiveFailed    = "failed"
 	DirectiveCanceled  = "canceled"
 	DirectiveStopping  = "machine_stopping"
+	DirectiveRefused   = "refused"
 	DirectiveLost      = "lost"
 	DirectiveRevoked   = "revoked"
 	DirectiveOrphaned  = "orphaned"

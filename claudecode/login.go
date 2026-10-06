@@ -102,20 +102,31 @@ var authFailureMarks = []string{
 	"not logged in", "invalid bearer token", "oauth token revoked",
 }
 
-// AuthFailed reports a run that ended because its credentials were refused
-// (a login expired, a key revoked), as its result or its error says.
-func AuthFailed(res Result, err error) bool {
-	text := strings.ToLower(res.Stderr)
-	if res.IsError || res.Subtype == "" {
-		text += "\n" + strings.ToLower(res.Report)
+// AuthFailure reports a run that ended because its credentials were refused
+// (a login expired, a key revoked): the line that says so, "" for any other
+// end. The result's text counts when the CLI reported a failure; its stderr
+// and the error only when it reported nothing: a run that answered is
+// judged by its answer, not by what a tool printed on the way.
+func AuthFailure(res Result, err error) string {
+	var texts []string
+	if res.IsError {
+		texts = append(texts, res.Report)
 	}
-	if err != nil {
-		text += "\n" + strings.ToLower(err.Error())
-	}
-	for _, mark := range authFailureMarks {
-		if strings.Contains(text, mark) {
-			return true
+	if res.Subtype == "" {
+		texts = append(texts, res.Report, res.Stderr)
+		if err != nil {
+			texts = append(texts, err.Error())
 		}
 	}
-	return false
+	for _, text := range texts {
+		for _, line := range strings.Split(text, "\n") {
+			lower := strings.ToLower(line)
+			for _, mark := range authFailureMarks {
+				if strings.Contains(lower, mark) {
+					return strings.TrimSpace(line)
+				}
+			}
+		}
+	}
+	return ""
 }

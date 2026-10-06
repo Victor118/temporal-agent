@@ -240,7 +240,7 @@ func TestClient_Session(t *testing.T) {
 	write(t, ws, machine.Message{Type: machine.TypeAck, ID: "d-1"})
 
 	write(t, ws, machine.Message{Type: machine.TypeDirective, ID: "d-2", Kind: "claude-code"})
-	if r := read(t, ws, machine.TypeResult); r.ID != "d-2" || r.Status != machine.StatusError {
+	if r := read(t, ws, machine.TypeResult); r.ID != "d-2" || r.Status != machine.StatusRefused {
 		t.Errorf("unknown kind: %+v", r)
 	}
 	in, _ = json.Marshal(machine.EchoInput{Text: "long", DurationMS: 60000})

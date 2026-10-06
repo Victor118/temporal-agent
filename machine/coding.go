@@ -88,6 +88,10 @@ type CodingOutput struct {
 	Events      int    `json:"events,omitempty"`
 }
 
+// CloneProgress is a coding run's progress while it clones: the CLI has not
+// started (nothing paid yet).
+const CloneProgress = "clone"
+
 // CodingProgress is a coding run's progress, as its user reads it on the
 // turn's line: "34 outils (dernier : Grep)".
 func CodingProgress(toolCalls int, lastTool string) string {

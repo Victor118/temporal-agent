@@ -54,20 +54,22 @@ func TestFindLogin(t *testing.T) {
 	}
 }
 
-func TestAuthFailed(t *testing.T) {
+func TestAuthFailure(t *testing.T) {
 	for _, c := range []struct {
 		res  Result
 		err  error
-		want bool
+		want string
 	}{
-		{Result{IsError: true, Subtype: "success", Report: "Invalid API key · Please run /login"}, nil, true},
-		{Result{Stderr: "OAuth token has expired. Please obtain a new token"}, errors.New("exited"), true},
-		{Result{}, errors.New(`claudecode: CLI exited with exit status 1 and reported nothing: {"type":"authentication_error"}`), true},
-		{Result{Subtype: "success", Report: "The login page uses an API key; run /login is in the docs"}, nil, false},
-		{Result{IsError: true, Subtype: "error_max_turns"}, nil, false},
+		{Result{IsError: true, Subtype: "success", Report: "Invalid API key · Please run /login"}, nil, "Invalid API key · Please run /login"},
+		{Result{Stderr: "warming up\nOAuth token has expired. Please obtain a new token"}, errors.New("exited"), "OAuth token has expired. Please obtain a new token"},
+		{Result{}, errors.New(`claudecode: CLI exited with exit status 1 and reported nothing: {"type":"authentication_error"}`), `claudecode: CLI exited with exit status 1 and reported nothing: {"type":"authentication_error"}`},
+		// A run that answered: what a tool printed on stderr is not read.
+		{Result{Subtype: "success", Report: "Done.", Stderr: "curl: Invalid API key"}, nil, ""},
+		{Result{Subtype: "success", Report: "The login page uses an API key; run /login is in the docs"}, nil, ""},
+		{Result{IsError: true, Subtype: "error_max_turns"}, nil, ""},
 	} {
-		if got := AuthFailed(c.res, c.err); got != c.want {
-			t.Errorf("%+v %v: %v", c.res, c.err, got)
+		if got := AuthFailure(c.res, c.err); got != c.want {
+			t.Errorf("%+v %v: %q, want %q", c.res, c.err, got, c.want)
 		}
 	}
 }

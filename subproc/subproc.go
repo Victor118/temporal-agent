@@ -97,3 +97,15 @@ func KillGroup(cmd *exec.Cmd) {
 	}
 	syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 }
+
+// NewSession starts cmd in a session of its own (setsid), after
+// KillGroupOnCancel: its own process group still (the session's), and no
+// controlling terminal, so that nothing it starts can prompt on the user's.
+func NewSession(cmd *exec.Cmd) {
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	// A session leader leads its group already; setpgid would fail on it.
+	cmd.SysProcAttr.Setpgid = false
+	cmd.SysProcAttr.Setsid = true
+}

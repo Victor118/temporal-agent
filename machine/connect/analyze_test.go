@@ -5,6 +5,9 @@ package connect
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -88,7 +91,7 @@ func TestAnalyzer_Run(t *testing.T) {
 		t.Errorf("output %+v", out)
 	}
 	args, _ := os.ReadFile(filepath.Join(seen, "args"))
-	for _, want := range []string{"--permission-mode plan", "--max-budget-usd 2", "--no-session-persistence", "read-only analysis"} {
+	for _, want := range []string{"--permission-mode plan", "--max-budget-usd 2", "--no-session-persistence", "read-only analysis", "--setting-sources user", "--strict-mcp-config"} {
 		if !strings.Contains(string(args), want) {
 			t.Errorf("args lack %q: %s", want, args)
 		}
@@ -104,7 +107,8 @@ func TestAnalyzer_Run(t *testing.T) {
 		t.Errorf("clone left behind: %v", entries)
 	}
 
-	if _, err := a.Run(context.Background(), input("/elsewhere", ""), func(string) {}); err == nil || !strings.Contains(err.Error(), "--repos") {
+	var refusal *Refusal
+	if _, err := a.Run(context.Background(), input("/elsewhere", ""), func(string) {}); !errors.As(err, &refusal) || !strings.Contains(err.Error(), "--repos") {
 		t.Errorf("a repository not allowed: %v", err)
 	}
 	if _, err := a.Run(context.Background(), input("--upload-pack=x", ""), func(string) {}); err == nil {
@@ -143,17 +147,41 @@ EOF
 	told := 0
 	a.OnLoginRefused = func() { told++ }
 	_, err := a.Run(context.Background(), input(repo, ""), func(string) {})
-	if err == nil || told != 1 || a.Login() != claudecode.LoginNone {
-		t.Fatalf("refused: %v, told %d, login %s", err, told, a.Login())
+	var refusal *Refusal
+	if !errors.As(err, &refusal) || told != 1 || a.Login() != claudecode.LoginNone {
+		t.Fatalf("refused before any tool: %v, told %d, login %s", err, told, a.Login())
 	}
-	// A new /login rewrites the file: announced again.
+	// Refused at once now, without running the CLI.
+	if _, err := a.Run(context.Background(), input(repo, ""), func(string) {}); !errors.As(err, &refusal) || told != 1 {
+		t.Errorf("logged out: %v", err)
+	}
+	// A new /login rewrites the file: announced again (past the cache).
 	later := time.Now().Add(time.Minute)
 	os.Chtimes(filepath.Join(a.Home, ".claude", ".credentials.json"), later, later)
+	time.Sleep(loginCacheFor)
 	if a.Login() != claudecode.LoginOK {
 		t.Errorf("after a new login: %s", a.Login())
 	}
 
+	// Nothing to tell a new login apart (a token): tried again after
+	// RetryAfter, or at the next connection.
+	a.loginRefused()
+	a.Environ, a.RetryAfter = []string{claudecode.OAuthTokenEnv + "=t"}, 300*time.Millisecond
+	if a.Login() != claudecode.LoginNone {
+		t.Error("refused token announced")
+	}
+	time.Sleep(loginCacheFor + 300*time.Millisecond)
+	if a.Login() != claudecode.LoginOK {
+		t.Error("not tried again after RetryAfter")
+	}
+	a.loginRefused()
+	a.Retry()
+	if a.Login() != claudecode.LoginOK {
+		t.Error("not tried again at a new connection")
+	}
+
 	a.Runner.Binary = filepath.Join(t.TempDir(), "no-claude")
+	a.Retry() // past the cache
 	if a.Login() != claudecode.LoginAbsent {
 		t.Errorf("no CLI: %s", a.Login())
 	}
@@ -161,5 +189,43 @@ EOF
 	a.Auth = claudecode.AuthAPI
 	if _, ok := claudecode.FindLogin(a.Auth, nil, a.Home); ok {
 		t.Error("api without a key")
+	}
+}
+
+// A clone never waits on a prompt: a repository that asks for credentials
+// fails at once, saying what to do; ext:: and plaintext transports are
+// refused.
+func TestAnalyzer_CloneNeverPrompts(t *testing.T) {
+	a, _, _ := newAnalyzer(t, analyzeStream)
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("WWW-Authenticate", `Basic realm="git"`)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+	// The owner's global git configuration is read: here, one that trusts
+	// the test server's certificate.
+	home := t.TempDir()
+	os.WriteFile(filepath.Join(home, ".gitconfig"), []byte("[http]\n\tsslVerify = false\n"), 0o644)
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	private := srv.URL + "/me/app.git"
+	marker := filepath.Join(t.TempDir(), "ran")
+	refused := []string{"ext::sh -c touch% " + marker, "http://127.0.0.1:1/x.git", "git://127.0.0.1:1/x.git"}
+	a.Repos = append([]string{private}, refused...)
+	start := time.Now()
+	_, err := a.Run(context.Background(), input(private, ""), func(string) {})
+	if err == nil || !strings.Contains(err.Error(), "asks for credentials") {
+		t.Errorf("credentials asked: %v", err)
+	}
+	if took := time.Since(start); took > 20*time.Second {
+		t.Errorf("waited %s", took)
+	}
+	for _, repo := range refused {
+		if _, err := a.Run(context.Background(), input(repo, ""), func(string) {}); err == nil || !strings.Contains(err.Error(), "not allowed") {
+			t.Errorf("%s: %v", repo, err)
+		}
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("ext:: ran a command")
 	}
 }

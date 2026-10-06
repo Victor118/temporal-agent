@@ -741,6 +741,10 @@ func (a *ClaudeCodeActivities) RunClaudeCode(ctx context.Context, in RunClaudeCo
 		// The workspace is deleted at the end of the run, so a transcript on
 		// disk would only outlive the tree it talks about.
 		NoSessionPersistence: true,
+		// The clone's own settings (hooks, even in plan mode) and MCP
+		// servers (.mcp.json) are the repository's, not the operator's.
+		SettingSources:  []string{"user"},
+		StrictMCPConfig: true,
 	})
 	// Stopped is WorkerStopping whatever the CLI returned, a run that ended
 	// at the very instant of Stop included: its result is dropped. On

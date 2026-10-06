@@ -49,6 +49,9 @@ const (
 	// StatusStopping is a directive ended because `agent connect` stops:
 	// the run is lost, like a machine that went away.
 	StatusStopping = "machine_stopping"
+	// StatusRefused is a directive the machine turned down before doing
+	// anything (no clone, no run): it can go elsewhere.
+	StatusRefused = "refused"
 )
 
 // Error codes the gateway sends before it closes a connection.
@@ -178,7 +181,7 @@ func CheckFromMachine(m *Message) error {
 			return bad("directive id %q", m.ID)
 		}
 		switch m.Status {
-		case StatusOK, StatusError, StatusCanceled, StatusStopping:
+		case StatusOK, StatusError, StatusCanceled, StatusStopping, StatusRefused:
 		default:
 			return bad("result status %q", m.Status)
 		}

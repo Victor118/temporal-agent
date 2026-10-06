@@ -63,7 +63,12 @@ type Params struct {
 	AddDirs            []string `json:"add_dirs,omitempty"`
 	MCPConfig          []string `json:"mcp_config,omitempty"` // JSON strings or file paths
 	StrictMCPConfig    bool     `json:"strict_mcp_config,omitempty"`
-	MaxBudgetUSD       float64  `json:"max_budget_usd,omitempty"`
+	// SettingSources are the settings files the CLI loads (--setting-sources:
+	// user, project, local); empty = all. A clone's own .claude/settings.json
+	// (hooks it would run, even in plan mode) is "project": a run on a
+	// repository someone else writes loads "user" only.
+	SettingSources []string `json:"setting_sources,omitempty"`
+	MaxBudgetUSD   float64  `json:"max_budget_usd,omitempty"`
 
 	// SessionID pins the CLI session id. A retried activity that reuses the
 	// same id keeps one session in the CLI's own logs instead of scattering
@@ -197,6 +202,10 @@ type Runner struct {
 	// Auth keeps the CLI to the worker's way of authenticating (ResolveAuth):
 	// the other mode's credential never reaches it. Zero: as found.
 	Auth Auth
+	// NewSession starts the CLI in a session of its own, with no controlling
+	// terminal: nothing it starts (ssh, git) can stop to prompt on one. For a
+	// run started from a user's terminal (agent connect).
+	NewSession bool
 }
 
 // Holder counts a command while it runs, and once none runs, ends every
@@ -257,6 +266,9 @@ func (r *Runner) Run(ctx context.Context, p Params) (Result, error) {
 	// a build or test it launched keeps running in the container after the
 	// activity is gone.
 	subproc.KillGroupOnCancel(cmd, syscall.SIGTERM, killGrace)
+	if r.NewSession {
+		subproc.NewSession(cmd)
+	}
 
 	// Writers, not StdoutPipe/StderrPipe: os/exec then makes the pipes and
 	// copies from them itself, and WaitDelay bounds that copy too. A process
@@ -397,6 +409,9 @@ func buildArgs(p Params) []string {
 	}
 	if p.StrictMCPConfig {
 		args = append(args, "--strict-mcp-config")
+	}
+	if len(p.SettingSources) > 0 {
+		args = append(args, "--setting-sources", strings.Join(p.SettingSources, ","))
 	}
 	if p.MaxBudgetUSD > 0 {
 		args = append(args, "--max-budget-usd", fmt.Sprintf("%g", p.MaxBudgetUSD))

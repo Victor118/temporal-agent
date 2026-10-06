@@ -161,7 +161,9 @@ func (a *MachineActivities) RunOnMachine(ctx context.Context, in RunOnMachineInp
 		closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		a.Store.CloseDirective(closeCtx, d.ID, store.DirectiveFailed, "not handed to the gateway")
-		return machine.Result{}, fmt.Errorf("hand the directive to the gateway: %w", err)
+		// Nothing ran: the caller may take it elsewhere.
+		return machine.Result{}, temporal.NewNonRetryableApplicationError(
+			fmt.Sprintf("the directive could not be handed to its machine: %v", err), machine.ErrTypeRefused, nil)
 	}
 	return machine.Result{}, activity.ErrResultPending
 }

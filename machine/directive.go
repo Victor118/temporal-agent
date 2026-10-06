@@ -27,6 +27,10 @@ const (
 	// ErrTypeClosed is a directive closed before it could start (swept,
 	// its machine revoked).
 	ErrTypeClosed = "DirectiveClosed"
+	// ErrTypeRefused is a directive that never started: its machine turned
+	// it down (a repository it does not allow, Claude Code not logged in),
+	// or it could not be handed over. Nothing ran: it may go elsewhere.
+	ErrTypeRefused = "DirectiveRefused"
 )
 
 // Result is what RunOnMachine returns: the machine's output, and its last

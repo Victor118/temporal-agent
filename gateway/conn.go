@@ -591,6 +591,12 @@ func completion(m machine.Message) (machine.Result, error) {
 	case machine.StatusStopping:
 		return res, temporal.NewNonRetryableApplicationError("the machine stopped (agent connect ended) during the directive",
 			machine.ErrTypeStopping, nil, res)
+	case machine.StatusRefused:
+		msg := m.Error
+		if msg == "" {
+			msg = "the machine refused the directive"
+		}
+		return res, temporal.NewNonRetryableApplicationError(msg, machine.ErrTypeRefused, nil, res)
 	default:
 		msg := m.Error
 		if msg == "" {
@@ -609,6 +615,8 @@ func closedState(status string) string {
 		return store.DirectiveCanceled
 	case machine.StatusStopping:
 		return store.DirectiveStopping
+	case machine.StatusRefused:
+		return store.DirectiveRefused
 	}
 	return store.DirectiveFailed
 }
@@ -704,8 +712,9 @@ func (c *conn) status(m machine.Message) {
 	c.claudeCode = m.ClaudeCode
 	switch {
 	case was == "ok" && m.ClaudeCode == "logged_out":
-		c.g.alert(c.ctx, c.m.UserID, fmt.Sprintf("Claude Code n'est plus connecté sur la machine « %s » : ses runs y sont refusés. "+
-			"Sur la machine : lance claude puis /login (ou claude setup-token) ; elle le réannonce d'elle-même.", c.m.Name))
+		c.g.alert(c.ctx, c.m.UserID, fmt.Sprintf("Claude Code n'est plus connecté sur la machine « %s » : son login a été refusé, "+
+			"ses analyses vont ailleurs (repli de l'installation) ou échouent. Sur la machine : lance claude puis /login (ou claude setup-token). "+
+			"Elle réannonce Claude Code dès que son fichier de login change, sinon réessaie d'elle-même au bout de 10 min ou à sa prochaine connexion.", c.m.Name))
 	case was == "logged_out" && m.ClaudeCode == "ok":
 		c.g.alert(c.ctx, c.m.UserID, fmt.Sprintf("Claude Code est de nouveau connecté sur la machine « %s ».", c.m.Name))
 	}

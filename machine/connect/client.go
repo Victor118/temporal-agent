@@ -42,6 +42,9 @@ type Client struct {
 	// StopWait bounds how long a stopping machine waits for the acks of
 	// its last results; zero = 5 s.
 	StopWait time.Duration
+	// OnConnect is called at the start of each connection, before its
+	// hello (Analyzer.Retry: a refused login is tried again).
+	OnConnect func()
 	// Status says what the machine can do now; nil: the capability of each
 	// executor, always. StatusEvery is how often it is checked (and
 	// announced when it changed); zero = 30 s.
@@ -70,6 +73,18 @@ type job struct {
 	sentAt time.Time
 	flush  *time.Timer
 	done   bool
+}
+
+// Refusal is a directive the machine turns down before doing anything (no
+// clone, no run): its executor returns one, and the workflow takes the
+// directive elsewhere.
+type Refusal struct{ Reason string }
+
+func (r *Refusal) Error() string { return r.Reason }
+
+// Refuse is a Refusal.
+func Refuse(format string, args ...any) error {
+	return &Refusal{Reason: fmt.Sprintf(format, args...)}
 }
 
 // Errors that end the client for good.
@@ -265,6 +280,9 @@ func (c *Client) session(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if c.OnConnect != nil {
+		c.OnConnect()
+	}
 	status := c.status()
 	hello := machine.Message{Type: machine.TypeHello, Protocol: machine.Protocol, AgentVersion: c.Version, OS: c.OS,
 		Capabilities: status.Capabilities, ClaudeCode: status.ClaudeCode, MaxDirectives: c.MaxDirectives}
@@ -433,7 +451,7 @@ func (c *Client) start(m machine.Message) {
 		return
 	}
 	fail := func(why string) {
-		r := machine.Message{Type: machine.TypeResult, ID: m.ID, Status: machine.StatusError, Error: why}
+		r := machine.Message{Type: machine.TypeResult, ID: m.ID, Status: machine.StatusRefused, Error: why}
 		if err := c.State.SaveResult(r); err != nil {
 			c.logf("connect: keep result %s: %v", m.ID, err)
 		}
@@ -482,7 +500,11 @@ func (c *Client) run(ctx context.Context, m machine.Message, exec Executor, j *j
 	c.mu.Unlock()
 	if err != nil {
 		// What the run produced, if anything, goes along: a partial report.
+		var refusal *Refusal
 		switch cause := context.Cause(ctx); {
+		case errors.As(err, &refusal):
+			r.Status = machine.StatusRefused
+			r.Error = machine.Cut(refusal.Reason, machine.MaxErrorBytes)
 		case errors.Is(cause, errStopping):
 			r.Status = machine.StatusStopping
 		case errors.Is(cause, errCanceled):

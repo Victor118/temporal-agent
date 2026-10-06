@@ -46,6 +46,7 @@ func TestBuildArgsMapsParams(t *testing.T) {
 		MaxBudgetUSD:         2.5,
 		SessionID:            "0e2f5f4a-0000-4000-8000-000000000000",
 		NoSessionPersistence: true,
+		SettingSources:       []string{"user"},
 	})
 	for _, want := range []string{
 		" --model opus ",
@@ -60,6 +61,7 @@ func TestBuildArgsMapsParams(t *testing.T) {
 		" --max-budget-usd 2.5 ",
 		" --session-id 0e2f5f4a-0000-4000-8000-000000000000 ",
 		" --no-session-persistence ",
+		" --setting-sources user ",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("args %q missing %q", got, want)
