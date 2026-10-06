@@ -48,7 +48,8 @@ func init() {
 	f.Bool("token-stdin", false, "with --join: read an enrollment token from the standard input instead of showing a code")
 	f.String("dir", "", "the machine's directory (default: $XDG_CONFIG_HOME/agent/machine)")
 	f.Int("max-directives", 1, "how many directives this machine runs at once")
-	f.String("repos", os.Getenv("AGENT_CONNECT_REPOS"), "repositories an analysis may clone, comma-separated globs (* stops at /); empty = every one refused (env AGENT_CONNECT_REPOS)")
+	f.String("repos", os.Getenv("AGENT_CONNECT_REPOS"), "repositories a run may clone (and push to, with --allow-push), comma-separated globs (* stops at /); empty = every one refused (env AGENT_CONNECT_REPOS)")
+	f.Bool("allow-push", os.Getenv("AGENT_CONNECT_ALLOW_PUSH") == "true", "let implement_feature run here and push its branch (agent/…) with your git identity, to a repository of --repos; off = this machine runs no implementation (env AGENT_CONNECT_ALLOW_PUSH=true)")
 	f.Float64("max-budget-usd", 0, "what one Claude Code run may spend at most, in dollars; 0 = no cap (env AGENT_CONNECT_MAX_BUDGET_USD)")
 	f.String("claude-auth", os.Getenv("CLAUDE_CODE_AUTH"), "who pays the runs: api (ANTHROPIC_API_KEY) or subscription (your Claude login); empty = the one credential present (env CLAUDE_CODE_AUTH)")
 	f.String("claude-model", os.Getenv("CLAUDE_CODE_MODEL"), "model of the runs; empty = the CLI's default (env CLAUDE_CODE_MODEL)")
@@ -86,19 +87,23 @@ func runConnect(cmd *cobra.Command, args []string) {
 	defer stop()
 
 	executors := map[string]connect.Executor{machine.KindEcho: connect.Echo}
-	analyzer, err := newAnalyzer(cmd)
+	coder, err := newCoder(cmd)
 	if err != nil {
 		log.Fatal(err)
 	}
-	if analyzer != nil {
-		executors[machine.KindAnalyzeRepo] = analyzer.Run
+	if coder != nil {
+		executors[machine.KindAnalyzeRepo] = coder.Analyze
+		executors[machine.KindImplementFeature] = coder.Implement
 	}
 	status := func() connect.Status {
 		s := connect.Status{Capabilities: []string{machine.KindEcho}, ClaudeCode: string(claudecode.LoginAbsent)}
-		if analyzer != nil {
-			s.ClaudeCode = string(analyzer.Login())
+		if coder != nil {
+			s.ClaudeCode = string(coder.Login())
 			if s.ClaudeCode == string(claudecode.LoginOK) {
 				s.Capabilities = append(s.Capabilities, machine.CapClaudeCode)
+			}
+			if coder.AllowPush {
+				s.Capabilities = append(s.Capabilities, machine.CapGitPush)
 			}
 		}
 		return s
@@ -122,20 +127,21 @@ func runConnect(cmd *cobra.Command, args []string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	if analyzer != nil {
-		analyzer.OnLoginRefused = c.Refresh
-		c.OnConnect = analyzer.Retry
-		if analyzer.WorkDir == "" {
+	if coder != nil {
+		coder.OnLoginRefused = c.Refresh
+		coder.Upload = c.Upload
+		c.OnConnect = coder.Retry
+		if coder.WorkDir == "" {
 			cache, err := os.UserCacheDir()
 			if err != nil {
 				log.Fatalf("--work-dir: %v", err)
 			}
-			analyzer.WorkDir = filepath.Join(cache, "agent", "runs", cfg.MachineID)
+			coder.WorkDir = filepath.Join(cache, "agent", "runs", cfg.MachineID)
 		}
-		if err := analyzer.Sweep(); err != nil {
-			log.Printf("connect: clean %s: %v", analyzer.WorkDir, err)
+		if err := coder.Sweep(); err != nil {
+			log.Printf("connect: clean %s: %v", coder.WorkDir, err)
 		}
-		describeAnalyzer(analyzer)
+		describeCoder(coder)
 	}
 	log.Printf("connect: machine %q of %s, running %v, %d at a time (%s)", cfg.Name, cfg.Server, c.Capabilities(), maxDirectives, dir)
 	if err := c.Run(ctx); err != nil {
@@ -184,11 +190,11 @@ func enroll(ctx context.Context, state connect.State, join, name string, tokenSt
 	return nil
 }
 
-// newAnalyzer is the machine's analyze_repo, when the claude CLI is
-// installed (nil otherwise): who pays is settled here, as on a worker
-// (claudecode.ResolveAuth): both credentials in the environment and no
-// --claude-auth stops agent connect.
-func newAnalyzer(cmd *cobra.Command) (*connect.Analyzer, error) {
+// newCoder is the machine's analyze_repo and implement_feature, when the
+// claude CLI is installed (nil otherwise): who pays is settled here, as on a
+// worker (claudecode.ResolveAuth): both credentials in the environment and
+// no --claude-auth stops agent connect.
+func newCoder(cmd *cobra.Command) (*connect.Coder, error) {
 	runner := claudecode.Runner{}
 	if !runner.Available() {
 		log.Println("connect: no claude CLI in PATH: this machine runs no Claude Code (install it, then restart agent connect)")
@@ -220,14 +226,15 @@ func newAnalyzer(cmd *cobra.Command) (*connect.Analyzer, error) {
 	}
 	model, _ := f.GetString("claude-model")
 	workDir, _ := f.GetString("work-dir")
+	allowPush, _ := f.GetBool("allow-push")
 	home, _ := os.UserHomeDir()
-	return &connect.Analyzer{Runner: runner, Auth: auth, Repos: repos, MaxBudgetUSD: budget, Model: model,
+	return &connect.Coder{Runner: runner, Auth: auth, Repos: repos, AllowPush: allowPush, MaxBudgetUSD: budget, Model: model,
 		WorkDir: workDir, Environ: os.Environ(), Home: home}, nil
 }
 
-// describeAnalyzer says at startup who pays the runs, and what keeps them in
+// describeCoder says at startup who pays the runs, and what keeps them in
 // bounds: the owner sees it before any run.
-func describeAnalyzer(a *connect.Analyzer) {
+func describeCoder(a *connect.Coder) {
 	switch a.Auth {
 	case claudecode.AuthAPI:
 		log.Println("connect: Claude Code runs are billed to the Anthropic API (ANTHROPIC_API_KEY)")
@@ -243,13 +250,22 @@ func describeAnalyzer(a *connect.Analyzer) {
 			"agent connect announces it within 30 s once there")
 	}
 	if len(a.Repos) == 0 {
-		log.Println("connect: --repos is empty: every analysis is refused (give the repositories you allow, e.g. --repos 'git@github.com:me/*')")
+		log.Println("connect: --repos is empty: every run is refused (give the repositories you allow, e.g. --repos 'git@github.com:me/*')")
 	} else {
-		log.Printf("connect: analyses may clone %v", a.Repos)
+		log.Printf("connect: runs may clone %v", a.Repos)
 	}
-	if a.MaxBudgetUSD > 0 {
-		log.Printf("connect: each run stops at $%g", a.MaxBudgetUSD)
+	if a.AllowPush {
+		log.Println("connect: --allow-push: implementations run here, and push their branch (agent/…) to those repositories with your git identity")
 	} else {
+		log.Println("connect: no --allow-push: implementations run elsewhere (the installation's fallback), never here")
+	}
+	switch {
+	case a.MaxBudgetUSD > 0:
+		log.Printf("connect: each run stops at $%g", a.MaxBudgetUSD)
+	case a.Auth == claudecode.AuthSubscription:
+		log.Println("connect: no spending cap per run (--max-budget-usd): with a subscription, a cap also keeps one run " +
+			"from eating your usage limit, which your own Claude sessions share")
+	default:
 		log.Println("connect: no spending cap per run (--max-budget-usd)")
 	}
 	log.Printf("connect: clones go to %s, deleted after each run", a.WorkDir)

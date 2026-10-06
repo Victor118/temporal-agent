@@ -9,6 +9,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -55,6 +56,9 @@ type Client struct {
 	// dropped without a word otherwise leaves it waiting for ever. Zero =
 	// 30 s.
 	PingEvery time.Duration
+	// LogEvery is how often a directive's progress is logged at most, for
+	// the machine's owner watching its terminal; zero = 1 min.
+	LogEvery time.Duration
 
 	mu   sync.Mutex
 	jobs map[string]*job
@@ -73,6 +77,9 @@ type job struct {
 	sentAt time.Time
 	flush  *time.Timer
 	done   bool
+	// loggedAt is when its progress was last logged, logged what.
+	loggedAt time.Time
+	logged   string
 }
 
 // Refusal is a directive the machine turns down before doing anything (no
@@ -462,8 +469,9 @@ func (c *Client) start(m machine.Message) {
 	case exec == nil:
 		fail(fmt.Sprintf("this machine does not run %q directives", m.Kind))
 		return
-	case !slices.Contains(c.status().Capabilities, machine.CapabilityOf(m.Kind)):
-		fail(fmt.Sprintf("this machine cannot run %q directives now (no %s: see agent connect's log)", m.Kind, machine.CapabilityOf(m.Kind)))
+	case !hasAll(c.status().Capabilities, machine.CapabilitiesOf(m.Kind)):
+		fail(fmt.Sprintf("this machine cannot run %q directives now (it needs %s: see agent connect's log)", m.Kind,
+			strings.Join(machine.CapabilitiesOf(m.Kind), ", ")))
 		return
 	case len(c.jobs) >= c.MaxDirectives:
 		fail(fmt.Sprintf("this machine runs %d directives at most", c.MaxDirectives))
@@ -480,11 +488,11 @@ func (c *Client) start(m machine.Message) {
 		inner := cancel
 		cancel = func(cause error) { inner(cause); stop() }
 	}
-	j := &job{cancel: cancel}
+	j := &job{cancel: cancel, loggedAt: time.Now()}
 	c.jobs[m.ID] = j
 	c.jobsWG.Add(1)
 	c.logf("connect: directive %s (%s) started", m.ID, m.Kind)
-	go c.run(ctx, m, exec, j)
+	go c.run(withDirective(ctx, m.ID), m, exec, j)
 }
 
 func (c *Client) run(ctx context.Context, m machine.Message, exec Executor, j *job) {
@@ -537,6 +545,15 @@ func (c *Client) progress(id string, j *job, p string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	j.progress = p
+	// Its owner sees how far it is, a line a minute at most.
+	every := c.LogEvery
+	if every <= 0 {
+		every = time.Minute
+	}
+	if p != j.logged && time.Since(j.loggedAt) >= every {
+		j.loggedAt, j.logged = time.Now(), p
+		c.logf("connect: directive %s: %s", id, p)
+	}
 	if j.done || j.flush != nil {
 		return
 	}
@@ -556,6 +573,16 @@ func (c *Client) progress(id string, j *job, p string) {
 			c.send(machine.Message{Type: machine.TypeProgress, ID: id, Text: latest})
 		}
 	})
+}
+
+// hasAll reports every one of want in have.
+func hasAll(have, want []string) bool {
+	for _, w := range want {
+		if !slices.Contains(have, w) {
+			return false
+		}
+	}
+	return true
 }
 
 // cancel stops a directive the gateway closed: a running one ends as

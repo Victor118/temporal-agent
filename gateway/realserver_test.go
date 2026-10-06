@@ -929,7 +929,7 @@ func smokeGitRepo(t *testing.T) string {
 
 // startAnalyzer starts a machine of userID's that runs analyses with a
 // stand-in for the claude CLI (script), on repo.
-func (e *smokeEnv) startAnalyzer(t *testing.T, userID, name, repo, script string) (*connect.Analyzer, chan error) {
+func (e *smokeEnv) startAnalyzer(t *testing.T, userID, name, repo, script string) (*connect.Coder, chan error) {
 	t.Helper()
 	id, token := e.enrollToken(userID, name, []string{machine.CapClaudeCode}, 1)
 	dir := t.TempDir()
@@ -940,9 +940,9 @@ func (e *smokeEnv) startAnalyzer(t *testing.T, userID, name, repo, script string
 	if err := os.WriteFile(bin, []byte("#!/bin/sh\ncat >/dev/null\n"+script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	a := &connect.Analyzer{Runner: claudecode.Runner{Binary: bin}, Auth: claudecode.AuthSubscription, Repos: []string{repo},
+	a := &connect.Coder{Runner: claudecode.Runner{Binary: bin}, Auth: claudecode.AuthSubscription, Repos: []string{repo},
 		WorkDir: t.TempDir(), Environ: []string{claudecode.OAuthTokenEnv + "=smoke"}, Home: t.TempDir(), ProgressEvery: 200 * time.Millisecond}
-	c := &connect.Client{State: connect.State{Dir: dir}, Executors: map[string]connect.Executor{machine.KindAnalyzeRepo: a.Run},
+	c := &connect.Client{State: connect.State{Dir: dir}, Executors: map[string]connect.Executor{machine.KindAnalyzeRepo: a.Analyze, machine.KindImplementFeature: a.Implement},
 		Status: func() connect.Status {
 			s := connect.Status{ClaudeCode: string(a.Login())}
 			if s.ClaudeCode == string(claudecode.LoginOK) {

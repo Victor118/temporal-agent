@@ -239,8 +239,11 @@ type CodingOutput struct {
 }
 
 // CloneProgress is a coding run's progress while it clones: the CLI has not
-// started (nothing paid yet).
-const CloneProgress = "clone"
+// started (nothing paid yet). PushProgress, while an implementation pushes.
+const (
+	CloneProgress = "clone"
+	PushProgress  = "push"
+)
 
 // CodingProgress is a coding run's progress, as its user reads it on the
 // turn's line: "34 outils (dernier : Grep)".

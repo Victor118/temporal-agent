@@ -53,7 +53,7 @@ func gitRepo(t *testing.T) string {
 	return repo
 }
 
-func newAnalyzer(t *testing.T, script string) (*Analyzer, string, string) {
+func newAnalyzer(t *testing.T, script string) (*Coder, string, string) {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("no git")
@@ -63,7 +63,7 @@ func newAnalyzer(t *testing.T, script string) (*Analyzer, string, string) {
 	os.MkdirAll(filepath.Join(home, ".claude"), 0o700)
 	os.WriteFile(filepath.Join(home, ".claude", ".credentials.json"), []byte(`{"claudeAiOauth":{"accessToken":"a"}}`), 0o600)
 	repo := gitRepo(t)
-	a := &Analyzer{Runner: claudecode.Runner{Binary: fakeClaude(t, seen, script)}, Auth: claudecode.AuthSubscription,
+	a := &Coder{Runner: claudecode.Runner{Binary: fakeClaude(t, seen, script)}, Auth: claudecode.AuthSubscription,
 		Repos: []string{repo}, MaxBudgetUSD: 2, WorkDir: t.TempDir(), Home: home, ProgressEvery: 100 * time.Millisecond}
 	return a, repo, seen
 }
@@ -73,7 +73,7 @@ func input(repo, ref string) json.RawMessage {
 	return raw
 }
 
-func TestAnalyzer_Run(t *testing.T) {
+func TestCoder_AnalyzeRun(t *testing.T) {
 	// A key in the owner's shell never reaches a subscription run.
 	t.Setenv("ANTHROPIC_API_KEY", "sk-should-not-leak")
 	a, repo, seen := newAnalyzer(t, analyzeStream)
@@ -81,7 +81,7 @@ func TestAnalyzer_Run(t *testing.T) {
 		t.Fatalf("login %s", a.Login())
 	}
 	var progresses []string
-	raw, err := a.Run(context.Background(), input(repo, "main"), func(p string) { progresses = append(progresses, p) })
+	raw, err := a.Analyze(context.Background(), input(repo, "main"), func(p string) { progresses = append(progresses, p) })
 	var out machine.CodingOutput
 	if err != nil || json.Unmarshal(raw, &out) != nil {
 		t.Fatalf("run: %s %v", raw, err)
@@ -108,18 +108,18 @@ func TestAnalyzer_Run(t *testing.T) {
 	}
 
 	var refusal *Refusal
-	if _, err := a.Run(context.Background(), input("/elsewhere", ""), func(string) {}); !errors.As(err, &refusal) || !strings.Contains(err.Error(), "--repos") {
+	if _, err := a.Analyze(context.Background(), input("/elsewhere", ""), func(string) {}); !errors.As(err, &refusal) || !strings.Contains(err.Error(), "--repos") {
 		t.Errorf("a repository not allowed: %v", err)
 	}
-	if _, err := a.Run(context.Background(), input("--upload-pack=x", ""), func(string) {}); err == nil {
+	if _, err := a.Analyze(context.Background(), input("--upload-pack=x", ""), func(string) {}); err == nil {
 		t.Error("a repository read as an option")
 	}
-	if _, err := a.Run(context.Background(), input(repo, "nope"), func(string) {}); err == nil || !strings.Contains(err.Error(), "unknown ref") {
+	if _, err := a.Analyze(context.Background(), input(repo, "nope"), func(string) {}); err == nil || !strings.Contains(err.Error(), "unknown ref") {
 		t.Errorf("unknown ref: %v", err)
 	}
 }
 
-func TestAnalyzer_CancelEndsTheCLI(t *testing.T) {
+func TestCoder_AnalyzeCancelEndsTheCLI(t *testing.T) {
 	a, repo, _ := newAnalyzer(t, `echo '{"type":"system","subtype":"init","session_id":"s"}'
 echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Read","input":{}}]},"session_id":"s"}'
 sleep 60
@@ -127,7 +127,7 @@ sleep 60
 	ctx, cancel := context.WithCancelCause(context.Background())
 	go func() { time.Sleep(500 * time.Millisecond); cancel(errCanceled) }()
 	start := time.Now()
-	raw, err := a.Run(ctx, input(repo, ""), func(string) {})
+	raw, err := a.Analyze(ctx, input(repo, ""), func(string) {})
 	var out machine.CodingOutput
 	json.Unmarshal(raw, &out)
 	if err == nil || !out.Interrupted || out.ToolCalls != 1 || out.LastTool != "Read" {
@@ -138,7 +138,7 @@ sleep 60
 	}
 }
 
-func TestAnalyzer_LoginRefusedThenBack(t *testing.T) {
+func TestCoder_AnalyzeLoginRefusedThenBack(t *testing.T) {
 	a, repo, _ := newAnalyzer(t, `cat <<'EOF'
 {"type":"system","subtype":"init","session_id":"s"}
 {"type":"result","subtype":"success","is_error":true,"result":"Invalid API key · Please run /login","session_id":"s"}
@@ -146,13 +146,13 @@ EOF
 `)
 	told := 0
 	a.OnLoginRefused = func() { told++ }
-	_, err := a.Run(context.Background(), input(repo, ""), func(string) {})
+	_, err := a.Analyze(context.Background(), input(repo, ""), func(string) {})
 	var refusal *Refusal
 	if !errors.As(err, &refusal) || told != 1 || a.Login() != claudecode.LoginNone {
 		t.Fatalf("refused before any tool: %v, told %d, login %s", err, told, a.Login())
 	}
 	// Refused at once now, without running the CLI.
-	if _, err := a.Run(context.Background(), input(repo, ""), func(string) {}); !errors.As(err, &refusal) || told != 1 {
+	if _, err := a.Analyze(context.Background(), input(repo, ""), func(string) {}); !errors.As(err, &refusal) || told != 1 {
 		t.Errorf("logged out: %v", err)
 	}
 	// A new /login rewrites the file: announced again (past the cache).
@@ -195,7 +195,7 @@ EOF
 // A clone never waits on a prompt: a repository that asks for credentials
 // fails at once, saying what to do; ext:: and plaintext transports are
 // refused.
-func TestAnalyzer_CloneNeverPrompts(t *testing.T) {
+func TestCoder_AnalyzeCloneNeverPrompts(t *testing.T) {
 	a, _, _ := newAnalyzer(t, analyzeStream)
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("WWW-Authenticate", `Basic realm="git"`)
@@ -213,7 +213,7 @@ func TestAnalyzer_CloneNeverPrompts(t *testing.T) {
 	refused := []string{"ext::sh -c touch% " + marker, "http://127.0.0.1:1/x.git", "git://127.0.0.1:1/x.git"}
 	a.Repos = append([]string{private}, refused...)
 	start := time.Now()
-	_, err := a.Run(context.Background(), input(private, ""), func(string) {})
+	_, err := a.Analyze(context.Background(), input(private, ""), func(string) {})
 	if err == nil || !strings.Contains(err.Error(), "asks for credentials") {
 		t.Errorf("credentials asked: %v", err)
 	}
@@ -221,7 +221,7 @@ func TestAnalyzer_CloneNeverPrompts(t *testing.T) {
 		t.Errorf("waited %s", took)
 	}
 	for _, repo := range refused {
-		if _, err := a.Run(context.Background(), input(repo, ""), func(string) {}); err == nil || !strings.Contains(err.Error(), "not allowed") {
+		if _, err := a.Analyze(context.Background(), input(repo, ""), func(string) {}); err == nil || !strings.Contains(err.Error(), "not allowed") {
 			t.Errorf("%s: %v", repo, err)
 		}
 	}
