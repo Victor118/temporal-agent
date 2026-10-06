@@ -46,6 +46,7 @@ happens to answer has locally.
 - **Built-in tools** — File system operations, web access, shell execution, user interaction, workflow queries, scheduling
 - **Published files** — An agent hands the members a file (`publish_file` for a text it writes, `exec`'s `publish` for a file a command made), attached to its answer and downloaded by the session's members only
 - **Documents** — `render_pdf` (Markdown or typst to PDF) and `make_slides` (Markdown to an editable pptx or a PDF deck), rendered by pandoc and typst on the main worker and published like any file
+- **Machines** (phase 0) — A user's own machine, outside the private network, connects to the server with `agent connect` (an outgoing WebSocket, no VPN, no database nor Temporal access) and runs the directives of their agents' turns; enrolled by a code typed in « Mes machines ». Phase 0 proves the mechanism with an `echo` directive: see [docs/design/machines.md](docs/design/machines.md)
 - **Remote MCP servers** — A worker declares MCP servers in its `worker.yaml` (Streamable HTTP, or the older HTTP+SSE) and publishes their tools; a server that is down is retried in the background, and tools it adds or removes are picked up within 30 s
 
 ## Architecture
@@ -57,6 +58,7 @@ The system runs in three modes:
 | **Server** | `agent server` | HTTP API + SSE hub + agent catalog + skill versioning |
 | **Worker** | `agent worker` | Temporal worker + activities + skill execution |
 | **Dev** | `agent dev` | Combined server + worker for local development |
+| **Machine** | `agent connect` | A user's machine: connects to a server's gateway and runs what it is sent (no database, no Temporal) |
 
 ### Workflows
 
@@ -127,6 +129,19 @@ docker compose exec -it agent ./tmp/main user create --email you@example.com --n
 
 Admins manage the other accounts in the back-office, under `/admin/users`.
 
+To try a machine (phase 0: an `echo` directive only), enroll one against the
+dev server, type the code it shows in « Machines › Ajouter une machine », then
+send it an echo:
+
+```bash
+docker compose exec -it agent ./tmp/main connect --join http://localhost:8888 --name essai
+docker compose exec agent ./tmp/main machine-echo --email you@example.com --text bonjour --duration 10s
+```
+
+`agent connect` keeps its token in `$XDG_CONFIG_HOME/agent/machine` (or
+`--dir`) and reconnects by itself; plain `http` is accepted only to this very
+host, `https` otherwise.
+
 Every worker of a coding queue (the queue `analyze_repo` and `implement_feature` are published on) must have the `claude` CLI installed. A worker without it on that queue still answers a run's first check, and the run fails at once saying so: with N workers there of which one lacks the CLI, about one run in N fails that way.
 
 A worker that stops ends its coding runs first, then gives the tasks under way 30 seconds to answer before it exits: each run's answer, that its worker stopped, is recorded by Temporal before the process ends, and read by the next worker of the queue (another replica, or this one once restarted). A stop takes 30 to 50 seconds in all. Give a worker's container a `stop_grace_period` of 60 seconds: Docker's default, 10 seconds, kills it before the answer goes out, and the workflow then waits a minute or two for the missed heartbeats.
@@ -165,10 +180,10 @@ A worker that stops ends its coding runs first, then gives the tasks under way 3
 | `CLAUDE_CODE_WORKSPACE` | Directory of a coding worker's clones, one per run, all of a run's steps on that worker (default `./claude-code-runs`); keep it apart from `WORKSPACE_PATH`. At startup the worker deletes the `run-*` entries a worker that died left there; if another live worker process shares the directory, only those older than a run's longest lifetime. Every worker process holds a lock on `.workers.lock` there; one that cannot take it does not start (one sweeping it is waited for up to 2 minutes, then the worker exits, to be restarted by whatever runs it) |
 | `CLAUDE_CODE_AUTH` | How coding runs authenticate: `api` (bills `ANTHROPIC_API_KEY`) or `subscription` (`CLAUDE_CODE_OAUTH_TOKEN`, made with `claude setup-token`, or the CLI's login). The other mode's credential never reaches the CLI. Empty = the one credential set; both set = the worker does not start |
 | `CLAUDE_CODE_OAUTH_TOKEN` | A Claude subscription's long-lived token, for `CLAUDE_CODE_AUTH=subscription`. The runs then count against the subscription's usage limits, and the dollar cap is only an estimate |
-| `INTERNAL_ADDR` | Address of the internal API that receives worker notifications (default `:9999`). Keep it off the public network |
-| `NOTIFY_URL` | Base URL a worker posts its notifications to (default `http://localhost:9999`) |
-| `INTERNAL_API_KEY` | Secret shared by the server and its workers for `/internal/notify` (`Authorization: Bearer …`). Empty = the server refuses every notification; a worker checks it at startup and logs a refusal as an error |
-| `TRUSTED_PROXIES` | Comma-separated addresses or CIDR ranges of the reverse proxies in front of the server, whose `X-Forwarded-For` gives the client's address; `none` when clients connect directly. Empty (default) = the client's address is unknown, and failed logins are limited per account only; so is a login a trusted proxy forwards without naming the client |
+| `INTERNAL_ADDR` | Address of the internal API that receives worker notifications and the directives workers hand to the machines' gateway (default `:9999`). Keep it off the public network |
+| `NOTIFY_URL` | Base URL a worker posts its notifications and its machines' directives to (default `http://localhost:9999`) |
+| `INTERNAL_API_KEY` | Secret shared by the server and its workers for `/internal/notify` and `/internal/machines/directives` (`Authorization: Bearer …`). Empty = the server refuses every notification and every directive; a worker checks it at startup and logs a refusal as an error |
+| `TRUSTED_PROXIES` | Comma-separated addresses or CIDR ranges of the reverse proxies in front of the server, whose `X-Forwarded-For` gives the client's address; `none` when clients connect directly. Empty (default) = the client's address is unknown, and failed logins are limited per account only; so is a login a trusted proxy forwards without naming the client. The same goes for machines' enrollment requests (20 per address in 10 minutes only when it is known; 500 pending at most in any case) |
 | `SKILLS_REPO`, `SKILLS_BRANCH` | Git repository (and branch) the skills are loaded from |
 | `SKILLS_WEBHOOK_SECRET` | GitHub webhook secret for `/webhooks/skills`. Empty = the route is not served |
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token, to send messages |
@@ -182,7 +197,9 @@ agent/
 ├── api/            # HTTP API types
 ├── cmd/agent/      # CLI entrypoints (server, worker, dev)
 ├── config/         # Configuration loading
+├── gateway/        # The machines' gateway: WebSocket, enrollment, heartbeats and completion as a Temporal client
 ├── conversation/   # What a model reads of a session: order and conversion of the history
+├── machine/        # Machines: protocol, tokens, directives; machine/connect is `agent connect`
 ├── provider/       # LLM provider abstraction (Anthropic)
 ├── session/        # Session rules: open, deliver, fork, members, Temporal lookups
 ├── skill/          # Skill loading (Git, filesystem)
@@ -255,6 +272,21 @@ agent/
   unreachable proxy (`127.0.0.1:0`: a package it lacks is never even
   requested), two threads and a bounded address space. A source can
   therefore read nothing outside its own files, and reach no network.
+
+- **Machines** (`agent connect`) never get a database address, a Temporal
+  address or a task token: the gateway holds the token and completes the
+  activity itself; a machine knows a directive's ID alone, and only its
+  owner's. Its token is long, kept as a hash on the server and in a 0600 file
+  on the machine, and rotated on every connection: a replaced token presented
+  again revokes the machine, and two live connections with one machine's
+  token are both cut; both alert the owner (their notifications). Enrollment
+  is by a code the machine shows and its owner types, logged in, into « Mes
+  machines » (10 minutes, wrong codes limited per user, a warning against
+  approving someone else's code), or by a single-use enrollment token read on
+  standard input. What a machine sends is untrusted and bounded (256 KiB per
+  message, 20 per second). `agent connect` needs `https`, its certificate
+  checked, except to this very host (development). Revoking a machine cuts it
+  and ends its directives at once.
 
 - **`web_fetch`** fetches a URL the model chose, so it only connects to public
   addresses: loopback, private, link-local (cloud metadata), CGNAT and reserved

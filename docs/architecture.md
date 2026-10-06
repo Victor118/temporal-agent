@@ -105,6 +105,11 @@ flowchart LR
   (`DescribeTaskQueue`) ; sinon c'est un conflit, loggé en erreur. Pas de
   heartbeat maison : Temporal fait foi sur la vivacité des queues.
 - **Mode dev** : serveur + worker dans le même processus.
+- **Passerelle des machines** (`gateway/`, dans le serveur) : les machines
+  des utilisateurs, hors du réseau privé, s'y connectent en WebSocket
+  (`agent connect`) ; elle leur remet les directives de `RunOnMachine` et
+  parle à Temporal en client (heartbeats, complétion). Une machine n'a ni la
+  base ni Temporal. Conception : [design/machines.md](design/machines.md).
 
 ### Configuration
 
@@ -140,6 +145,8 @@ tools: [github_*]
 | `messages`, `sessions`, `memory`, `users`, `task_logs` | données runtime | workflows / serveur |
 | `files`, `file_contents` | fichiers publiés par les agents (métadonnées, contenu à part) | workers (outils) |
 | `skills_version` | signal de rechargement des skills | serveur |
+| `machines`, `machine_retired_tokens`, `machine_enrollments` | machines des utilisateurs (hash du jeton), jetons remplacés, inscriptions en attente | serveur (passerelle) |
+| `machine_directives` | directives des machines : réservation et directive sur une ligne, jeton de tâche, état | workers (`PickMachine`, `RunOnMachine`) / passerelle |
 | `agent_executions`, `user_questions` | arbre d'exécution, questions (prévu) | workflows |
 
 ## Flux principaux
@@ -334,6 +341,13 @@ diagnostic.
   (aucun worker = échec immédiat), puis attend un worker libre jusqu'à
   `CLAUDE_CODE_QUEUE_WAIT` ; un seul run par worker tant que chaque run n'a pas
   son propre uid.
+- **Machines** : phase 0 faite (`docs/design/machines.md`, §16) : inscription
+  par code ou par jeton, rotation du jeton, passerelle WebSocket (une seule
+  réplique), `PickMachine` et `RunOnMachine` avec complétion asynchrone, une
+  directive triviale (`echo`, `agent machine-echo`). Rien encore sur Claude
+  Code : `CodingRunWorkflow`, repli par outil, fichiers depuis la machine sont
+  les phases suivantes. « Mes machines » ne règle ni la pause ni la priorité ;
+  les `progress` ne nourrissent pas encore la note du tour.
 - **Tous les workflows et activities sont enregistrés sur toutes les queues**
   d'un worker, y compris sa queue d'outils. Les outils de type workflow
   (`ask_user`) tournent donc sur la queue de l'outil.
@@ -366,6 +380,8 @@ diagnostic.
 7. **`ClaudeCodeWorkflow`.**
 8. **Arbre d'exécution et questions utilisateur** (`agent_executions`,
    `user_questions`, refonte d'`AskUserWorkflow`).
+9. **Machines** ([design/machines.md](design/machines.md), §14) : phase 0
+   faite ; ensuite `CodingRunWorkflow` et `analyze_repo` sur la machine.
 
 ## Questions ouvertes
 
