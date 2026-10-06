@@ -36,6 +36,8 @@ type conn struct {
 	tokenHash string
 	// ready: welcomed, Deliver may send to it (under g.mu).
 	ready bool
+	// claudeCode is the state of the machine's CLI, as it last said.
+	claudeCode string
 
 	mu sync.Mutex
 	// directives are the ones this connection heartbeats.
@@ -48,7 +50,14 @@ type attached struct {
 	progress string
 	// cancelSent: the machine was told to stop it.
 	cancelSent bool
+	// d is the directive (its turn, its kind), noteAt when its turn's line
+	// last showed its progress.
+	d      store.Directive
+	noteAt time.Time
 }
+
+// defaultNoteEvery is Gateway.NoteEvery's default.
+const defaultNoteEvery = 5 * time.Second
 
 // messageLimit is what a machine may send, per second and in a burst, past
 // which the connection ends: four progresses a second per directive (agent
@@ -136,7 +145,9 @@ func (c *conn) serve(presented, addr string) {
 		return
 	}
 	c.tokenHash = machine.HashToken(next)
-	info := store.MachineInfo{OS: hello.OS, Capabilities: hello.Capabilities, MaxDirectives: hello.MaxDirectives, AgentVersion: hello.AgentVersion}
+	info := store.MachineInfo{OS: hello.OS, Capabilities: hello.Capabilities, MaxDirectives: hello.MaxDirectives,
+		AgentVersion: hello.AgentVersion, ClaudeCode: hello.ClaudeCode}
+	c.claudeCode = hello.ClaudeCode
 	prevAddr, err := c.g.Store.MachineConnected(c.ctx, c.m.ID, c.g.id, addr, info)
 	if err != nil {
 		c.refuseOrRetry("record the connection", err)
@@ -357,6 +368,7 @@ func (c *conn) send(d store.Directive) {
 	c.attach(d)
 	deadline := d.Deadline
 	c.write(machine.Message{Type: machine.TypeDirective, ID: d.ID, Kind: d.Kind, Input: d.Input, Deadline: &deadline})
+	c.g.note(d, c.m.Name, "")
 }
 
 // lose ends a directive the machine no longer knows: it restarted between
@@ -366,6 +378,7 @@ func (c *conn) lose(d store.Directive) {
 	if err != nil || !closed {
 		return
 	}
+	c.g.clearNote(d)
 	cerr := temporal.NewNonRetryableApplicationError(
 		fmt.Sprintf("machine %q lost the directive (it restarted during it); nothing was done twice", c.m.Name), machine.ErrTypeLost, nil)
 	if err := c.g.complete(c.ctx, completeTries, d.TaskToken, nil, cerr); err != nil && !isNotFound(err) {
@@ -377,7 +390,32 @@ func (c *conn) attach(d store.Directive) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.directives[d.ID] == nil {
-		c.directives[d.ID] = &attached{token: d.TaskToken}
+		c.directives[d.ID] = &attached{token: d.TaskToken, d: d}
+	}
+}
+
+// progress keeps a directive's last progress for its next heartbeat, and
+// shows it on its turn's line, every noteEvery at most.
+func (c *conn) progress(id, text string) {
+	c.mu.Lock()
+	a := c.directives[id]
+	if a == nil {
+		c.mu.Unlock()
+		return
+	}
+	a.progress = text
+	every := c.g.NoteEvery
+	if every <= 0 {
+		every = defaultNoteEvery
+	}
+	show := time.Since(a.noteAt) >= every
+	if show {
+		a.noteAt = time.Now()
+	}
+	d := a.d
+	c.mu.Unlock()
+	if show {
+		c.g.note(d, c.m.Name, text)
 	}
 }
 
@@ -435,11 +473,9 @@ func (c *conn) readLoop(maxDirectives int) {
 				log.Printf("machines: confirm the token of %s: %v", c.m.ID, err)
 			}
 		case machine.TypeProgress:
-			c.mu.Lock()
-			if a := c.directives[m.ID]; a != nil {
-				a.progress = m.Text
-			}
-			c.mu.Unlock()
+			c.progress(m.ID, m.Text)
+		case machine.TypeCapabilities:
+			c.status(m)
 		case machine.TypeResult:
 			if c.g.claim(m.ID) {
 				go c.result(m)
@@ -521,9 +557,16 @@ func (c *conn) heartbeat(id string, token []byte, progress string) {
 			c.write(machine.Message{Type: machine.TypeCancel, ID: id, Text: "cancel requested"})
 		}
 	case isNotFound(err):
+		c.mu.Lock()
+		var d store.Directive
+		if a := c.directives[id]; a != nil {
+			d = a.d
+		}
+		c.mu.Unlock()
 		if !c.detach(id) {
 			return
 		}
+		c.g.clearNote(d)
 		log.Printf("machines: directive %s: its activity is gone", id)
 		c.write(machine.Message{Type: machine.TypeCancel, ID: id, Text: "gone"})
 		if _, err := c.g.Store.CloseDirective(c.ctx, id, store.DirectiveGone, "its activity no longer exists"); err != nil {
@@ -639,6 +682,7 @@ func (g *Gateway) finish(ctx context.Context, tries int, d store.Directive, m ma
 	default:
 		return err
 	}
+	g.clearNote(d)
 	if _, err := g.Store.CloseDirective(ctx, d.ID, state, m.Error); err != nil {
 		// Completed: a close that failed leaves the row open until its
 		// deadline; the sweep's completion of it then finds it gone.
@@ -646,4 +690,23 @@ func (g *Gateway) finish(ctx context.Context, tries int, d store.Directive, m ma
 	}
 	log.Printf("machines: directive %s done on %s: %s", d.ID, d.MachineID, state)
 	return nil
+}
+
+// status records what a machine says it can do now: a login lost (a run
+// refused for it) or back. Its owner is told when Claude Code goes.
+func (c *conn) status(m machine.Message) {
+	if err := c.g.Store.UpdateMachineStatus(c.ctx, c.m.ID, m.Capabilities, m.ClaudeCode); err != nil {
+		log.Printf("machines: status of %s: %v", c.m.ID, err)
+		return
+	}
+	log.Printf("machines: machine %s (%s) now runs %v (Claude Code: %q)", c.m.ID, c.m.Name, m.Capabilities, m.ClaudeCode)
+	was := c.claudeCode
+	c.claudeCode = m.ClaudeCode
+	switch {
+	case was == "ok" && m.ClaudeCode == "logged_out":
+		c.g.alert(c.ctx, c.m.UserID, fmt.Sprintf("Claude Code n'est plus connecté sur la machine « %s » : ses runs y sont refusés. "+
+			"Sur la machine : lance claude puis /login (ou claude setup-token) ; elle le réannonce d'elle-même.", c.m.Name))
+	case was == "logged_out" && m.ClaudeCode == "ok":
+		c.g.alert(c.ctx, c.m.UserID, fmt.Sprintf("Claude Code est de nouveau connecté sur la machine « %s ».", c.m.Name))
+	}
 }

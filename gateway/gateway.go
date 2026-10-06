@@ -46,6 +46,9 @@ type Store interface {
 	ConfirmMachineToken(ctx context.Context, id, currentHash string) error
 	MachineConnected(ctx context.Context, id, gateway, addr string, hello store.MachineInfo) (string, error)
 	MachineDisconnected(ctx context.Context, id, gateway string) error
+	UpdateMachineStatus(ctx context.Context, id string, capabilities []string, claudeCode string) error
+	SetMachinePaused(ctx context.Context, userID, id string, paused bool) error
+	SetMachinePriority(ctx context.Context, userID, id string, priority int) error
 	TouchMachines(ctx context.Context, ids []string) error
 	ResetMachineConnections(ctx context.Context) error
 	RevokeMachine(ctx context.Context, id, reason string) ([]store.Directive, error)
@@ -106,10 +109,17 @@ type Gateway struct {
 	// be a proxy's, every client's.
 	ClientAddr func(r *http.Request) string
 	AddrsKnown bool
+	// Notice shows a note on a participant's working line in a session
+	// (the event activity.EventNotice, through session.Service.Observe):
+	// what a directive of its turn does. Web only. Nil: none.
+	Notice func(sessionID, participant, agent, text string)
 
 	HeartbeatEvery time.Duration
 	PingTimeout    time.Duration
 	SweepEvery     time.Duration
+	// NoteEvery is how often a directive's progress reaches its turn's line
+	// at most (each note reloads the session's pages); zero = 5 s.
+	NoteEvery time.Duration
 
 	// id names this gateway's connections in the database.
 	id string
@@ -290,6 +300,7 @@ func (g *Gateway) revoke(ctx context.Context, m store.Machine, reason string) er
 	}
 	c := g.conn(m.ID)
 	for _, d := range closed {
+		g.clearNote(d)
 		if c != nil {
 			c.detach(d.ID)
 			c.write(machine.Message{Type: machine.TypeCancel, ID: d.ID, Text: "machine revoked"})
@@ -379,6 +390,7 @@ func (g *Gateway) sweep(ctx context.Context) {
 	}
 	for _, d := range swept {
 		log.Printf("machines: directive %s on machine %s closed by the sweep (%s)", d.ID, d.MachineID, d.State)
+		g.clearNote(d)
 		if c := g.conn(d.MachineID); c != nil && c.detach(d.ID) {
 			c.write(machine.Message{Type: machine.TypeCancel, ID: d.ID, Text: d.State})
 		}
@@ -465,3 +477,60 @@ func (g *Gateway) ServeDirectives(apiKey string) http.HandlerFunc {
 		}
 	}
 }
+
+// kindLabel names a directive's work on its turn's line.
+func kindLabel(kind string) string {
+	switch kind {
+	case machine.KindAnalyzeRepo:
+		return "Analyse"
+	}
+	return "Tâche « " + kind + " »"
+}
+
+// note shows, on the line of the turn d works for, that it runs on machine
+// name, and how far it is (progress, untrusted text from the machine, cut).
+func (g *Gateway) note(d store.Directive, name, progress string) {
+	if g.Notice == nil || d.SessionID == "" {
+		return
+	}
+	text := fmt.Sprintf("%s sur la machine « %s »", kindLabel(d.Kind), name)
+	if progress != "" {
+		text += " — " + machine.Cut(progress, 200)
+	}
+	g.Notice(d.SessionID, d.Participant, d.Agent, text)
+}
+
+// clearNote takes a directive's note off its turn's line: it is over.
+func (g *Gateway) clearNote(d store.Directive) {
+	if g.Notice != nil && d.SessionID != "" {
+		g.Notice(d.SessionID, d.Participant, d.Agent, "")
+	}
+}
+
+// SetPaused pauses or resumes a machine of userID's.
+func (g *Gateway) SetPaused(ctx context.Context, userID, machineID string, paused bool) error {
+	err := g.Store.SetMachinePaused(ctx, userID, machineID, paused)
+	if errors.Is(err, store.ErrMachineNotFound) {
+		return ErrMachineNotFound
+	}
+	return err
+}
+
+// SetPriority sets a machine's priority, between MinPriority and
+// MaxPriority: the highest is chosen first.
+func (g *Gateway) SetPriority(ctx context.Context, userID, machineID string, priority int) error {
+	if priority < MinPriority || priority > MaxPriority {
+		return fmt.Errorf("priority %d out of [%d, %d]", priority, MinPriority, MaxPriority)
+	}
+	err := g.Store.SetMachinePriority(ctx, userID, machineID, priority)
+	if errors.Is(err, store.ErrMachineNotFound) {
+		return ErrMachineNotFound
+	}
+	return err
+}
+
+// The priorities a user may give a machine.
+const (
+	MinPriority = -10
+	MaxPriority = 10
+)
