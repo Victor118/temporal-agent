@@ -23,6 +23,9 @@ func loadWorkerConfig(cfg *config.Config) *config.WorkerConfig {
 	if err == nil {
 		log.Printf("Worker config %s: queue %q, workflows %v, tools %v, %d MCP servers",
 			cfg.WorkerFile, wc.Queue, wc.Workflows, wc.Tools, len(wc.MCP))
+		if len(wc.Tools) == 0 {
+			log.Printf("Worker config %s: tools: [], this worker publishes no tool (it serves the workflows of its queue)", cfg.WorkerFile)
+		}
 		return wc
 	}
 	if !errors.Is(err, os.ErrNotExist) {

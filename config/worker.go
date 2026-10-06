@@ -44,8 +44,10 @@ func LoadWorkerConfig(file string) (*WorkerConfig, error) {
 	if wc.Queue == "" {
 		return nil, fmt.Errorf("%s: missing queue", file)
 	}
-	if len(wc.Tools) == 0 {
-		return nil, fmt.Errorf("%s: no tools listed (use \"*\" to expose all)", file)
+	// No tools key is a mistake; an empty list (tools: []) says the worker
+	// publishes none, as a coding container serving only its workflows.
+	if wc.Tools == nil {
+		return nil, fmt.Errorf("%s: no tools key (use \"*\" to expose all, [] for none)", file)
 	}
 	for _, g := range wc.Tools {
 		if _, err := path.Match(g, ""); err != nil {

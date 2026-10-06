@@ -37,7 +37,7 @@ mcp:
 func TestLoadWorkerConfig_Invalid(t *testing.T) {
 	cases := map[string]string{
 		"missing queue":            `tools: ["*"]`,
-		"no tools listed":          `queue: q`,
+		"no tools key":             `queue: q`,
 		"invalid tool":             "queue: q\ntools: [\"[bad\"]",
 		"requires name":            "queue: q\ntools: [\"*\"]\nmcp:\n  - url: http://x",
 		"duplicate mcp":            "queue: q\ntools: [\"*\"]\nmcp:\n  - {name: a, url: u}\n  - {name: a, url: u}",
@@ -47,6 +47,30 @@ func TestLoadWorkerConfig_Invalid(t *testing.T) {
 		_, err := LoadWorkerConfig(writeFile(t, content))
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%s: got error %v", want, err)
+		}
+	}
+}
+
+// An explicit empty list publishes nothing, and loads.
+func TestLoadWorkerConfig_NoTools(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "worker.yaml")
+	os.WriteFile(path, []byte("queue: q\nworkflows: false\ntools: []\n"), 0o644)
+	wc, err := LoadWorkerConfig(path)
+	if err != nil || wc.Tools == nil || len(wc.Tools) != 0 {
+		t.Fatalf("%+v %v", wc, err)
+	}
+}
+
+// The worker configs of the repository load: a container started with one
+// would stop otherwise.
+func TestLoadWorkerConfig_TheRepositorysFiles(t *testing.T) {
+	files, err := filepath.Glob("../worker*.yaml")
+	if err != nil || len(files) < 3 {
+		t.Fatalf("worker configs: %v %v", files, err)
+	}
+	for _, f := range files {
+		if _, err := LoadWorkerConfig(f); err != nil {
+			t.Errorf("%s: %v", f, err)
 		}
 	}
 }
