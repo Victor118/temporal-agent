@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -201,6 +202,117 @@ func TestMessageLimit(t *testing.T) {
 		perSecond, burst := messageLimit(max)
 		if need := float64(max) * float64(time.Second/machine.ProgressInterval); float64(perSecond) < need+5 || burst < int(perSecond) {
 			t.Errorf("%d directives: %v/s burst %d", max, perSecond, burst)
+		}
+	}
+}
+
+// pendingStore holds directives whose result waits for its completion.
+type pendingStore struct {
+	Store
+	mu      sync.Mutex
+	pending []store.Directive
+	closed  map[string]string
+}
+
+func (f *pendingStore) ResetMachineConnections(context.Context) error { return nil }
+func (f *pendingStore) PendingDirectiveResults(context.Context) ([]store.Directive, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []store.Directive
+	for _, d := range f.pending {
+		if _, done := f.closed[d.ID]; !done {
+			out = append(out, d)
+		}
+	}
+	return out, nil
+}
+func (f *pendingStore) CloseDirective(_ context.Context, id, state, _ string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.closed[id] = state
+	return true, nil
+}
+
+// blockingTemporal completes once released, and counts the completions
+// under way.
+type blockingTemporal struct {
+	Temporal
+	release chan struct{}
+	mu      sync.Mutex
+	now     int
+	most    int
+}
+
+func (b *blockingTemporal) CompleteActivity(ctx context.Context, _ []byte, _ any, _ error) error {
+	b.mu.Lock()
+	b.now++
+	b.most = max(b.most, b.now)
+	b.mu.Unlock()
+	defer func() {
+		b.mu.Lock()
+		b.now--
+		b.mu.Unlock()
+	}()
+	select {
+	case <-b.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// The sweep never waits on Temporal: each pending result is tried once, in
+// a goroutine of its own, a bounded number at a time; the next sweep takes
+// what is left, and nothing is tried twice at once.
+func TestRetryResults_BoundedAndNotWaitedFor(t *testing.T) {
+	st := &pendingStore{closed: map[string]string{}}
+	for i := range 20 {
+		id := fmt.Sprintf("d-%d", i)
+		raw, _ := json.Marshal(machine.Message{Type: machine.TypeResult, ID: id, Status: machine.StatusOK})
+		st.pending = append(st.pending, store.Directive{ID: id, State: store.DirectiveRunning, TaskToken: []byte("t"), Result: raw})
+	}
+	tc := &blockingTemporal{release: make(chan struct{})}
+	g := &Gateway{Store: st, Temporal: tc}
+	if err := g.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer g.stop()
+	start := time.Now()
+	g.retryResults(g.ctx)
+	if took := time.Since(start); took > time.Second {
+		t.Errorf("the sweep waited %s", took)
+	}
+	waitUntil := func(what string, cond func() bool) {
+		t.Helper()
+		for deadline := time.Now().Add(5 * time.Second); !cond(); time.Sleep(10 * time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Fatalf("%s", what)
+			}
+		}
+	}
+	waitUntil("8 completions under way", func() bool { tc.mu.Lock(); defer tc.mu.Unlock(); return tc.now == maxResultRetries })
+	g.retryResults(g.ctx) // all slots taken, those under way claimed: nothing more
+	time.Sleep(50 * time.Millisecond)
+	tc.mu.Lock()
+	most := tc.most
+	tc.mu.Unlock()
+	if most != maxResultRetries {
+		t.Errorf("%d completions at once, want %d", most, maxResultRetries)
+	}
+	close(tc.release)
+	waitUntil("the first ones closed", func() bool { st.mu.Lock(); defer st.mu.Unlock(); return len(st.closed) == maxResultRetries })
+	closed := func() int { st.mu.Lock(); defer st.mu.Unlock(); return len(st.closed) }
+	for closed() < 20 {
+		before := closed()
+		waitUntil("slots free", func() bool { return len(g.retrySlots) == 0 })
+		g.retryResults(g.ctx)
+		waitUntil("more closed", func() bool { return closed() > before })
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	for id, state := range st.closed {
+		if state != store.DirectiveCompleted {
+			t.Errorf("%s closed %s", id, state)
 		}
 	}
 }
