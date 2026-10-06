@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -21,14 +22,18 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
+	"github.com/google/uuid"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/serviceerror"
+	sdkactivity "go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/worker"
+	sdkworkflow "go.temporal.io/sdk/workflow"
 
 	"github.com/victor/temporal-agent/activity"
+	"github.com/victor/temporal-agent/claudecode"
 	"github.com/victor/temporal-agent/machine"
 	"github.com/victor/temporal-agent/machine/connect"
 	"github.com/victor/temporal-agent/store"
@@ -58,6 +63,10 @@ type smokeEnv struct {
 	// flaky wraps it: its next completions can be made to fail.
 	flaky *flakyTemporal
 	queue string
+	// fallback is analyze_repo's fallback queue, served by a stand-in.
+	fallback string
+	// notes are the notes the gateway put on turns' lines.
+	notes chan smokeNote
 	addr  string
 	base  string
 
@@ -105,7 +114,8 @@ func newSmokeEnv(t *testing.T) *smokeEnv {
 	}
 	t.Cleanup(gwTC.Close)
 
-	e := &smokeEnv{t: t, st: st, db: db, tc: tc, gwTC: gwTC, flaky: &flakyTemporal{Temporal: gwTC}, queue: "smoke-machines-" + smokeRandom(t)}
+	e := &smokeEnv{t: t, st: st, db: db, tc: tc, gwTC: gwTC, flaky: &flakyTemporal{Temporal: gwTC}, queue: "smoke-machines-" + smokeRandom(t),
+		fallback: "smoke-fallback-" + smokeRandom(t), notes: make(chan smokeNote, 256)}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -117,17 +127,42 @@ func newSmokeEnv(t *testing.T) *smokeEnv {
 
 	w := worker.New(tc, e.queue, worker.Options{})
 	w.RegisterWorkflow(workflow.MachineEchoWorkflow)
-	w.RegisterActivity(&activity.MachineActivities{Store: st, Handoff: activity.NewHTTPDirectiveHandoff(e.base, smokeInternalKey)})
+	w.RegisterWorkflow(workflow.CodingRunWorkflow)
+	w.RegisterActivity(&activity.MachineActivities{Store: st, Handoff: activity.NewHTTPDirectiveHandoff(e.base, smokeInternalKey),
+		Routing: activity.CodingRouting{Machines: true, AnalyzeQueue: e.fallback}})
 	if err := w.Start(); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(w.Stop)
+
+	// The fallback queue: a stand-in for the coding containers, which
+	// answer the probe and run AnalyzeRepoWorkflow.
+	fw := worker.New(tc, e.fallback, worker.Options{})
+	fw.RegisterActivityWithOptions(func(context.Context) (activity.ProbeRunWorkerOutput, error) {
+		return activity.ProbeRunWorkerOutput{}, nil
+	}, sdkactivity.RegisterOptions{Name: "ProbeRunWorker"})
+	fw.RegisterWorkflowWithOptions(func(ctx sdkworkflow.Context, raw json.RawMessage) (workflow.ClaudeCodeOutput, error) {
+		var in workflow.AnalyzeRepoInput
+		json.Unmarshal(raw, &in)
+		return workflow.ClaudeCodeOutput{Repo: in.Repo, Report: "from the fallback, for " + in.UserID + ", as " + sdkworkflow.GetInfo(ctx).WorkflowExecution.ID}, nil
+	}, sdkworkflow.RegisterOptions{Name: "AnalyzeRepoWorkflow"})
+	if err := fw.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(fw.Stop)
 	return e
 }
 
 // serve starts a gateway on ln.
 func (e *smokeEnv) serve(ln net.Listener) {
-	g := &Gateway{Store: e.st, Temporal: e.flaky, completeWait: 50 * time.Millisecond, HeartbeatEvery: smokeHeartbeatEvery, PingTimeout: time.Second, SweepEvery: 2 * time.Second,
+	g := &Gateway{Store: e.st, Temporal: e.flaky, completeWait: 50 * time.Millisecond, NoteEvery: 100 * time.Millisecond,
+		Notice: func(session, participant, agent, text string) {
+			select {
+			case e.notes <- smokeNote{session, participant, agent, text}:
+			default:
+			}
+		},
+		HeartbeatEvery: smokeHeartbeatEvery, PingTimeout: time.Second, SweepEvery: 2 * time.Second,
 		ClientAddr: func(r *http.Request) string { h, _, _ := net.SplitHostPort(r.RemoteAddr); return h }, AddrsKnown: true}
 	if err := g.Start(context.Background()); err != nil {
 		e.t.Fatal(err)
@@ -730,6 +765,104 @@ func TestMachines_RealServer(t *testing.T) {
 		})
 	})
 
+	t.Run("analyze_repo on the user's machine, its progress on the turn's line", func(t *testing.T) {
+		ivan := e.user("ivan")
+		repo := smokeGitRepo(t)
+		a, _ := e.startAnalyzer(t, ivan, "atelier", repo, `echo '{"type":"system","subtype":"init","session_id":"s","apiKeySource":"none"}'
+echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Grep","input":{}}]},"session_id":"s"}'
+sleep 1.5
+echo '{"type":"result","subtype":"success","is_error":false,"result":"The handler is in main.go.","session_id":"s","num_turns":2,"total_cost_usd":0.05}'
+`)
+		session := uuid.NewString()
+		run := e.analyze(t, session, ivan, repo)
+		n := e.waitNote(t, session, func(s string) bool { return strings.Contains(s, "1 outil (dernier : Grep)") })
+		if n.participant != "jarvis" || n.agent != "Jarvis" || !strings.HasPrefix(n.text, "Analyse sur la machine « atelier »") {
+			t.Errorf("note %+v", n)
+		}
+		var out workflow.ClaudeCodeOutput
+		ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		if err := run.Get(ctx, &out); err != nil {
+			t.Fatal(err)
+		}
+		if out.Report != "The handler is in main.go." || out.Machine != "atelier" || len(out.Commit) != 40 || out.PaidBy != "subscription" ||
+			!strings.Contains(out.Content, `machine: "atelier"`) {
+			t.Errorf("output %+v", out)
+		}
+		e.waitNote(t, session, func(s string) bool { return s == "" })
+		if entries, _ := os.ReadDir(a.WorkDir); len(entries) != 0 {
+			t.Errorf("clone left: %v", entries)
+		}
+	})
+
+	t.Run("analyze_repo cancelled: the machine's CLI ended, its clone deleted", func(t *testing.T) {
+		kate := e.user("kate")
+		repo := smokeGitRepo(t)
+		a, _ := e.startAnalyzer(t, kate, "bureau", repo, `echo '{"type":"system","subtype":"init","session_id":"s"}'
+echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Read","input":{}}]},"session_id":"s"}'
+sleep 60
+`)
+		session := uuid.NewString()
+		run := e.analyze(t, session, kate, repo)
+		e.waitNote(t, session, func(s string) bool { return strings.Contains(s, "1 outil") })
+		asked := time.Now()
+		if err := e.tc.CancelWorkflow(ctx, run.GetID(), ""); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		var canceled *temporal.CanceledError
+		if err := run.Get(ctx, nil); !errors.As(err, &canceled) {
+			t.Errorf("workflow: %v", err)
+		}
+		if took := time.Since(asked); took > 15*time.Second {
+			t.Errorf("cancelled in %s", took)
+		}
+		waitFor(t, "clone deleted", 10*time.Second, func() bool { entries, _ := os.ReadDir(a.WorkDir); return len(entries) == 0 })
+		e.waitNote(t, session, func(s string) bool { return s == "" })
+	})
+
+	t.Run("analyze_repo refused for the machine's login: Claude Code withdrawn, the next run elsewhere", func(t *testing.T) {
+		leo := e.user("leo")
+		repo := smokeGitRepo(t)
+		e.startAnalyzer(t, leo, "expiree", repo, `cat <<'EOF'
+{"type":"system","subtype":"init","session_id":"s"}
+{"type":"result","subtype":"success","is_error":true,"result":"Invalid API key · Please run /login","session_id":"s"}
+EOF
+`)
+		var out workflow.ClaudeCodeOutput
+		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
+		if err := e.analyze(t, uuid.NewString(), leo, repo).Get(ctx, &out); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out.Error, "login was refused") || out.Machine != "expiree" {
+			t.Errorf("output %+v", out)
+		}
+		waitFor(t, "Claude Code withdrawn", 10*time.Second, func() bool {
+			ms, _ := e.st.ListMachines(ctx, leo)
+			return len(ms) == 1 && ms[0].ClaudeCode == "logged_out" && !ms[0].Can(machine.CapClaudeCode)
+		})
+		if err := e.analyze(t, uuid.NewString(), leo, repo).Get(ctx, &out); err != nil || !strings.HasPrefix(out.Report, "from the fallback") {
+			t.Errorf("the next run: %+v %v", out, err)
+		}
+	})
+
+	t.Run("analyze_repo with no machine: the fallback queue runs it", func(t *testing.T) {
+		judith := e.user("judith")
+		session := uuid.NewString()
+		run := e.analyze(t, session, judith, "https://example.com/app.git")
+		var out workflow.ClaudeCodeOutput
+		ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		if err := run.Get(ctx, &out); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasPrefix(out.Report, "from the fallback, for "+judith+", as "+session+":") || out.Machine != "" {
+			t.Errorf("output %+v", out)
+		}
+	})
+
 	t.Run("two live connections of one machine: both cut", func(t *testing.T) {
 		erin := e.user("erin")
 		_, token := e.enrollToken(erin, "double", []string{machine.KindEcho}, 1)
@@ -752,6 +885,93 @@ func TestMachines_RealServer(t *testing.T) {
 			t.Error("first still connected")
 		}
 	})
+}
+
+// smokeNote is a note the gateway put on a turn's line.
+type smokeNote struct{ session, participant, agent, text string }
+
+// smokeGitRepo makes a repository with one commit.
+func smokeGitRepo(t *testing.T) string {
+	t.Helper()
+	repo := t.TempDir()
+	for _, args := range [][]string{
+		{"init", "--quiet", "-b", "main"},
+		{"-c", "user.email=a@b", "-c", "user.name=a", "commit", "--quiet", "--allow-empty", "-m", "first"},
+	} {
+		if out, err := exec.Command("git", append([]string{"-C", repo}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v %s", args, err, out)
+		}
+	}
+	return repo
+}
+
+// startAnalyzer starts a machine of userID's that runs analyses with a
+// stand-in for the claude CLI (script), on repo.
+func (e *smokeEnv) startAnalyzer(t *testing.T, userID, name, repo, script string) (*connect.Analyzer, chan error) {
+	t.Helper()
+	id, token := e.enrollToken(userID, name, []string{machine.CapClaudeCode}, 1)
+	dir := t.TempDir()
+	if err := (connect.State{Dir: dir}).Save(connect.Config{Server: e.base, MachineID: id, Name: name, Token: token}); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\ncat >/dev/null\n"+script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a := &connect.Analyzer{Runner: claudecode.Runner{Binary: bin}, Auth: claudecode.AuthSubscription, Repos: []string{repo},
+		WorkDir: t.TempDir(), Environ: []string{claudecode.OAuthTokenEnv + "=smoke"}, Home: t.TempDir(), ProgressEvery: 200 * time.Millisecond}
+	c := &connect.Client{State: connect.State{Dir: dir}, Executors: map[string]connect.Executor{machine.KindAnalyzeRepo: a.Run},
+		Status: func() connect.Status {
+			s := connect.Status{ClaudeCode: string(a.Login())}
+			if s.ClaudeCode == string(claudecode.LoginOK) {
+				s.Capabilities = []string{machine.CapClaudeCode}
+			}
+			return s
+		},
+		MaxDirectives: 1, OS: "linux", Version: "smoke", MinBackoff: 100 * time.Millisecond, MaxBackoff: 500 * time.Millisecond, StopWait: time.Second}
+	a.OnLoginRefused = c.Refresh
+	ctx, cancel := context.WithCancel(context.Background())
+	runErr := make(chan error, 1)
+	go func() { runErr <- c.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-runErr:
+		case <-time.After(10 * time.Second):
+		}
+	})
+	waitFor(t, "analyzer online", 10*time.Second, func() bool { return e.gateway().Online(id) })
+	return a, runErr
+}
+
+// analyze starts analyze_repo as a turn of session's participant jarvis
+// would, for userID.
+func (e *smokeEnv) analyze(t *testing.T, session, userID, repo string) client.WorkflowRun {
+	t.Helper()
+	raw, _ := json.Marshal(map[string]string{"repo": repo, "task": "Where is the handler?", "user_id": userID, "agent": "Jarvis"})
+	id := session + ":p:jarvis:m1:tool:analyze_repo:call-" + smokeRandom(t)
+	run, err := e.tc.ExecuteWorkflow(context.Background(), client.StartWorkflowOptions{ID: id, TaskQueue: e.queue}, workflow.CodingRunWorkflow, json.RawMessage(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { e.tc.TerminateWorkflow(context.Background(), run.GetID(), "", "smoke test over") })
+	return run
+}
+
+// waitNote waits for a note of session whose text satisfies match.
+func (e *smokeEnv) waitNote(t *testing.T, session string, match func(string) bool) smokeNote {
+	t.Helper()
+	timeout := time.After(20 * time.Second)
+	for {
+		select {
+		case n := <-e.notes:
+			if n.session == session && match(n.text) {
+				return n
+			}
+		case <-timeout:
+			t.Fatalf("no such note on session %s", session)
+		}
+	}
 }
 
 // flakyTemporal is the gateway's Temporal client, whose next completions
