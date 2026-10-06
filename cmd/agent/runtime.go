@@ -269,6 +269,7 @@ func workerWorkflows() []any {
 		workflow.ReportToParentWorkflow,
 		workflow.MachineEchoWorkflow,
 		workflow.CodingRunWorkflow,
+		workflow.AnalyzeFallbackWorkflow,
 	}
 }
 

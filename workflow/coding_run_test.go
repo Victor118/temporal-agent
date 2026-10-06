@@ -20,13 +20,15 @@ import (
 
 // codingRunCase is what the stubs of a CodingRunWorkflow run do.
 type codingRunCase struct {
-	route   activity.CodingRouting
-	pick    activity.PickMachineOutput
-	run     func(activity.RunOnMachineInput) (machine.Result, error)
-	probe   error
-	picks   []activity.PickMachineInput
-	child   []json.RawMessage
-	childOn string
+	route      activity.CodingRouting
+	pick       activity.PickMachineOutput
+	run        func(activity.RunOnMachineInput) (machine.Result, error)
+	probe      error
+	probeOut   activity.ProbeRunWorkerOutput
+	picks      []activity.PickMachineInput
+	child      []json.RawMessage
+	childProbe activity.ProbeRunWorkerOutput
+	childOn    string
 }
 
 func runCodingRun(t *testing.T, c *codingRunCase, in AnalyzeRepoInput) (ClaudeCodeOutput, error) {
@@ -48,18 +50,15 @@ func runCodingRun(t *testing.T, c *codingRunCase, in AnalyzeRepoInput) (ClaudeCo
 		return c.run(in)
 	}, sdkactivity.RegisterOptions{Name: "RunOnMachine"})
 	env.RegisterActivityWithOptions(func(context.Context) (activity.ProbeRunWorkerOutput, error) {
-		return activity.ProbeRunWorkerOutput{}, c.probe
+		return c.probeOut, c.probe
 	}, sdkactivity.RegisterOptions{Name: "ProbeRunWorker"})
-	env.RegisterWorkflowWithOptions(func(ctx sdkworkflow.Context, raw json.RawMessage) (ClaudeCodeOutput, error) {
-		c.child = append(c.child, raw)
+	env.RegisterWorkflowWithOptions(func(ctx sdkworkflow.Context, in AnalyzeFallbackInput) (ClaudeCodeOutput, error) {
+		c.child = append(c.child, in.Input)
+		c.childProbe = in.Probe
 		c.childOn = sdkworkflow.GetInfo(ctx).TaskQueueName
 		return ClaudeCodeOutput{Report: "from the fallback", Repo: "r"}, nil
-	}, sdkworkflow.RegisterOptions{Name: "AnalyzeRepoWorkflow"})
-	args := map[string]any{"repo": in.Repo, "task": in.Task, "ref": in.Ref}
-	if in.Probe != nil {
-		args["probe"] = in.Probe // what a model might add
-	}
-	raw, _ := tool.WithCallContext(mustJSON(args), in.CallContext)
+	}, sdkworkflow.RegisterOptions{Name: "AnalyzeFallbackWorkflow"})
+	raw, _ := tool.WithCallContext(mustJSON(map[string]any{"repo": in.Repo, "task": in.Task, "ref": in.Ref}), in.CallContext)
 	env.ExecuteWorkflow(CodingRunWorkflow, raw)
 	var out ClaudeCodeOutput
 	err := env.GetWorkflowError()
@@ -156,24 +155,21 @@ func TestCodingRun_Nowhere(t *testing.T) {
 }
 
 // A machine that turns the run down before anything ran: the same run goes
-// to the fallback, saying why; the probe's answer goes to the child, and a
-// model's "probe" never does.
+// to the fallback, saying why; the probe's answer goes to the child.
 func TestCodingRun_RefusedThenFallback(t *testing.T) {
 	c := &codingRunCase{route: activity.CodingRouting{Machines: true, AnalyzeQueue: "fallback"},
 		pick: activity.PickMachineOutput{DirectiveID: "d-1", MachineName: "maison"},
 		run: func(activity.RunOnMachineInput) (machine.Result, error) {
 			return machine.Result{}, temporal.NewNonRetryableApplicationError(`repository "x" is not one this machine may use`, machine.ErrTypeRefused, nil)
 		}}
-	in := analyzeCall
-	in.Probe = &activity.ProbeRunWorkerOutput{QueueWaitSeconds: 1} // as a model would try
-	out, err := runCodingRun(t, c, in)
+	c.probeOut = activity.ProbeRunWorkerOutput{QueueWaitSeconds: 42}
+	out, err := runCodingRun(t, c, analyzeCall)
 	if err != nil || out.Report != "from the fallback" || out.Machine != "" || out.Interrupted ||
 		!strings.Contains(out.Note, `your machine "maison" turned it down`) || !strings.Contains(out.Content, "note: ") {
 		t.Fatalf("output %+v %v", out, err)
 	}
-	var child AnalyzeRepoInput
-	if json.Unmarshal(c.child[0], &child) != nil || child.Probe == nil || child.Probe.QueueWaitSeconds == 1 {
-		t.Errorf("the child's probe: %s", c.child[0])
+	if c.childProbe.QueueWaitSeconds != 42 {
+		t.Errorf("the child's probe: %+v", c.childProbe)
 	}
 }
 
@@ -192,19 +188,23 @@ func TestCodingRun_LostBeforeTheCLI(t *testing.T) {
 	}
 }
 
-// Given the probe's answer, AnalyzeRepoWorkflow does not ask the queue again.
-func TestAnalyzeRepoWorkflow_ProbedOnce(t *testing.T) {
+// Given the probe's answer (AnalyzeFallbackWorkflow), the analysis does not
+// ask the queue again; AnalyzeRepoWorkflow, the tool's, always does.
+func TestAnalyzeFallbackWorkflow_ProbedOnce(t *testing.T) {
 	for _, probed := range []bool{false, true} {
 		a := newAnalyzeEnv(t, nil, claudeCodeResult{Report: "r", Subtype: "success"}, nil)
 		probes := 0
 		a.env.OnActivity(probeActivity, mock.Anything).Run(func(mock.Arguments) { probes++ }).
 			Return(activity.ProbeRunWorkerOutput{QueueWaitSeconds: 60}, nil)
-		in := AnalyzeRepoInput{Repo: "/src/repo", Task: "why"}
+		raw := mustJSON(AnalyzeRepoInput{Repo: "/src/repo", Task: "why"})
 		if probed {
-			in.Probe = &activity.ProbeRunWorkerOutput{QueueWaitSeconds: 60}
+			a.env.ExecuteWorkflow(AnalyzeFallbackWorkflow, AnalyzeFallbackInput{Input: raw, Probe: activity.ProbeRunWorkerOutput{QueueWaitSeconds: 60}})
+		} else {
+			a.env.ExecuteWorkflow(AnalyzeRepoWorkflow, raw)
 		}
-		if out := a.run_(t, in); out.Report != "r" || (probes == 1) == probed {
-			t.Errorf("probed %v: %d probes, %+v", probed, probes, out)
+		var out ClaudeCodeOutput
+		if err := a.env.GetWorkflowResult(&out); err != nil || out.Report != "r" || (probes == 1) == probed {
+			t.Errorf("probed %v: %d probes, %+v %v", probed, probes, out, err)
 		}
 	}
 }

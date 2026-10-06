@@ -64,10 +64,15 @@ type AnalyzeRepoInput struct {
 	// The caller's, never the model's (tool.WithCallContext): where to tell
 	// the user that the run waits for a worker.
 	tool.CallContext
-	// Probe is the fallback queue's answer to the probe, when
-	// CodingRunWorkflow asked it before starting this run there: it is not
-	// asked again. Set by CodingRunWorkflow alone, which drops a model's.
-	Probe *activity.ProbeRunWorkerOutput `json:"probe,omitempty"`
+}
+
+// AnalyzeFallbackInput is what CodingRunWorkflow starts AnalyzeFallbackWorkflow
+// with: the tool's input, as the model and the call context made it, and the
+// fallback queue's answer to the probe it made already. A type of its own,
+// apart from the tool's input: no call to analyze_repo can carry a probe.
+type AnalyzeFallbackInput struct {
+	Input json.RawMessage               `json:"input"`
+	Probe activity.ProbeRunWorkerOutput `json:"probe"`
 }
 
 // ClaudeCodeOutput is what a coding workflow returns. Error carries a run that
@@ -131,7 +136,13 @@ type runProgress struct {
 // to look at and what to find out; the code decides how, which is what keeps
 // "read-only" a property of the system rather than a promise in a prompt.
 func AnalyzeRepoWorkflow(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCodeOutput, error) {
-	return withContent(analyzeRepo(ctx, rawInput))
+	return withContent(analyzeRepo(ctx, rawInput, nil))
+}
+
+// AnalyzeFallbackWorkflow is AnalyzeRepoWorkflow as CodingRunWorkflow starts
+// it on its fallback queue, after its probe: the queue is not asked again.
+func AnalyzeFallbackWorkflow(ctx workflow.Context, in AnalyzeFallbackInput) (ClaudeCodeOutput, error) {
+	return withContent(analyzeRepo(ctx, in.Input, &in.Probe))
 }
 
 // withContent fills in what the calling agent reads of a coding run's output.
@@ -142,7 +153,7 @@ func withContent(out ClaudeCodeOutput, err error) (ClaudeCodeOutput, error) {
 	return out, err
 }
 
-func analyzeRepo(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCodeOutput, error) {
+func analyzeRepo(ctx workflow.Context, rawInput json.RawMessage, probed *activity.ProbeRunWorkerOutput) (ClaudeCodeOutput, error) {
 	var input AnalyzeRepoInput
 	if err := json.Unmarshal(rawInput, &input); err != nil {
 		return ClaudeCodeOutput{}, temporal.NewNonRetryableApplicationError(
@@ -156,7 +167,7 @@ func analyzeRepo(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCodeOutp
 	out := ClaudeCodeOutput{Repo: input.Repo, Ref: input.Ref}
 	var ccAct *activity.ClaudeCodeActivities
 
-	r, err := openRun(ctx, analyzeSessionTimeout, input.CallContext, input.Probe)
+	r, err := openRun(ctx, analyzeSessionTimeout, input.CallContext, probed)
 	if err != nil {
 		out.Error = err.Error()
 		return out, nil

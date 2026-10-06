@@ -44,8 +44,6 @@ func codingRun(ctx workflow.Context, rawInput json.RawMessage) (ClaudeCodeOutput
 		return ClaudeCodeOutput{}, temporal.NewNonRetryableApplicationError(
 			"analyze_repo requires repo and task", "InvalidInput", nil)
 	}
-	// Probe is the workflow's to set for its fallback, never the model's.
-	input.Probe = nil
 	out := ClaudeCodeOutput{Repo: input.Repo, Ref: input.Ref}
 
 	var mAct *activity.MachineActivities
@@ -186,9 +184,9 @@ func (o *ClaudeCodeOutput) fromMachine(raw json.RawMessage) {
 // analyzeOnFallback runs the analysis on the installation's queue for it:
 // AnalyzeRepoWorkflow as it always was, a child whose ID keeps the session's
 // prefix (SessionOf, query_workflow), with the same input, call context
-// included. A probe first: with no worker on the queue, the child would
-// never start, and its own probe never run; its answer goes to the child,
-// which does not ask again. noMachine says why no machine of the user's ran
+// included (AnalyzeFallbackWorkflow). A probe first: with no worker on the
+// queue, the child would never start, and its own probe never run; its
+// answer goes to the child, which does not ask again. noMachine says why no machine of the user's ran
 // it, for the agent.
 func analyzeOnFallback(ctx workflow.Context, input AnalyzeRepoInput, queue, noMachine string, out ClaudeCodeOutput) (ClaudeCodeOutput, error) {
 	prefix := ""
@@ -217,7 +215,6 @@ func analyzeOnFallback(ctx workflow.Context, input AnalyzeRepoInput, queue, noMa
 		out.Error = prefix + fmt.Sprintf("could not reach the installation's fallback (%q): %v; nothing was done", queue, err)
 		return out, nil
 	}
-	input.Probe = &probe
 	raw, err := json.Marshal(input)
 	if err != nil {
 		return out, err
@@ -227,7 +224,7 @@ func analyzeOnFallback(ctx workflow.Context, input AnalyzeRepoInput, queue, noMa
 		TaskQueue:  queue,
 	})
 	var res ClaudeCodeOutput
-	if err := workflow.ExecuteChildWorkflow(child, AnalyzeRepoWorkflow, json.RawMessage(raw)).Get(ctx, &res); err != nil {
+	if err := workflow.ExecuteChildWorkflow(child, AnalyzeFallbackWorkflow, AnalyzeFallbackInput{Input: raw, Probe: probe}).Get(ctx, &res); err != nil {
 		return res, err
 	}
 	if noMachine != "" {

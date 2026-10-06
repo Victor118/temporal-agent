@@ -136,16 +136,16 @@ func newSmokeEnv(t *testing.T) *smokeEnv {
 	t.Cleanup(w.Stop)
 
 	// The fallback queue: a stand-in for the coding containers, which
-	// answer the probe and run AnalyzeRepoWorkflow.
+	// answer the probe and run AnalyzeFallbackWorkflow.
 	fw := worker.New(tc, e.fallback, worker.Options{})
 	fw.RegisterActivityWithOptions(func(context.Context) (activity.ProbeRunWorkerOutput, error) {
 		return activity.ProbeRunWorkerOutput{}, nil
 	}, sdkactivity.RegisterOptions{Name: "ProbeRunWorker"})
-	fw.RegisterWorkflowWithOptions(func(ctx sdkworkflow.Context, raw json.RawMessage) (workflow.ClaudeCodeOutput, error) {
+	fw.RegisterWorkflowWithOptions(func(ctx sdkworkflow.Context, fin workflow.AnalyzeFallbackInput) (workflow.ClaudeCodeOutput, error) {
 		var in workflow.AnalyzeRepoInput
-		json.Unmarshal(raw, &in)
+		json.Unmarshal(fin.Input, &in)
 		return workflow.ClaudeCodeOutput{Repo: in.Repo, Report: "from the fallback, for " + in.UserID + ", as " + sdkworkflow.GetInfo(ctx).WorkflowExecution.ID}, nil
-	}, sdkworkflow.RegisterOptions{Name: "AnalyzeRepoWorkflow"})
+	}, sdkworkflow.RegisterOptions{Name: "AnalyzeFallbackWorkflow"})
 	if err := fw.Start(); err != nil {
 		t.Fatal(err)
 	}
