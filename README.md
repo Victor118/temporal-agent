@@ -169,8 +169,8 @@ An analysis is read-only (the CLI's `plan` mode), and loads your own Claude
 settings only, never the repository's (`--setting-sources user`,
 `--strict-mcp-config`: a branch's `.claude/settings.json` hooks or
 `.mcp.json` servers are not run). It clones with your git identity and your
-git configuration (credential helpers, ssh setup), but never waits on a
-prompt: a repository that asks for a password, or an ssh host not in your
+git configuration (credential helpers, `core.sshCommand`), but never waits on
+a prompt (git runs with no terminal): a repository that asks for a password, or an ssh host not in your
 `known_hosts`, fails at once, saying what to do. Only ssh, https and local
 paths are cloned (never `ext::`, `git://` or plain `http://`); git hooks are
 off.
