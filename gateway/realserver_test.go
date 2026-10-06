@@ -63,8 +63,12 @@ type smokeEnv struct {
 	// flaky wraps it: its next completions can be made to fail.
 	flaky *flakyTemporal
 	queue string
-	// fallback is analyze_repo's fallback queue, served by a stand-in.
-	fallback string
+	// fallback is analyze_repo's fallback queue, implFallback
+	// implement_feature's, each served by a stand-in.
+	fallback     string
+	implFallback string
+	// files are the file_published events the gateway sent, by session.
+	files chan smokeFiles
 	// notes are the notes the gateway put on turns' lines.
 	notes chan smokeNote
 	addr  string
@@ -115,7 +119,8 @@ func newSmokeEnv(t *testing.T) *smokeEnv {
 	t.Cleanup(gwTC.Close)
 
 	e := &smokeEnv{t: t, st: st, db: db, tc: tc, gwTC: gwTC, flaky: &flakyTemporal{Temporal: gwTC}, queue: "smoke-machines-" + smokeRandom(t),
-		fallback: "smoke-fallback-" + smokeRandom(t), notes: make(chan smokeNote, 256)}
+		fallback: "smoke-fallback-" + smokeRandom(t), implFallback: "smoke-impl-fallback-" + smokeRandom(t),
+		notes: make(chan smokeNote, 256), files: make(chan smokeFiles, 64)}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -128,8 +133,9 @@ func newSmokeEnv(t *testing.T) *smokeEnv {
 	w := worker.New(tc, e.queue, worker.Options{})
 	w.RegisterWorkflow(workflow.MachineEchoWorkflow)
 	w.RegisterWorkflow(workflow.CodingRunWorkflow)
+	w.RegisterWorkflow(workflow.ImplementRunWorkflow)
 	w.RegisterActivity(&activity.MachineActivities{Store: st, Handoff: activity.NewHTTPDirectiveHandoff(e.base, smokeInternalKey),
-		Routing: activity.CodingRouting{Machines: true, AnalyzeQueue: e.fallback}})
+		Routing: activity.CodingRouting{Machines: true, AnalyzeQueue: e.fallback, ImplementQueue: e.implFallback}})
 	if err := w.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -150,6 +156,21 @@ func newSmokeEnv(t *testing.T) *smokeEnv {
 		t.Fatal(err)
 	}
 	t.Cleanup(fw.Stop)
+
+	// implement_feature's fallback queue: its stand-in pushes nothing.
+	iw := worker.New(tc, e.implFallback, worker.Options{})
+	iw.RegisterActivityWithOptions(func(context.Context) (activity.ProbeRunWorkerOutput, error) {
+		return activity.ProbeRunWorkerOutput{}, nil
+	}, sdkactivity.RegisterOptions{Name: "ProbeRunWorker"})
+	iw.RegisterWorkflowWithOptions(func(ctx sdkworkflow.Context, fin workflow.ImplementFallbackInput) (workflow.ClaudeCodeOutput, error) {
+		var in workflow.ImplementFeatureInput
+		json.Unmarshal(fin.Input, &in)
+		return workflow.ClaudeCodeOutput{Repo: in.Repo, Report: "implemented by the fallback, for " + in.UserID}, nil
+	}, sdkworkflow.RegisterOptions{Name: "ImplementFallbackWorkflow"})
+	if err := iw.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(iw.Stop)
 	return e
 }
 
@@ -159,6 +180,12 @@ func (e *smokeEnv) serve(ln net.Listener) {
 		Notice: func(session, participant, agent, text string) {
 			select {
 			case e.notes <- smokeNote{session, participant, agent, text}:
+			default:
+			}
+		},
+		FilesPublished: func(session, turn, agent string, ids []string) {
+			select {
+			case e.files <- smokeFiles{session, turn, agent, ids}:
 			default:
 			}
 		},
@@ -172,6 +199,7 @@ func (e *smokeEnv) serve(ln net.Listener) {
 	mux.HandleFunc("POST /machines/device", g.ServeDevice)
 	mux.HandleFunc("POST /machines/device/token", g.ServeDeviceToken)
 	mux.HandleFunc("POST /machines/enroll", g.ServeEnroll)
+	mux.HandleFunc("PUT "+machine.FilesPath, g.ServeFiles)
 	mux.HandleFunc("POST "+activity.DirectivePath, g.ServeDirectives(smokeInternalKey))
 	srv := &http.Server{Handler: mux}
 	go srv.Serve(ln)
@@ -880,6 +908,74 @@ EOF
 		}
 	})
 
+	t.Run("implement_feature on the user's machine: committed, pushed with its git, its outputs published for the turn", func(t *testing.T) {
+		nina := e.user("nina")
+		repo := smokeGitRepo(t)
+		remote := filepath.Join(t.TempDir(), "remote.git")
+		if out, err := exec.Command("git", "clone", "--quiet", "--bare", repo, remote).CombinedOutput(); err != nil {
+			t.Fatalf("bare: %v %s", err, out)
+		}
+		a, _ := e.startCoder(t, nina, "atelier", remote, true, implementCommits)
+		session := e.session(t, nina)
+		run := e.implement(t, session, nina, remote)
+		n := e.waitNote(t, session, func(s string) bool { return strings.Contains(s, "outil") })
+		if !strings.HasPrefix(n.text, "Implémentation sur la machine « atelier »") {
+			t.Errorf("note %+v", n)
+		}
+		var out workflow.ClaudeCodeOutput
+		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
+		if err := run.Get(ctx, &out); err != nil {
+			t.Fatal(err)
+		}
+		if !out.Pushed || out.Machine != "atelier" || !strings.HasPrefix(out.Branch, "agent/health-") || len(out.Commits) != 1 ||
+			out.Commits[0].Subject != "Add health" || out.Error != "" || len(out.Files) != 1 || out.Files[0].Name != "notes.md" {
+			t.Fatalf("output %+v", out)
+		}
+		got, err := exec.Command("git", "-C", remote, "rev-parse", "refs/heads/"+out.Branch).Output()
+		if err != nil || strings.TrimSpace(string(got)) != out.Commits[0].SHA {
+			t.Errorf("the remote's branch: %s %v, want %s", got, err, out.Commits[0].SHA)
+		}
+		files, err := e.st.ListSessionFiles(ctx, session)
+		if err != nil || len(files) != 1 || files[0].Name != "notes.md" || files[0].TurnKey != "m1.jarvis" || files[0].AgentID != "jarvis" ||
+			files[0].UserID != nina || files[0].ID != out.Files[0].ID {
+			t.Errorf("the session's files: %+v %v", files, err)
+		}
+		if content, _ := e.st.ReadFileContent(ctx, files[0].ID); string(content) != "# What I did\n" {
+			t.Errorf("content %q", content)
+		}
+		select {
+		case f := <-e.files:
+			if f.session != session || f.turn != "m1.jarvis" || f.agent != "jarvis" || len(f.ids) != 1 || f.ids[0] != files[0].ID {
+				t.Errorf("file_published %+v", f)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("no file_published")
+		}
+		if !strings.Contains(out.Content, "notes.md") || !strings.Contains(out.Content, "(pushed, 1 commits)") {
+			t.Errorf("content %s", out.Content)
+		}
+		waitFor(t, "clone deleted", 10*time.Second, func() bool { entries, _ := os.ReadDir(a.WorkDir); return len(entries) == 0 })
+	})
+
+	t.Run("implement_feature with a machine that does not allow pushes: the implementation's own fallback runs it", func(t *testing.T) {
+		olga := e.user("olga")
+		repo := smokeGitRepo(t)
+		e.startCoder(t, olga, "prudente", repo, false, implementCommits)
+		var out workflow.ClaudeCodeOutput
+		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
+		if err := e.implement(t, e.session(t, olga), olga, repo).Get(ctx, &out); err != nil {
+			t.Fatal(err)
+		}
+		if out.Report != "implemented by the fallback, for "+olga || out.Machine != "" || out.Pushed || !strings.Contains(out.Note, "--allow-push") {
+			t.Errorf("output %+v", out)
+		}
+		if got, _ := exec.Command("git", "-C", repo, "branch", "--list", "agent/*").Output(); len(strings.TrimSpace(string(got))) != 0 {
+			t.Errorf("a branch was pushed: %s", got)
+		}
+	})
+
 	t.Run("two live connections of one machine: both cut", func(t *testing.T) {
 		erin := e.user("erin")
 		_, token := e.enrollToken(erin, "double", []string{machine.KindEcho}, 1)
@@ -904,6 +1000,19 @@ EOF
 	})
 }
 
+// implementCommits is a stand-in CLI's implementation: a commit on its
+// branch, a report in its outputs.
+const implementCommits = `export GIT_AUTHOR_NAME=a GIT_AUTHOR_EMAIL=a@b GIT_COMMITTER_NAME=a GIT_COMMITTER_EMAIL=a@b
+echo '{"type":"system","subtype":"init","session_id":"s","apiKeySource":"none"}'
+echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Edit","input":{}}]},"session_id":"s"}'
+sleep 1
+echo hello > health.txt
+git add health.txt
+git commit --quiet -m "Add health"
+echo "# What I did" > ../outputs/notes.md
+echo '{"type":"result","subtype":"success","is_error":false,"result":"Added health.","session_id":"s","num_turns":3,"total_cost_usd":0.4}'
+`
+
 // analyzeOK is a stand-in CLI's successful analysis.
 const analyzeOK = `echo '{"type":"system","subtype":"init","session_id":"s","apiKeySource":"none"}'
 echo '{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"s"}'
@@ -911,6 +1020,12 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"ok","sessi
 
 // smokeNote is a note the gateway put on a turn's line.
 type smokeNote struct{ session, participant, agent, text string }
+
+// smokeFiles is a file_published event of the gateway's.
+type smokeFiles struct {
+	session, turn, agent string
+	ids                  []string
+}
 
 // smokeGitRepo makes a repository with one commit.
 func smokeGitRepo(t *testing.T) string {
@@ -930,6 +1045,13 @@ func smokeGitRepo(t *testing.T) string {
 // startAnalyzer starts a machine of userID's that runs analyses with a
 // stand-in for the claude CLI (script), on repo.
 func (e *smokeEnv) startAnalyzer(t *testing.T, userID, name, repo, script string) (*connect.Coder, chan error) {
+	return e.startCoder(t, userID, name, repo, false, script)
+}
+
+// startCoder starts a machine of userID's that runs coding directives with a
+// stand-in for the claude CLI (script), on repo, pushing there with
+// allowPush; what its runs leave in their outputs is uploaded.
+func (e *smokeEnv) startCoder(t *testing.T, userID, name, repo string, allowPush bool, script string) (*connect.Coder, chan error) {
 	t.Helper()
 	id, token := e.enrollToken(userID, name, []string{machine.CapClaudeCode}, 1)
 	dir := t.TempDir()
@@ -940,18 +1062,23 @@ func (e *smokeEnv) startAnalyzer(t *testing.T, userID, name, repo, script string
 	if err := os.WriteFile(bin, []byte("#!/bin/sh\ncat >/dev/null\n"+script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	a := &connect.Coder{Runner: claudecode.Runner{Binary: bin}, Auth: claudecode.AuthSubscription, Repos: []string{repo},
+	a := &connect.Coder{Runner: claudecode.Runner{Binary: bin}, Auth: claudecode.AuthSubscription, Repos: []string{repo}, AllowPush: allowPush,
 		WorkDir: t.TempDir(), Environ: []string{claudecode.OAuthTokenEnv + "=smoke"}, Home: t.TempDir(), ProgressEvery: 200 * time.Millisecond}
-	c := &connect.Client{State: connect.State{Dir: dir}, Executors: map[string]connect.Executor{machine.KindAnalyzeRepo: a.Analyze, machine.KindImplementFeature: a.Implement},
+	c := &connect.Client{State: connect.State{Dir: dir},
+		Executors: map[string]connect.Executor{machine.KindAnalyzeRepo: a.Analyze, machine.KindImplementFeature: a.Implement},
 		Status: func() connect.Status {
 			s := connect.Status{ClaudeCode: string(a.Login())}
 			if s.ClaudeCode == string(claudecode.LoginOK) {
 				s.Capabilities = []string{machine.CapClaudeCode}
 			}
+			if a.AllowPush {
+				s.Capabilities = append(s.Capabilities, machine.CapGitPush)
+			}
 			return s
 		},
 		MaxDirectives: 1, OS: "linux", Version: "smoke", MinBackoff: 100 * time.Millisecond, MaxBackoff: 500 * time.Millisecond, StopWait: time.Second}
 	a.OnLoginRefused = c.Refresh
+	a.Upload = c.Upload
 	c.OnConnect = a.Retry
 	ctx, cancel := context.WithCancel(context.Background())
 	runErr := make(chan error, 1)
@@ -963,8 +1090,35 @@ func (e *smokeEnv) startAnalyzer(t *testing.T, userID, name, repo, script string
 		case <-time.After(10 * time.Second):
 		}
 	})
-	waitFor(t, "analyzer online", 10*time.Second, func() bool { return e.gateway().Online(id) })
+	waitFor(t, "machine online", 10*time.Second, func() bool { return e.gateway().Online(id) })
 	return a, runErr
+}
+
+// session makes a session of userID's: files are published in one.
+func (e *smokeEnv) session(t *testing.T, userID string) string {
+	t.Helper()
+	id := uuid.NewString()
+	if err := e.st.CreateSession(context.Background(), store.Session{SessionID: id, CreatedBy: userID, Channel: "web"}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { e.db.Exec("DELETE FROM sessions WHERE session_id = $1", id) })
+	return id
+}
+
+// implement starts implement_feature as the turn m1.jarvis of session's
+// participant jarvis would, for userID.
+func (e *smokeEnv) implement(t *testing.T, session, userID, repo string) client.WorkflowRun {
+	t.Helper()
+	callID := "call-" + smokeRandom(t)
+	raw, _ := json.Marshal(map[string]any{"repo": repo, "task": "Add a health file", "title": "health", "user_id": userID, "agent": "Jarvis",
+		"agent_chain": []string{"jarvis"}, "call_id": callID, "turn": map[string]string{"session_id": session, "turn_key": "m1.jarvis"}})
+	id := session + ":p:jarvis:m1:tool:implement_feature:" + callID
+	run, err := e.tc.ExecuteWorkflow(context.Background(), client.StartWorkflowOptions{ID: id, TaskQueue: e.queue}, workflow.ImplementRunWorkflow, json.RawMessage(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { e.tc.TerminateWorkflow(context.Background(), run.GetID(), "", "smoke test over") })
+	return run
 }
 
 // analyze starts analyze_repo as a turn of session's participant jarvis
