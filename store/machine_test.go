@@ -114,7 +114,7 @@ func TestMachineEnrollment_Device(t *testing.T) {
 	machineUser(t, s, "zz-mach-alice")
 	now := time.Now()
 	req := MachineEnrollment{ID: "zz-mach-e1", Kind: EnrollmentDevice, SecretHash: "zz-mach-secret", UserCode: "ZZ2345",
-		Info: MachineInfo{Name: "maison", OS: "linux", Capabilities: []string{"echo"}}, ClientAddr: "192.0.2.1",
+		Info: MachineInfo{Name: "maison", OS: "linux", Capabilities: []string{"echo"}, MaxDirectives: 3}, ClientAddr: "192.0.2.1",
 		ExpiresAt: now.Add(10 * time.Minute)}
 	t.Cleanup(func() { s.db.Exec("DELETE FROM machine_enrollments WHERE id LIKE 'zz-mach-%'") })
 	s.db.Exec("DELETE FROM machine_enrollments WHERE id LIKE 'zz-mach-%' OR user_code = 'ZZ2345'")
@@ -151,7 +151,7 @@ func TestMachineEnrollment_Device(t *testing.T) {
 		t.Error("an approved request is still found by its code")
 	}
 	m, err := s.RedeemMachineEnrollment(ctx, EnrollmentDevice, req.SecretHash, tok, Machine{ID: "zz-mach-m"}, "zz-mach-h", now)
-	if err != nil || m.UserID != "zz-mach-alice" || m.Name != "maison" || m.MaxDirectives != 1 {
+	if err != nil || m.UserID != "zz-mach-alice" || m.Name != "maison" || m.MaxDirectives != 3 {
 		t.Fatalf("redeem: %+v %v", m, err)
 	}
 	if _, err := s.RedeemMachineEnrollment(ctx, EnrollmentDevice, req.SecretHash, tok, Machine{ID: "zz-mach-m2"}, "zz-mach-h2", now); !errors.Is(err, ErrEnrollmentUnknown) {
@@ -320,11 +320,19 @@ func TestPickMachine(t *testing.T) {
 	if err := s.SaveDirectiveResult(ctx, d1.ID, json.RawMessage(`{"text":"hi"}`)); err != nil {
 		t.Fatal(err)
 	}
+	pending, err := s.PendingDirectiveResults(ctx)
+	if err != nil || !slices.ContainsFunc(pending, func(d Directive) bool { return d.ID == d1.ID }) ||
+		slices.ContainsFunc(pending, func(d Directive) bool { return d.ID == d2.ID }) {
+		t.Errorf("pending results: %+v %v", pending, err)
+	}
 	if ok, err := s.CloseDirective(ctx, d1.ID, DirectiveCompleted, ""); !ok || err != nil {
 		t.Fatalf("close: %v %v", ok, err)
 	}
 	if ok, _ := s.CloseDirective(ctx, d1.ID, DirectiveFailed, "late"); ok {
 		t.Error("closed twice")
+	}
+	if pending, _ := s.PendingDirectiveResults(ctx); slices.ContainsFunc(pending, func(d Directive) bool { return d.ID == d1.ID }) {
+		t.Error("a closed directive's result is still pending")
 	}
 	if _, err := s.StartDirective(ctx, d1.ID, []byte("tok2"), "5", time.Now()); !errors.Is(err, ErrDirectiveClosed) {
 		t.Errorf("start a closed one: %v", err)

@@ -252,6 +252,7 @@ const machineSchema = `
 			os            TEXT NOT NULL DEFAULT '',
 			capabilities  JSONB NOT NULL DEFAULT '[]',
 			agent_version TEXT NOT NULL DEFAULT '',
+			max_directives INTEGER NOT NULL DEFAULT 1 CHECK (max_directives >= 1),
 			client_addr   TEXT NOT NULL DEFAULT '',
 			created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			expires_at    TIMESTAMPTZ NOT NULL,
@@ -272,11 +273,11 @@ func (s *PostgresStore) CreateMachineEnrollment(ctx context.Context, e MachineEn
 	}
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO machine_enrollments (id, kind, secret_hash, user_code, name, os, capabilities, agent_version,
-			client_addr, expires_at, approved_by, approved_at)
-		VALUES ($1, $2, $3, NULLIF($4, ''), $5, $6, $7, $8, $9, $10, NULLIF($11, ''),
-			CASE WHEN $11 = '' THEN NULL ELSE NOW() END)`,
+			max_directives, client_addr, expires_at, approved_by, approved_at)
+		VALUES ($1, $2, $3, NULLIF($4, ''), $5, $6, $7, $8, $9, $10, $11, NULLIF($12, ''),
+			CASE WHEN $12 = '' THEN NULL ELSE NOW() END)`,
 		e.ID, e.Kind, e.SecretHash, e.UserCode, e.Info.Name, e.Info.OS, caps, e.Info.AgentVersion,
-		e.ClientAddr, e.ExpiresAt, e.ApprovedBy)
+		max(e.Info.MaxDirectives, 1), e.ClientAddr, e.ExpiresAt, e.ApprovedBy)
 	if isUniqueViolation(err) && e.UserCode != "" {
 		return ErrUserCodeTaken
 	}
@@ -293,13 +294,13 @@ func (s *PostgresStore) CountPendingDeviceRequests(ctx context.Context, now time
 }
 
 const enrollmentColumns = `id, kind, secret_hash, COALESCE(user_code, ''), name, os, capabilities, agent_version,
-	client_addr, created_at, expires_at, COALESCE(approved_by, ''), machine_id`
+	max_directives, client_addr, created_at, expires_at, COALESCE(approved_by, ''), machine_id`
 
 func scanEnrollment(row interface{ Scan(...any) error }) (*MachineEnrollment, error) {
 	var e MachineEnrollment
 	var caps []byte
 	err := row.Scan(&e.ID, &e.Kind, &e.SecretHash, &e.UserCode, &e.Info.Name, &e.Info.OS, &caps, &e.Info.AgentVersion,
-		&e.ClientAddr, &e.CreatedAt, &e.ExpiresAt, &e.ApprovedBy, &e.MachineID)
+		&e.Info.MaxDirectives, &e.ClientAddr, &e.CreatedAt, &e.ExpiresAt, &e.ApprovedBy, &e.MachineID)
 	if err != nil {
 		return nil, err
 	}
@@ -881,4 +882,16 @@ func nonNil(s []string) []string {
 		return []string{}
 	}
 	return s
+}
+
+// PendingDirectiveResults returns the running directives whose machine's
+// result is kept but whose activity was not completed with it (Temporal
+// away): the gateway's sweep completes them again.
+func (s *PostgresStore) PendingDirectiveResults(ctx context.Context) ([]Directive, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+directiveColumns+` FROM machine_directives
+		WHERE state = 'running' AND result IS NOT NULL AND task_token IS NOT NULL ORDER BY created_at, id`)
+	if err != nil {
+		return nil, err
+	}
+	return scanDirectives(rows)
 }
