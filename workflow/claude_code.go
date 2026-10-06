@@ -13,6 +13,7 @@ import (
 
 	"github.com/victor/temporal-agent/activity"
 	"github.com/victor/temporal-agent/machine"
+	"github.com/victor/temporal-agent/machine/outputs"
 	"github.com/victor/temporal-agent/tool"
 )
 
@@ -38,6 +39,10 @@ const (
 	// this timeout at most (60s at most), so 2 min leaves a minute of
 	// margin, as for the run itself (claudeCodeHeartbeat).
 	gitHeartbeatTimeout = 2 * time.Minute
+	// publishOutputsTimeout covers the wait for the run's CLI to be gone
+	// (activity.DefaultRunEndWait), and the publishing (outputs.Budget).
+	publishOutputsTimeout  = activity.DefaultRunEndWait + outputs.Budget + time.Minute
+	publishOutputsAttempts = 2
 	// cleanupTimeout covers the wait for a run given up on to be gone from
 	// its worker (activity.DefaultRunEndWait), as inspectTimeout and
 	// pushTimeout do.
@@ -229,15 +234,20 @@ func analyzeRepo(ctx workflow.Context, rawInput json.RawMessage, probed *activit
 			Task:               input.Task,
 			PermissionMode:     analyzePermissionMode,
 			AppendSystemPrompt: analyzeSystemPrompt,
+			Outputs:            true,
 		},
 	).Get(r.ctx, &result)
+	ran := workflow.Now(ctx).Sub(runStarted)
+	if err == nil || !r.failed(err) {
+		out.publishOutputs(ctx, r, prepared.Dir, input.CallContext)
+	}
 	if err != nil {
 		if r.failed(err) {
 			out.Error = r.lostAt("before the analysis finished", "there is no report")
 		} else {
 			out.Error = "the analysis did not complete: " + whyEnded(err, analyzeTimeout)
 		}
-		out.interrupted(err, workflow.Now(ctx).Sub(runStarted))
+		out.interrupted(err, ran)
 		return out, nil
 	}
 
@@ -251,6 +261,43 @@ func analyzeRepo(ctx workflow.Context, rawInput json.RawMessage, probed *activit
 		out.Error = fmt.Sprintf("the run reported a failure (%s)", result.Subtype)
 	}
 	return out, nil
+}
+
+// publishOutputs publishes, on the run's worker and before its clone goes,
+// what the run left in its outputs (activity.PublishOutputs), attached to
+// the call's session turn, and tells the session's pages. Best effort: what
+// is not published is said in o, never the run's failure.
+func (o *ClaudeCodeOutput) publishOutputs(ctx workflow.Context, r *run, dir string, call tool.CallContext) {
+	if r.lost {
+		return
+	}
+	var ccAct *activity.ClaudeCodeActivities
+	var res activity.PublishOutputsOutput
+	err := workflow.ExecuteActivity(
+		r.step(workflow.ActivityOptions{
+			StartToCloseTimeout: publishOutputsTimeout,
+			HeartbeatTimeout:    gitHeartbeatTimeout,
+			RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: publishOutputsAttempts},
+		}),
+		ccAct.PublishOutputs,
+		activity.PublishOutputsInput{Dir: dir, Call: call},
+	).Get(r.ctx, &res)
+	if err != nil {
+		if !r.failed(err) && !temporal.IsCanceledError(err) {
+			o.Unpublished = append(o.Unpublished, "the run's outputs: "+failureText(err))
+		}
+		return
+	}
+	o.Files, o.Unpublished = res.Files, res.Unpublished
+	if len(res.Files) > 0 && call.Turn != nil {
+		agentID := ""
+		if n := len(call.AgentChain); n > 0 {
+			agentID = call.AgentChain[n-1]
+		}
+		opts := turnNotifyOptions
+		opts.TaskQueue = call.NotifyQueue
+		notifyFilesWith(ctx, opts, *call.Turn, agentID, res.Files)
+	}
 }
 
 // claudeCodeResult mirrors the fields of claudecode.Result this package reads.

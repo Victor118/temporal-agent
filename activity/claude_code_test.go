@@ -16,8 +16,10 @@ import (
 	"go.temporal.io/sdk/testsuite"
 
 	"github.com/victor/temporal-agent/claudecode"
+	"github.com/victor/temporal-agent/store"
 	"github.com/victor/temporal-agent/subproc"
 	"github.com/victor/temporal-agent/subproc/subproctest"
+	"github.com/victor/temporal-agent/tool"
 )
 
 // testRepos lets the tests clone and push to the repositories they make under
@@ -913,6 +915,47 @@ printf '{"type":"result","subtype":"success","is_error":false,"result":"model=%s
 	}
 }
 
+// A run given its outputs is told where they are, may write there, and has
+// them as a directory of its own; one without is told nothing.
+func TestRunClaudeCode_Outputs(t *testing.T) {
+	id := subproctest.Identity(t)
+	if os.Geteuid() == 0 && id == nil {
+		t.Skip("no identity to run as")
+	}
+	bin := filepath.Join(subproctest.Dir(t, nil), "fake-claude")
+	script := `#!/bin/sh
+args=$(echo "$*" | tr -d '"\\' | tr '\n' ' ')
+printf '{"type":"result","subtype":"success","is_error":false,"result":"%s","session_id":"s"}\n' "$args"
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: subproctest.Dir(t, nil), RunAs: id, Runner: &claudecode.Runner{Binary: bin}}
+	if id != nil {
+		a.Runs = subproc.NewRuns(id)
+	}
+	dir := filepath.Join(a.Root, "run-1")
+	os.Mkdir(dir, 0o755)
+	if id != nil {
+		if err := id.Give(dir); err != nil {
+			t.Fatal(err)
+		}
+	}
+	res, err := a.RunClaudeCode(context.Background(), RunClaudeCodeInput{Dir: dir, Task: "x", PermissionMode: "plan", Outputs: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := outputsDir(dir)
+	for _, want := range []string{"--add-dir " + out, "Edit(/" + out + "/**)", "write them in " + out} {
+		if !strings.Contains(res.Report, want) {
+			t.Errorf("the CLI's args lack %q: %s", want, res.Report)
+		}
+	}
+	if res, _ := a.RunClaudeCode(context.Background(), RunClaudeCodeInput{Dir: dir, Task: "x"}); strings.Contains(res.Report, "outputs") {
+		t.Errorf("outputs without asking: %s", res.Report)
+	}
+}
+
 // The payer the activity reports is the worker's choice, confirmed by the
 // CLI's apiKeySource; when they disagree, it names none.
 func TestRunClaudeCode_SaysWhatPaid(t *testing.T) {
@@ -1392,5 +1435,69 @@ func TestStepErrorsKeepTheirType(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// fileSaver keeps the files a publisher stores.
+type fileSaver struct{ files []store.File }
+
+func (s *fileSaver) SaveFile(_ context.Context, f store.File, _ []byte) (store.File, error) {
+	for _, old := range s.files {
+		if old.TurnKey == f.TurnKey && old.CallID == f.CallID && old.Name == f.Name {
+			return old, nil
+		}
+	}
+	s.files = append(s.files, f)
+	return f, nil
+}
+
+// A run's outputs: made with its workspace, offered to the CLI, published
+// for the call's turn once it is over, deleted with the workspace.
+func TestPublishOutputs(t *testing.T) {
+	src := initRepo(t)
+	saver := &fileSaver{}
+	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: t.TempDir(), Publisher: &tool.Publisher{Store: saver}}
+	prepared, err := a.PrepareWorkspace(context.Background(), PrepareWorkspaceInput{Name: "run-1", Repo: src})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := outputsDir(prepared.Dir)
+	if fi, err := os.Stat(out); err != nil || !fi.IsDir() {
+		t.Fatalf("no outputs: %v", err)
+	}
+	os.WriteFile(filepath.Join(out, "report.md"), []byte("# Report"), 0o600)
+	os.Symlink("/etc/passwd", filepath.Join(out, "passwd"))
+
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestActivityEnvironment()
+	env.RegisterActivity(a)
+	call := tool.CallContext{UserID: "u-1", CallID: "call-1", AgentChain: []string{"main", "jarvis"},
+		Turn: &tool.TurnRef{SessionID: "s-1", TurnKey: "m3.jarvis"}}
+	v, err := env.ExecuteActivity(a.PublishOutputs, PublishOutputsInput{Dir: prepared.Dir, Call: call})
+	var res PublishOutputsOutput
+	if err != nil || v.Get(&res) != nil {
+		t.Fatal(err)
+	}
+	if len(res.Files) != 1 || res.Files[0].Name != "report.md" || len(res.Unpublished) != 1 || !strings.Contains(res.Unpublished[0], "passwd: a link") {
+		t.Errorf("published %+v", res)
+	}
+	if f := saver.files[0]; f.SessionID != "s-1" || f.TurnKey != "m3.jarvis" || f.CallID != "call-1" || f.AgentID != "jarvis" || f.UserID != "u-1" {
+		t.Errorf("stored %+v", f)
+	}
+	// Again (a retry): nothing more stored.
+	if _, err := env.ExecuteActivity(a.PublishOutputs, PublishOutputsInput{Dir: prepared.Dir, Call: call}); err != nil || len(saver.files) != 1 {
+		t.Errorf("retry: %v, %d files", err, len(saver.files))
+	}
+	// Somewhere else than a workspace: refused.
+	if _, err := env.ExecuteActivity(a.PublishOutputs, PublishOutputsInput{Dir: "/etc", Call: call}); err == nil {
+		t.Error("published from outside Root")
+	}
+
+	// The run is told where its outputs go, and may write there.
+	if err := a.CleanupWorkspace(context.Background(), CleanupWorkspaceInput{Dir: prepared.Dir}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(out); !os.IsNotExist(err) {
+		t.Errorf("outputs left: %v", err)
 	}
 }

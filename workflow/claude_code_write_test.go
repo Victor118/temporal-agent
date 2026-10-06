@@ -29,6 +29,9 @@ type implementEnv struct {
 	pushed     *activity.PushBranchInput
 	cleaned    []string
 	inspected  activity.InspectWorkspaceOutput
+	// outputs is what PublishOutputs returns; published, what it was asked.
+	outputs   activity.PublishOutputsOutput
+	published *activity.PublishOutputsInput
 }
 
 func newImplementEnv(t *testing.T, result claudeCodeResult, runErr error, inspected activity.InspectWorkspaceOutput, pushErr error) *implementEnv {
@@ -70,6 +73,11 @@ func newImplementEnv(t *testing.T, result claudeCodeResult, runErr error, inspec
 		e.cleaned = append(e.cleaned, in.Dir)
 		return nil
 	}, sdkactivity.RegisterOptions{Name: "CleanupWorkspace"})
+
+	e.env.RegisterActivityWithOptions(func(ctx context.Context, in activity.PublishOutputsInput) (activity.PublishOutputsOutput, error) {
+		e.published = &in
+		return e.outputs, nil
+	}, sdkactivity.RegisterOptions{Name: "PublishOutputs"})
 
 	return e
 }

@@ -18,6 +18,8 @@ import (
 	"go.temporal.io/sdk/temporal"
 
 	"github.com/victor/temporal-agent/claudecode"
+	"github.com/victor/temporal-agent/machine"
+	"github.com/victor/temporal-agent/machine/outputs"
 	"github.com/victor/temporal-agent/subproc"
 	"github.com/victor/temporal-agent/tool"
 )
@@ -76,6 +78,9 @@ type ClaudeCodeActivities struct {
 	// RunEndWait bounds the wait of a step after a run for the run to be
 	// gone (awaitRunEnd); zero = DefaultRunEndWait.
 	RunEndWait time.Duration
+	// Publisher stores what a run leaves in its outputs (PublishOutputs);
+	// nil: they are not published, and the run is told so.
+	Publisher *tool.Publisher
 
 	live cliRuns
 }
@@ -432,9 +437,15 @@ func (a *ClaudeCodeActivities) PrepareWorkspace(ctx context.Context, in PrepareW
 	if err := keepGitConfig(dir); err != nil {
 		return PrepareWorkspaceOutput{}, stepError("prepare workspace", err)
 	}
-	// The run works, and commits, as RunAs: the clone is its own. Root and the
-	// configuration's copy stay the worker's.
+	if err := os.Mkdir(outputsDir(dir), 0o700); err != nil {
+		return PrepareWorkspaceOutput{}, stepError("prepare workspace", err)
+	}
+	// The run works, and commits, as RunAs: the clone and its outputs are
+	// its own. Root and the configuration's copy stay the worker's.
 	if err := a.RunAs.Give(dir); err != nil {
+		return PrepareWorkspaceOutput{}, stepError("prepare workspace", err)
+	}
+	if err := a.RunAs.Give(outputsDir(dir)); err != nil {
 		return PrepareWorkspaceOutput{}, stepError("prepare workspace", err)
 	}
 	return PrepareWorkspaceOutput{Dir: dir, Commit: strings.TrimSpace(commit), Branch: in.Branch}, nil
@@ -578,10 +589,15 @@ func restoreGitConfig(dir string) (changed bool, err error) {
 // workspace, in Root, and thrown away with it.
 func cliConfigDir(dir string) string { return dir + ".claude" }
 
+// outputsDir is where the run in dir may leave files for the user
+// (machine.OutputsPrompt): next to the workspace, in Root, the run's own,
+// published after it (PublishOutputs) and deleted with it.
+func outputsDir(dir string) string { return dir + ".outputs" }
+
 // removeWorkspace deletes a run's directory, the copy of its git
-// configuration and its CLI configuration.
+// configuration, its CLI configuration and its outputs.
 func removeWorkspace(dir string) error {
-	for _, path := range []string{dir, cliConfigDir(dir)} {
+	for _, path := range []string{dir, cliConfigDir(dir), outputsDir(dir)} {
 		if err := os.RemoveAll(path); err != nil {
 			return err
 		}
@@ -677,6 +693,10 @@ type RunClaudeCodeInput struct {
 	AppendSystemPrompt string   `json:"append_system_prompt,omitempty"`
 	MaxBudgetUSD       float64  `json:"max_budget_usd,omitempty"`
 	SessionID          string   `json:"session_id,omitempty"`
+	// Outputs lets the run leave files for the user in its outputs
+	// (outputsDir), and tells it where (machine.OutputsPrompt): the
+	// directory is the worker's to name.
+	Outputs bool `json:"outputs,omitempty"`
 }
 
 // RunClaudeCode runs one coding session and heartbeats while it does. A run the
@@ -723,6 +743,14 @@ func (a *ClaudeCodeActivities) RunClaudeCode(ctx context.Context, in RunClaudeCo
 	if a.Runs != nil {
 		runner.Runs = a.Runs
 	}
+	allowed, prompt := in.AllowedTools, in.AppendSystemPrompt
+	var addDirs []string
+	if in.Outputs {
+		out := outputsDir(dir)
+		allowed = append(append([]string(nil), allowed...), machine.OutputsRule(out))
+		prompt = strings.TrimSpace(prompt + "\n" + machine.OutputsPrompt(out))
+		addDirs = []string{out}
+	}
 	// Until the CLI is gone, the steps after the run wait (awaitRunEnd).
 	defer a.live.hold(dir)()
 	ctx, stopped, cancel := a.endOnStop(ctx)
@@ -733,9 +761,10 @@ func (a *ClaudeCodeActivities) RunClaudeCode(ctx context.Context, in RunClaudeCo
 		Task:               in.Task,
 		Model:              a.Model,
 		PermissionMode:     in.PermissionMode,
-		AllowedTools:       in.AllowedTools,
+		AllowedTools:       allowed,
 		DisallowedTools:    in.DisallowedTools,
-		AppendSystemPrompt: in.AppendSystemPrompt,
+		AppendSystemPrompt: prompt,
+		AddDirs:            addDirs,
 		MaxBudgetUSD:       lowerCap(a.MaxBudgetUSD, in.MaxBudgetUSD),
 		SessionID:          in.SessionID,
 		// The workspace is deleted at the end of the run, so a transcript on
@@ -771,6 +800,56 @@ func (a *ClaudeCodeActivities) RunClaudeCode(ctx context.Context, in RunClaudeCo
 	}
 	res.PaidBy = paid
 	return res, nil
+}
+
+type PublishOutputsInput struct {
+	Dir string `json:"dir"`
+	// Call is the run's call: the session turn and tool call its files go
+	// to, the agent that made it (the last of its chain), the user.
+	Call tool.CallContext `json:"call"`
+}
+
+type PublishOutputsOutput struct {
+	Files []tool.FileRef `json:"files,omitempty"`
+	// Unpublished are the outputs not published, and why ("path: reason").
+	Unpublished []string `json:"unpublished,omitempty"`
+}
+
+// PublishOutputs publishes what the run in Dir left in its outputs, as a
+// machine does (outputs.Publish: regular files of their own, never through
+// a link, within bounds), attached to the call's session turn through the
+// worker's file store; once the run's CLI is gone (awaitRunEnd). Retried,
+// it stores nothing twice (the same name and content is the file stored
+// first).
+func (a *ClaudeCodeActivities) PublishOutputs(ctx context.Context, in PublishOutputsInput) (PublishOutputsOutput, error) {
+	dir, err := a.workspaceDir(in.Dir)
+	if err != nil {
+		return PublishOutputsOutput{}, stepError("publish outputs", err)
+	}
+	if err := a.awaitRunEnd(ctx, dir); err != nil {
+		return PublishOutputsOutput{}, stepError("publish outputs", err)
+	}
+	defer heartbeatWhile(ctx, "publishing the outputs")()
+	var out PublishOutputsOutput
+	var upload outputs.Upload
+	max := int64(tool.DefaultMaxFileBytes)
+	if a.Publisher != nil {
+		max = a.Publisher.MaxFileBytes()
+		ctx = tool.WithCall(ctx, in.Call)
+		ctx = tool.WithUserID(ctx, in.Call.UserID)
+		if n := len(in.Call.AgentChain); n > 0 {
+			ctx = tool.WithAgentID(ctx, in.Call.AgentChain[n-1])
+		}
+		upload = func(ctx context.Context, name string, content []byte) error {
+			f, err := a.Publisher.Publish(ctx, name, content)
+			if err == nil {
+				out.Files = append(out.Files, f)
+			}
+			return err
+		}
+	}
+	out.Unpublished = outputs.Publish(ctx, outputsDir(dir), max, upload)
+	return out, nil
 }
 
 // lowerCap is the smaller of two budget caps, where zero means none.

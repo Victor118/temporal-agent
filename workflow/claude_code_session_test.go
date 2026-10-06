@@ -124,7 +124,7 @@ func checkOneWorker(t *testing.T, runs []activityRun, steps ...string) {
 func TestAnalyzeRepoWorkflow_RunsOnOneWorker(t *testing.T) {
 	a := newAnalyzeEnv(t, nil, claudeCodeResult{Report: "ok", Subtype: "success"}, nil)
 	a.run_(t, AnalyzeRepoInput{Repo: "/src/repo", Task: "look"})
-	checkOneWorker(t, a.queues.all(), "PrepareWorkspace", "RunClaudeCode", "CleanupWorkspace")
+	checkOneWorker(t, a.queues.all(), "PrepareWorkspace", "RunClaudeCode", "PublishOutputs", "CleanupWorkspace")
 }
 
 func TestImplementFeatureWorkflow_RunsOnOneWorker(t *testing.T) {
@@ -133,7 +133,7 @@ func TestImplementFeatureWorkflow_RunsOnOneWorker(t *testing.T) {
 	if !out.Pushed {
 		t.Fatalf("not pushed: %s", out.Error)
 	}
-	checkOneWorker(t, e.queues.all(), "PrepareWorkspace", "RunClaudeCode", "InspectWorkspace", "PushBranch", "CleanupWorkspace")
+	checkOneWorker(t, e.queues.all(), "PrepareWorkspace", "RunClaudeCode", "PublishOutputs", "InspectWorkspace", "PushBranch", "CleanupWorkspace")
 }
 
 // No worker answers the probe: the run says so at once, names the queue,
@@ -628,13 +628,13 @@ func TestCodingRuns_CleanupAfterCancel(t *testing.T) {
 // SDK fails the session under a run still going. The values are written out:
 // changing a step's timeout or attempts must come with a look at these.
 func TestRunSessionTimeouts(t *testing.T) {
-	if want := 98*time.Minute + 30*time.Second; analyzeSessionTimeout != want {
+	if want := 107*time.Minute + 30*time.Second; analyzeSessionTimeout != want {
 		t.Errorf("analyze session %s, want %s", analyzeSessionTimeout, want)
 	}
-	if want := 207*time.Minute + 30*time.Second; implementSessionTimeout != want {
+	if want := 216*time.Minute + 30*time.Second; implementSessionTimeout != want {
 		t.Errorf("implement session %s, want %s", implementSessionTimeout, want)
 	}
-	if want := 222*time.Minute + 30*time.Second; RunWorkspaceLifetime != want {
+	if want := 231*time.Minute + 30*time.Second; RunWorkspaceLifetime != want {
 		t.Errorf("RunWorkspaceLifetime %s, want %s", RunWorkspaceLifetime, want)
 	}
 }

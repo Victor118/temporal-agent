@@ -145,7 +145,8 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 	runs := subproc.NewRuns(runAs)
 
 	stopRuns := &activity.RunStop{}
-	codeAct := &activity.ClaudeCodeActivities{Root: cfg.ClaudeCodeWorkspace, SSHKeyPath: cfg.ClaudeCodeSSHKey, AllowedRepos: cfg.ClaudeCodeRepos, RunAs: runAs, Runs: runs, Runner: &claudecode.Runner{StallTimeout: stallTimeout}, ClaudeConfigDir: cfg.ClaudeConfigDir, Model: cfg.ClaudeCodeModel, MaxBudgetUSD: budget, Auth: auth, QueueWait: queueWait, Stopper: stopRuns}
+	pub := &tool.Publisher{Store: st, MaxBytes: maxFile}
+	codeAct := &activity.ClaudeCodeActivities{Publisher: pub, Root: cfg.ClaudeCodeWorkspace, SSHKeyPath: cfg.ClaudeCodeSSHKey, AllowedRepos: cfg.ClaudeCodeRepos, RunAs: runAs, Runs: runs, Runner: &claudecode.Runner{StallTimeout: stallTimeout}, ClaudeConfigDir: cfg.ClaudeConfigDir, Model: cfg.ClaudeCodeModel, MaxBudgetUSD: budget, Auth: auth, QueueWait: queueWait, Stopper: stopRuns}
 	workerConf := loadWorkerConfig(cfg)
 	machinesOn, err := cfg.MachinesOn()
 	if err != nil {
@@ -162,8 +163,7 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 		}
 	}
 
-	registry := buildRegistry(cfg, st, tc, runAs, runs, &tool.Publisher{Store: st, MaxBytes: maxFile},
-		workerConf.Workflows, routing)
+	registry := buildRegistry(cfg, st, tc, runAs, runs, pub, workerConf.Workflows, routing)
 
 	skills := loadSkills(opts.skills)
 	catalog := initCatalog(st)

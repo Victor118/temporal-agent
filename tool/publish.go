@@ -172,6 +172,22 @@ func (p *Publisher) publish(ctx context.Context, name string, content []byte, ma
 	return f, nil
 }
 
+// Publish stores content as a file named name, attached to the session turn
+// of the call ctx carries (WithCall; WithAgentID and WithUserID say whose),
+// at most MaxBytes, as exec's publish does: what a coding run left in its
+// outputs (activity.ClaudeCodeActivities.PublishOutputs). The same name and
+// content again is the file stored first; another content is refused.
+func (p *Publisher) Publish(ctx context.Context, name string, content []byte) (FileRef, error) {
+	f, err := p.publish(ctx, name, content, p.maxBytes())
+	if err != nil {
+		return FileRef{}, err
+	}
+	return FileRef{ID: f.ID, Name: f.Name, ContentType: f.ContentType, Size: f.Size, SHA256: f.SHA256}, nil
+}
+
+// MaxFileBytes is the largest file Publish stores.
+func (p *Publisher) MaxFileBytes() int64 { return p.maxBytes() }
+
 // call is the context of a call that may publish: one of a session turn
 // (call.Turn), with its ID. Any other is refused, before it makes anything
 // to publish.

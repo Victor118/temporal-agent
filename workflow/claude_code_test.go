@@ -15,6 +15,7 @@ import (
 	"go.temporal.io/sdk/testsuite"
 
 	"github.com/victor/temporal-agent/activity"
+	"github.com/victor/temporal-agent/tool"
 )
 
 // analyzeEnv registers stand-ins for the three activities and reports what the
@@ -27,6 +28,9 @@ type analyzeEnv struct {
 	cleaned  []string
 	// duringRun, when set, is what the run does instead of returning at once.
 	duringRun func(ctx context.Context) error
+	// outputs is what PublishOutputs returns, published what it was asked.
+	outputs   activity.PublishOutputsOutput
+	published *activity.PublishOutputsInput
 }
 
 func newAnalyzeEnv(t *testing.T, prepareErr error, result claudeCodeResult, runErr error) *analyzeEnv {
@@ -55,6 +59,11 @@ func newAnalyzeEnv(t *testing.T, prepareErr error, result claudeCodeResult, runE
 		a.cleaned = append(a.cleaned, in.Dir)
 		return nil
 	}, sdkactivity.RegisterOptions{Name: "CleanupWorkspace"})
+
+	a.env.RegisterActivityWithOptions(func(ctx context.Context, in activity.PublishOutputsInput) (activity.PublishOutputsOutput, error) {
+		a.published = &in
+		return a.outputs, nil
+	}, sdkactivity.RegisterOptions{Name: "PublishOutputs"})
 
 	return a
 }
@@ -311,5 +320,25 @@ func TestAnalyzeRepoWorkflow_RunOutOfTime(t *testing.T) {
 	}
 	if !strings.Contains(out.Content, "progress unknown; cost unknown (run interrupted)") {
 		t.Errorf("content:\n%s", out.Content)
+	}
+}
+
+// What the run left in its outputs is published on its worker, for the
+// call's turn, and listed for the agent; what was not, said.
+func TestAnalyzeRepoWorkflow_PublishesItsOutputs(t *testing.T) {
+	a := newAnalyzeEnv(t, nil, claudeCodeResult{Report: "ok", Subtype: "success"}, nil)
+	a.outputs = activity.PublishOutputsOutput{Files: []tool.FileRef{{ID: "f-1", Name: "diagram.svg", Size: 2048}},
+		Unpublished: []string{"key: a link, not published"}}
+	call := tool.CallContext{UserID: "u-1", CallID: "call-1", AgentChain: []string{"jarvis"}, NotifyQueue: "agent",
+		Turn: &tool.TurnRef{SessionID: "s-1", TurnKey: "m3.jarvis"}}
+	out := a.run_(t, AnalyzeRepoInput{Repo: "/src/repo", Task: "look", CallContext: call})
+	if !a.run.Outputs || a.published == nil || a.published.Call.CallID != "call-1" || a.published.Call.Turn.TurnKey != "m3.jarvis" ||
+		a.published.Dir != a.run.Dir {
+		t.Fatalf("run %+v, published %+v", a.run, a.published)
+	}
+	for _, want := range []string{"files published", "diagram.svg (2.0 KB, id f-1)", "files not published", "key: a link"} {
+		if !strings.Contains(out.Content, want) {
+			t.Errorf("content lacks %q: %s", want, out.Content)
+		}
 	}
 }

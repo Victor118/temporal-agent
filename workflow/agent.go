@@ -743,6 +743,13 @@ func notifyToolCalls(ctx workflow.Context, sessionID, channel, channelID string,
 // under turn: their thread shows them. Best effort, as a turn event: the
 // files are stored, and the thread shows them at its next reload anyway.
 func notifyFiles(ctx workflow.Context, turn tool.TurnRef, agentID string, files []tool.FileRef) {
+	notifyFilesWith(ctx, turnNotifyOptions, turn, agentID, files)
+}
+
+// notifyFilesWith is notifyFiles with its activity's options: a coding run
+// sends it to its turn's queue (CallContext.NotifyQueue), whose workers
+// hold the channels' notifiers.
+func notifyFilesWith(ctx workflow.Context, opts workflow.ActivityOptions, turn tool.TurnRef, agentID string, files []tool.FileRef) {
 	ids := make([]string, len(files))
 	for i, f := range files {
 		ids[i] = f.ID
@@ -755,7 +762,7 @@ func notifyFiles(ctx workflow.Context, turn tool.TurnRef, agentID string, files 
 	})
 	var notifAct *activity.NotificationActivities
 	_ = workflow.ExecuteActivity(
-		workflow.WithActivityOptions(ctx, turnNotifyOptions),
+		workflow.WithActivityOptions(ctx, opts),
 		notifAct.NotifyStep,
 		activity.NotifyInput{
 			SessionID: turn.SessionID,

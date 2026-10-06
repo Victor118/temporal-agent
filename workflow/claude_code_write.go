@@ -140,9 +140,13 @@ func implementFeature(ctx workflow.Context, rawInput json.RawMessage, probed *ac
 			DisallowedTools:    implementDeniedTools,
 			AppendSystemPrompt: implementSystemPrompt,
 			MaxBudgetUSD:       input.MaxBudgetUSD,
+			Outputs:            true,
 		},
 	).Get(r.ctx, &result)
 	ran := workflow.Now(ctx).Sub(runStarted)
+	if runErr == nil || !r.failed(runErr) {
+		out.publishOutputs(ctx, r, prepared.Dir, input.CallContext)
+	}
 
 	// The commits are in the clone, on the lost worker's disk: no other
 	// worker can inspect or push them.

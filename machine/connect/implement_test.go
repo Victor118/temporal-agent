@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -186,72 +185,6 @@ func TestCoder_ImplementPushRefused(t *testing.T) {
 	json.Unmarshal(raw, &out)
 	if err != nil || out.Pushed || len(out.Commits) != 1 || !strings.Contains(out.Error, "were not pushed") || !strings.Contains(out.Error, "refused by policy") {
 		t.Errorf("output %+v %v", out, err)
-	}
-}
-
-// What a run leaves in its outputs is published within bounds: regular
-// files only, never through a link nor a file another path shares, at most
-// so many, so deep, so large, one per name.
-func TestCoder_PublishOutputs(t *testing.T) {
-	dir := t.TempDir()
-	write := func(p, content string) {
-		os.MkdirAll(filepath.Dir(filepath.Join(dir, p)), 0o700)
-		if err := os.WriteFile(filepath.Join(dir, p), []byte(content), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	secret := filepath.Join(t.TempDir(), "id_ed25519")
-	os.WriteFile(secret, []byte("PRIVATE KEY"), 0o600)
-	write("report.md", "# Report")
-	write("sub/data.csv", "a,b")
-	write("sub/report.md", "another")
-	write("big.bin", strings.Repeat("x", 33))
-	write("a/b/c/d/deep.txt", "too deep")
-	os.Symlink(secret, filepath.Join(dir, "key"))
-	os.Symlink("/etc", filepath.Join(dir, "etc"))
-	os.Link(secret, filepath.Join(dir, "linked"))
-	exec.Command("mkfifo", filepath.Join(dir, "fifo")).Run()
-
-	a := &Coder{MaxFileBytes: 32}
-	pub := &published{}
-	a.Upload = pub.upload
-	refused := a.publishOutputs(context.Background(), dir)
-	if len(pub.files) != 2 || pub.files["report.md"] != "# Report" || pub.files["data.csv"] != "a,b" {
-		t.Errorf("published %v", pub.files)
-	}
-	said := strings.Join(refused, "\n")
-	for _, want := range []string{"big.bin: too large", "a/b/c/d/: more than", "key: a link", "etc: a link", "linked: another path shares",
-		"sub/report.md: another file is published as report.md"} {
-		if !strings.Contains(said, want) {
-			t.Errorf("refusals lack %q:\n%s", want, said)
-		}
-	}
-	if _, err := os.Stat(filepath.Join(dir, "fifo")); err == nil && !strings.Contains(said, "fifo: not a regular file") {
-		t.Errorf("a FIFO:\n%s", said)
-	}
-	if strings.Contains(fmt.Sprint(pub.files), "PRIVATE KEY") {
-		t.Error("a secret went out")
-	}
-
-	// So many files: the first ones only.
-	many := t.TempDir()
-	for i := range machine.MaxOutputFiles + 3 {
-		os.WriteFile(filepath.Join(many, fmt.Sprintf("f%02d.txt", i)), []byte("x"), 0o600)
-	}
-	pub = &published{}
-	a.Upload = pub.upload
-	refused = a.publishOutputs(context.Background(), many)
-	if len(pub.files) != machine.MaxOutputFiles || len(refused) != 3 || !strings.Contains(refused[0], "at most") {
-		t.Errorf("%d published, refused %v", len(pub.files), refused)
-	}
-
-	// A run cancelled publishes nothing.
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	pub = &published{}
-	a.Upload = pub.upload
-	if refused := a.publishOutputs(ctx, dir); len(pub.files) != 0 || refused != nil {
-		t.Errorf("cancelled: %v %v", pub.files, refused)
 	}
 }
 

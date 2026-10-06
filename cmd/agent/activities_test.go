@@ -109,6 +109,7 @@ func TestWorkerActivities_AreTheActivities(t *testing.T) {
 		"PostForkSummary",
 		"PrepareWorkspace",
 		"ProbeRunWorker",
+		"PublishOutputs",
 		"PushBranch",
 		"Relay",
 		"RunClaudeCode",
