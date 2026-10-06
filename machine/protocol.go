@@ -16,10 +16,12 @@ import (
 // Protocol is the version of the messages this binary speaks; a machine
 // sends it in its hello. MinProtocol is the oldest the gateway accepts: the
 // machines run the binary their owner installed, the one place where two
-// versions of the project really meet.
+// versions of the project really meet. 2: a machine's capabilities change
+// while connected; 3: implement_feature, git-push, and the files a machine
+// publishes (phase 2).
 const (
-	Protocol    = 2
-	MinProtocol = 2
+	Protocol    = 3
+	MinProtocol = 3
 )
 
 // Message types. A machine sends hello, rotated, progress, result and

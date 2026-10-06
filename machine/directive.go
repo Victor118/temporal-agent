@@ -33,11 +33,35 @@ const (
 	ErrTypeRefused = "DirectiveRefused"
 )
 
-// Result is what RunOnMachine returns: the machine's output, and its last
-// progress.
+// Result is what RunOnMachine returns: the machine's output, its last
+// progress, and the files it published for the directive's turn, as the
+// gateway lists them from its database (never the machine's word).
 type Result struct {
 	Output   json.RawMessage `json:"output,omitempty"`
 	Progress string          `json:"progress,omitempty"`
+	Files    []FileRef       `json:"files,omitempty"`
+}
+
+// FileRef is a file a machine published, as the server stored it: never its
+// content (tool.FileRef's fields).
+type FileRef struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	ContentType string `json:"content_type"`
+	Size        int64  `json:"size"`
+	SHA256      string `json:"sha256"`
+}
+
+// FilesPath is the server's route where a machine publishes a file of a
+// directive it runs: PUT, its machine token as Bearer, the directive and the
+// file's name as the query's "directive" and "name", the content as the
+// body. The answer is the FileRef, or an UploadError.
+const FilesPath = "/machines/files"
+
+// UploadError is the server's answer to a file it refused, in words for the
+// model (the machine passes them on in its output).
+type UploadError struct {
+	Error string `json:"error"`
 }
 
 // Heartbeat is what the gateway records on a directive's activity: its
