@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -88,6 +89,14 @@ func TestCallLLMOnMachine(t *testing.T) {
 		t.Errorf("request %+v", r)
 	}
 
+	// At its cap: busy, passing, nothing handed over.
+	machines.err = fmt.Errorf("%w: 4 calls", store.ErrMachineBusy)
+	_, err = env.ExecuteActivity(llm.CallLLMOnMachine, in)
+	var busy *temporal.ApplicationError
+	if !errors.As(err, &busy) || busy.Type() != machine.ErrTypeBusy || len(handoff.requests) != 1 {
+		t.Errorf("busy: %v", err)
+	}
+
 	// The machine cannot take it: refused, nothing handed over.
 	machines.err = store.ErrMachineUnavailable
 	_, err = env.ExecuteActivity(llm.CallLLMOnMachine, in)
@@ -97,10 +106,24 @@ func TestCallLLMOnMachine(t *testing.T) {
 	}
 
 	// The gateway could not reach it: unreachable, the directive closed.
-	machines.err, handoff.err = nil, errors.New("424")
+	machines.err, handoff.err = nil, fmt.Errorf("424: %w", machine.ErrUnreachable)
 	_, err = env.ExecuteActivity(llm.CallLLMOnMachine, in)
 	if !errors.As(err, &appErr) || appErr.Type() != machine.ErrTypeUnreachable || len(machines.closed) != 1 || machines.closed[0] != store.DirectiveFailed {
 		t.Errorf("unreachable: %v %v", err, machines.closed)
+	}
+	// The gateway itself out of reach: not the machine's doing.
+	handoff.err = errors.New("connection refused")
+	_, err = env.ExecuteActivity(llm.CallLLMOnMachine, in)
+	if !errors.As(err, &appErr) || appErr.Type() != machine.ErrTypeHandoffFailed {
+		t.Errorf("handoff failed: %v", err)
+	}
+	// A worker with no gateway: its own type.
+	noGateway := newLLM(failingProvider{errors.New("x")}, st)
+	other := suite.NewTestActivityEnvironment()
+	other.RegisterActivity(noGateway)
+	_, err = other.ExecuteActivity(noGateway.CallLLMOnMachine, in)
+	if !errors.As(err, &appErr) || appErr.Type() != machine.ErrTypeNoGateway {
+		t.Errorf("no gateway: %v", err)
 	}
 
 	// Past the guard, or past what a machine reads: too long, nothing

@@ -40,10 +40,12 @@ type LLMMachine struct {
 	Model string `json:"model,omitempty"`
 }
 
-// ChooseMachineOutput is the machine chosen, or NoMachine: why none.
+// ChooseMachineOutput is the machine chosen, or NoMachine: why none;
+// MachinesOff when the installation has its machines off.
 type ChooseMachineOutput struct {
-	Machine   *LLMMachine `json:"machine,omitempty"`
-	NoMachine string      `json:"no_machine,omitempty"`
+	Machine     *LLMMachine `json:"machine,omitempty"`
+	NoMachine   string      `json:"no_machine,omitempty"`
+	MachinesOff bool        `json:"machines_off,omitempty"`
 }
 
 // ChooseMachine chooses a machine of the turn's author for its model, and
@@ -55,7 +57,7 @@ type ChooseMachineOutput struct {
 func (a *MachineActivities) ChooseMachine(ctx context.Context, in ChooseMachineInput) (ChooseMachineOutput, error) {
 	switch {
 	case !a.Routing.Machines:
-		return ChooseMachineOutput{NoMachine: "this installation has its machines off (MACHINES_ENABLED=false)"}, nil
+		return ChooseMachineOutput{NoMachine: "this installation has its machines off (MACHINES_ENABLED=false)", MachinesOff: true}, nil
 	case in.UserID == "":
 		return ChooseMachineOutput{NoMachine: "the turn has no author whose machine could run its model"}, nil
 	}
@@ -119,12 +121,15 @@ type LLMMachineStore interface {
 // the gateway with the request, and returns pending: the gateway completes
 // it with the machine's answer. One attempt: the workflow retries, falls
 // back or stops (AgentWorkflow). A machine that cannot take the call is
-// DirectiveRefused; one the gateway could not reach, MachineUnreachable:
-// nothing ran.
+// DirectiveRefused, one at its cap MachineBusy (passing); one the gateway
+// could not reach, MachineUnreachable; a gateway this worker could not
+// reach, HandoffFailed; a worker with no gateway, WorkerNoGateway: nothing
+// ran.
 func (a *LLMActivities) CallLLMOnMachine(ctx context.Context, in CallLLMOnMachineInput) (LLMTurnResponse, error) {
 	if a.Machines == nil || a.Handoff == nil {
 		return LLMTurnResponse{}, temporal.NewNonRetryableApplicationError(
-			"this worker hands no call to a machine (no gateway, MACHINES_ENABLED, NOTIFY_URL)", machine.ErrTypeUnreachable, nil)
+			"this worker hands no call to a machine: no gateway configured on the worker of CallLLM's queue (MACHINES_ENABLED, NOTIFY_URL, INTERNAL_API_KEY)",
+			machine.ErrTypeNoGateway, nil)
 	}
 	req := in.Request
 	request, memory, err := a.buildRequest(ctx, req)
@@ -141,6 +146,10 @@ func (a *LLMActivities) CallLLMOnMachine(ctx context.Context, in CallLLMOnMachin
 		return LLMTurnResponse{}, temporal.NewNonRetryableApplicationError(ContextTooLongMessage, ErrContextTooLong, nil)
 	}
 
+	// Building the request may have taken a while: the heartbeat timeout
+	// runs from the start, and the gateway's first heartbeat comes after the
+	// handoff.
+	activity.RecordHeartbeat(ctx)
 	info := activity.GetInfo(ctx)
 	input, err := json.Marshal(machine.LLMInput{PromptMemory: memory})
 	if err != nil {
@@ -155,6 +164,9 @@ func (a *LLMActivities) CallLLMOnMachine(ctx context.Context, in CallLLMOnMachin
 	}
 	d, m, err := a.Machines.CreateLLMDirective(ctx, dr)
 	switch {
+	case errors.Is(err, store.ErrMachineBusy):
+		return LLMTurnResponse{}, temporal.NewNonRetryableApplicationError(
+			fmt.Sprintf("the machine is busy: %v", err), machine.ErrTypeBusy, nil)
 	case errors.Is(err, store.ErrMachineUnavailable), errors.Is(err, store.ErrDirectiveClosed):
 		return LLMTurnResponse{}, temporal.NewNonRetryableApplicationError(
 			fmt.Sprintf("the machine cannot take the call: %v", err), machine.ErrTypeRefused, nil)
@@ -170,8 +182,12 @@ func (a *LLMActivities) CallLLMOnMachine(ctx context.Context, in CallLLMOnMachin
 		closeCtx, cancelClose := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancelClose()
 		a.Machines.CloseDirective(closeCtx, d.ID, store.DirectiveFailed, "not handed to the machine")
+		typ := machine.ErrTypeHandoffFailed // the server away: not the machine's fault
+		if errors.Is(err, machine.ErrUnreachable) {
+			typ = machine.ErrTypeUnreachable
+		}
 		return LLMTurnResponse{}, temporal.NewNonRetryableApplicationError(
-			fmt.Sprintf("the call could not be handed to machine %q: %v", m.Name, err), machine.ErrTypeUnreachable, nil)
+			fmt.Sprintf("the call could not be handed to machine %q: %v", m.Name, err), typ, nil)
 	}
 	return LLMTurnResponse{}, activity.ErrResultPending
 }

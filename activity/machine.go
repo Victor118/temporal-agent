@@ -231,10 +231,6 @@ type DirectiveHandoffInput struct {
 	Request     json.RawMessage `json:"request,omitempty"`
 }
 
-// errMachineUnreachable is a call to the model the gateway could not send to
-// its machine (424): it closed the directive.
-var errMachineUnreachable = errors.New("the machine is not connected to the server, or did not take the request")
-
 // DeliverLLM hands a call to the model with its request: one try, within
 // machine.LLMHandoffTimeout (the gateway writes it to the machine within
 // machine.LLMWriteTimeout). A failure is the step's: its workflow decides.
@@ -259,7 +255,8 @@ func (h *HTTPDirectiveHandoff) DeliverLLM(ctx context.Context, directiveID strin
 	resp.Body.Close()
 	switch {
 	case resp.StatusCode == http.StatusFailedDependency:
-		return errMachineUnreachable
+		// The gateway closed the directive.
+		return machine.ErrUnreachable
 	case resp.StatusCode == http.StatusUnauthorized:
 		return fmt.Errorf("%w: the server refused this worker's INTERNAL_API_KEY", errHandoffRefused)
 	case resp.StatusCode/100 != 2:
