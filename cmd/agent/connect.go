@@ -19,6 +19,7 @@ import (
 	"github.com/victor/temporal-agent/claudecode"
 	"github.com/victor/temporal-agent/machine"
 	"github.com/victor/temporal-agent/machine/connect"
+	"github.com/victor/temporal-agent/provider"
 )
 
 // version is the binary's version, which a machine announces; set at build
@@ -54,6 +55,9 @@ func init() {
 	f.String("claude-auth", os.Getenv("CLAUDE_CODE_AUTH"), "who pays the runs: api (ANTHROPIC_API_KEY) or subscription (your Claude login); empty = the one credential present (env CLAUDE_CODE_AUTH)")
 	f.String("claude-model", os.Getenv("CLAUDE_CODE_MODEL"), "model of the runs; empty = the CLI's default (env CLAUDE_CODE_MODEL)")
 	f.String("work-dir", "", "where the runs' clones go, deleted after each (default: the user's cache, agent/runs/<machine>)")
+	f.String("llm-provider", os.Getenv("AGENT_CONNECT_LLM_PROVIDER"), "run the model of your turns here, for the agents that allow it, with this provider (anthropic) and your key in AGENT_CONNECT_LLM_API_KEY; empty = no model here (env AGENT_CONNECT_LLM_PROVIDER)")
+	f.String("llm-model", os.Getenv("AGENT_CONNECT_LLM_MODEL"), "the model of your turns, whatever the server asks (env AGENT_CONNECT_LLM_MODEL)")
+	f.Int("llm-max-concurrent", machine.DefaultMaxLLM, "how many calls to the model this machine makes at once, apart from its directives")
 }
 
 func runConnect(cmd *cobra.Command, args []string) {
@@ -91,6 +95,13 @@ func runConnect(cmd *cobra.Command, args []string) {
 	if err != nil {
 		log.Fatal(err)
 	}
+	modeler, maxLLM, err := newModeler(cmd)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if modeler != nil {
+		executors[machine.KindLLM] = modeler.Call
+	}
 	if coder != nil {
 		executors[machine.KindAnalyzeRepo] = coder.Analyze
 		executors[machine.KindImplementFeature] = coder.Implement
@@ -104,6 +115,12 @@ func runConnect(cmd *cobra.Command, args []string) {
 			}
 			if coder.AllowPush {
 				s.Capabilities = append(s.Capabilities, machine.CapGitPush)
+			}
+		}
+		if modeler != nil {
+			s.LLM = modeler.State()
+			if modeler.Offered() {
+				s.Capabilities = append(s.Capabilities, machine.CapLLM)
 			}
 		}
 		return s
@@ -123,6 +140,13 @@ func runConnect(cmd *cobra.Command, args []string) {
 
 	c := &connect.Client{State: state, Executors: executors, Status: status, MaxDirectives: maxDirectives,
 		OS: runtime.GOOS + "/" + runtime.GOARCH, Version: version}
+	if modeler != nil {
+		c.MaxLLM, c.LLMProvider, c.LLMModel = maxLLM, modeler.ProviderName, modeler.Model
+		modeler.OnRefused = c.Refresh
+		log.Printf("connect: the model of your turns runs here for the agents that allow it: %s %s, %d calls at a time, "+
+			"billed to your key (AGENT_CONNECT_LLM_API_KEY). The machine gets the agent's prompt, its tools and the session's conversation, "+
+			"and decides which tools the turn calls", modeler.ProviderName, modeler.Model, maxLLM)
+	}
 	cfg, err := state.Load()
 	if err != nil {
 		log.Fatal(err)
@@ -230,6 +254,39 @@ func newCoder(cmd *cobra.Command) (*connect.Coder, error) {
 	home, _ := os.UserHomeDir()
 	return &connect.Coder{Runner: runner, Auth: auth, Repos: repos, AllowPush: allowPush, MaxBudgetUSD: budget, Model: model,
 		WorkDir: workDir, Environ: os.Environ(), Home: home}, nil
+}
+
+// newModeler is the machine's model, when --llm-provider is given (nil
+// otherwise): the provider of the binary's registry (provider.New), the
+// owner's key from AGENT_CONNECT_LLM_API_KEY only (never ANTHROPIC_API_KEY,
+// which Claude Code's runs read or drop by their own rule), and a model.
+func newModeler(cmd *cobra.Command) (*connect.Modeler, int, error) {
+	f := cmd.Flags()
+	name, _ := f.GetString("llm-provider")
+	model, _ := f.GetString("llm-model")
+	maxLLM, _ := f.GetInt("llm-max-concurrent")
+	if name == "" {
+		if model != "" {
+			return nil, 0, fmt.Errorf("--llm-model goes with --llm-provider")
+		}
+		return nil, 0, nil
+	}
+	key := os.Getenv("AGENT_CONNECT_LLM_API_KEY")
+	switch {
+	case key == "":
+		return nil, 0, fmt.Errorf("--llm-provider %s: put your API key in AGENT_CONNECT_LLM_API_KEY", name)
+	case model == "":
+		return nil, 0, fmt.Errorf("--llm-provider %s: name the model with --llm-model (e.g. claude-sonnet-5)", name)
+	case len(model) > machine.MaxLLMModelBytes:
+		return nil, 0, fmt.Errorf("--llm-model: at most %d bytes", machine.MaxLLMModelBytes)
+	case maxLLM < 1 || maxLLM > machine.MaxLLM:
+		return nil, 0, fmt.Errorf("--llm-max-concurrent: between 1 and %d", machine.MaxLLM)
+	}
+	p, err := provider.New(name, key, model)
+	if err != nil {
+		return nil, 0, fmt.Errorf("--llm-provider: %w", err)
+	}
+	return &connect.Modeler{Provider: p, ProviderName: name, Model: model}, maxLLM, nil
 }
 
 // describeCoder says at startup who pays the runs, and what keeps them in

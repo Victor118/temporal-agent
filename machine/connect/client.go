@@ -29,11 +29,18 @@ type Executor func(ctx context.Context, input json.RawMessage, progress func(str
 type Client struct {
 	State     State
 	Executors map[string]Executor // by kind: the machine's capabilities
-	// MaxDirectives is how many directives it runs at once (≥ 1).
+	// MaxDirectives is how many coding directives it runs at once (≥ 1),
+	// MaxLLM how many calls to the model (machine.FamilyOf: each family has
+	// its own cap; 0 = none).
 	MaxDirectives int
-	OS            string
-	Version       string
-	Log           *log.Logger
+	MaxLLM        int
+	// LLMProvider and LLMModel are what its model is, announced in its
+	// hello; empty without one.
+	LLMProvider string
+	LLMModel    string
+	OS          string
+	Version     string
+	Log         *log.Logger
 	// MinBackoff and MaxBackoff bound the wait between reconnections; zero
 	// = 1 s and 1 min.
 	MinBackoff, MaxBackoff time.Duration
@@ -70,6 +77,7 @@ type Client struct {
 }
 
 type job struct {
+	kind     string
 	cancel   context.CancelCauseFunc
 	progress string
 	// sentAt is when its last progress went out; flush sends the latest
@@ -113,16 +121,17 @@ func (c *Client) logf(format string, args ...any) {
 	}
 }
 
-// Status is what the machine can do now: the capabilities it announces, and
-// the state of its claude CLI ("ok", "logged_out", "absent"; "" = not
-// said).
+// Status is what the machine can do now: the capabilities it announces, the
+// state of its claude CLI ("ok", "logged_out", "absent"; "" = not said), and
+// of its model (machine.LLMState*; "" = none).
 type Status struct {
 	Capabilities []string
 	ClaudeCode   string
+	LLM          string
 }
 
 func (s Status) equal(o Status) bool {
-	return s.ClaudeCode == o.ClaudeCode && slices.Equal(s.Capabilities, o.Capabilities)
+	return s.ClaudeCode == o.ClaudeCode && s.LLM == o.LLM && slices.Equal(s.Capabilities, o.Capabilities)
 }
 
 // Capabilities are what the machine announces now: Status's when set,
@@ -175,11 +184,11 @@ func (c *Client) statusLoop(ctx context.Context, ws *websocket.Conn, sent Status
 		if now.equal(sent) {
 			continue
 		}
-		if err := c.write(ws, machine.Message{Type: machine.TypeCapabilities, Capabilities: now.Capabilities, ClaudeCode: now.ClaudeCode}); err != nil {
+		if err := c.write(ws, machine.Message{Type: machine.TypeCapabilities, Capabilities: now.Capabilities, ClaudeCode: now.ClaudeCode, LLM: now.LLM}); err != nil {
 			ws.CloseNow()
 			return
 		}
-		c.logf("connect: now running %v (Claude Code: %s)", now.Capabilities, now.ClaudeCode)
+		c.logf("connect: now running %v (Claude Code: %s, model: %s)", now.Capabilities, now.ClaudeCode, now.LLM)
 		sent = now
 	}
 }
@@ -272,6 +281,9 @@ func (c *Client) session(ctx context.Context) error {
 	ws, resp, err := websocket.Dial(dctx, wsURL(cfg.Server), &websocket.DialOptions{
 		HTTPClient: c.HTTPClient,
 		HTTPHeader: http.Header{"Authorization": {"Bearer " + cfg.Token}},
+		// A call to the model's request is one large message: compressed on
+		// its own, no context kept between messages (the gateway's mode).
+		CompressionMode: websocket.CompressionNoContextTakeover,
 	})
 	cancel()
 	if err != nil {
@@ -281,7 +293,9 @@ func (c *Client) session(ctx context.Context) error {
 		return err
 	}
 	defer ws.CloseNow()
-	ws.SetReadLimit(machine.MaxMessageBytes)
+	// A call to the model comes with its request: the protocol's bound on
+	// one message, whatever the server's guard.
+	ws.SetReadLimit(machine.MaxReadBytes)
 
 	results, err := c.State.Results()
 	if err != nil {
@@ -292,7 +306,8 @@ func (c *Client) session(ctx context.Context) error {
 	}
 	status := c.status()
 	hello := machine.Message{Type: machine.TypeHello, Protocol: machine.Protocol, AgentVersion: c.Version, OS: c.OS,
-		Capabilities: status.Capabilities, ClaudeCode: status.ClaudeCode, MaxDirectives: c.MaxDirectives}
+		Capabilities: status.Capabilities, ClaudeCode: status.ClaudeCode, MaxDirectives: c.MaxDirectives,
+		MaxLLM: c.MaxLLM, LLMProvider: c.LLMProvider, LLMModel: c.LLMModel, LLM: status.LLM}
 	c.mu.Lock()
 	for id := range c.jobs {
 		hello.Running = append(hello.Running, id)
@@ -429,7 +444,8 @@ func (c *Client) setConn(ws *websocket.Conn) {
 }
 
 func (c *Client) write(ws *websocket.Conn, m machine.Message) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// An answer of the model may be large, on a slow link.
+	ctx, cancel := context.WithTimeout(context.Background(), machine.LLMWriteTimeout)
 	defer cancel()
 	return wsjson.Write(ctx, ws, m)
 }
@@ -473,8 +489,8 @@ func (c *Client) start(m machine.Message) {
 		fail(fmt.Sprintf("this machine cannot run %q directives now (it needs %s: see agent connect's log)", m.Kind,
 			strings.Join(machine.CapabilitiesOf(m.Kind), ", ")))
 		return
-	case len(c.jobs) >= c.MaxDirectives:
-		fail(fmt.Sprintf("this machine runs %d directives at most", c.MaxDirectives))
+	case c.running(machine.FamilyOf(m.Kind)) >= c.capOf(machine.FamilyOf(m.Kind)):
+		fail(fmt.Sprintf("this machine runs %d %s directives at most", c.capOf(machine.FamilyOf(m.Kind)), machine.FamilyOf(m.Kind)))
 		return
 	}
 	if err := c.State.MarkRunning(m.ID); err != nil {
@@ -488,7 +504,7 @@ func (c *Client) start(m machine.Message) {
 		inner := cancel
 		cancel = func(cause error) { inner(cause); stop() }
 	}
-	j := &job{cancel: cancel, loggedAt: time.Now()}
+	j := &job{kind: m.Kind, cancel: cancel, loggedAt: time.Now()}
 	c.jobs[m.ID] = j
 	c.jobsWG.Add(1)
 	c.logf("connect: directive %s (%s) started", m.ID, m.Kind)
@@ -573,6 +589,25 @@ func (c *Client) progress(id string, j *job, p string) {
 			c.send(machine.Message{Type: machine.TypeProgress, ID: id, Text: latest})
 		}
 	})
+}
+
+// running counts the jobs of a family (under c.mu).
+func (c *Client) running(family string) int {
+	n := 0
+	for _, j := range c.jobs {
+		if machine.FamilyOf(j.kind) == family {
+			n++
+		}
+	}
+	return n
+}
+
+// capOf is how many directives of a family the machine runs at once.
+func (c *Client) capOf(family string) int {
+	if family == machine.FamilyLLM {
+		return c.MaxLLM
+	}
+	return c.MaxDirectives
 }
 
 // hasAll reports every one of want in have.
