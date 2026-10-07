@@ -174,7 +174,7 @@ Le pont tourne sous le même utilisateur que la CLI : le jeton de run de la sock
 - **Ce que la machine renvoie n'est pas de confiance** : tailles, références de fichiers (session et tour de la directive, vérifiés en base), rapports (texte pour le modèle, traité comme tel). Pour une machine qui fait tourner le modèle, voir §10 : elle a l'autorité de l'agent.
 - **Jetons** : jeton machine (long, révocable, hash en base) pour la connexion et l'API ; une requête de l'API n'est acceptée que pour une directive ouverte de cette machine. Jamais de jeton de tâche Temporal hors du réseau privé.
 - **Ce qu'une machine voit** : ses directives, et pour chacune ce qu'elle exige. Ni liste, ni lecture d'autres sessions.
-- **Abus** : plafonds de taille (messages WSS, `progress`, uploads), débit par machine, directives simultanées par machine, révocation immédiate.
+- **Abus** : plafonds de taille (messages WSS, `progress`, uploads), débit par machine, directives simultanées par machine, révocation immédiate. Le limiteur de la passerelle compte des messages, pas des octets : avec la limite de lecture de 4 Mio de la phase 3, une machine inscrite peut envoyer beaucoup d'octets ; c'est borné par le nombre de machines et la révocation (`machine-llm.md` §5).
 - **Le serveur vu de la machine** : son propriétaire fait confiance à l'installation qu'il rejoint, puisqu'elle lui envoie des tâches pour sa CLI ; les garde-fous locaux (§8) restent les siens.
 
 ## 12. Ce qui change dans le code
