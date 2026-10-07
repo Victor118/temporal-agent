@@ -51,6 +51,7 @@ type Store interface {
 	SetMachinePaused(ctx context.Context, userID, id string, paused bool) error
 	SetMachinePriority(ctx context.Context, userID, id string, priority int) error
 	TouchMachines(ctx context.Context, ids []string) error
+	ClearMachineAside(ctx context.Context, id string) error
 	ResetMachineConnections(ctx context.Context) error
 	RevokeMachine(ctx context.Context, id, reason string) ([]store.Directive, error)
 

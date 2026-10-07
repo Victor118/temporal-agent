@@ -44,6 +44,9 @@ type conn struct {
 	mu sync.Mutex
 	// directives are the ones this connection heartbeats.
 	directives map[string]*attached
+	// asideClearedAt: when a heartbeat last took its machine back for the
+	// model (clearAside).
+	asideClearedAt time.Time
 }
 
 // attached is a directive a connection carries.
@@ -312,14 +315,18 @@ func reconcile(open []store.Directive, running, finished []string, connID string
 		if d.State != store.DirectiveRunning {
 			continue // reserved: RunOnMachine hands it over
 		}
-		if d.Kind == machine.KindLLM {
-			// A call to the model is never sent again (its request is
-			// gone), nor carried on: lost, its workflow tries again. What
-			// the machine lists of it is cancelled or dropped below.
-			p.lost = append(p.lost, d)
+		isOpen[d.ID] = true
+		if d.Kind == machine.KindLLM && !listed[d.ID] {
+			// A call to the model is never sent again: its request is gone.
+			// Not sent yet, DeliverLLM sends it, or closes it; sent on an
+			// earlier connection and unknown to the machine, it is lost,
+			// and its workflow tries again. Listed, it is carried on below
+			// like any other: running, or its result on its way.
+			if d.SentConn != "" && d.SentConn != connID {
+				p.lost = append(p.lost, d)
+			}
 			continue
 		}
-		isOpen[d.ID] = true
 		switch {
 		case listed[d.ID]:
 			p.attach = append(p.attach, d)
@@ -398,7 +405,7 @@ func (c *conn) lose(d store.Directive) {
 	c.g.clearNote(d)
 	why := fmt.Sprintf("machine %q lost the directive (it restarted during it); nothing was done twice", c.m.Name)
 	if d.Kind == machine.KindLLM {
-		why = fmt.Sprintf("machine %q reconnected during the call to its model", c.m.Name)
+		why = fmt.Sprintf("machine %q no longer knows the call to its model (it restarted during it)", c.m.Name)
 	}
 	cerr := temporal.NewNonRetryableApplicationError(why, machine.ErrTypeLost, nil)
 	if err := c.g.complete(c.ctx, completeTries, d.TaskToken, nil, cerr); err != nil && !isNotFound(err) {
@@ -588,6 +595,10 @@ func (c *conn) heartbeat(id string, token []byte, progress string) {
 	cancel()
 	switch {
 	case err == nil:
+		// It answers, and so does Temporal: a machine set aside for the
+		// model after a lost call (a heartbeat timeout may come from slow
+		// pongs, or from a gateway away) is taken back.
+		c.clearAside()
 	case temporal.IsCanceledError(err):
 		c.mu.Lock()
 		a := c.directives[id]
@@ -620,6 +631,24 @@ func (c *conn) heartbeat(id string, token []byte, progress string) {
 		if c.ctx.Err() == nil {
 			log.Printf("machines: heartbeat of directive %s: %v", id, err)
 		}
+	}
+}
+
+// clearAside takes the connection's machine back for the model, once per
+// connection and per minute at most: an update each heartbeat would be one
+// per directive every 30 s.
+func (c *conn) clearAside() {
+	c.mu.Lock()
+	due := time.Since(c.asideClearedAt) >= time.Minute
+	if due {
+		c.asideClearedAt = time.Now()
+	}
+	c.mu.Unlock()
+	if !due {
+		return
+	}
+	if err := c.g.Store.ClearMachineAside(c.ctx, c.m.ID); err != nil && c.ctx.Err() == nil {
+		log.Printf("machines: take %s back for the model: %v", c.m.ID, err)
 	}
 }
 
@@ -772,7 +801,7 @@ func (c *conn) status(m machine.Message) {
 	}
 	log.Printf("machines: machine %s (%s) now runs %v (Claude Code: %q, model: %q)", c.m.ID, c.m.Name, m.Capabilities, m.ClaudeCode, m.LLM)
 	if c.llm == machine.LLMStateOK && m.LLM == machine.LLMStateRefused {
-		c.g.alert(c.ctx, c.m.UserID, fmt.Sprintf("Le fournisseur du modèle de la machine « %s » a refusé sa clé (ou son crédit est épuisé) : "+
+		c.g.alert(c.ctx, c.m.UserID, fmt.Sprintf("Le fournisseur du modèle de la machine « %s » a refusé sa clé (ou son crédit est épuisé, ou le modèle n'est pas permis à cette clé ; le journal d'agent connect dit sa réponse) : "+
 			"la machine ne fait plus tourner le modèle de tes tours jusqu'à ce qu'agent connect redémarre avec une clé valide "+
 			"(AGENT_CONNECT_LLM_API_KEY). Les agents « de préférence » prennent la clé du serveur ; les autres s'arrêtent.", c.m.Name))
 	}

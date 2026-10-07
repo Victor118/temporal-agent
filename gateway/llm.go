@@ -24,7 +24,7 @@ import (
 // ErrMachineUnreachable is an llm directive that could not be handed to its
 // machine now: not connected, or the write failed. The directive is closed;
 // nothing ran.
-var ErrMachineUnreachable = errors.New("machine unreachable")
+var ErrMachineUnreachable = machine.ErrUnreachable
 
 // llmChunk is how much of a request one write gives the WebSocket: a ping
 // goes out between two frames, and a large request on a slow link does not
@@ -180,6 +180,9 @@ func llmCompletion(d store.Directive, m machine.Message) (any, error) {
 		msg := m.Error
 		if msg == "" {
 			msg = "the machine refused the call"
+		}
+		if m.Code == machine.CodeBusy {
+			return nil, temporal.NewNonRetryableApplicationError(msg, machine.ErrTypeBusy, nil)
 		}
 		return nil, temporal.NewNonRetryableApplicationError(msg, machine.ErrTypeRefused, nil)
 	}

@@ -14,19 +14,21 @@ import (
 	"github.com/victor/temporal-agent/store"
 )
 
-// A call to the model is never sent again nor carried on at a hello: its
-// request is gone. Lost, whatever the machine says of it; what it lists is
-// cancelled, or its result dropped.
+// A call to the model the machine lists is carried on (running, or its
+// result on its way); one not sent yet is DeliverLLM's; one sent on an
+// earlier connection the machine no longer knows is lost. Its request is
+// never sent again.
 func TestReconcile_LLM(t *testing.T) {
 	open := []store.Directive{
 		{ID: "llm-running", Kind: machine.KindLLM, State: store.DirectiveRunning, SentConn: "c-old"},
 		{ID: "llm-finished", Kind: machine.KindLLM, State: store.DirectiveRunning, SentConn: "c-old"},
 		{ID: "llm-unsent", Kind: machine.KindLLM, State: store.DirectiveRunning},
-		{ID: "run", Kind: machine.KindAnalyzeRepo, State: store.DirectiveRunning, SentConn: "c-old"},
+		{ID: "llm-forgotten", Kind: machine.KindLLM, State: store.DirectiveRunning, SentConn: "c-old"},
+		{ID: "llm-sent-here", Kind: machine.KindLLM, State: store.DirectiveRunning, SentConn: "c-now"},
 	}
-	p := reconcile(open, []string{"llm-running", "run"}, []string{"llm-finished"}, "c-now")
-	if !slices.Equal(ids(p.lost), []string{"llm-running", "llm-finished", "llm-unsent"}) || len(p.send) != 0 ||
-		!slices.Equal(ids(p.attach), []string{"run"}) || !slices.Equal(p.cancel, []string{"llm-running"}) || !slices.Equal(p.ack, []string{"llm-finished"}) {
+	p := reconcile(open, []string{"llm-running"}, []string{"llm-finished"}, "c-now")
+	if !slices.Equal(ids(p.attach), []string{"llm-running", "llm-finished"}) || !slices.Equal(ids(p.lost), []string{"llm-forgotten"}) ||
+		len(p.send) != 0 || len(p.cancel) != 0 || len(p.ack) != 0 {
 		t.Errorf("plan %+v", p)
 	}
 }
@@ -82,7 +84,8 @@ func TestLLMCompletion(t *testing.T) {
 		"bad result":    {fail(machine.LLMFailure{Type: machine.LLMFailBadResult}), machine.ErrTypeBadResult},
 		"other failure": {machine.Message{Status: machine.StatusError, Error: "network"}, machine.ErrTypeFailed},
 		"stopping":      {machine.Message{Status: machine.StatusStopping}, machine.ErrTypeStopping},
-		"refused":       {machine.Message{Status: machine.StatusRefused, Error: "full"}, machine.ErrTypeRefused},
+		"refused":       {machine.Message{Status: machine.StatusRefused, Error: "no model"}, machine.ErrTypeRefused},
+		"busy":          {machine.Message{Status: machine.StatusRefused, Error: "full", Code: machine.CodeBusy}, machine.ErrTypeBusy},
 	} {
 		_, err := llmCompletion(d, c.m)
 		var appErr *temporal.ApplicationError
