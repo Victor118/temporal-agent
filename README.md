@@ -181,7 +181,10 @@ workers: a clone at the base, on a branch `agent/<slug>-<id>` the server names;
 the CLI in `acceptEdits` mode with only `git add`, `git commit` and `git
 status` (never `git log`, `diff` or `show`, whose `--output` writes any file;
 never an edit of `.git/`), every git it starts made to run no program of the
-clone's configuration (hooks, fsmonitor, editor, signing: `GIT_CONFIG_COUNT`),
+clone's configuration (hooks, fsmonitor, editor, signing: `GIT_CONFIG_COUNT`)
+and to read a commit's message or pathspec from a file of the clone only (a
+`git` placed first in its `PATH` refuses `-F`, `--template`,
+`--pathspec-from-file` naming a file outside, and the standard input),
 and the same prompt; the CLI ends 10 minutes before the directive's deadline,
 leaving the push its time; then the machine
 inspects the clone and pushes the newest commit it listed
