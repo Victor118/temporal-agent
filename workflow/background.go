@@ -67,12 +67,15 @@ func BackgroundTaskWorkflow(ctx workflow.Context, in BackgroundTaskInput) error 
 	var raw json.RawMessage
 	err := workflow.ExecuteChildWorkflow(childCtx, in.Workflow, in.Input).Get(ctx, &raw)
 
-	// The tool has ended: whatever comes now (a member's stop) changes no
-	// more than the state its end says. The end is posted, told and woken
-	// from a disconnected context: a cancellation arriving meanwhile would
-	// abandon an activity half way, its message written (done) and nobody
-	// woken.
-	cancelled := ctx.Err() != nil
+	// The tool has ended. Cancelled is a tool that ended on the stop: in
+	// error, or a sub-agent that returned what it had, cancelled. A result
+	// that came with the stop, in the same workflow task, is a result,
+	// never thrown away. Whatever comes now changes nothing: the end is
+	// posted, told and woken from a disconnected context, a cancellation
+	// arriving meanwhile would abandon an activity half way, its message
+	// written and nobody woken.
+	stopped := ctx.Err() != nil
+	cancelled := (err != nil && (stopped || temporal.IsCanceledError(err))) || (err == nil && stopped && in.SubAgent && subAgentCancelled(raw))
 	ctx, cancel := workflow.NewDisconnectedContext(ctx)
 	defer cancel()
 
@@ -160,6 +163,13 @@ func wakeParticipant(ctx workflow.Context, agentID string, out activity.PostTask
 		signer = agentID
 	}
 	notifyResponse(ctx, out.SessionID, out.Channel, out.ChannelID, signer, "Error processing message: "+reason)
+}
+
+// subAgentCancelled reports whether a sub-agent's result is that of a run
+// cancelled (cancelledOutput).
+func subAgentCancelled(raw json.RawMessage) bool {
+	var out AgentWorkflowOutput
+	return json.Unmarshal(raw, &out) == nil && out.Cancelled
 }
 
 // childFailure is why a child workflow failed, for the model and the

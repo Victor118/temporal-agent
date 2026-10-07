@@ -100,6 +100,9 @@ type AgentWorkflowOutput struct {
 	// until it hits the payload limit.
 	NewMessages  []store.Message `json:"new_messages"`
 	GoalAchieved bool            `json:"goal_achieved"`
+	// Cancelled: the run was cancelled, and returns what it had produced
+	// (cancelledOutput).
+	Cancelled bool `json:"cancelled,omitempty"`
 	// Error reports a turn that failed with a transcript worth keeping (the LLM
 	// call gave up, for instance). The workflow returns no error in that case,
 	// so NewMessages survives — a failed workflow returns no result at all.
@@ -596,7 +599,7 @@ func exhaustedOutput(newMessages []store.Message) AgentWorkflowOutput {
 // Returning the cancellation as an error would end the run as cancelled,
 // with no result at all.
 func cancelledOutput(newMessages []store.Message) AgentWorkflowOutput {
-	return AgentWorkflowOutput{Response: "Agent cancelled.", NewMessages: newMessages}
+	return AgentWorkflowOutput{Response: "Agent cancelled.", NewMessages: newMessages, Cancelled: true}
 }
 
 // truncateToolResult shortens an oversized tool result, keeping its head and

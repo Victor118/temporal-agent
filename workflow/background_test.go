@@ -727,3 +727,34 @@ func TestAgentWorkflow_CallWithoutID(t *testing.T) {
 		t.Errorf("task %s, call %q, prefix %q", r.ID, r.CallID, sub.CallPrefix)
 	}
 }
+
+// A tool that returns its result as the stop comes keeps it: the task ends
+// done, its result posted, its participant woken. A sub-agent that returns
+// what it had, cancelled, ends the task cancelled.
+func TestBackgroundTask_ResultWithTheStop(t *testing.T) {
+	e := newTaskEnv(t, func(ctx sdkworkflow.Context, _ json.RawMessage) (tool.Result, error) {
+		sdkworkflow.Sleep(ctx, time.Hour) // cancelled: it returns all the same
+		return tool.Result{Content: "finished anyway"}, nil
+	})
+	e.env.RegisterDelayedCallback(e.env.CancelWorkflow, time.Minute)
+	e.run()
+	results := e.taskResults()
+	if len(results) != 1 || results[0].Task.State != store.BackgroundDone || results[0].Content != `"finished anyway"` || len(e.starts.all()) != 1 {
+		t.Errorf("results %+v, wakes %d", results, len(e.starts.all()))
+	}
+
+	e = newTaskEnv(t, func(sdkworkflow.Context, json.RawMessage) (tool.Result, error) { return tool.Result{}, nil })
+	e.env.RegisterWorkflowWithOptions(func(ctx sdkworkflow.Context, _ AgentWorkflowInput) (AgentWorkflowOutput, error) {
+		if err := sdkworkflow.Sleep(ctx, time.Hour); err != nil {
+			return cancelledOutput(nil), nil
+		}
+		return AgentWorkflowOutput{Response: "the review"}, nil
+	}, sdkworkflow.RegisterOptions{Name: "FakeAgentWorkflow"})
+	e.env.RegisterDelayedCallback(e.env.CancelWorkflow, time.Minute)
+	e.env.ExecuteWorkflow(BackgroundTaskWorkflow, BackgroundTaskInput{SessionID: "s1", AgentID: "smith", Tool: "agent_x", SubAgent: true,
+		Workflow: "FakeAgentWorkflow", ChildID: testTaskID + ":tool:agent_x:c1", TaskQueue: "agent", Input: json.RawMessage(`{}`)})
+	results = e.taskResults()
+	if len(results) != 1 || results[0].Task.State != store.BackgroundCancelled || len(e.starts.all()) != 0 {
+		t.Errorf("sub-agent: results %+v, wakes %d", results, len(e.starts.all()))
+	}
+}
