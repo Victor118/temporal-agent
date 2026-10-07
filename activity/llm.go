@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"time"
 
 	"go.temporal.io/sdk/temporal"
 
 	"github.com/victor/temporal-agent/conversation"
+	"github.com/victor/temporal-agent/machine"
 	"github.com/victor/temporal-agent/provider"
 	"github.com/victor/temporal-agent/store"
 )
@@ -67,6 +69,12 @@ type LLMActivities struct {
 	// MaxContextBytes bounds a request (see DefaultMaxContextBytes); 0 = the
 	// default.
 	MaxContextBytes int
+	// Machines and Handoff carry a call to the machine of the turn's author
+	// (CallLLMOnMachine): its directive, and the gateway it goes through. Nil
+	// where the machines are off. OnlineWindow is MachineActivities'.
+	Machines     LLMMachineStore
+	Handoff      DirectiveHandoff
+	OnlineWindow time.Duration
 }
 
 // LLMTurnRequest is one call of a turn. The conversation is given inline
@@ -124,15 +132,9 @@ type LLMTurnResponse struct {
 	PromptMemory
 }
 
-// PromptMemory is what a call's prompt held of the user's memory.
-type PromptMemory struct {
-	// MemoryVersion: 0 for a memory never saved; nil when the prompt held
-	// none, and a save would be blind.
-	MemoryVersion *int64 `json:"memory_version,omitempty"`
-	// MemoryUnread: the prompt was to hold the memory, which could not be
-	// read (MemoryVersion nil). The next call reads it again.
-	MemoryUnread bool `json:"memory_unread,omitempty"`
-}
+// PromptMemory is what a call's prompt held of the user's memory: the
+// machine package's, which a call on a machine keeps in its directive.
+type PromptMemory = machine.PromptMemory
 
 func (a *LLMActivities) CallLLM(ctx context.Context, req LLMTurnRequest) (LLMTurnResponse, error) {
 	request, memory, err := a.buildRequest(ctx, req)

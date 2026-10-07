@@ -301,7 +301,8 @@ type activityDeps struct {
 // activities it holds (TestWorkerActivities_AreTheActivities).
 func workerActivities(d activityDeps) []any {
 	return []any{
-		&activity.LLMActivities{Provider: d.llm, Store: d.store, Catalog: d.catalog, Prompts: d.skills.Prompts, MaxContextBytes: d.maxContext},
+		&activity.LLMActivities{Provider: d.llm, Store: d.store, Catalog: d.catalog, Prompts: d.skills.Prompts, MaxContextBytes: d.maxContext,
+			Machines: d.machines, Handoff: d.handoff},
 		&activity.ForkActivities{Store: d.store, LLM: d.llm, Private: d.catalog},
 		&activity.MemoryActivities{Store: d.store},
 		&activity.TurnActivities{Store: d.store},

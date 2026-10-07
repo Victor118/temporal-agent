@@ -92,7 +92,9 @@ func TestRegister_RefusesAMethodWithNoResult(t *testing.T) {
 func TestWorkerActivities_AreTheActivities(t *testing.T) {
 	want := []string{
 		"CallLLM",
+		"CallLLMOnMachine",
 		"CheckTurn",
+		"ChooseMachine",
 		"CleanupWorkspace",
 		"CodingRoute",
 		"DeleteSchedule",
@@ -114,6 +116,7 @@ func TestWorkerActivities_AreTheActivities(t *testing.T) {
 		"Relay",
 		"RunClaudeCode",
 		"RunOnMachine",
+		"SetMachineAside",
 		"SummarizeConversation",
 		"SummarizeForkReport",
 	}

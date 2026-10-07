@@ -38,6 +38,16 @@ func (f *fakeMachineStore) StartDirective(_ context.Context, id string, token []
 	return d, f.startOK
 }
 
+func (f *fakeMachineStore) ChooseLLMMachine(context.Context, string, []string, time.Time) (store.Machine, error) {
+	return store.Machine{}, store.ErrNoMachine
+}
+
+func (f *fakeMachineStore) SetMachineAside(context.Context, string) error { return nil }
+
+func (f *fakeMachineStore) CreateLLMDirective(_ context.Context, req store.LLMDirectiveRequest) (store.Directive, store.Machine, error) {
+	return store.Directive{ID: req.DirectiveID}, store.Machine{ID: req.MachineID}, nil
+}
+
 func (f *fakeMachineStore) CloseDirective(_ context.Context, id, state, _ string) (bool, error) {
 	f.closed = append(f.closed, id+":"+state)
 	return true, nil
@@ -46,6 +56,10 @@ func (f *fakeMachineStore) CloseDirective(_ context.Context, id, state, _ string
 type handoffFunc func(ctx context.Context, id string) error
 
 func (h handoffFunc) Deliver(ctx context.Context, id string) error { return h(ctx, id) }
+
+func (h handoffFunc) DeliverLLM(ctx context.Context, id string, _ json.RawMessage) error {
+	return h(ctx, id)
+}
 
 func TestPickMachine(t *testing.T) {
 	var suite testsuite.WorkflowTestSuite

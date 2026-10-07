@@ -21,15 +21,21 @@ import (
 // MachineStore is what the machine activities read and write.
 type MachineStore interface {
 	PickMachine(ctx context.Context, req store.PickRequest) (store.Directive, store.Machine, error)
+	ChooseLLMMachine(ctx context.Context, userID string, excluded []string, seenAfter time.Time) (store.Machine, error)
+	SetMachineAside(ctx context.Context, id string) error
+	CreateLLMDirective(ctx context.Context, req store.LLMDirectiveRequest) (store.Directive, store.Machine, error)
 	StartDirective(ctx context.Context, id string, token []byte, activityID string, deadline time.Time) (store.Directive, error)
 	CloseDirective(ctx context.Context, id, state, errText string) (bool, error)
 }
 
 // DirectiveHandoff hands a running directive to the gateway, which sends it
 // to its machine: in process in dev (*gateway.Gateway), through the
-// server's internal API otherwise (HTTPDirectiveHandoff).
+// server's internal API otherwise (HTTPDirectiveHandoff). DeliverLLM hands
+// a call to the model with its request, sent to the machine at once or
+// never.
 type DirectiveHandoff interface {
 	Deliver(ctx context.Context, directiveID string) error
+	DeliverLLM(ctx context.Context, directiveID string, request json.RawMessage) error
 }
 
 // MachineActivities choose a user's machine for a directive and run it
@@ -114,10 +120,7 @@ type PickMachineOutput struct {
 // machine is a result, not an error: retrying would not make one appear.
 func (a *MachineActivities) PickMachine(ctx context.Context, in PickMachineInput) (PickMachineOutput, error) {
 	info := activity.GetInfo(ctx)
-	window := a.OnlineWindow
-	if window <= 0 {
-		window = DefaultMachineOnlineWindow
-	}
+	window := a.onlineWindow()
 	now := time.Now()
 	d, m, err := a.Store.PickMachine(ctx, store.PickRequest{
 		DirectiveID:  uuid.NewString(),
@@ -221,9 +224,48 @@ func NewHTTPDirectiveHandoff(baseURL, apiKey string) *HTTPDirectiveHandoff {
 // DirectivePath is the server's internal route of the handoff.
 const DirectivePath = "/internal/machines/directives"
 
-// DirectiveHandoffInput is the handoff's body.
+// DirectiveHandoffInput is the handoff's body; Request, a call to the
+// model's (DeliverLLM).
 type DirectiveHandoffInput struct {
-	DirectiveID string `json:"directive_id"`
+	DirectiveID string          `json:"directive_id"`
+	Request     json.RawMessage `json:"request,omitempty"`
+}
+
+// errMachineUnreachable is a call to the model the gateway could not send to
+// its machine (424): it closed the directive.
+var errMachineUnreachable = errors.New("the machine is not connected to the server, or did not take the request")
+
+// DeliverLLM hands a call to the model with its request: one try, within
+// machine.LLMHandoffTimeout (the gateway writes it to the machine within
+// machine.LLMWriteTimeout). A failure is the step's: its workflow decides.
+func (h *HTTPDirectiveHandoff) DeliverLLM(ctx context.Context, directiveID string, request json.RawMessage) error {
+	body, err := json.Marshal(DirectiveHandoffInput{DirectiveID: directiveID, Request: request})
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, machine.LLMHandoffTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.BaseURL+DirectivePath, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+h.APIKey)
+	// Not h.Client, bounded for a small body: the context bounds this one.
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	switch {
+	case resp.StatusCode == http.StatusFailedDependency:
+		return errMachineUnreachable
+	case resp.StatusCode == http.StatusUnauthorized:
+		return fmt.Errorf("%w: the server refused this worker's INTERNAL_API_KEY", errHandoffRefused)
+	case resp.StatusCode/100 != 2:
+		return fmt.Errorf("status %d", resp.StatusCode)
+	}
+	return nil
 }
 
 func (h *HTTPDirectiveHandoff) Deliver(ctx context.Context, directiveID string) error {
