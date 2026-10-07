@@ -36,8 +36,10 @@ type conn struct {
 	tokenHash string
 	// ready: welcomed, Deliver may send to it (under g.mu).
 	ready bool
-	// claudeCode is the state of the machine's CLI, as it last said.
+	// claudeCode is the state of the machine's CLI, llm of its model, as it
+	// last said.
 	claudeCode string
+	llm        string
 
 	mu sync.Mutex
 	// directives are the ones this connection heartbeats.
@@ -61,9 +63,10 @@ const defaultNoteEvery = 5 * time.Second
 
 // messageLimit is what a machine may send, per second and in a burst, past
 // which the connection ends: four progresses a second per directive (agent
-// connect sends one per 250 ms at most), its results, and room to spare.
-func messageLimit(maxDirectives int) (rate.Limit, int) {
-	perSecond := 4*maxDirectives + 10
+// connect sends one per 250 ms at most), the results of its calls to the
+// model (no progress), and room to spare.
+func messageLimit(maxDirectives, maxLLM int) (rate.Limit, int) {
+	perSecond := 4*maxDirectives + maxLLM + 10
 	return rate.Limit(perSecond), 4 * perSecond
 }
 
@@ -103,11 +106,17 @@ func (g *Gateway) ServeConnect(w http.ResponseWriter, r *http.Request) {
 	if g.ClientAddr != nil {
 		addr = g.ClientAddr(r)
 	}
-	ws, err := websocket.Accept(w, r, nil)
+	// Compressed (a conversation's JSON shrinks five to ten times), each
+	// message on its own: the context between messages does nothing for a
+	// request that is one large message, and would hold 1.2 MB per
+	// connection.
+	ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{CompressionMode: websocket.CompressionNoContextTakeover})
 	if err != nil {
 		return // Accept answered
 	}
-	ws.SetReadLimit(machine.MaxMessageBytes)
+	// An llm directive's result may weigh that much; anything else is
+	// bounded once read (readLimitFor).
+	ws.SetReadLimit(machine.MaxReadBytes)
 	ctx, cancel := context.WithCancel(g.ctx)
 	c := &conn{g: g, id: "c-" + uuid.NewString(), m: *m, ws: ws, ctx: ctx, cancel: cancel, done: make(chan struct{}),
 		directives: map[string]*attached{}}
@@ -146,15 +155,16 @@ func (c *conn) serve(presented, addr string) {
 	}
 	c.tokenHash = machine.HashToken(next)
 	info := store.MachineInfo{OS: hello.OS, Capabilities: hello.Capabilities, MaxDirectives: hello.MaxDirectives,
-		AgentVersion: hello.AgentVersion, ClaudeCode: hello.ClaudeCode}
-	c.claudeCode = hello.ClaudeCode
+		AgentVersion: hello.AgentVersion, ClaudeCode: hello.ClaudeCode,
+		MaxLLM: hello.MaxLLM, LLMProvider: hello.LLMProvider, LLMModel: hello.LLMModel, LLMState: hello.LLM}
+	c.claudeCode, c.llm = hello.ClaudeCode, hello.LLM
 	prevAddr, err := c.g.Store.MachineConnected(c.ctx, c.m.ID, c.g.id, addr, info)
 	if err != nil {
 		c.refuseOrRetry("record the connection", err)
 		return
 	}
-	log.Printf("machines: machine %s (%s) connected from %q, protocol %d, %v, up to %d at a time",
-		c.m.ID, c.m.Name, addr, hello.Protocol, hello.Capabilities, hello.MaxDirectives)
+	log.Printf("machines: machine %s (%s) connected from %q, protocol %d, %v, up to %d at a time, %d calls to its model (%s %s)",
+		c.m.ID, c.m.Name, addr, hello.Protocol, hello.Capabilities, hello.MaxDirectives, hello.MaxLLM, hello.LLMProvider, hello.LLMModel)
 	if prevAddr != "" && addr != "" && prevAddr != addr {
 		c.g.alert(c.ctx, c.m.UserID, fmt.Sprintf("Machine « %s » connectée depuis une nouvelle adresse : %s (avant : %s). Si ce n'est pas toi, révoque-la.",
 			c.m.Name, addr, prevAddr))
@@ -169,7 +179,7 @@ func (c *conn) serve(presented, addr string) {
 	c.reconcile(hello)
 
 	go c.heartbeats()
-	c.readLoop(hello.MaxDirectives)
+	c.readLoop(hello.MaxDirectives, hello.MaxLLM)
 }
 
 // refuseOrRetry ends a connection the database could not admit: for good
@@ -190,7 +200,7 @@ func (c *conn) readHello() (machine.Message, error) {
 	ctx, cancel := context.WithTimeout(c.ctx, helloTimeout)
 	defer cancel()
 	var hello machine.Message
-	if err := wsjson.Read(ctx, c.ws, &hello); err != nil {
+	if err := c.read(ctx, &hello); err != nil {
 		return hello, fmt.Errorf("read hello: %w", err)
 	}
 	if hello.Type != machine.TypeHello {
@@ -212,7 +222,7 @@ func (g *Gateway) register(c *conn) bool {
 		return true
 	}
 	g.mu.Unlock()
-	pctx, cancel := context.WithTimeout(c.ctx, g.pingTimeout())
+	pctx, cancel := context.WithTimeout(c.ctx, min(g.pingTimeout(), stalePingTimeout))
 	err := old.ws.Ping(pctx)
 	cancel()
 	if err == nil {
@@ -302,6 +312,13 @@ func reconcile(open []store.Directive, running, finished []string, connID string
 		if d.State != store.DirectiveRunning {
 			continue // reserved: RunOnMachine hands it over
 		}
+		if d.Kind == machine.KindLLM {
+			// A call to the model is never sent again (its request is
+			// gone), nor carried on: lost, its workflow tries again. What
+			// the machine lists of it is cancelled or dropped below.
+			p.lost = append(p.lost, d)
+			continue
+		}
 		isOpen[d.ID] = true
 		switch {
 		case listed[d.ID]:
@@ -379,8 +396,11 @@ func (c *conn) lose(d store.Directive) {
 		return
 	}
 	c.g.clearNote(d)
-	cerr := temporal.NewNonRetryableApplicationError(
-		fmt.Sprintf("machine %q lost the directive (it restarted during it); nothing was done twice", c.m.Name), machine.ErrTypeLost, nil)
+	why := fmt.Sprintf("machine %q lost the directive (it restarted during it); nothing was done twice", c.m.Name)
+	if d.Kind == machine.KindLLM {
+		why = fmt.Sprintf("machine %q reconnected during the call to its model", c.m.Name)
+	}
+	cerr := temporal.NewNonRetryableApplicationError(why, machine.ErrTypeLost, nil)
 	if err := c.g.complete(c.ctx, completeTries, d.TaskToken, nil, cerr); err != nil && !isNotFound(err) {
 		log.Printf("machines: end lost directive %s: %v", d.ID, err)
 	}
@@ -440,17 +460,40 @@ func (c *conn) write(m machine.Message) {
 	}
 }
 
+// read reads one message: up to machine.MaxReadBytes on the wire, then the
+// limit of its kind (readLimitFor). One past it is a bad message
+// (machine.ErrBadMessage).
+func (c *conn) read(ctx context.Context, m *machine.Message) error {
+	_, data, err := c.ws.Read(ctx)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(data, m); err != nil {
+		return fmt.Errorf("%w: %v", machine.ErrBadMessage, err)
+	}
+	if limit := c.readLimitFor(*m); len(data) > limit {
+		return fmt.Errorf("%w: %s of %d bytes, over %d", machine.ErrBadMessage, m.Type, len(data), limit)
+	}
+	return nil
+}
+
 func (c *conn) closeWith(code int, reason string) {
 	c.ws.Close(websocket.StatusCode(code), reason)
 }
 
 // readLoop reads the machine's messages until the connection ends. Results
 // are completed apart: the reads go on meanwhile, pongs included.
-func (c *conn) readLoop(maxDirectives int) {
-	limit := rate.NewLimiter(messageLimit(maxDirectives))
+func (c *conn) readLoop(maxDirectives, maxLLM int) {
+	limit := rate.NewLimiter(messageLimit(maxDirectives, maxLLM))
 	for {
 		var m machine.Message
-		if err := wsjson.Read(c.ctx, c.ws, &m); err != nil {
+		if err := c.read(c.ctx, &m); err != nil {
+			if errors.Is(err, machine.ErrBadMessage) {
+				log.Printf("machines: machine %s: %v", c.m.ID, err)
+				c.write(machine.Message{Type: machine.TypeError, Code: machine.CodeBadMessage, Text: err.Error()})
+				c.closeWith(machine.ClosePolicy, "bad message")
+				return
+			}
 			if s := websocket.CloseStatus(err); s != websocket.StatusNormalClosure && s != websocket.StatusGoingAway && c.ctx.Err() == nil {
 				log.Printf("machines: read from %s: %v", c.m.ID, err)
 			}
@@ -648,6 +691,11 @@ func (c *conn) result(m machine.Message) {
 		ack()
 		return
 	}
+	if d.Kind == machine.KindLLM {
+		// Checked before it is kept: one refused is kept as the failure
+		// that replaces it, and completed like any other.
+		m = checkLLMResult(m)
+	}
 	raw, _ := json.Marshal(m)
 	if err := c.g.Store.SaveDirectiveResult(ctx, m.ID, raw); err != nil {
 		if errors.Is(err, store.ErrDirectiveClosed) {
@@ -672,16 +720,22 @@ func (c *conn) result(m machine.Message) {
 // as gone: the result is dropped. Any other failure leaves it open, its
 // result kept, for the sweep to try again.
 func (g *Gateway) finish(ctx context.Context, tries int, d store.Directive, m machine.Message) error {
-	res, cerr := completion(m, g.callFiles(ctx, d))
 	var result any
-	if cerr == nil {
-		result = res
+	var cerr error
+	if d.Kind == machine.KindLLM {
+		result, cerr = llmCompletion(d, m)
+	} else {
+		var res machine.Result
+		res, cerr = completion(m, g.callFiles(ctx, d))
+		if cerr == nil {
+			result = res
+		}
 	}
 	err := g.complete(ctx, tries, d.TaskToken, result, cerr)
 	if err != nil && isInvalidArgument(err) && m.Status == machine.StatusCanceled {
 		// Cancelled on the machine without the workflow asking: a failure.
 		err = g.complete(ctx, tries, d.TaskToken, nil, temporal.NewNonRetryableApplicationError(
-			"the directive was cancelled on the machine", machine.ErrTypeFailed, nil, res))
+			"the directive was cancelled on the machine", machine.ErrTypeFailed, nil, machine.Result{Output: m.Output, Progress: m.Text}))
 	}
 	state := closedState(m.Status)
 	switch {
@@ -708,7 +762,13 @@ func (c *conn) status(m machine.Message) {
 		log.Printf("machines: status of %s: %v", c.m.ID, err)
 		return
 	}
-	log.Printf("machines: machine %s (%s) now runs %v (Claude Code: %q)", c.m.ID, c.m.Name, m.Capabilities, m.ClaudeCode)
+	log.Printf("machines: machine %s (%s) now runs %v (Claude Code: %q, model: %q)", c.m.ID, c.m.Name, m.Capabilities, m.ClaudeCode, m.LLM)
+	if c.llm == machine.LLMStateOK && m.LLM == machine.LLMStateRefused {
+		c.g.alert(c.ctx, c.m.UserID, fmt.Sprintf("Le fournisseur du modèle de la machine « %s » a refusé sa clé (ou son crédit est épuisé) : "+
+			"la machine ne fait plus tourner le modèle de tes tours jusqu'à ce qu'agent connect redémarre avec une clé valide "+
+			"(AGENT_CONNECT_LLM_API_KEY). Les agents « de préférence » prennent la clé du serveur ; les autres s'arrêtent.", c.m.Name))
+	}
+	c.llm = m.LLM
 	was := c.claudeCode
 	c.claudeCode = m.ClaudeCode
 	switch {

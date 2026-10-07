@@ -78,10 +78,18 @@ const (
 	// DefaultHeartbeatEvery: the design's 30 s, well inside RunOnMachine's
 	// heartbeat timeout (5 min), so a stop reaches a machine in 30 s.
 	DefaultHeartbeatEvery = 30 * time.Second
-	DefaultPingTimeout    = 10 * time.Second
-	DefaultSweepEvery     = time.Minute
-	helloTimeout          = 10 * time.Second
-	writeTimeout          = 10 * time.Second
+	// DefaultPingTimeout and writeTimeout: a ping or a message may wait
+	// behind a call to the model's request on a slow link (the frames of a
+	// message go out one by one, a ping between two), 60 s at most
+	// (machine.LLMWriteTimeout).
+	DefaultPingTimeout = 60 * time.Second
+	DefaultSweepEvery  = time.Minute
+	helloTimeout       = 10 * time.Second
+	writeTimeout       = machine.LLMWriteTimeout
+	// stalePingTimeout bounds the ping that tells a connection gone stale
+	// from a second copy of the machine (register): its machine waits for
+	// it to connect again.
+	stalePingTimeout = 10 * time.Second
 	// deviceTTL is how long a device request waits for its approval, and
 	// enrollmentTokenTTL how long an enrollment token waits for its machine.
 	deviceTTL          = 10 * time.Minute
@@ -247,6 +255,9 @@ func (g *Gateway) Deliver(ctx context.Context, directiveID string) error {
 	case d == nil:
 		return ErrUnknownDirective
 	case d.State != store.DirectiveRunning:
+		return ErrDirectiveClosed
+	case d.Kind == machine.KindLLM:
+		// Its request comes with it (DeliverLLM), or never.
 		return ErrDirectiveClosed
 	}
 	if c := g.conn(d.MachineID); c != nil && g.isReady(c) {
@@ -461,8 +472,10 @@ func (g *Gateway) retryResults(ctx context.Context) {
 }
 
 // ServeDirectives is the internal API's /internal/machines/directives: a
-// worker's RunOnMachine hands a directive over (activity.HTTPDirectiveHandoff).
-// It takes INTERNAL_API_KEY, like /internal/notify; empty = closed.
+// worker's RunOnMachine hands a directive over (activity.HTTPDirectiveHandoff),
+// or its CallLLMOnMachine a call to the model with its request, sent to the
+// machine at once or never (424: unreachable, the directive closed). It
+// takes INTERNAL_API_KEY, like /internal/notify; empty = closed.
 func (g *Gateway) ServeDirectives(apiKey string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
@@ -471,13 +484,22 @@ func (g *Gateway) ServeDirectives(apiKey string) http.HandlerFunc {
 			return
 		}
 		var in struct {
-			DirectiveID string `json:"directive_id"`
+			DirectiveID string          `json:"directive_id"`
+			Request     json.RawMessage `json:"request,omitempty"`
 		}
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&in); err != nil || in.DirectiveID == "" {
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, machine.MaxReadBytes+4096)).Decode(&in); err != nil || in.DirectiveID == "" {
 			http.Error(w, "Invalid request body", http.StatusBadRequest)
 			return
 		}
-		switch err := g.Deliver(r.Context(), in.DirectiveID); {
+		var err error
+		if len(in.Request) > 0 {
+			err = g.DeliverLLM(r.Context(), in.DirectiveID, in.Request)
+		} else {
+			err = g.Deliver(r.Context(), in.DirectiveID)
+		}
+		switch {
+		case errors.Is(err, ErrMachineUnreachable):
+			http.Error(w, "machine unreachable", http.StatusFailedDependency)
 		case errors.Is(err, ErrUnknownDirective):
 			http.Error(w, "unknown directive", http.StatusNotFound)
 		case errors.Is(err, ErrDirectiveClosed):
@@ -505,7 +527,9 @@ func kindLabel(kind string) string {
 // note shows, on the line of the turn d works for, that it runs on machine
 // name, and how far it is (progress, untrusted text from the machine, cut).
 func (g *Gateway) note(d store.Directive, name, progress string) {
-	if g.Notice == nil || d.SessionID == "" {
+	// A call to the model has no note of its own: its turn says which
+	// machine runs its model.
+	if g.Notice == nil || d.SessionID == "" || d.Kind == machine.KindLLM {
 		return
 	}
 	text := fmt.Sprintf("%s sur la machine « %s »", kindLabel(d.Kind), name)
@@ -517,7 +541,7 @@ func (g *Gateway) note(d store.Directive, name, progress string) {
 
 // clearNote takes a directive's note off its turn's line: it is over.
 func (g *Gateway) clearNote(d store.Directive) {
-	if g.Notice != nil && d.SessionID != "" {
+	if g.Notice != nil && d.SessionID != "" && d.Kind != machine.KindLLM {
 		g.Notice(d.SessionID, d.Participant, d.Agent, "")
 	}
 }

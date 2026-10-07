@@ -126,10 +126,15 @@ const (
 	// LLMFailCredentials: the provider refused the machine's key, or its
 	// account has no credit left; the machine withdraws its model.
 	LLMFailCredentials = "credentials"
+	// LLMFailBadResult: the gateway refused the machine's answer
+	// (CheckLLMOutput), and wrote this failure in its place.
+	LLMFailBadResult = "bad_result"
 )
 
 // RetryAfter is an LLMFailRetryAfter's wait.
-func (f LLMFailure) RetryAfter() time.Duration { return time.Duration(f.RetryAfterMS) * time.Millisecond }
+func (f LLMFailure) RetryAfter() time.Duration {
+	return time.Duration(f.RetryAfterMS) * time.Millisecond
+}
 
 // Temporal error types of an llm directive's activity (CallLLMOnMachine),
 // besides the directives' own (ErrTypeRevoked, ErrTypeStopping…).

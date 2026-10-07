@@ -199,7 +199,7 @@ func TestFirstDuplicate_OncePerHour(t *testing.T) {
 // pace, and more.
 func TestMessageLimit(t *testing.T) {
 	for _, max := range []int{1, machine.MaxDirectives} {
-		perSecond, burst := messageLimit(max)
+		perSecond, burst := messageLimit(max, machine.DefaultMaxLLM)
 		if need := float64(max) * float64(time.Second/machine.ProgressInterval); float64(perSecond) < need+5 || burst < int(perSecond) {
 			t.Errorf("%d directives: %v/s burst %d", max, perSecond, burst)
 		}
