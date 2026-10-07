@@ -418,7 +418,10 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 				dispatches[j] = toolDispatch{unavailable: fmt.Sprintf("Tool %q is not available to this agent.", tc.Name)}
 				continue
 			}
-			d := toolDispatch{kind: tool.ToolKind(res.Kind), agent: res.AgentID != "", fireAndForget: res.FireAndForget, taskQueue: res.TaskQueue}
+			d := toolDispatch{kind: tool.ToolKind(res.Kind), agent: res.AgentID != "", taskQueue: res.TaskQueue}
+			// Only a workflow can outlive the turn: an activity's result
+			// would be dropped with it, so an activity tool is always awaited.
+			d.fireAndForget = res.FireAndForget && d.kind == tool.ToolKindWorkflow
 			// This call's context: the run's, and the call's own ID.
 			cc := call
 			cc.CallID = tc.ID
@@ -439,11 +442,23 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 					continue
 				}
 
-				childCtx := workflow.WithChildOptions(ctx, workflow.ChildWorkflowOptions{
+				childOpts := workflow.ChildWorkflowOptions{
 					WorkflowID: d.workflowID,
 					TaskQueue:  res.TaskQueue,
-				})
-				d.future = workflow.ExecuteChildWorkflow(childCtx, childWorkflow, childInput)
+				}
+				if d.fireAndForget {
+					// Not waited for: it must outlive the turn, which ends
+					// long before it. The default policy would terminate it
+					// as soon as the turn closes.
+					childOpts.ParentClosePolicy = enumspb.PARENT_CLOSE_POLICY_ABANDON
+				}
+				child := workflow.ExecuteChildWorkflow(workflow.WithChildOptions(ctx, childOpts), childWorkflow, childInput)
+				d.future = child
+				if d.fireAndForget {
+					// What is awaited is its start: a turn that closed
+					// before it would leave it never started.
+					d.future = child.GetChildWorkflowExecution()
+				}
 			} else {
 				opts := toolOpts
 				opts.TaskQueue = res.TaskQueue
@@ -481,8 +496,13 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 				content = d.unavailable
 				isError = true
 			} else if d.fireAndForget {
-				// Don't wait — return the workflow ID so the LLM can query it later
-				content = fmt.Sprintf("Workflow started (workflow_id: %s). Use query_workflow to check its status.", d.workflowID)
+				// Started, not awaited: the LLM gets its ID to query it later.
+				if err := d.future.Get(ctx, nil); err != nil {
+					content = fmt.Sprintf("Workflow failed to start: %s", err.Error())
+					isError = true
+				} else {
+					content = fmt.Sprintf("Workflow started (workflow_id: %s). Use query_workflow to check its status.", d.workflowID)
+				}
 			} else if d.kind == tool.ToolKindWorkflow {
 				var result json.RawMessage
 				if err := d.future.Get(ctx, &result); err != nil {
