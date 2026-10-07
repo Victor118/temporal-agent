@@ -74,8 +74,12 @@ type smokeEnv struct {
 	notes chan smokeNote
 	addr  string
 	base  string
-	// pingTimeout is the next gateways' (serve); zero = 1 s.
+	// pingTimeout is the next gateways' (serve); zero = 1 s. writeBuffer,
+	// when set, is the send buffer of their connections: what a ping may
+	// queue behind in the kernel (zero = the system's, which grows to
+	// megabytes on loopback).
 	pingTimeout time.Duration
+	writeBuffer int
 
 	mu  sync.Mutex
 	g   *Gateway
@@ -179,6 +183,9 @@ func newSmokeEnv(t *testing.T) *smokeEnv {
 
 // serve starts a gateway on ln.
 func (e *smokeEnv) serve(ln net.Listener) {
+	if e.writeBuffer > 0 {
+		ln = smallSends{ln, e.writeBuffer}
+	}
 	g := &Gateway{Store: e.st, Temporal: e.flaky, completeWait: 50 * time.Millisecond, NoteEvery: 100 * time.Millisecond,
 		Notice: func(session, participant, agent, text string) {
 			select {
@@ -1257,4 +1264,18 @@ func (r *rawMachine) expect(t *testing.T, typ string) machine.Message {
 			return m
 		}
 	}
+}
+
+// smallSends gives the connections it accepts a small send buffer.
+type smallSends struct {
+	net.Listener
+	size int
+}
+
+func (l smallSends) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if tc, ok := c.(*net.TCPConn); ok {
+		tc.SetWriteBuffer(l.size)
+	}
+	return c, err
 }

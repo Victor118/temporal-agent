@@ -207,6 +207,12 @@ type llmMachine struct {
 // llm executor.
 func (e *smokeEnv) startLLMMachine(t *testing.T, userID, name, server string, priority int, wrap func(connect.Executor) connect.Executor) *llmMachine {
 	t.Helper()
+	return e.startLLMMachineWith(t, userID, name, server, priority, 4, wrap)
+}
+
+// startLLMMachineWith is startLLMMachine, with maxLLM calls at once.
+func (e *smokeEnv) startLLMMachineWith(t *testing.T, userID, name, server string, priority, maxLLM int, wrap func(connect.Executor) connect.Executor) *llmMachine {
+	t.Helper()
 	id, token := e.enrollToken(userID, name, []string{machine.CapLLM, machine.KindEcho}, 1)
 	if server == "" {
 		server = e.base
@@ -235,7 +241,7 @@ func (e *smokeEnv) startLLMMachine(t *testing.T, userID, name, server string, pr
 			}
 			return s
 		},
-		StatusEvery: 200 * time.Millisecond, MaxDirectives: 1, MaxLLM: 4, LLMProvider: "fake", LLMModel: "machine-model",
+		StatusEvery: 200 * time.Millisecond, MaxDirectives: 1, MaxLLM: maxLLM, LLMProvider: "fake", LLMModel: "machine-model",
 		OS: "linux", Version: "smoke", MinBackoff: 100 * time.Millisecond, MaxBackoff: 500 * time.Millisecond, StopWait: time.Second}
 	lm.modeler.OnRefused = lm.client.Refresh
 	ctx, cancel := context.WithCancel(context.Background())
@@ -276,7 +282,7 @@ func (e *smokeEnv) llmDirectives(t *testing.T, prefix string) []llmDirective {
 
 func (e *smokeEnv) asideForLLM(id string) bool {
 	m, _ := e.st.GetMachine(context.Background(), id)
-	return m != nil && m.AsideForLLM()
+	return m != nil && m.AsideForLLM(time.Now().Add(-activity.DefaultMachineOnlineWindow))
 }
 
 // blockUntilStopped is a model that answers nothing until its call is
@@ -666,19 +672,89 @@ func TestMachinesLLM_RealServer(t *testing.T) {
 
 	// --- A request of 1.5 MB, compressed, to a machine behind a slow link:
 	// written in chunks, the pings in between, no disconnection.
+	// --- Busy is passing: a machine at its cap of calls makes the next one
+	// wait, then take it; the machine is not excluded.
+	t.Run("busy", func(t *testing.T) {
+		mia := e.user("llm-mia")
+		w.setModes(require)
+		m := e.startLLMMachineWith(t, mia, "etroite", "", 0, 1, nil)
+		blocked, release := make(chan struct{}, 1), make(chan struct{})
+		m.model.set(func(ctx context.Context, n int, req provider.ChatRequest) (provider.ChatResponse, error) {
+			if n == 1 {
+				blocked <- struct{}{}
+				<-release
+				return say("first")(ctx, n, req)
+			}
+			return say("second")(ctx, n, req)
+		})
+		_, first := w.turn(t, mia, "jarvis", "one")
+		<-blocked
+		_, second := w.turn(t, mia, "jarvis", "two")
+		// Its first attempt finds the machine full (no directive), and waits.
+		time.Sleep(3 * time.Second)
+		if ds := e.llmDirectives(t, second.GetID()); len(ds) != 0 {
+			t.Errorf("a call created on a full machine: %+v", ds)
+		}
+		close(release)
+		if out := turnResult(t, first, time.Minute); out.Response != "first" {
+			t.Errorf("first: %+v", out)
+		}
+		out := turnResult(t, second, time.Minute)
+		ds := e.llmDirectives(t, second.GetID())
+		if out.Response != "second" || len(ds) != 1 || ds[0].machine != m.id || ds[0].key == "llm:0:1" || e.asideForLLM(m.id) {
+			t.Errorf("second: %+v, %+v", out, ds)
+		}
+	})
+
+	// --- A call carried across the gateway's restart: running, or finished
+	// while no gateway listened, its answer is given at the reconnection,
+	// never asked again (paid once).
+	t.Run("across a gateway restart", func(t *testing.T) {
+		nina := e.user("llm-nina")
+		w.setModes(require)
+		m := e.startLLMMachine(t, nina, "fidele", "", 0, nil)
+		for _, finishedFirst := range []bool{false, true} {
+			blocked, release := make(chan struct{}, 1), make(chan struct{})
+			m.model.set(func(ctx context.Context, n int, req provider.ChatRequest) (provider.ChatResponse, error) {
+				blocked <- struct{}{}
+				<-release
+				return say("kept")(ctx, n, req)
+			})
+			_, run := w.turn(t, nina, "jarvis", "hello")
+			<-blocked
+			e.stopGateway()
+			if finishedFirst {
+				close(release)
+				time.Sleep(500 * time.Millisecond) // the machine keeps its result, no gateway to take it
+			}
+			e.restartGateway()
+			waitFor(t, "the machine back", 20*time.Second, func() bool { return e.gateway().Online(m.id) })
+			if !finishedFirst {
+				close(release)
+			}
+			out := turnResult(t, run, time.Minute)
+			ds := e.llmDirectives(t, run.GetID())
+			if out.Response != "kept" || len(m.model.requests()) != 1 || len(ds) != 1 || ds[0].state != store.DirectiveCompleted {
+				t.Errorf("finished first %v: %+v, calls %d, %+v", finishedFirst, out, len(m.model.requests()), ds)
+			}
+		}
+	})
+
 	t.Run("large request, slow link", func(t *testing.T) {
 		lena := e.user("llm-lena")
 		w.setModes(prefer)
-		// The production's ping timeout: a ping waits behind the request.
-		e.pingTimeout = 60 * time.Second
+		// A ping timeout shorter than the request takes, and small send
+		// buffers: the pings go out between its frames, or the connection
+		// is cut.
+		e.pingTimeout, e.writeBuffer = 5*time.Second, 64<<10
 		e.stopGateway()
 		e.restartGateway()
 		defer func() {
-			e.pingTimeout = 0
+			e.pingTimeout, e.writeBuffer = 0, 0
 			e.stopGateway()
 			e.restartGateway()
 		}()
-		proxy := slowProxy(t, e.addr, 150<<10)
+		proxy := slowProxy(t, e.addr, 100<<10)
 		m := e.startLLMMachine(t, lena, "lente", "http://"+proxy, 0, nil)
 		m.model.set(say("read it all"))
 		before := e.gateway().conn(m.id)
@@ -694,7 +770,11 @@ func TestMachinesLLM_RealServer(t *testing.T) {
 		if after := e.gateway().conn(m.id); after != before || before == nil {
 			t.Errorf("the machine reconnected during the request")
 		}
-		t.Logf("1.5 MB request through a 150 KiB/s link: %s", time.Since(start).Round(time.Millisecond))
+		took := time.Since(start)
+		if took < 6*time.Second {
+			t.Errorf("the request took %s: not longer than the 5 s ping timeout, the test proves nothing", took)
+		}
+		t.Logf("1.5 MB request through a 100 KiB/s link, pings every second within 5 s: %s", took.Round(time.Millisecond))
 	})
 }
 
@@ -717,6 +797,10 @@ func slowProxy(t *testing.T, addr string, rate int) string {
 				down.Close()
 				continue
 			}
+			// Small buffers: what waits on the way down is what this link
+			// holds, not megabytes the kernel takes at once on loopback.
+			up.(*net.TCPConn).SetReadBuffer(64 << 10)
+			down.(*net.TCPConn).SetWriteBuffer(64 << 10)
 			go func() { io.Copy(up, down); up.Close() }()
 			go func() {
 				defer down.Close()
