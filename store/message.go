@@ -53,6 +53,23 @@ type Message struct {
 	ToolResult *ToolResult `json:"tool_result,omitempty"`
 	// Fork is the fork a KindForkReport comes from.
 	Fork *ForkRef `json:"fork,omitempty"`
+	// On an assistant message: the model that wrote it, what its call took
+	// (Usage), and the machine that called it, when the turn's model ran on
+	// its author's machine (docs/design/machine-llm.md); empty: the server's
+	// key, or a message written before they were kept.
+	Model     string `json:"model,omitempty"`
+	Usage     *Usage `json:"usage,omitempty"`
+	MachineID string `json:"machine_id,omitempty"`
+	// Machine is that machine's name when it answered, for the thread.
+	Machine string `json:"machine,omitempty"`
+}
+
+// Usage is what a call to the model took, in tokens (provider.Usage).
+type Usage struct {
+	InputTokens              int64 `json:"input_tokens"`
+	OutputTokens             int64 `json:"output_tokens"`
+	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens,omitempty"`
+	CacheReadInputTokens     int64 `json:"cache_read_input_tokens,omitempty"`
 }
 
 // ForkRef names the fork a report comes from: its session, its title when it

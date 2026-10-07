@@ -34,6 +34,19 @@ type Machine struct {
 	// ClaudeCode is the state of its claude CLI, as it last said:
 	// "ok", "logged_out", "absent"; "" = never said.
 	ClaudeCode string
+	// MaxLLM is how many calls to the model it makes at once (the llm
+	// family's cap; MaxDirectives is the coding runs'), LLMProvider and
+	// LLMModel what it calls, LLMState how its model is (machine.LLMState*;
+	// "" = none), as its hello and capabilities said.
+	MaxLLM      int
+	LLMProvider string
+	LLMModel    string
+	LLMState    string
+	// ConnectedAt is when it last connected; AsideAt when a turn lost a call
+	// to its model on it: set aside for the model until it connects again
+	// (AsideForLLM).
+	ConnectedAt *time.Time
+	AsideAt     *time.Time
 	// OpenDirectives is how many directives it holds, and OpenKinds their
 	// kinds: ListMachines only.
 	OpenDirectives int
@@ -43,6 +56,14 @@ type Machine struct {
 // Online reports a machine a gateway holds and has heard from since since.
 func (m Machine) Online(since time.Time) bool {
 	return m.ConnectedTo != "" && m.RevokedAt == nil && m.SeenAt != nil && m.SeenAt.After(since)
+}
+
+// AsideForLLM reports a machine set aside for the model: a turn lost a call
+// on it since it last connected. Still "seen" for a while, it would
+// otherwise be chosen again, and the next turn wait out its heartbeat
+// timeout too.
+func (m Machine) AsideForLLM() bool {
+	return m.AsideAt != nil && (m.ConnectedAt == nil || !m.ConnectedAt.After(*m.AsideAt))
 }
 
 // Can reports a capability the machine announced.
@@ -66,6 +87,10 @@ type MachineInfo struct {
 	MaxDirectives int
 	AgentVersion  string
 	ClaudeCode    string
+	MaxLLM        int
+	LLMProvider   string
+	LLMModel      string
+	LLMState      string
 }
 
 // Enrollment kinds: a device request, approved by its user code, or an
@@ -110,6 +135,10 @@ var (
 	ErrDirectiveClosed = errors.New("directive closed")
 	// ErrDirectiveNotFound is no such directive.
 	ErrDirectiveNotFound = errors.New("directive not found")
+	// ErrMachineUnavailable: the machine chosen for a call to the model
+	// cannot take it now (offline, paused, its model withdrawn, set aside,
+	// at its cap); the error says which.
+	ErrMachineUnavailable = errors.New("machine unavailable")
 )
 
 // TokenUse is what a presented machine token is.
@@ -289,6 +318,16 @@ const machineSchema = `
 		ALTER TABLE machine_directives ADD COLUMN IF NOT EXISTS turn_key TEXT NOT NULL DEFAULT '';
 		ALTER TABLE machine_directives ADD COLUMN IF NOT EXISTS call_id TEXT NOT NULL DEFAULT '';
 		ALTER TABLE machine_directives ADD COLUMN IF NOT EXISTS agent_id TEXT NOT NULL DEFAULT '';
+		-- The model on the machine (docs/design/machine-llm.md): how many
+		-- calls at once, what it calls, how its model is ('ok', 'refused',
+		-- '' = none); when it connected, and when a turn lost a call on it
+		-- (set aside for the model until it connects again).
+		ALTER TABLE machines ADD COLUMN IF NOT EXISTS max_llm INTEGER NOT NULL DEFAULT 0 CHECK (max_llm >= 0);
+		ALTER TABLE machines ADD COLUMN IF NOT EXISTS llm_provider TEXT NOT NULL DEFAULT '';
+		ALTER TABLE machines ADD COLUMN IF NOT EXISTS llm_model TEXT NOT NULL DEFAULT '';
+		ALTER TABLE machines ADD COLUMN IF NOT EXISTS llm_state TEXT NOT NULL DEFAULT '';
+		ALTER TABLE machines ADD COLUMN IF NOT EXISTS connected_at TIMESTAMPTZ;
+		ALTER TABLE machines ADD COLUMN IF NOT EXISTS llm_aside_at TIMESTAMPTZ;
 
 		CREATE TABLE IF NOT EXISTS machine_enrollments (
 			id            TEXT PRIMARY KEY,
@@ -435,13 +474,15 @@ func (s *PostgresStore) DeleteExpiredEnrollments(ctx context.Context, now time.T
 // --- Machines ---
 
 const machineColumns = `m.id, m.user_id, m.name, m.os, m.capabilities, m.max_directives, m.priority, m.paused,
-	m.agent_version, m.connected_to, m.last_addr, m.created_at, m.seen_at, m.revoked_at, m.revoked_reason, m.claude_code`
+	m.agent_version, m.connected_to, m.last_addr, m.created_at, m.seen_at, m.revoked_at, m.revoked_reason, m.claude_code,
+	m.max_llm, m.llm_provider, m.llm_model, m.llm_state, m.connected_at, m.llm_aside_at`
 
 func scanMachine(row interface{ Scan(...any) error }, extra ...any) (Machine, error) {
 	var m Machine
 	var caps []byte
 	dest := append([]any{&m.ID, &m.UserID, &m.Name, &m.OS, &caps, &m.MaxDirectives, &m.Priority, &m.Paused,
-		&m.AgentVersion, &m.ConnectedTo, &m.LastAddr, &m.CreatedAt, &m.SeenAt, &m.RevokedAt, &m.RevokedReason, &m.ClaudeCode}, extra...)
+		&m.AgentVersion, &m.ConnectedTo, &m.LastAddr, &m.CreatedAt, &m.SeenAt, &m.RevokedAt, &m.RevokedReason, &m.ClaudeCode,
+		&m.MaxLLM, &m.LLMProvider, &m.LLMModel, &m.LLMState, &m.ConnectedAt, &m.AsideAt}, extra...)
 	if err := row.Scan(dest...); err != nil {
 		return m, err
 	}
@@ -618,12 +659,13 @@ func (s *PostgresStore) MachineConnected(ctx context.Context, id, gateway, addr 
 		return "", err
 	}
 	err = s.db.QueryRowContext(ctx, `
-		UPDATE machines m SET connected_to = $2, seen_at = NOW(), os = $3, capabilities = $4,
+		UPDATE machines m SET connected_to = $2, seen_at = NOW(), connected_at = NOW(), os = $3, capabilities = $4,
 			max_directives = $5, agent_version = $6, last_addr = CASE WHEN $7 = '' THEN m.last_addr ELSE $7 END,
-			claude_code = $8
+			claude_code = $8, max_llm = $9, llm_provider = $10, llm_model = $11, llm_state = $12
 		FROM machines old WHERE m.id = $1 AND old.id = m.id AND m.revoked_at IS NULL
 		RETURNING old.last_addr`,
-		id, gateway, hello.OS, caps, max(hello.MaxDirectives, 1), hello.AgentVersion, addr, hello.ClaudeCode).Scan(&prevAddr)
+		id, gateway, hello.OS, caps, max(hello.MaxDirectives, 1), hello.AgentVersion, addr, hello.ClaudeCode,
+		max(hello.MaxLLM, 0), hello.LLMProvider, hello.LLMModel, hello.LLMState).Scan(&prevAddr)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrMachineNotFound
 	}
@@ -631,15 +673,23 @@ func (s *PostgresStore) MachineConnected(ctx context.Context, id, gateway, addr 
 }
 
 // UpdateMachineStatus records what a connected machine says it can do now
-// (a login lost, or back).
-func (s *PostgresStore) UpdateMachineStatus(ctx context.Context, id string, capabilities []string, claudeCode string) error {
+// (a login lost, or back; its model's key refused).
+func (s *PostgresStore) UpdateMachineStatus(ctx context.Context, id string, capabilities []string, claudeCode, llmState string) error {
 	caps, err := json.Marshal(nonNil(capabilities))
 	if err != nil {
 		return err
 	}
-	res, err := s.db.ExecContext(ctx, `UPDATE machines SET capabilities = $2, claude_code = $3
-		WHERE id = $1 AND revoked_at IS NULL`, id, caps, claudeCode)
+	res, err := s.db.ExecContext(ctx, `UPDATE machines SET capabilities = $2, claude_code = $3, llm_state = $4
+		WHERE id = $1 AND revoked_at IS NULL`, id, caps, claudeCode, llmState)
 	return affectedOne(res, err, ErrMachineNotFound)
+}
+
+// SetMachineAside sets a machine aside for the model: a turn lost a call to
+// it. It is not chosen for the model again until it connects again
+// (Machine.AsideForLLM).
+func (s *PostgresStore) SetMachineAside(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE machines SET llm_aside_at = NOW() WHERE id = $1`, id)
+	return err
 }
 
 // SetMachinePaused pauses (or resumes) a machine of userID's: a paused
@@ -823,8 +873,9 @@ func (s *PostgresStore) PickMachine(ctx context.Context, req PickRequest) (Direc
 			ids[i] = mm.ID
 		}
 		open := map[string]int{}
+		// The coding runs' cap: the calls to the model have their own.
 		loads, err := tx.QueryContext(ctx, `SELECT machine_id, COUNT(*) FROM machine_directives
-			WHERE machine_id = ANY($1) AND state IN ('reserved', 'running') GROUP BY machine_id`, ids)
+			WHERE machine_id = ANY($1) AND state IN ('reserved', 'running') AND kind <> 'llm' GROUP BY machine_id`, ids)
 		if err != nil {
 			return err
 		}

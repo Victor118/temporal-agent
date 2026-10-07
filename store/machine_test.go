@@ -452,7 +452,7 @@ func TestMachineSettingsAndStatus(t *testing.T) {
 	if _, err := s.MachineConnected(ctx, "zz-mach-set", "gw", "", MachineInfo{Capabilities: []string{"echo"}, MaxDirectives: 2, ClaudeCode: "absent"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.UpdateMachineStatus(ctx, "zz-mach-set", []string{"echo", "claude-code"}, "ok"); err != nil {
+	if err := s.UpdateMachineStatus(ctx, "zz-mach-set", []string{"echo", "claude-code"}, "ok", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.SetMachinePaused(ctx, "someone-else", "zz-mach-set", true); !errors.Is(err, ErrMachineNotFound) {

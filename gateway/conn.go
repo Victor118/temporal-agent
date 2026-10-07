@@ -704,7 +704,7 @@ func (g *Gateway) finish(ctx context.Context, tries int, d store.Directive, m ma
 // status records what a machine says it can do now: a login lost (a run
 // refused for it) or back. Its owner is told when Claude Code goes.
 func (c *conn) status(m machine.Message) {
-	if err := c.g.Store.UpdateMachineStatus(c.ctx, c.m.ID, m.Capabilities, m.ClaudeCode); err != nil {
+	if err := c.g.Store.UpdateMachineStatus(c.ctx, c.m.ID, m.Capabilities, m.ClaudeCode, m.LLM); err != nil {
 		log.Printf("machines: status of %s: %v", c.m.ID, err)
 		return
 	}

@@ -47,7 +47,7 @@ type Store interface {
 	ConfirmMachineToken(ctx context.Context, id, currentHash string) error
 	MachineConnected(ctx context.Context, id, gateway, addr string, hello store.MachineInfo) (string, error)
 	MachineDisconnected(ctx context.Context, id, gateway string) error
-	UpdateMachineStatus(ctx context.Context, id string, capabilities []string, claudeCode string) error
+	UpdateMachineStatus(ctx context.Context, id string, capabilities []string, claudeCode, llmState string) error
 	SetMachinePaused(ctx context.Context, userID, id string, paused bool) error
 	SetMachinePriority(ctx context.Context, userID, id string, priority int) error
 	TouchMachines(ctx context.Context, ids []string) error
