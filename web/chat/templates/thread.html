@@ -66,7 +66,7 @@
 <div class="msg{{if .Running}} running{{end}}" id="m{{.ID}}"{{if ne .ForkID .ID}} data-fork="m{{.ForkID}}"{{end}}>
   <div class="agent-mark"></div>
   <div class="msg-body">
-    <div class="msg-head"><span class="who">{{.Agent.Name}}</span>{{with .Agent.Mention}}<span class="agent-meta">@{{.}}</span>{{end}}<span class="when">{{clock .Time}}{{if .Running}} → en cours{{else if .Stopped}} → interrompu{{else if not .End.IsZero}} → {{clock .End}}{{end}}</span></div>
+    <div class="msg-head"><span class="who">{{.Agent.Name}}</span>{{with .Agent.Mention}}<span class="agent-meta">@{{.}}</span>{{end}}{{with .Via}}<span class="agent-meta">{{.}}</span>{{end}}<span class="when">{{clock .Time}}{{if .Running}} → en cours{{else if .Stopped}} → interrompu{{else if not .End.IsZero}} → {{clock .End}}{{end}}</span></div>
     {{template "quote" .Quote}}
     <div class="agent-card">
       <div class="prose">{{.HTML}}</div>

@@ -258,6 +258,41 @@ type ThreadItem struct {
 	AgentChain []string // question: the agents that led to it
 
 	turn string // agent answer, error: the turn it shows ("" for none)
+	// models: agent answer, where its model ran, in order, without
+	// repeats: a machine's label (machineLabel), "" for the server's key.
+	models []string
+}
+
+// Via says where an agent answer's model ran when a machine wrote any of
+// it (docs/design/machine-llm.md §9): « via la machine de Victor · sonnet »,
+// « … puis le modèle de l'installation » when the turn fell back. Empty when
+// the server's key wrote it all.
+func (it ThreadItem) Via() string {
+	if !slices.ContainsFunc(it.models, func(s string) bool { return s != "" }) {
+		return ""
+	}
+	parts := make([]string, len(it.models))
+	for i, m := range it.models {
+		parts[i] = m
+		if m == "" {
+			parts[i] = "le modèle de l'installation"
+		}
+	}
+	return "via " + strings.Join(parts, " puis ")
+}
+
+// machineLabel names the machine that wrote m, and its model: its owner's
+// (the user the turn answered, named by their messages in the thread), else
+// its own name.
+func machineLabel(m store.Message, people map[string]string) string {
+	label := "la machine « " + m.Machine + " »"
+	if name := people[m.UserID]; name != "" {
+		label = "la machine de " + name
+	}
+	if m.Model != "" {
+		label += " · " + m.Model
+	}
+	return label
 }
 
 // Quote is the message a turn answers, as its item recalls it: a link to
@@ -442,6 +477,13 @@ func threadItems(ordered []store.MessageWithID, states map[string]turnState, vie
 	var agent *ThreadItem                    // the agent item being assembled
 	var agentText []string
 	var agentPlain []int64 // the messages no turn wrote in it (a scheduled result)
+	// people names the users by their messages: whose machine wrote.
+	people := map[string]string{}
+	for _, m := range ordered {
+		if m.Role == store.RoleUser && m.UserID != "" && m.Author != "" {
+			people[m.UserID] = m.Author
+		}
+	}
 	closeAgent := func() {
 		if agent == nil {
 			return
@@ -514,6 +556,13 @@ func threadItems(ordered []store.MessageWithID, states map[string]turnState, vie
 			}
 			if agent.ID == 0 {
 				agent.ID = m.ID
+			}
+			model := ""
+			if m.MachineID != "" {
+				model = machineLabel(m.Message, people)
+			}
+			if n := len(agent.models); n == 0 || agent.models[n-1] != model {
+				agent.models = append(agent.models, model)
 			}
 			if turn == "" {
 				// A message no turn wrote (a scheduled result) can be

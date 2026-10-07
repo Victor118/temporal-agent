@@ -173,7 +173,8 @@ func (m *machinesUI) page(w http.ResponseWriter, r *http.Request, p chat.Machine
 		row := chat.MachineRow{ID: v.ID, Name: v.Name, OS: v.OS, Capabilities: slices.Clone(v.Capabilities), Online: v.Online,
 			OpenDirectives: v.OpenDirectives, MaxDirectives: v.MaxDirectives, CreatedAt: v.CreatedAt, Revoked: v.RevokedAt != nil,
 			RevokedReason: v.RevokedReason, LastAddr: v.LastAddr, AgentVersion: v.AgentVersion,
-			Paused: v.Paused, Priority: v.Priority, ClaudeCode: v.ClaudeCode, OpenKinds: v.OpenKinds}
+			Paused: v.Paused, Priority: v.Priority, ClaudeCode: v.ClaudeCode, OpenKinds: v.OpenKinds,
+			MaxLLM: v.MaxLLM, LLMProvider: v.LLMProvider, LLMModel: v.LLMModel, LLMState: v.LLMState, AsideForLLM: v.AsideForLLM()}
 		if v.SeenAt != nil {
 			row.SeenAt = *v.SeenAt
 		}

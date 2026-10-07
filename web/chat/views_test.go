@@ -1022,3 +1022,33 @@ func TestAttachFiles(t *testing.T) {
 		t.Errorf("no files: %+v", got)
 	}
 }
+
+// An answer whose model ran on a machine says whose, and which model; one
+// that fell back to the server's key says that too; one on the server's key
+// alone says nothing.
+func TestBuildThread_SaysTheMachine(t *testing.T) {
+	jarvis := AgentInfo{ID: "default", Name: "Jarvis"}
+	msgs := []store.MessageWithID{
+		{ID: 1, Message: store.Message{Role: store.RoleUser, Content: j("Q1"), UserID: "u-v", Author: "Victor"}},
+		{ID: 2, Message: store.Message{Role: store.RoleAssistant, Content: j("R1"), AgentID: "default", UserID: "u-v", MachineID: "m1", Machine: "portable", Model: "sonnet"}},
+		{ID: 3, Message: store.TurnEnd("default", "")},
+		{ID: 4, Message: store.Message{Role: store.RoleUser, Content: j("Q2"), UserID: "u-v", Author: "Victor"}},
+		{ID: 5, Message: store.Message{Role: store.RoleAssistant, AgentID: "default", UserID: "u-x", MachineID: "m2", Machine: "maison", ToolCalls: []store.ToolCall{{ID: "t", Name: "exec"}}}},
+		{ID: 6, Message: store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "t"}}},
+		{ID: 7, Message: store.Message{Role: store.RoleAssistant, Content: j("R2"), AgentID: "default", UserID: "u-x", Model: "claude-sonnet-5"}},
+		{ID: 8, Message: store.TurnEnd("default", "")},
+		{ID: 9, Message: store.Message{Role: store.RoleUser, Content: j("Q3"), UserID: "u-v", Author: "Victor"}},
+		{ID: 10, Message: store.Message{Role: store.RoleAssistant, Content: j("R3"), AgentID: "default", Model: "claude-sonnet-5"}},
+	}
+	items := BuildThread(msgs, "u-v", nil, nil, AgentDirectory{Session: jarvis})
+	var got []string
+	for _, it := range items {
+		if it.Kind == ItemAgent {
+			got = append(got, it.Via())
+		}
+	}
+	want := []string{"via la machine de Victor · sonnet", "via la machine « maison » puis le modèle de l'installation", ""}
+	if !slices.Equal(got, want) {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}

@@ -176,8 +176,11 @@ func TestRender_Machines(t *testing.T) {
 		Machines: []MachineRow{
 			{ID: "m1", Name: "maison <b>", OS: "linux/amd64", Capabilities: []string{"echo", "claude-code"}, Online: true, MaxDirectives: 2, CreatedAt: now, SeenAt: now,
 				ClaudeCode: "ok", Paused: true, Priority: 3, OpenKinds: []string{"analyze_repo", "analyze_repo"}, OpenDirectives: 2},
-			{ID: "m3", Name: "atelier", Capabilities: []string{"claude-code", "git-push"}, Online: true, MaxDirectives: 1, CreatedAt: now,
-				ClaudeCode: "ok", OpenKinds: []string{"implement_feature"}, OpenDirectives: 1},
+			{ID: "m3", Name: "atelier", Capabilities: []string{"claude-code", "git-push", "llm"}, Online: true, MaxDirectives: 1, CreatedAt: now,
+				ClaudeCode: "ok", OpenKinds: []string{"implement_feature", "llm", "llm"}, OpenDirectives: 3,
+				MaxLLM: 4, LLMProvider: "anthropic", LLMModel: "claude-sonnet-5", LLMState: "ok"},
+			{ID: "m4", Name: "refusee", Capabilities: []string{"echo"}, Online: true, MaxDirectives: 1, CreatedAt: now,
+				MaxLLM: 2, LLMProvider: "anthropic", LLMModel: "claude-x", LLMState: "refused"},
 			{ID: "m2", Name: "vieux", Revoked: true, RevokedReason: "révoquée par son propriétaire", CreatedAt: now.Add(-48 * time.Hour)},
 		}})
 	for _, want := range []string{
@@ -186,6 +189,8 @@ func TestRender_Machines(t *testing.T) {
 		"révoquée", "capacités : echo, claude-code", "vue à l&#39;instant", "il y a 2 jours",
 		"Claude Code : connecté", "2 × analyse de dépôt", "en pause", "Reprendre", `name="priority"`, `value="3"`,
 		"implémentations : non (agent connect --allow-push)", "implémentations : oui", "implémentation",
+		"modèle : anthropic claude-sonnet-5 (4 appels à la fois)", "directives en cours (1 sur 1), appels au modèle (2 sur 4)",
+		"2 × appel au modèle", "modèle : anthropic claude-x, clé refusée", "directives en cours (2 sur 2)",
 	} {
 		if !strings.Contains(page, want) {
 			t.Errorf("machines page lacks %s", want)
