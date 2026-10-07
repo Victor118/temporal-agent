@@ -226,11 +226,12 @@ your memory) and sends it to the machine over its WebSocket, never through
 Temporal nor the database. **The machine has the agent's authority**: it reads
 all that, and its answers decide which of the agent's tools the turn calls.
 A passing failure is retried on the same machine (six attempts, the
-provider's `Retry-After` waited); a machine that is lost or unreachable is
-set aside until it connects again, and the turn goes on with the server's
+provider's `Retry-After` waited), a machine at its cap of calls included; a
+machine that is lost or unreachable is set aside (for two minutes at most,
+until it answers a heartbeat, or until it connects again), and the turn goes on with the server's
 key (`prefer`) or another machine of yours (`require`; none: the turn stops
-and says so). A key the provider refuses, or an account with no credit left,
-withdraws the model until `agent connect` starts again (you are told). A
+and says so). A key the provider refuses (or a model it may not use), or an account with no
+credit left, withdraws the model until `agent connect` starts again (you are told). A
 sub-agent runs on its parent's machine unless its own agent is set to
 `never`. The thread signs such an answer « via la machine de … · model »;
 each answer keeps its model and its token usage. Scheduled tasks, fork
