@@ -316,13 +316,16 @@ func reconcile(open []store.Directive, running, finished []string, connID string
 			continue // reserved: RunOnMachine hands it over
 		}
 		isOpen[d.ID] = true
-		if d.Kind == machine.KindLLM && !listed[d.ID] {
+		if d.Kind == machine.KindLLM {
 			// A call to the model is never sent again: its request is gone.
+			// Listed, it is carried on: running, or its result on its way.
 			// Not sent yet, DeliverLLM sends it, or closes it; sent on an
 			// earlier connection and unknown to the machine, it is lost,
-			// and its workflow tries again. Listed, it is carried on below
-			// like any other: running, or its result on its way.
-			if d.SentConn != "" && d.SentConn != connID {
+			// and its workflow tries again. Never p.send.
+			switch {
+			case listed[d.ID]:
+				p.attach = append(p.attach, d)
+			case d.SentConn != "" && d.SentConn != connID:
 				p.lost = append(p.lost, d)
 			}
 			continue

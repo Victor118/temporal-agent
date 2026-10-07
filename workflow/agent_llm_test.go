@@ -523,3 +523,60 @@ func TestAgentWorkflow_SubAgentInheritsExclusions(t *testing.T) {
 		t.Errorf("child %+v", child)
 	}
 }
+
+// prefer: a machine that never answers the step (busy all six attempts)
+// hands the step to the server's key; require fails it.
+func TestAgentWorkflow_PreferAfterTheAttempts(t *testing.T) {
+	for _, mode := range []string{store.LLMOnMachinePrefer, store.LLMOnMachineRequire} {
+		t.Run(mode, func(t *testing.T) {
+			var suite testsuite.WorkflowTestSuite
+			env := suite.NewTestWorkflowEnvironment()
+			w := &machineWorld{modes: map[string]string{"jarvis": mode}, free: []string{"m1"},
+				answer: machineAnswers(temporal.NewNonRetryableApplicationError("full", machine.ErrTypeBusy, nil))}
+			w.register(env, fetchTools)
+			f := registerLLM(env, answers(done))
+			out := runTurn(t, env, f)
+			if len(w.calls) != machineLLMAttempts {
+				t.Errorf("%d attempts", len(w.calls))
+			}
+			if mode == store.LLMOnMachinePrefer {
+				if out.Response != "done" || len(f.model.sent()) != 1 || len(w.notes) < 2 || !strings.Contains(w.notes[1], "n'a pas répondu") {
+					t.Errorf("prefer: %+v, notes %q", out, w.notes)
+				}
+				return
+			}
+			if out.ErrorType != machine.ErrTypeBusy || len(f.model.sent()) != 0 {
+				t.Errorf("require: %+v", out)
+			}
+		})
+	}
+}
+
+// require: when the machines were excluded because the server could not be
+// reached, the turn says so, not that no machine is there.
+func TestAgentWorkflow_RequireServerAway(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+	w := &machineWorld{modes: map[string]string{"jarvis": store.LLMOnMachineRequire}, free: []string{"m1", "m2"},
+		answer: machineAnswers(temporal.NewNonRetryableApplicationError("server away", machine.ErrTypeHandoffFailed, nil))}
+	w.register(env, fetchTools)
+	f := registerLLM(env, answers(done))
+	out := runTurn(t, env, f)
+	if out.ErrorType != ErrTypeMachineRequired || out.Error != ServerUnreachableMessage || len(w.calls) != 2 || len(w.aside) != 0 {
+		t.Errorf("%+v, calls %v", out, w.keys())
+	}
+	// One machine refusing for itself: no machine is the reason.
+	env = suite.NewTestWorkflowEnvironment()
+	w = &machineWorld{modes: map[string]string{"jarvis": store.LLMOnMachineRequire}, free: []string{"m1", "m2"}}
+	w.answer = func(n int, in activity.CallLLMOnMachineInput) (activity.LLMTurnResponse, error) {
+		if in.MachineID == "m1" {
+			return activity.LLMTurnResponse{}, temporal.NewNonRetryableApplicationError("no model", machine.ErrTypeRefused, nil)
+		}
+		return activity.LLMTurnResponse{}, temporal.NewNonRetryableApplicationError("server away", machine.ErrTypeHandoffFailed, nil)
+	}
+	w.register(env, fetchTools)
+	f = registerLLM(env, answers(done))
+	if out := runTurn(t, env, f); out.Error != MachineRequiredMessage {
+		t.Errorf("mixed: %+v", out)
+	}
+}

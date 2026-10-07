@@ -25,9 +25,12 @@ func TestReconcile_LLM(t *testing.T) {
 		{ID: "llm-unsent", Kind: machine.KindLLM, State: store.DirectiveRunning},
 		{ID: "llm-forgotten", Kind: machine.KindLLM, State: store.DirectiveRunning, SentConn: "c-old"},
 		{ID: "llm-sent-here", Kind: machine.KindLLM, State: store.DirectiveRunning, SentConn: "c-now"},
+		// Listed, though the database never saw it sent: carried on, never
+		// sent (its request is gone).
+		{ID: "llm-listed-unsent", Kind: machine.KindLLM, State: store.DirectiveRunning},
 	}
-	p := reconcile(open, []string{"llm-running"}, []string{"llm-finished"}, "c-now")
-	if !slices.Equal(ids(p.attach), []string{"llm-running", "llm-finished"}) || !slices.Equal(ids(p.lost), []string{"llm-forgotten"}) ||
+	p := reconcile(open, []string{"llm-running", "llm-listed-unsent"}, []string{"llm-finished"}, "c-now")
+	if !slices.Equal(ids(p.attach), []string{"llm-running", "llm-finished", "llm-listed-unsent"}) || !slices.Equal(ids(p.lost), []string{"llm-forgotten"}) ||
 		len(p.send) != 0 || len(p.cancel) != 0 || len(p.ack) != 0 {
 		t.Errorf("plan %+v", p)
 	}

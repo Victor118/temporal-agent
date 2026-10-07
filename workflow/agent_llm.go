@@ -64,6 +64,12 @@ const MachineRequiredMessage = "Cet agent fait tourner son modèle sur la machin
 const MachinesOffMessage = "Cet agent fait tourner son modèle sur la machine de l'auteur du message seulement, et les machines sont désactivées sur cette installation (MACHINES_ENABLED=false) : " +
 	"un admin doit le régler sur « jamais » ou « de préférence » dans /admin."
 
+// ServerUnreachableMessage is what they read when every machine left was
+// lost for the server, not for itself: the worker could not reach the
+// gateway.
+const ServerUnreachableMessage = "Cet agent fait tourner son modèle sur la machine de l'auteur du message seulement, et le serveur n'a pas pu joindre la passerelle des machines (redémarrage ou panne du serveur) : " +
+	"ta machine n'y est pour rien, renvoie ton message dans un instant."
+
 // subAgentMachinesOff is what a parent reads of a sub-agent stopped because
 // the machines are off.
 const subAgentMachinesOff = "The agent stopped without an answer: it runs its model on the user's machine only, and this installation has its machines off."
@@ -81,6 +87,9 @@ type llmRoute struct {
 	excluded []string
 	// off: the installation has its machines off (ChooseMachine said so).
 	off bool
+	// unreached are the excluded machines the worker could not hand a call
+	// to: the server was away, not the machine (HandoffFailed).
+	unreached []string
 	// note says the turn's line shows where its model runs; session turns
 	// only (sessionID, participant, agent).
 	noting      bool
@@ -156,6 +165,9 @@ func (r *llmRoute) noMachine(ctx workflow.Context) error {
 	if r.off {
 		return temporal.NewNonRetryableApplicationError(MachinesOffMessage, ErrTypeMachineRequired, nil)
 	}
+	if len(r.excluded) > 0 && !slices.ContainsFunc(r.excluded, func(id string) bool { return !slices.Contains(r.unreached, id) }) {
+		return temporal.NewNonRetryableApplicationError(ServerUnreachableMessage, ErrTypeMachineRequired, nil)
+	}
 	return temporal.NewNonRetryableApplicationError(MachineRequiredMessage, ErrTypeMachineRequired, nil)
 }
 
@@ -219,6 +231,9 @@ func (r *llmRoute) call(ctx workflow.Context, llmCtx workflow.Context, queue str
 				r.setAside(ctx, m.ID)
 			}
 			r.excluded = append(r.excluded, m.ID)
+			if hasErrorType(err, machine.ErrTypeHandoffFailed) {
+				r.unreached = append(r.unreached, m.ID)
+			}
 			if r.mode == store.LLMOnMachineRequire {
 				if !r.choose(ctx, userID) {
 					return resp, nil, r.noMachine(ctx)
@@ -239,7 +254,16 @@ func (r *llmRoute) call(ctx workflow.Context, llmCtx workflow.Context, queue str
 			return resp, m, err
 		}
 	}
-	return activity.LLMTurnResponse{}, r.machine, last
+	if r.mode == store.LLMOnMachineRequire {
+		return activity.LLMTurnResponse{}, r.machine, last
+	}
+	// prefer: the machine never answered the step (busy all along, failing):
+	// the step, and the rest of the turn, on the server's key.
+	workflow.GetLogger(ctx).Warn("The machine of the turn's model never answered the step", "machine", r.machine.ID, "error", last)
+	name := r.machine.Name
+	r.machine = nil
+	r.note(ctx, fmt.Sprintf("modèle de l'installation : la machine « %s » n'a pas répondu", name))
+	return onServer()
 }
 
 // Failure kinds of a call on a machine.
