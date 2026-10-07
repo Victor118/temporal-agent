@@ -60,7 +60,7 @@ func (m MachineRow) LLMText() string {
 	model := strings.TrimSpace(m.LLMProvider + " " + m.LLMModel)
 	switch {
 	case m.LLMState == "refused":
-		return "modèle : " + model + ", clé refusée ou crédit épuisé (redémarre agent connect avec une clé valide)"
+		return "modèle : " + model + ", clé refusée, crédit épuisé ou modèle non permis (le journal d'agent connect dit pourquoi ; redémarre agent connect avec une clé valide)"
 	case m.AsideForLLM:
 		return "modèle : " + model + ", écarté depuis un appel perdu, jusqu'à sa reconnexion"
 	}

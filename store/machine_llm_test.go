@@ -76,12 +76,17 @@ func TestLLMMachines(t *testing.T) {
 	if _, _, err := s.CreateLLMDirective(ctx, llmCall("zz-llm-alice", "zz-llm-high", "zz-llm-r1", "llm:0:1", seen)); !errors.Is(err, ErrDirectiveClosed) {
 		t.Errorf("same key: %v", err)
 	}
-	// Its cap reached: not chosen, a call refused.
+	// Its cap reached: another chosen first; a call is busy, not refused.
 	if m, err := s.ChooseLLMMachine(ctx, "zz-llm-alice", nil, seen); err != nil || m.ID != "zz-llm-low" {
 		t.Errorf("high full: %s %v", m.ID, err)
 	}
-	if _, _, err := s.CreateLLMDirective(ctx, llmCall("zz-llm-alice", "zz-llm-high", "zz-llm-r1", "llm:0:2", seen)); !errors.Is(err, ErrMachineUnavailable) {
+	if _, _, err := s.CreateLLMDirective(ctx, llmCall("zz-llm-alice", "zz-llm-high", "zz-llm-r1", "llm:0:2", seen)); !errors.Is(err, ErrMachineBusy) ||
+		errors.Is(err, ErrMachineUnavailable) {
 		t.Errorf("over the cap: %v", err)
+	}
+	// With no other, the full one is chosen all the same: its calls wait.
+	if m, err := s.ChooseLLMMachine(ctx, "zz-llm-alice", []string{"zz-llm-low"}, seen); err != nil || m.ID != "zz-llm-high" {
+		t.Errorf("only a full one: %s %v", m.ID, err)
 	}
 	// The coding runs have their own cap: a call to the model takes none of
 	// it (high runs one at a time, and has a call open)…
@@ -117,6 +122,22 @@ func TestLLMMachines(t *testing.T) {
 	if _, _, err := s.CreateLLMDirective(ctx, llmCall("zz-llm-alice", "zz-llm-high", "zz-llm-r4", "llm:0:1", seen)); !errors.Is(err, ErrMachineUnavailable) {
 		t.Errorf("a call to a machine set aside: %v", err)
 	}
+	// Bounded in time: an aside older than the online window is over.
+	got, _ := s.GetMachine(ctx, "zz-llm-high")
+	if !got.AsideForLLM(seen) || got.AsideForLLM(time.Now().Add(time.Second)) {
+		t.Errorf("aside within the window %v, past it %v", got.AsideForLLM(seen), got.AsideForLLM(time.Now().Add(time.Second)))
+	}
+	// Lifted by a heartbeat of its gateway.
+	if err := s.ClearMachineAside(ctx, "zz-llm-high"); err != nil {
+		t.Fatal(err)
+	}
+	if m, err := s.ChooseLLMMachine(ctx, "zz-llm-alice", nil, seen); err != nil || m.ID != "zz-llm-high" {
+		t.Errorf("back after a heartbeat: %s %v", m.ID, err)
+	}
+	// And by its next connection.
+	if err := s.SetMachineAside(ctx, "zz-llm-high"); err != nil {
+		t.Fatal(err)
+	}
 	time.Sleep(10 * time.Millisecond)
 	if _, err := s.MachineConnected(ctx, "zz-llm-high", "gw", "", MachineInfo{Capabilities: []string{"llm"}, MaxDirectives: 1, MaxLLM: 1, LLMState: "ok"}); err != nil {
 		t.Fatal(err)
@@ -132,7 +153,7 @@ func TestLLMMachines(t *testing.T) {
 	if m, err := s.ChooseLLMMachine(ctx, "zz-llm-alice", nil, seen); err != nil || m.ID != "zz-llm-low" {
 		t.Errorf("model withdrawn: %s %v", m.ID, err)
 	}
-	got, _ := s.GetMachine(ctx, "zz-llm-high")
+	got, _ = s.GetMachine(ctx, "zz-llm-high")
 	if got.LLMState != "refused" || got.Can("llm") {
 		t.Errorf("after the refusal: %+v", got)
 	}

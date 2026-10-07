@@ -49,9 +49,10 @@ func openLLMCalls(ctx context.Context, q queryer, ids []string) (map[string]int,
 }
 
 // llmUnavailable says why m cannot take a call to the model now, "" when it
-// can: online since seenAfter, not paused, its model offered, not set aside,
-// under its cap with open calls already.
-func llmUnavailable(m Machine, open int, seenAfter time.Time) string {
+// can: online since seenAfter, not paused, its model offered, not set aside
+// (since seenAfter too). Its cap is apart: a machine full is busy, not
+// unavailable.
+func llmUnavailable(m Machine, seenAfter time.Time) string {
 	switch {
 	case !m.Online(seenAfter):
 		return "offline"
@@ -59,18 +60,18 @@ func llmUnavailable(m Machine, open int, seenAfter time.Time) string {
 		return "paused"
 	case !m.Can(llmCapability):
 		return "its model is not offered"
-	case m.AsideForLLM():
+	case m.AsideForLLM(seenAfter):
 		return "set aside since a call to its model was lost"
-	case open >= m.MaxLLM:
-		return "at its cap of calls to the model"
 	}
 	return ""
 }
 
 // ChooseLLMMachine chooses a machine of userID's for a turn's model, and
 // creates nothing: online since seenAfter, not paused, with its model, not
-// set aside, under its cap of calls, none of excluded; the highest priority,
-// then the least busy with calls to the model. None: ErrNoMachine.
+// set aside, none of excluded; under its cap of calls first, the highest
+// priority, then the least busy with calls to the model. One at its cap is
+// still chosen when no other is there: busy is passing, its calls wait for a
+// slot (ErrMachineBusy). None: ErrNoMachine.
 func (s *PostgresStore) ChooseLLMMachine(ctx context.Context, userID string, excluded []string, seenAfter time.Time) (Machine, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT `+machineColumns+` FROM machines m
 		WHERE m.user_id = $1 AND m.revoked_at IS NULL ORDER BY m.id`, userID)
@@ -98,18 +99,25 @@ func (s *PostgresStore) ChooseLLMMachine(ctx context.Context, userID string, exc
 	if err != nil {
 		return Machine{}, err
 	}
-	var choices []machineChoice
+	var free, full []machineChoice
 	for _, m := range machines {
-		if slices.Contains(excluded, m.ID) || llmUnavailable(m, open[m.ID], seenAfter) != "" {
+		if slices.Contains(excluded, m.ID) || llmUnavailable(m, seenAfter) != "" {
 			continue
 		}
-		choices = append(choices, machineChoice{ID: m.ID, Priority: m.Priority, Max: m.MaxLLM, Open: open[m.ID], Online: true, Can: true})
+		c := machineChoice{ID: m.ID, Priority: m.Priority, Max: m.MaxLLM, Open: open[m.ID], Online: true, Can: true}
+		free = append(free, c)
+		if c.Max > 0 {
+			c.Max = c.Open + 1 // chosen among the full ones by priority, then load
+			full = append(full, c)
+		}
 	}
-	if chosen := chooseMachine(choices); chosen != "" {
-		for _, m := range machines {
-			if m.ID == chosen {
-				return m, nil
-			}
+	chosen := chooseMachine(free)
+	if chosen == "" {
+		chosen = chooseMachine(full)
+	}
+	for _, m := range machines {
+		if chosen != "" && m.ID == chosen {
+			return m, nil
 		}
 	}
 	return Machine{}, ErrNoMachine
@@ -145,7 +153,8 @@ type LLMDirectiveRequest struct {
 // once (its task token set: the activity hands it over right after), in one
 // transaction that holds the machine's row: under its cap of calls, the
 // machine online, not paused, with its model, not set aside. Otherwise
-// ErrMachineUnavailable, saying why; a key used already: ErrDirectiveClosed
+// ErrMachineUnavailable, saying why; at its cap, ErrMachineBusy (passing:
+// try again later, on the same machine); a key used already: ErrDirectiveClosed
 // (an attempt is never made twice). One whose activity never hands it over
 // (its worker died) expires at its deadline, swept.
 func (s *PostgresStore) CreateLLMDirective(ctx context.Context, req LLMDirectiveRequest) (Directive, Machine, error) {
@@ -173,8 +182,11 @@ func (s *PostgresStore) CreateLLMDirective(ctx context.Context, req LLMDirective
 		if err != nil {
 			return err
 		}
-		if why := llmUnavailable(m, open[m.ID], req.SeenAfter); why != "" {
+		if why := llmUnavailable(m, req.SeenAfter); why != "" {
 			return fmt.Errorf("%w: %s", ErrMachineUnavailable, why)
+		}
+		if open[m.ID] >= m.MaxLLM {
+			return fmt.Errorf("%w: %d calls to its model at once", ErrMachineBusy, m.MaxLLM)
 		}
 		d, err = scanDirective(tx.QueryRowContext(ctx, `
 			INSERT INTO machine_directives (id, machine_id, user_id, kind, input, workflow_id, run_id, activity_id, call_key,

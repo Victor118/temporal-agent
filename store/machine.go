@@ -59,11 +59,14 @@ func (m Machine) Online(since time.Time) bool {
 }
 
 // AsideForLLM reports a machine set aside for the model: a turn lost a call
-// on it since it last connected. Still "seen" for a while, it would
-// otherwise be chosen again, and the next turn wait out its heartbeat
-// timeout too.
-func (m Machine) AsideForLLM() bool {
-	return m.AsideAt != nil && (m.ConnectedAt == nil || !m.ConnectedAt.After(*m.AsideAt))
+// on it after since (the online window: a lost machine still looks online
+// that long), and it has not connected again since. Still "seen" for a
+// while, it would otherwise be chosen again, and the next turn wait out its
+// heartbeat timeout too. Bounded in time, and lifted by a heartbeat its
+// gateway records for it (ClearMachineAside): a heartbeat timeout may come
+// from the gateway or from slow pongs, not from the machine.
+func (m Machine) AsideForLLM(since time.Time) bool {
+	return m.AsideAt != nil && m.AsideAt.After(since) && (m.ConnectedAt == nil || !m.ConnectedAt.After(*m.AsideAt))
 }
 
 // Can reports a capability the machine announced.
@@ -139,6 +142,9 @@ var (
 	// cannot take it now (offline, paused, its model withdrawn, set aside,
 	// at its cap); the error says which.
 	ErrMachineUnavailable = errors.New("machine unavailable")
+	// ErrMachineBusy: the machine chosen for a call to the model is at its
+	// cap of calls; a passing state, it frees itself.
+	ErrMachineBusy = errors.New("machine busy")
 )
 
 // TokenUse is what a presented machine token is.
@@ -689,6 +695,13 @@ func (s *PostgresStore) UpdateMachineStatus(ctx context.Context, id string, capa
 // (Machine.AsideForLLM).
 func (s *PostgresStore) SetMachineAside(ctx context.Context, id string) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE machines SET llm_aside_at = NOW() WHERE id = $1`, id)
+	return err
+}
+
+// ClearMachineAside takes a machine back for the model: its gateway just
+// recorded a heartbeat for one of its directives, it answers.
+func (s *PostgresStore) ClearMachineAside(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE machines SET llm_aside_at = NULL WHERE id = $1 AND llm_aside_at IS NOT NULL`, id)
 	return err
 }
 

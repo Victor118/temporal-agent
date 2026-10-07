@@ -190,7 +190,7 @@ func TestRender_Machines(t *testing.T) {
 		"Claude Code : connecté", "2 × analyse de dépôt", "en pause", "Reprendre", `name="priority"`, `value="3"`,
 		"implémentations : non (agent connect --allow-push)", "implémentations : oui", "implémentation",
 		"modèle : anthropic claude-sonnet-5 (4 appels à la fois)", "directives en cours (1 sur 1), appels au modèle (2 sur 4)",
-		"2 × appel au modèle", "modèle : anthropic claude-x, clé refusée", "directives en cours (2 sur 2)",
+		"2 × appel au modèle", "modèle : anthropic claude-x, clé refusée, crédit épuisé ou modèle non permis", "directives en cours (2 sur 2)",
 	} {
 		if !strings.Contains(page, want) {
 			t.Errorf("machines page lacks %s", want)

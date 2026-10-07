@@ -174,7 +174,7 @@ func (m *machinesUI) page(w http.ResponseWriter, r *http.Request, p chat.Machine
 			OpenDirectives: v.OpenDirectives, MaxDirectives: v.MaxDirectives, CreatedAt: v.CreatedAt, Revoked: v.RevokedAt != nil,
 			RevokedReason: v.RevokedReason, LastAddr: v.LastAddr, AgentVersion: v.AgentVersion,
 			Paused: v.Paused, Priority: v.Priority, ClaudeCode: v.ClaudeCode, OpenKinds: v.OpenKinds,
-			MaxLLM: v.MaxLLM, LLMProvider: v.LLMProvider, LLMModel: v.LLMModel, LLMState: v.LLMState, AsideForLLM: v.AsideForLLM()}
+			MaxLLM: v.MaxLLM, LLMProvider: v.LLMProvider, LLMModel: v.LLMModel, LLMState: v.LLMState, AsideForLLM: v.AsideForLLM(time.Now().Add(-activity.DefaultMachineOnlineWindow))}
 		if v.SeenAt != nil {
 			row.SeenAt = *v.SeenAt
 		}
