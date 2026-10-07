@@ -30,6 +30,7 @@ type machineWorld struct {
 	mu      sync.Mutex
 	modes   map[string]string // agent → llm_on_machine
 	free    []string          // machines ChooseMachine may give, in order
+	off     bool              // the machines off
 	chooses [][]string        // the exclusions of each ChooseMachine
 	aside   []string
 	calls   []activity.CallLLMOnMachineInput
@@ -63,7 +64,7 @@ func (w *machineWorld) register(env *testsuite.TestWorkflowEnvironment, tools ac
 				return activity.ChooseMachineOutput{Machine: &activity.LLMMachine{ID: id, Name: "machine-" + id, Model: "model-" + id}}, nil
 			}
 		}
-		return activity.ChooseMachineOutput{NoMachine: "none"}, nil
+		return activity.ChooseMachineOutput{NoMachine: "none", MachinesOff: w.off}, nil
 	}, sdkactivity.RegisterOptions{Name: "ChooseMachine"})
 	env.RegisterActivityWithOptions(func(_ context.Context, in activity.SetMachineAsideInput) error {
 		w.mu.Lock()
@@ -420,5 +421,105 @@ func TestAgentWorkflow_MachineBackIsNotSetAside(t *testing.T) {
 	out := runTurn(t, env, f)
 	if out.Response != "done" || len(w.aside) != 0 || len(f.model.sent()) != 1 {
 		t.Errorf("out %+v, aside %v", out, w.aside)
+	}
+}
+
+// A machine at its cap is busy: the same machine again after a wait, not
+// excluded, not set aside, no other chosen.
+func TestAgentWorkflow_MachineBusyWaits(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+	w := &machineWorld{modes: map[string]string{"jarvis": store.LLMOnMachineRequire}, free: []string{"m1", "m2"},
+		answer: machineAnswers(temporal.NewNonRetryableApplicationError("full", machine.ErrTypeBusy, nil), done)}
+	w.register(env, fetchTools)
+	f := registerLLM(env, answers(done))
+	start := env.Now()
+	out := runTurn(t, env, f)
+	if out.Response != "done" || !slices.Equal(w.keys(), []string{"m1/llm:0:1", "m1/llm:0:2"}) || len(w.chooses) != 1 || len(w.aside) != 0 ||
+		env.Now().Sub(start) < machineLLMFirstWait {
+		t.Errorf("out %+v, calls %v, chooses %v, aside %v", out, w.keys(), w.chooses, w.aside)
+	}
+}
+
+// A worker with no gateway is the worker's fault: prefer goes on with the
+// server's key, require stops; the machine is neither set aside nor
+// excluded. A gateway out of reach excludes the machine for the turn, without
+// setting it aside.
+func TestAgentWorkflow_NotTheMachinesFault(t *testing.T) {
+	noGateway := temporal.NewNonRetryableApplicationError("no gateway", machine.ErrTypeNoGateway, nil)
+	for name, c := range map[string]struct {
+		mode     string
+		err      error
+		response string
+		chooses  int
+	}{
+		"no gateway, prefer":  {store.LLMOnMachinePrefer, noGateway, "done", 1},
+		"no gateway, require": {store.LLMOnMachineRequire, noGateway, "", 1},
+		"handoff failed":      {store.LLMOnMachineRequire, temporal.NewNonRetryableApplicationError("server away", machine.ErrTypeHandoffFailed, nil), "", 2},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var suite testsuite.WorkflowTestSuite
+			env := suite.NewTestWorkflowEnvironment()
+			w := &machineWorld{modes: map[string]string{"jarvis": c.mode}, free: []string{"m1"}, answer: machineAnswers(c.err)}
+			w.register(env, fetchTools)
+			f := registerLLM(env, answers(done))
+			out := runTurn(t, env, f)
+			if out.Response != c.response || len(w.aside) != 0 || len(w.chooses) != c.chooses {
+				t.Errorf("out %+v, aside %v, chooses %v", out, w.aside, w.chooses)
+			}
+		})
+	}
+}
+
+// require with the machines off says why.
+func TestAgentWorkflow_RequireWithMachinesOff(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+	w := &machineWorld{modes: map[string]string{"jarvis": store.LLMOnMachineRequire}, off: true, answer: machineAnswers(done)}
+	w.register(env, fetchTools)
+	f := registerLLM(env, answers(done))
+	out := runTurn(t, env, f)
+	if out.ErrorType != ErrTypeMachineRequired || out.Error != MachinesOffMessage {
+		t.Errorf("%+v", out)
+	}
+	if content, isErr := subAgentContent(mustJSON(out)); !isErr || content != subAgentMachinesOff {
+		t.Errorf("a parent reads %q", content)
+	}
+}
+
+// A sub-agent inherits the machines its parent's turn excluded.
+func TestAgentWorkflow_SubAgentInheritsExclusions(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+	tools := activity.ListToolsOutput{
+		Tools:       []provider.ToolDefinition{{Name: "agent_analyst", InputSchema: json.RawMessage(activity.AgentToolSchema)}},
+		Resolutions: map[string]activity.ToolResolution{"agent_analyst": {Kind: "workflow", AgentID: "analyst"}},
+	}
+	delegate := provider.ChatResponse{StopReason: "tool_use", ToolCalls: []provider.ToolCallInfo{
+		{ID: "1", Name: "agent_analyst", Input: json.RawMessage(`{"task":"look"}`)}}}
+	w := &machineWorld{modes: map[string]string{"jarvis": store.LLMOnMachineRequire, "analyst": store.LLMOnMachineRequire}, free: []string{"m1", "m2"}}
+	w.answer = func(n int, in activity.CallLLMOnMachineInput) (activity.LLMTurnResponse, error) {
+		if in.MachineID == "m1" {
+			return activity.LLMTurnResponse{}, temporal.NewNonRetryableApplicationError("not connected", machine.ErrTypeUnreachable, nil)
+		}
+		if n == 2 {
+			return activity.LLMTurnResponse{ChatResponse: delegate}, nil
+		}
+		return activity.LLMTurnResponse{ChatResponse: done}, nil
+	}
+	w.register(env, tools)
+	f := registerLLM(env, answers(done))
+	var child AgentWorkflowInput
+	env.OnWorkflow(AgentWorkflow, mock.Anything, mock.Anything).Return(
+		func(ctx workflow.Context, in AgentWorkflowInput) (AgentWorkflowOutput, error) {
+			if in.AgentID == "jarvis" {
+				return AgentWorkflow(ctx, in)
+			}
+			child = in
+			return AgentWorkflowOutput{Response: "looked"}, nil
+		})
+	runTurn(t, env, f)
+	if child.LLMMachine == nil || child.LLMMachine.ID != "m2" || !slices.Equal(child.LLMExcluded, []string{"m1"}) {
+		t.Errorf("child %+v", child)
 	}
 }

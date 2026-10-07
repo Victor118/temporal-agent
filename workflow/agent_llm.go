@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	enumspb "go.temporal.io/api/enums/v1"
@@ -58,6 +59,15 @@ const ErrTypeMachineRequired = "MachineRequired"
 const MachineRequiredMessage = "Cet agent fait tourner son modèle sur la machine de l'auteur du message seulement, et aucune de tes machines n'en offre un en ce moment : " +
 	"lance agent connect avec ton modèle (--llm-provider, --llm-model, AGENT_CONNECT_LLM_API_KEY), puis renvoie ton message."
 
+// MachinesOffMessage is what they read when the installation has its
+// machines off: no machine of theirs could ever run it.
+const MachinesOffMessage = "Cet agent fait tourner son modèle sur la machine de l'auteur du message seulement, et les machines sont désactivées sur cette installation (MACHINES_ENABLED=false) : " +
+	"un admin doit le régler sur « jamais » ou « de préférence » dans /admin."
+
+// subAgentMachinesOff is what a parent reads of a sub-agent stopped because
+// the machines are off.
+const subAgentMachinesOff = "The agent stopped without an answer: it runs its model on the user's machine only, and this installation has its machines off."
+
 // subAgentNoMachine is what a parent reads of a sub-agent stopped for it.
 const subAgentNoMachine = "The agent stopped without an answer: it runs its model on the user's machine only, and none of the user's machines offers one now."
 
@@ -67,8 +77,10 @@ type llmRoute struct {
 	mode    string
 	machine *activity.LLMMachine
 	// excluded are the machines the turn set aside: lost, unreachable or
-	// refusing; never chosen again in this turn.
+	// refusing; never chosen again in this turn, nor by its sub-agents.
 	excluded []string
+	// off: the installation has its machines off (ChooseMachine said so).
+	off bool
 	// note says the turn's line shows where its model runs; session turns
 	// only (sessionID, participant, agent).
 	noting      bool
@@ -85,7 +97,7 @@ type llmRoute struct {
 // ChooseMachine finds. None found: the server's key (prefer), or the turn
 // stops (require: a MachineRequired error).
 func startLLMRoute(ctx workflow.Context, input AgentWorkflowInput, mode, signer string) (*llmRoute, error) {
-	r := &llmRoute{mode: mode}
+	r := &llmRoute{mode: mode, excluded: slices.Clone(input.LLMExcluded)}
 	if mode == "" {
 		r.mode = store.LLMOnMachineNever
 	}
@@ -131,7 +143,7 @@ func (r *llmRoute) choose(ctx workflow.Context, userID string) bool {
 	} else if out.NoMachine != "" {
 		workflow.GetLogger(ctx).Info("No machine for the turn's model", "why", out.NoMachine)
 	}
-	r.machine = out.Machine
+	r.machine, r.off = out.Machine, out.MachinesOff
 	return r.machine != nil || r.mode != store.LLMOnMachineRequire
 }
 
@@ -140,6 +152,9 @@ func (r *llmRoute) choose(ctx workflow.Context, userID string) bool {
 func (r *llmRoute) noMachine(ctx workflow.Context) error {
 	if r.mode != store.LLMOnMachineRequire || ctx.Err() != nil {
 		return nil
+	}
+	if r.off {
+		return temporal.NewNonRetryableApplicationError(MachinesOffMessage, ErrTypeMachineRequired, nil)
 	}
 	return temporal.NewNonRetryableApplicationError(MachineRequiredMessage, ErrTypeMachineRequired, nil)
 }
@@ -183,15 +198,24 @@ func (r *llmRoute) call(ctx workflow.Context, llmCtx workflow.Context, queue str
 			return resp, m, err
 		}
 		last = err
-		switch kind := machineFailure(err); kind {
+		kind, aside := machineFailure(err)
+		switch kind {
 		case failureFinal:
 			return resp, m, err
+		case failureWorker:
+			// The worker of CallLLM's queue hands no call to a machine:
+			// another machine would fare no better, and this one is not to
+			// blame.
+			workflow.GetLogger(ctx).Error("The worker of the turn's model cannot reach the machines", "error", err)
+			if r.mode == store.LLMOnMachineRequire {
+				return resp, m, err
+			}
+			r.machine = nil
+			r.note(ctx, "modèle de l'installation : ce worker n'atteint pas les machines")
+			return onServer()
 		case failureMachine, failureRefused:
 			workflow.GetLogger(ctx).Warn("The machine of the turn's model failed it", "machine", m.ID, "error", err)
-			// Set aside until it connects again; not one that lost the call
-			// by connecting again (DirectiveLost): it is back already, and
-			// would stay aside until its next connection.
-			if kind == failureMachine && !hasErrorType(err, machine.ErrTypeLost) {
+			if aside {
 				r.setAside(ctx, m.ID)
 			}
 			r.excluded = append(r.excluded, m.ID)
@@ -228,29 +252,42 @@ const (
 	// unreachable at the handoff, reconnected, stopped, revoked): set aside.
 	failureMachine
 	// failureRefused: the machine turned the call down before anything
-	// (its cap, its model withdrawn).
+	// (offline, paused, its model withdrawn, set aside). One at its cap is
+	// busy, which passes: failurePassing, the same machine later.
 	failureRefused
+	// failureWorker: the worker that took the call hands none to a machine
+	// (no gateway on it): neither the machine's fault nor another's cure.
+	failureWorker
 )
 
-// machineFailure tells what a failed attempt on a machine calls for.
-func machineFailure(err error) int {
+// machineFailure tells what a failed attempt on a machine calls for, and
+// whether to set the machine aside for the turns to come: lost (no
+// heartbeat), unreachable at the handoff, stopped, revoked. Not one that
+// lost the call by connecting again (DirectiveLost: it is back), nor one
+// whose gateway this worker could not reach (HandoffFailed: the server's
+// trouble): excluded from the turn only.
+func machineFailure(err error) (kind int, aside bool) {
 	var timeoutErr *temporal.TimeoutError
 	if errors.As(err, &timeoutErr) && timeoutErr.TimeoutType() == enumspb.TIMEOUT_TYPE_HEARTBEAT {
-		return failureMachine
+		return failureMachine, true
 	}
 	var appErr *temporal.ApplicationError
 	if !errors.As(err, &appErr) {
-		return failurePassing
+		return failurePassing, false
 	}
 	switch appErr.Type() {
 	case machine.ErrTypePermanentAPI, machine.ErrTypeContextTooLong:
-		return failureFinal
-	case machine.ErrTypeUnreachable, machine.ErrTypeLost, machine.ErrTypeStopping, machine.ErrTypeRevoked:
-		return failureMachine
+		return failureFinal, false
+	case machine.ErrTypeUnreachable, machine.ErrTypeStopping, machine.ErrTypeRevoked:
+		return failureMachine, true
+	case machine.ErrTypeLost, machine.ErrTypeHandoffFailed:
+		return failureMachine, false
 	case machine.ErrTypeRefused:
-		return failureRefused
+		return failureRefused, false
+	case machine.ErrTypeNoGateway:
+		return failureWorker, false
 	}
-	return failurePassing
+	return failurePassing, false
 }
 
 // retryWait is how long a step waits before its next attempt on the same

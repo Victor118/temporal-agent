@@ -82,6 +82,9 @@ type AgentWorkflowInput struct {
 	// sub-agent's calls go there too, unless its own agent is set to never
 	// (docs/design/machine-llm.md §8). Nil: its own agent's setting decides.
 	LLMMachine *activity.LLMMachine `json:"llm_machine,omitempty"`
+	// LLMExcluded are the machines its parent's turn excluded (lost,
+	// unreachable, refusing): never chosen by the sub-agent either.
+	LLMExcluded []string `json:"llm_excluded,omitempty"`
 }
 
 type AgentWorkflowOutput struct {
@@ -426,7 +429,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 				// Build input first — a sub-agent runs on the current workflow
 				// queue, and its model on the machine this turn's runs on now.
 				parent := input
-				parent.LLMMachine = route.machine
+				parent.LLMMachine, parent.LLMExcluded = route.machine, slices.Clone(route.excluded)
 				childWorkflow, childInput, err := buildChildInput(tc.Input, parent, d.workflowID, &res, cc, currentAgentID, workflow.GetInfo(ctx).TaskQueueName)
 				if err == nil && d.agent {
 					err = delegationRefusal(currentChain, res.AgentID)
@@ -715,7 +718,8 @@ func subAgentInput(rawInput json.RawMessage, parent AgentWorkflowInput, childID 
 		SessionTurn: parentCall.Turn,
 		// And calls its model where its parent does, unless its agent says
 		// never.
-		LLMMachine: parent.LLMMachine,
+		LLMMachine:  parent.LLMMachine,
+		LLMExcluded: parent.LLMExcluded,
 	}, nil
 }
 
@@ -862,6 +866,8 @@ func subAgentContent(result json.RawMessage) (content string, isError bool) {
 			return agent.Response, false
 		case agent.ErrorType == activity.ErrContextTooLong:
 			return subAgentTooLong, true
+		case agent.ErrorType == ErrTypeMachineRequired && agent.Error == MachinesOffMessage:
+			return subAgentMachinesOff, true
 		case agent.ErrorType == ErrTypeMachineRequired:
 			return subAgentNoMachine, true
 		case agent.Error != "":
