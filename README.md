@@ -46,7 +46,7 @@ happens to answer has locally.
 - **Built-in tools** — File system operations, web access, shell execution, user interaction, workflow queries, scheduling
 - **Published files** — An agent hands the members a file (`publish_file` for a text it writes, `exec`'s `publish` for a file a command made), attached to its answer and downloaded by the session's members only
 - **Documents** — `render_pdf` (Markdown or typst to PDF) and `make_slides` (Markdown to an editable pptx or a PDF deck), rendered by pandoc and typst on the main worker and published like any file
-- **Machines** — A user's own machine, outside the private network, connects to the server with `agent connect` (an outgoing WebSocket, no VPN, no database nor Temporal access) and runs the directives of their agents' turns; enrolled by a code typed in « Mes machines ». `analyze_repo` and `implement_feature` run there, with the user's own Claude Code login and git identity (an implementation pushes its branch from their machine, only where they allowed it), and fall back to the installation's coding workers when no machine of theirs takes them; what a run leaves in its outputs is published to the session: see [docs/design/machines.md](docs/design/machines.md)
+- **Machines** — A user's own machine, outside the private network, connects to the server with `agent connect` (an outgoing WebSocket, no VPN, no database nor Temporal access) and runs the directives of their agents' turns; enrolled by a code typed in « Mes machines ». `analyze_repo` and `implement_feature` run there, with the user's own Claude Code login and git identity (an implementation pushes its branch from their machine, only where they allowed it), and fall back to the installation's coding workers when no machine of theirs takes them; what an implementation leaves in its outputs is published to the session: see [docs/design/machines.md](docs/design/machines.md)
 - **Remote MCP servers** — A worker declares MCP servers in its `worker.yaml` (Streamable HTTP, or the older HTTP+SSE) and publishes their tools; a server that is down is retried in the background, and tools it adds or removes are picked up within 30 s
 
 ## Architecture
@@ -178,8 +178,12 @@ off.
 
 An implementation, with `--allow-push`, runs as on the installation's coding
 workers: a clone at the base, on a branch `agent/<slug>-<id>` the server names;
-the CLI in `acceptEdits` mode with the git commands it needs to commit (never
-`git push`, `git remote`, `git config`), and the same prompt; then the machine
+the CLI in `acceptEdits` mode with only `git add`, `git commit` and `git
+status` (never `git log`, `diff` or `show`, whose `--output` writes any file;
+never an edit of `.git/`), every git it starts made to run no program of the
+clone's configuration (hooks, fsmonitor, editor, signing: `GIT_CONFIG_COUNT`),
+and the same prompt; the CLI ends 10 minutes before the directive's deadline,
+leaving the push its time; then the machine
 inspects the clone and pushes the newest commit it listed
 (`<sha>:refs/heads/<branch>`) to the repository the call named, with your git
 identity. Nothing is pushed when the run made no commit, left HEAD on another
@@ -187,13 +191,13 @@ branch, or changed the clone's `.git/config` (it is restored before the
 inspection and the push, a copy kept outside the clone). `agent connect` logs
 how far a directive is, a line a minute at most.
 
-A run (analysis or implementation, on a machine or a coding worker) may leave
-files for you in an `outputs` directory next to its clone, which its prompt
-names: once it is over, they are published to the session's turn (on a
-machine through `PUT /machines/files`, with its token), shown under the
-answer and listed for the agent. Regular files only (no link, no file another
-path shares), 20 at most, 4 levels deep, `FILES_MAX_BYTES` each (the
-server's).
+An implementation (on a machine or a coding worker) may leave files for you
+in an `outputs` directory next to its clone, which its prompt names: once it
+is over, they are published to the session's turn (on a machine through
+`PUT /machines/files`, with its token), shown under the answer and listed for
+the agent. Regular files only (no link, no file another path shares), 20 at
+most, 4 levels deep, `FILES_MAX_BYTES` each and twice that in all (the
+server's). An analysis has none: the CLI's `plan` mode refuses every write.
 
 Every worker of a coding queue (the fallback queues `analyze_repo` and `implement_feature` run on) must have the `claude` CLI installed. A worker without it on that queue still answers a run's first check, and the run fails at once saying so: with N workers there of which one lacks the CLI, about one run in N fails that way.
 
@@ -221,7 +225,7 @@ A worker that stops ends its coding runs first, then gives the tasks under way 3
 | `AGENT_DEFINITIONS_FILE` | Agents seed file (default `./agents.yaml`) |
 | `WORKER_CONFIG` | Worker config: tool queue, exposed tools, MCP servers (default `./worker.yaml`, see `worker.example.yaml`) |
 | `MCP_SERVERS` | JSON array of MCP servers (`name`, `url`, `api_key`, `transport`), used only without a worker config |
-| `FILES_MAX_BYTES` | Worker: largest file `exec` may publish (its `publish` parameter), that a coding run publishes from its outputs, and largest document `render_pdf` and `make_slides` render (and the most their `files` may weigh together), in bytes (default `20971520`, 20 MiB); `publish_file`, for a short text the model writes, has its own bound (1 MiB). Server: largest file a machine publishes (`PUT /machines/files`). Files are stored in PostgreSQL. Not a positive number = the process does not start |
+| `FILES_MAX_BYTES` | Worker: largest file `exec` may publish (its `publish` parameter), that an implementation publishes from its outputs, and largest document `render_pdf` and `make_slides` render (and the most their `files` may weigh together), in bytes (default `20971520`, 20 MiB); `publish_file`, for a short text the model writes, has its own bound (1 MiB). Server: largest file a machine publishes (`PUT /machines/files`). Files are stored in PostgreSQL. Not a positive number = the process does not start |
 | `TYPST_PACKAGES` | Worker: directory of the typst packages a rendered document may import (default `/usr/local/share/typst/packages`, where the agent image puts touying). Typst never downloads one |
 | `RUN_AS_UID`, `RUN_AS_GID` | User (and group, default: the uid) that `exec`, the document tools and coding runs run as. Set to `10001` (`agent-run`) by both images. Empty on a worker running as root = `exec`, documents and coding runs are refused. Must be a uid of its own, used by one worker process per pid namespace (one container): its processes are killed whenever no command runs, and at the startup of a coding worker |
 | `CLAUDE_CODE_REPOS` | Comma-separated globs of the repositories a coding worker (`analyze_repo`, `implement_feature`) may clone and push to, e.g. `git@github.com:acme/*,https://github.com/acme/*` (`*` stops at a `/`). Empty = every repository is refused |
@@ -345,7 +349,9 @@ agent/
   and ends its directives at once. A file a machine publishes
   (`PUT /machines/files`) needs its token and an open directive of its own,
   goes to that directive's session turn only, is read up to
-  `FILES_MAX_BYTES`, and is listed in the run's result from the database,
+  `FILES_MAX_BYTES` (40 files and twice that in all per directive, checked
+  under the directive's lock; one upload a second per machine after a burst
+  of 20), and is listed in the run's result from the database,
   never from the machine's word. A machine pushes only with `--allow-push`,
   to a repository of its `--repos`, a branch under `agent/`.
 

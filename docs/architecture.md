@@ -326,8 +326,9 @@ diagnostic.
   un stockage objet (S3) ; un téléchargement charge le fichier entier en
   mémoire du serveur : avec S3, le servir en flux. Pas de quota par session ;
   pas d'aperçu dans la page (toujours téléchargés) ; rien n'est envoyé sur
-  Telegram. Les runs Claude Code ne publient pas encore (pas de dossier
-  `outputs/`, pas de pont MCP vers `publish_file`).
+  Telegram. Seule une implémentation Claude Code publie, depuis son dossier
+  `outputs/` (une analyse, en mode `plan`, ne peut rien écrire) ; pas de pont
+  MCP vers `publish_file`.
 - **Documents** : `render_pdf` et `make_slides` sur le worker principal ; un
   seul thème de diapositives (metropolis), pas de modèle pptx propre (celui de
   pandoc), pas de HTML vers PDF ni de LaTeX. Seuls les paquets typst de
@@ -354,7 +355,7 @@ diagnostic.
   implémentation, son identité git, seulement avec `--allow-push`), sinon la
   queue de repli de l'outil (`CLAUDE_CODE_ANALYZE_QUEUE`,
   `CLAUDE_CODE_IMPLEMENT_QUEUE`), sinon une erreur claire ; la note du tour
-  suit la machine (web). Ce qu'un run laisse dans ses sorties est publié pour
+  suit la machine (web). Ce qu'une implémentation laisse dans ses sorties est publié pour
   le tour (machine : `PUT /machines/files` ; worker : son magasin de
   fichiers). Pas encore : client de bureau, `CallLLM` sur la machine.
 - **Tous les workflows et activities sont enregistrés sur toutes les queues**
