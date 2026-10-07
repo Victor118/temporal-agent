@@ -258,3 +258,18 @@ func TestSweepTasks_WakesAgain(t *testing.T) {
 		t.Error("the channel was not told")
 	}
 }
+
+// A stop recorded whose workflow cannot be told now is no failure: the
+// sweep tells it.
+func TestStopTask_PendingWhenTemporalRefuses(t *testing.T) {
+	task := bgTask("c1", bob.ID)
+	st := &memStore{tasks: []store.BackgroundTask{task}}
+	tc := &fakeTemporal{cancelErr: errors.New("temporal away")}
+	err := newTest(st, tc).StopTask(context.Background(), creatorSession(), task.ID, bob)
+	if !errors.Is(err, ErrStopPending) || st.tasks[0].CancelledBy != bob.ID || st.tasks[0].CancelSentAt != nil {
+		t.Errorf("%v; %+v", err, st.tasks[0])
+	}
+	if list, _ := st.ListTasksToCancel(context.Background()); len(list) != 1 {
+		t.Errorf("not left for the sweep: %+v", list)
+	}
+}

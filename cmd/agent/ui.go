@@ -233,7 +233,7 @@ func (u *ui) buildPage(ctx context.Context, me *store.User, sessionID, view, blo
 		// A task running shows its files apart, not under its turn.
 		running, err := u.store.ListRunningTasks(ctx, sessionID, "")
 		if err != nil {
-			return nil, err
+			log.Printf("ui: running tasks of %s: %v", sessionID, err)
 		}
 		p.Thread = chat.AttachFiles(p.Thread, files, running, directory)
 	}
@@ -638,6 +638,8 @@ func (u *ui) stopTaskForm(w http.ResponseWriter, r *http.Request) {
 		u.renderAgents(w, r, "Seul le membre qui a demandé une tâche, ou le créateur de la session, peut l'arrêter.")
 	case err == nil, errors.Is(err, session.ErrTaskOver), errors.Is(err, session.ErrNoSuchTask):
 		u.renderAgents(w, r, "")
+	case errors.Is(err, session.ErrStopPending):
+		u.renderAgents(w, r, "Arrêt enregistré : il sera transmis à la tâche sous peu.")
 	default:
 		log.Printf("ui: stop a task in %s: %v", sess.SessionID, err)
 		u.renderAgents(w, r, "L'arrêt de la tâche n'a pas pu être envoyé.")

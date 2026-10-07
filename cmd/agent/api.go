@@ -297,7 +297,8 @@ type stopTaskRequest struct {
 }
 
 // stopTask stops a background task of the session: by who asked for it,
-// or the session's creator. 202 once cancelled, 403 to a member who may
+// or the session's creator. 202 once cancelled, or recorded and to be
+// told by the sweep, 403 to a member who may
 // not, 409 when it ended, 404 when the session has no such task.
 func (a *api) stopTask(w http.ResponseWriter, r *http.Request) {
 	var req stopTaskRequest
@@ -317,6 +318,9 @@ func (a *api) stopTask(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusConflict)
 	case errors.Is(err, session.ErrNoSuchTask):
 		http.Error(w, err.Error(), http.StatusNotFound)
+	case errors.Is(err, session.ErrStopPending):
+		// Recorded: the sweep tells the task.
+		http.Error(w, err.Error(), http.StatusAccepted)
 	case err != nil:
 		http.Error(w, fmt.Sprintf("Failed to stop: %v", err), http.StatusInternalServerError)
 	default:

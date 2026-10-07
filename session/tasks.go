@@ -31,6 +31,9 @@ var (
 	ErrNoSuchTask = errors.New("no such background task in this session")
 	// ErrTaskOver: the background task has ended.
 	ErrTaskOver = errors.New("the background task has ended")
+	// ErrStopPending: the stop is recorded, its workflow not told yet:
+	// the sweep tells it within a minute or so.
+	ErrStopPending = errors.New("the stop is recorded; the task will be told shortly")
 )
 
 // Task is a background task running, as the Agents panel shows it under
@@ -76,7 +79,8 @@ func (s *Service) tasksOf(ctx context.Context, sessionID string, v *visible) map
 //
 // ErrNoSuchTask: not one of the session's. ErrTaskOver: it ended.
 // ErrStopNotAllowed: another member's, and the user did not create the
-// session.
+// session. ErrStopPending: recorded, but its workflow could not be told
+// now; the sweep tells it.
 func (s *Service) StopTask(ctx context.Context, sess *store.Session, taskID string, me *store.User) error {
 	t, err := s.store.GetTask(ctx, taskID)
 	switch {
@@ -90,7 +94,7 @@ func (s *Service) StopTask(ctx context.Context, sess *store.Session, taskID stri
 		return ErrStopNotAllowed
 	}
 	defer s.statuses.invalidate()
-	if err := s.store.SetTaskCancelledBy(ctx, taskID, me.Name()); err != nil {
+	if err := s.store.SetTaskCancelledBy(ctx, taskID, cmp.Or(me.Name(), me.ID)); err != nil { // never empty: empty is no stop
 		if errors.Is(err, store.ErrTaskOver) || errors.Is(err, store.ErrTaskNotFound) {
 			return ErrTaskOver
 		}
@@ -102,7 +106,8 @@ func (s *Service) StopTask(ctx context.Context, sess *store.Session, taskID stri
 	case errors.As(err, &gone):
 		return ErrTaskOver // closed: the sweep ends its row, cancelled
 	case err != nil:
-		return fmt.Errorf("cancel the task (the sweep tries again): %w", err)
+		log.Printf("Session %s: cancel %s (the sweep sends it again): %v", sess.SessionID, taskID, err)
+		return ErrStopPending
 	}
 	if err := s.store.SetTaskCancelSent(ctx, taskID); err != nil {
 		log.Printf("Session %s: record the cancel of %s (the sweep sends it again): %v", sess.SessionID, taskID, err)
