@@ -59,6 +59,20 @@ type ChatResponse struct {
 	Content    string         `json:"content"`
 	ToolCalls  []ToolCallInfo `json:"tool_calls,omitempty"`
 	StopReason string         `json:"stop_reason"`
+	// Model is the model that answered, as its API names it; empty when it
+	// does not say.
+	Model string `json:"model,omitempty"`
+	// Usage is what the call took, in tokens; nil when the API does not say.
+	Usage *Usage `json:"usage,omitempty"`
+}
+
+// Usage is what a call took, in tokens: what it read (the cached part apart)
+// and what it wrote.
+type Usage struct {
+	InputTokens              int64 `json:"input_tokens"`
+	OutputTokens             int64 `json:"output_tokens"`
+	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens,omitempty"`
+	CacheReadInputTokens     int64 `json:"cache_read_input_tokens,omitempty"`
 }
 
 // ErrContextTooLong is in the error of a request the model refuses for its
@@ -69,6 +83,9 @@ var ErrContextTooLong = errors.New("context too long for the model")
 // PermanentAPIError wraps API errors that should not be retried (auth, billing, bad request, etc.)
 type PermanentAPIError struct {
 	Err error
+	// Credentials: the API refused the key itself, or its account has no
+	// credit left. Every request with it would be refused, whatever it holds.
+	Credentials bool
 }
 
 func (e *PermanentAPIError) Error() string { return e.Err.Error() }

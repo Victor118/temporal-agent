@@ -68,6 +68,25 @@ func contextOverflow(status int, body []byte) bool {
 	return false
 }
 
+// refusedCredentials tells an API error that refuses the key itself (401,
+// 403), or the account behind it: no credit left. Any request with that key
+// would get it again, whatever it holds.
+func refusedCredentials(status int, body []byte) bool {
+	switch status {
+	case http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden:
+		return true
+	}
+	var e anthropicError
+	if json.Unmarshal(body, &e) != nil {
+		return false
+	}
+	switch e.Error.Type {
+	case "authentication_error", "permission_error", "billing_error":
+		return true
+	}
+	return strings.Contains(strings.ToLower(e.Error.Message), "credit balance")
+}
+
 // resolveModel returns the requested model, or the provider default.
 func (p *AnthropicProvider) resolveModel(requested string) (string, error) {
 	if requested != "" {
@@ -108,6 +127,8 @@ type anthropicCacheControl struct {
 type anthropicResponse struct {
 	Content    []anthropicContentBlock `json:"content"`
 	StopReason string                  `json:"stop_reason"`
+	Model      string                  `json:"model"`
+	Usage      *Usage                  `json:"usage"`
 }
 
 type anthropicContentBlock struct {
@@ -206,7 +227,7 @@ func (p *AnthropicProvider) Chat(ctx context.Context, request ChatRequest) (Chat
 			return ChatResponse{}, &PermanentAPIError{Err: fmt.Errorf("%w: %w", ErrContextTooLong, err)}
 		}
 		if !transientStatus(resp.StatusCode) {
-			return ChatResponse{}, &PermanentAPIError{Err: err}
+			return ChatResponse{}, &PermanentAPIError{Err: err, Credentials: refusedCredentials(resp.StatusCode, respBody)}
 		}
 		// Rate limited or overloaded (429, 529, 503), the API may say when
 		// to come back.
@@ -222,8 +243,7 @@ func (p *AnthropicProvider) Chat(ctx context.Context, request ChatRequest) (Chat
 	}
 
 	// Convert response
-	var result ChatResponse
-	result.StopReason = aResp.StopReason
+	result := ChatResponse{StopReason: aResp.StopReason, Model: aResp.Model, Usage: aResp.Usage}
 
 	for _, block := range aResp.Content {
 		switch block.Type {
