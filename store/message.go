@@ -47,12 +47,15 @@ type Message struct {
 	Author  string `json:"author,omitempty"`
 	// Kind marks a message the system wrote: KindForkSummary is the summary
 	// a fork starts from, KindTurnEnd a turn's end, KindForkReport a
-	// fork's report to its parent. Empty for an ordinary message.
+	// fork's report to its parent, KindTaskResult a background task's end.
+	// Empty for an ordinary message.
 	Kind       string      `json:"kind,omitempty"`
 	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`
 	ToolResult *ToolResult `json:"tool_result,omitempty"`
 	// Fork is the fork a KindForkReport comes from.
 	Fork *ForkRef `json:"fork,omitempty"`
+	// Task is the background task a KindTaskResult ends.
+	Task *TaskRef `json:"task,omitempty"`
 	// On an assistant message: the model that wrote it, what its call took
 	// (Usage), and the machine that called it, when the turn's model ran on
 	// its author's machine (docs/design/machine-llm.md); empty: the server's
@@ -139,9 +142,10 @@ type MessageWithID struct {
 }
 
 // The keys of a session's messages, by writer: a person ("msg:"), a
-// scheduled task's result ("sched:"), a fork's report ("report:"), a fork's
-// summary (ForkSummaryKey), and a turn: "{turn key}:{index}" for what it
-// wrote, "{turn key}:end" for its end (TurnEndKey).
+// scheduled task's result ("sched:"), a fork's report ("report:"), a
+// background task's end ("task:", TaskResultKey), a fork's summary
+// (ForkSummaryKey), and a turn: "{turn key}:{index}" for what it wrote,
+// "{turn key}:end" for its end (TurnEndKey).
 
 const (
 	humanKeyPrefix     = "msg:"
@@ -199,7 +203,7 @@ func digits(s string) bool {
 
 // TurnOf returns the key of the turn that wrote the message stored under
 // msgKey, its end included; false for a message no turn wrote: a person's, a
-// task result, a fork's report or summary.
+// task result (scheduled or background), a fork's report or summary.
 func TurnOf(msgKey string) (string, bool) {
 	i := strings.LastIndexByte(msgKey, ':')
 	if i <= 0 {
