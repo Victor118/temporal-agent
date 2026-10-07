@@ -159,7 +159,7 @@ Ces deux étapes sont esquissées ici ; elles auront leur propre conception.
 
 **`CallLLM` sur la machine (phase 3).** La requête entière (prompt système, conversation convertie, définitions d'outils), construite par le serveur comme aujourd'hui, peut atteindre 2 Mo (`LLM_MAX_CONTEXT_BYTES`) : la machine la lit par `GET /machines/directives/<id>/request`, jamais par Temporal. **Modèle de menace** *[rev. 4]* : la machine qui fait tourner le modèle **a l'autorité de l'agent**. Sa réponse est une suite de tool calls que le workflow exécute avec toute l'allowlist (`send_email`, `exec` sur nos workers, `schedule_task`, sous-agents) : ce n'est pas « une saisie d'utilisateur à valider ». Dans l'autre sens, le prompt de l'agent, ses skills, les définitions d'outils et les messages des autres membres partent sur sa machine (sa mémoire à lui seulement ; les entrées et résultats `PrivateInput` des autres déjà masqués par `conversation.Convert`). D'où :
 - une politique **par agent**, « peut tourner sur une machine », **non** par défaut, choisie par l'admin en connaissance de cause ;
-- un sous-agent appelé depuis un tour exécuté sur une machine ne retombe jamais sur la clé du serveur (même règle, ou refus) ;
+- un sous-agent appelé depuis un tour exécuté sur une machine suit la machine de son parent, sauf si son agent est réglé pour ne jamais tourner sur une machine : il prend alors la clé du serveur (décision de `docs/design/machine-llm.md` §8) ;
 - l'origine tracée : `machine_id` sur les messages du tour.
 
 **`CLIAgentWorkflow` et le pont MCP (phase 4)** *[rev. 3]*. La CLI de l'utilisateur fait tout le tour ; les outils de la plateforme lui sont offerts par un MCP stdio local (`agent mcp-bridge`), qui passe par `agent connect` et la passerelle jusqu'au workflow du run, par une **Workflow Update** `call_tool`. Ce n'est **pas** possible dans `AgentWorkflow` : sa boucle numérote elle-même les étapes et écrit chaque appel avec son résultat. À trancher dans la conception de `CLIAgentWorkflow`, avant d'écrire une ligne :
@@ -174,7 +174,7 @@ Le pont tourne sous le même utilisateur que la CLI : le jeton de run de la sock
 - **Ce que la machine renvoie n'est pas de confiance** : tailles, références de fichiers (session et tour de la directive, vérifiés en base), rapports (texte pour le modèle, traité comme tel). Pour une machine qui fait tourner le modèle, voir §10 : elle a l'autorité de l'agent.
 - **Jetons** : jeton machine (long, révocable, hash en base) pour la connexion et l'API ; une requête de l'API n'est acceptée que pour une directive ouverte de cette machine. Jamais de jeton de tâche Temporal hors du réseau privé.
 - **Ce qu'une machine voit** : ses directives, et pour chacune ce qu'elle exige. Ni liste, ni lecture d'autres sessions.
-- **Abus** : plafonds de taille (messages WSS, `progress`, uploads), débit par machine, directives simultanées par machine, révocation immédiate.
+- **Abus** : plafonds de taille (messages WSS, `progress`, uploads), débit par machine, directives simultanées par machine, révocation immédiate. Le limiteur de la passerelle compte des messages, pas des octets : avec la limite de lecture de 4 Mio de la phase 3, une machine inscrite peut envoyer beaucoup d'octets ; c'est borné par le nombre de machines et la révocation (`machine-llm.md` §5).
 - **Le serveur vu de la machine** : son propriétaire fait confiance à l'installation qu'il rejoint, puisqu'elle lui envoie des tâches pour sa CLI ; les garde-fous locaux (§8) restent les siens.
 
 ## 12. Ce qui change dans le code
