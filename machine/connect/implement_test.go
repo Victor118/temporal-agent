@@ -289,3 +289,22 @@ func TestClient_LogsProgress(t *testing.T) {
 		t.Errorf("logged %q", got)
 	}
 }
+
+// The CLI of an implementation ends before its directive does: the push and
+// the outputs keep their time.
+func TestCLIDeadline(t *testing.T) {
+	now := time.Now()
+	ctx, cancel := context.WithDeadline(context.Background(), now.Add(2*time.Hour))
+	defer cancel()
+	if got := cliDeadline(ctx, now); !got.Equal(now.Add(2*time.Hour - pushReserve)) {
+		t.Errorf("long: %s", got.Sub(now))
+	}
+	short, cancel2 := context.WithDeadline(context.Background(), now.Add(10*time.Minute))
+	defer cancel2()
+	if got := cliDeadline(short, now); !got.Equal(now.Add(5 * time.Minute)) {
+		t.Errorf("short: %s", got.Sub(now))
+	}
+	if got := cliDeadline(context.Background(), now); got.Sub(now) < 24*time.Hour {
+		t.Errorf("none: %s", got.Sub(now))
+	}
+}
