@@ -230,7 +230,12 @@ func (u *ui) buildPage(ctx context.Context, me *store.User, sessionID, view, blo
 		if err != nil {
 			return nil, err
 		}
-		p.Thread = chat.AttachFiles(p.Thread, files, directory)
+		// A task running shows its files apart, not under its turn.
+		running, err := u.store.ListRunningTasks(ctx, sessionID, "")
+		if err != nil {
+			return nil, err
+		}
+		p.Thread = chat.AttachFiles(p.Thread, files, running, directory)
 	}
 	if p.Report != nil {
 		p.Thread = chat.MarkReported(p.Thread, sess, p.Report.Refused == nil)

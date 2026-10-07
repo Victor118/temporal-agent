@@ -684,8 +684,10 @@ func (f FileLink) Href() string { return "/files/" + f.ID }
 // A file a turn published twice, same name and same content (the model
 // called again), shows once. A file of a background task's call (its own
 // call, or one of a sub-agent it launched: "<call>/…") shows on the task's
-// card once it ended, not under the turn, long finished, that launched it.
-func AttachFiles(items []ThreadItem, files []store.File, agents AgentDirectory) []ThreadItem {
+// card once it ended, not under the turn, long finished, that launched it;
+// while it runs (running), on an item of the task's own at the thread's
+// end, « Tâche en cours ».
+func AttachFiles(items []ThreadItem, files []store.File, running []store.BackgroundTask, agents AgentDirectory) []ThreadItem {
 	if len(files) == 0 {
 		return items
 	}
@@ -695,7 +697,12 @@ func AttachFiles(items []ThreadItem, files []store.File, agents AgentDirectory) 
 			taskAt[it.Task.TurnKey+" "+it.Task.CallID] = i
 		}
 	}
+	runningAt := map[string]int{} // "<turn> <call>": a task running, in running
+	for i, t := range running {
+		runningAt[t.TurnKey+" "+t.CallID] = i
+	}
 	byTask := map[int][]store.File{}
+	byRunning := map[int][]store.File{}
 	var order []string // turns, in the order of their first file
 	byTurn := map[string][]store.File{}
 	seen := map[[3]string]bool{}
@@ -708,6 +715,10 @@ func AttachFiles(items []ThreadItem, files []store.File, agents AgentDirectory) 
 		call, _, _ := strings.Cut(f.CallID, "/")
 		if i, ok := taskAt[f.TurnKey+" "+call]; ok {
 			byTask[i] = append(byTask[i], f)
+			continue
+		}
+		if i, ok := runningAt[f.TurnKey+" "+call]; ok {
+			byRunning[i] = append(byRunning[i], f)
 			continue
 		}
 		if _, ok := byTurn[f.TurnKey]; !ok {
@@ -740,6 +751,15 @@ func AttachFiles(items []ThreadItem, files []store.File, agents AgentDirectory) 
 			orphans = append(orphans, ThreadItem{Kind: ItemFiles, Time: first.CreatedAt,
 				Agent: agents.Signer(store.Message{AgentID: first.AgentID}), Files: links, turn: turn})
 		}
+	}
+	for i, t := range running {
+		fs, ok := byRunning[i]
+		if !ok {
+			continue
+		}
+		ref := t.Ref()
+		orphans = append(orphans, ThreadItem{Kind: ItemFiles, Time: fs[0].CreatedAt,
+			Agent: agents.Signer(store.Message{AgentID: t.Participant}), Files: fileLinks(fs, agents), Task: &ref})
 	}
 	if len(orphans) == 0 {
 		return items

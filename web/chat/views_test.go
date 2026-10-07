@@ -993,7 +993,7 @@ func TestAttachFiles(t *testing.T) {
 		// By a sub-agent of the turn: says so.
 		{ID: "f7", TurnKey: answered, AgentID: "smith", Name: "chart.svg", Size: 5},
 	}
-	items = AttachFiles(items, files, directory)
+	items = AttachFiles(items, files, nil, directory)
 
 	var kinds []string
 	for _, it := range items {
@@ -1018,7 +1018,7 @@ func TestAttachFiles(t *testing.T) {
 		t.Errorf("href %s", items[1].Files[0].Href())
 	}
 	// No files: nothing changes.
-	if got := AttachFiles(items[:1], nil, directory); len(got) != 1 {
+	if got := AttachFiles(items[:1], nil, nil, directory); len(got) != 1 {
 		t.Errorf("no files: %+v", got)
 	}
 }
@@ -1081,7 +1081,7 @@ func TestBuildThread_TaskResult(t *testing.T) {
 		{ID: "f1", TurnKey: launch, CallID: "c1", AgentID: "jarvis", Name: "resultat-analyze_repo.md", Size: 40000},
 		{ID: "f2", TurnKey: launch, CallID: "c1/c7", AgentID: "smith", Name: "chart.svg", Size: 5, SHA256: "x"},
 		{ID: "f3", TurnKey: launch, CallID: "c0", AgentID: "jarvis", Name: "notes.md", Size: 5, SHA256: "y"},
-	}, directory)
+	}, nil, directory)
 	if got := shape(items); !strings.Contains(got, "task") {
 		t.Fatalf("shape %s", got)
 	}
@@ -1138,5 +1138,30 @@ func TestBuildAgents_Tasks(t *testing.T) {
 	creator := BuildAgents(ps, sess, "u-alice", directory).Rows[0]
 	if !creator.Tasks[1].CanStop || !strings.Contains(creator.ClearConfirm(), "Ses 2 tâches de fond continuent") {
 		t.Errorf("the creator's row %+v: %q", creator.Tasks, creator.ClearConfirm())
+	}
+}
+
+// While a task runs, the files of its call show on an item of its own, at
+// the thread's end, not under the turn that launched it.
+func TestAttachFiles_RunningTask(t *testing.T) {
+	jarvis := AgentInfo{ID: "jarvis", Name: "Jarvis", Mention: "jarvis"}
+	launch := store.TurnKey(1, "jarvis")
+	msgs := []store.MessageWithID{
+		{ID: 1, Key: store.HumanMessageKey("a"), Message: store.Message{Role: store.RoleUser, Content: j("go"), UserID: "u-v", Author: "Victor"}},
+		{ID: 2, Key: store.TurnMessageKey(launch, 0), Message: store.Message{Role: store.RoleAssistant, AgentID: "jarvis", Content: j("It runs.")}},
+		{ID: 3, Key: store.TurnEndKey(launch), Message: store.TurnEnd("jarvis", "")},
+	}
+	directory := AgentDirectory{ByID: map[string]AgentInfo{"jarvis": jarvis}, Session: jarvis}
+	running := []store.BackgroundTask{{ID: "s1:p:jarvis:m1:bg:c1", Participant: "jarvis", Tool: "agent_smith", TurnKey: launch, CallID: "c1"}}
+	items := AttachFiles(BuildThread(msgs, "u-v", nil, nil, directory), []store.File{
+		{ID: "f1", TurnKey: launch, CallID: "c1/c4", AgentID: "smith", Name: "chart.svg", Size: 5},
+	}, running, directory)
+	last := items[len(items)-1]
+	if len(items) != 3 || items[1].Files != nil || last.Kind != ItemFiles || last.Task == nil || last.Task.Tool != "agent_smith" || len(last.Files) != 1 {
+		t.Errorf("items %+v", items)
+	}
+	p := &Page{Node: &TreeNode{Session: store.Session{SessionID: "s1"}}, Thread: items}
+	if out := render(t, "thread-inner", p); !strings.Contains(out, "Tâche en cours · <code>agent_smith</code>") {
+		t.Errorf("rendered %s", out)
 	}
 }

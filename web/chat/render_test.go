@@ -621,7 +621,7 @@ func TestRender_Files(t *testing.T) {
 		{ID: 10, Key: store.TurnEndKey(turn), Message: store.TurnEnd("default", "")},
 	}, "u1", nil, nil, AgentDirectory{Session: p.Agent})
 	p.Thread = AttachFiles(p.Thread, []store.File{{ID: "f1", TurnKey: turn, Name: `<b>x</b>.html`, Size: 10},
-		{ID: "f2", TurnKey: turn, AgentID: "smith", Name: "chart.svg", Size: 5}}, AgentDirectory{ByID: map[string]AgentInfo{"smith": smith}})
+		{ID: "f2", TurnKey: turn, AgentID: "smith", Name: "chart.svg", Size: 5}}, nil, AgentDirectory{ByID: map[string]AgentInfo{"smith": smith}})
 	out := render(t, "thread-inner", p)
 	link := `href="/files/f1" download="&lt;b&gt;x&lt;/b&gt;.html"`
 	if !strings.Contains(out, link) || !strings.Contains(out, "10 o") {

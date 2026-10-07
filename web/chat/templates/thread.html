@@ -132,7 +132,7 @@
 <div class="msg" id="files-{{(index .Files 0).ID}}">
   <div class="agent-mark"></div>
   <div class="msg-body">
-    <div class="msg-head"><span class="who">{{.Agent.Name}}</span>{{with .Agent.Mention}}<span class="agent-meta">@{{.}}</span>{{end}}<span class="when">{{clock .Time}}</span></div>
+    <div class="msg-head">{{if .Task}}<span class="who">⧗ Tâche en cours · <code>{{.Task.Tool}}</code></span><span class="agent-meta">— {{.Agent.Name}}</span>{{else}}<span class="who">{{.Agent.Name}}</span>{{with .Agent.Mention}}<span class="agent-meta">@{{.}}</span>{{end}}{{end}}<span class="when">{{clock .Time}}</span></div>
     <div class="agent-card">{{template "files" .Files}}</div>
   </div>
 </div>
