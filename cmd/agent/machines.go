@@ -55,13 +55,13 @@ func newGateway(cfg *config.Config, st *store.PostgresStore, tc client.Client, h
 	return g
 }
 
-// machineNotices shows what a directive does on its turn's line: a notice
-// event on the session's topic, which the server reads in passing
-// (session.Service.Observe, the participant's note) and the pages reload
-// on. Web only.
-func machineNotices(hub *sse.Hub) func(sessionID, participant, agent, text string) {
-	return func(sessionID, participant, agent, text string) {
-		data, _ := json.Marshal(map[string]string{"type": activity.EventNotice, "text": text, "agent": agent, "participant": participant})
+// machineNotices shows what a directive does on its turn's line, or its
+// background task's: a notice event on the session's topic, which the
+// server reads in passing (session.Service.Observe, the participant's or
+// the task's note) and the pages reload on. Web only.
+func machineNotices(hub *sse.Hub) func(sessionID, participant, task, agent, text string) {
+	return func(sessionID, participant, task, agent, text string) {
+		data, _ := json.Marshal(map[string]string{"type": activity.EventNotice, "text": text, "agent": agent, "participant": participant, "task": task})
 		hub.Publish(sessionID, activity.SSEEvent{Type: activity.EventNotice, Data: data})
 	}
 }

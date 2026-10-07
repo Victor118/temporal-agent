@@ -10,6 +10,7 @@ import (
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/victor/temporal-agent/activity"
+	"github.com/victor/temporal-agent/store"
 	"github.com/victor/temporal-agent/tool"
 )
 
@@ -206,14 +207,16 @@ func sendRunNotice(ctx workflow.Context, call tool.CallContext, text string) {
 		logger.Warn("A coding run has a notice for its user, and no session to say it to")
 		return
 	}
-	// The participant whose turn waits: the server shows the notice on its
-	// line.
+	// The participant whose turn waits, or its background task: the server
+	// shows the notice on its line.
 	participant, _ := ParticipantOf(wfID)
+	task, _ := store.TaskOfWorkflow(wfID)
 	data, _ := json.Marshal(map[string]string{
 		"type":        activity.EventNotice,
 		"text":        text,
 		"agent":       call.Agent,
 		"participant": participant,
+		"task":        task,
 	})
 	var notifAct *activity.NotificationActivities
 	err := workflow.ExecuteActivity(

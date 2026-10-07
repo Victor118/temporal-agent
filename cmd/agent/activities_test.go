@@ -68,7 +68,7 @@ func TestWorkerWorkflows_Register(t *testing.T) {
 			names = append(names, name[strings.LastIndexByte(name, '.')+1:])
 		}
 	}()
-	for _, want := range []string{"ParticipantWorkflow", "AgentWorkflow", "AskUserWorkflow", "ForkSessionWorkflow", "ReportToParentWorkflow"} {
+	for _, want := range []string{"ParticipantWorkflow", "AgentWorkflow", "AskUserWorkflow", "ForkSessionWorkflow", "ReportToParentWorkflow", "BackgroundTaskWorkflow"} {
 		if !slices.Contains(names, want) {
 			t.Errorf("workflows %v lack %s", names, want)
 		}

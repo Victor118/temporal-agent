@@ -85,6 +85,11 @@ type AgentWorkflowInput struct {
 	// LLMExcluded are the machines its parent's turn excluded (lost,
 	// unreachable, refusing): never chosen by the sub-agent either.
 	LLMExcluded []string `json:"llm_excluded,omitempty"`
+	// CallPrefix starts the IDs a sub-agent's tool calls give their files
+	// (tool.CallContext.CallID): "<parent's call>/". The files of a call
+	// are those of the sub-agent it launched too, as a background task's
+	// end shows them.
+	CallPrefix string `json:"call_prefix,omitempty"`
 }
 
 type AgentWorkflowOutput struct {
@@ -408,6 +413,9 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 			workflowID  string
 			taskQueue   string
 			unavailable string // non-empty: error returned without dispatching
+			// background: the call launched a background task; future
+			// settles on its start.
+			background *backgroundStart
 		}
 		dispatches := make([]toolDispatch, len(response.ToolCalls))
 		for j, tc := range response.ToolCalls {
@@ -418,22 +426,38 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 				continue
 			}
 			d := toolDispatch{kind: tool.ToolKind(res.Kind), agent: res.AgentID != "", taskQueue: res.TaskQueue}
-			// This call's context: the run's, and the call's own ID.
+			// This call's context: the run's, and the call's own ID, under
+			// the call that launched this run if it is a sub-agent.
 			cc := call
-			cc.CallID = tc.ID
+			cc.CallID = input.CallPrefix + tc.ID
 			// The model may ask a tool that allows it to run in the
 			// background: the field is the dispatch's, never the tool's.
 			toolInput := tc.Input
+			background := false
 			if res.Background {
 				var err error
-				if toolInput, _, err = activity.TakeBackground(tc.Input); err != nil {
+				toolInput, background, err = activity.TakeBackground(tc.Input)
+				if err == nil && background && input.TurnKey == "" {
+					// No tasks of tasks, of sub-agents, of scheduled runs:
+					// the field is not offered there.
+					err = errors.New("background tasks are launched from a session's turn only: make this call without background, and wait for its result")
+				}
+				if err != nil {
 					dispatches[j] = toolDispatch{unavailable: err.Error()}
 					continue
 				}
 			}
 
 			if d.kind == tool.ToolKindWorkflow {
-				d.workflowID = childWorkflowID(workflow.GetInfo(ctx).WorkflowExecution.ID, tc.Name, tc.ID, i, j)
+				turnID := workflow.GetInfo(ctx).WorkflowExecution.ID
+				taskID := ""
+				if background {
+					// The tool runs under its task: "<turn>:bg:<call>:tool:…".
+					taskID = store.BackgroundTaskID(turnID, callKey(tc.ID, i, j))
+					d.workflowID = childWorkflowID(taskID, tc.Name, tc.ID, i, j)
+				} else {
+					d.workflowID = childWorkflowID(turnID, tc.Name, tc.ID, i, j)
+				}
 
 				// Build input first — a sub-agent runs on the current workflow
 				// queue, and its model on the machine this turn's runs on now.
@@ -445,6 +469,21 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 				}
 				if err != nil {
 					dispatches[j] = toolDispatch{unavailable: err.Error()}
+					continue
+				}
+				if background {
+					start, err := newBackgroundStart(input, tc, toolInput, cc, taskID, d.workflowID, res.TaskQueue, childWorkflow, childInput, d.agent)
+					if err != nil {
+						dispatches[j] = toolDispatch{unavailable: err.Error()}
+						continue
+					}
+					future, refused := start.launch(ctx)
+					if refused != "" {
+						dispatches[j] = toolDispatch{unavailable: refused}
+						continue
+					}
+					d.future, d.background = future, &start
+					dispatches[j] = d
 					continue
 				}
 
@@ -489,6 +528,8 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 			if d.unavailable != "" {
 				content = d.unavailable
 				isError = true
+			} else if d.background != nil {
+				content, isError = d.background.started(ctx, d.future.Get(ctx, nil))
 			} else if d.kind == tool.ToolKindWorkflow {
 				var result json.RawMessage
 				if err := d.future.Get(ctx, &result); err != nil {
@@ -563,12 +604,17 @@ func cancelledOutput(newMessages []store.Message) AgentWorkflowOutput {
 // or the summary line. Cuts land on rune boundaries so the result stays valid
 // UTF-8, which the JSON payloads downstream require.
 func truncateToolResult(content string) string {
-	if len(content) <= maxToolResultBytes {
+	return truncateTo(content, maxToolResultBytes)
+}
+
+// truncateTo is truncateToolResult to max bytes.
+func truncateTo(content string, max int) string {
+	if len(content) <= max {
 		return content
 	}
 
-	head := runeStart(content, maxToolResultBytes*2/3)
-	tail := runeStart(content, len(content)-(maxToolResultBytes-head))
+	head := runeStart(content, max*2/3)
+	tail := runeStart(content, len(content)-(max-head))
 	if tail <= head {
 		tail = len(content)
 	}
@@ -726,6 +772,8 @@ func subAgentInput(rawInput json.RawMessage, parent AgentWorkflowInput, childID 
 		// never.
 		LLMMachine:  parent.LLMMachine,
 		LLMExcluded: parent.LLMExcluded,
+		// And its calls' files are its parent's call's.
+		CallPrefix: parentCall.CallID + "/",
 	}, nil
 }
 
@@ -889,8 +937,14 @@ func subAgentContent(result json.RawMessage) (content string, isError bool) {
 // precedes the first ':' (SessionOf): ask_user and the coding runs find it
 // there. The tool call ID keeps parallel calls and later turns distinct.
 func childWorkflowID(parentID, toolName, callID string, iteration, index int) string {
+	return parentID + toolMark + toolName + ":" + callKey(callID, iteration, index)
+}
+
+// callKey names a tool call in a workflow ID: its ID, or its place in the
+// run when the model gave none.
+func callKey(callID string, iteration, index int) string {
 	if callID == "" {
-		callID = fmt.Sprintf("%d-%d", iteration, index)
+		return fmt.Sprintf("%d-%d", iteration, index)
 	}
-	return parentID + toolMark + toolName + ":" + callID
+	return callID
 }

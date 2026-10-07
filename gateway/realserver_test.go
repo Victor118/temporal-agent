@@ -187,7 +187,7 @@ func (e *smokeEnv) serve(ln net.Listener) {
 		ln = smallSends{ln, e.writeBuffer}
 	}
 	g := &Gateway{Store: e.st, Temporal: e.flaky, completeWait: 50 * time.Millisecond, NoteEvery: 100 * time.Millisecond,
-		Notice: func(session, participant, agent, text string) {
+		Notice: func(session, participant, _, agent, text string) {
 			select {
 			case e.notes <- smokeNote{session, participant, agent, text}:
 			default:

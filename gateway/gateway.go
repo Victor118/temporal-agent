@@ -122,10 +122,11 @@ type Gateway struct {
 	// be a proxy's, every client's.
 	ClientAddr func(r *http.Request) string
 	AddrsKnown bool
-	// Notice shows a note on a participant's working line in a session
+	// Notice shows a note on a participant's working line in a session, or
+	// on its background task's (task: the directive's run belongs to one)
 	// (the event activity.EventNotice, through session.Service.Observe):
 	// what a directive of its turn does. Web only. Nil: none.
-	Notice func(sessionID, participant, agent, text string)
+	Notice func(sessionID, participant, task, agent, text string)
 	// FilesPublished tells a session's pages that a machine published files
 	// for a turn (the event activity.EventFilePublished): its thread shows
 	// them. Nil: none.
@@ -537,13 +538,15 @@ func (g *Gateway) note(d store.Directive, name, progress string) {
 	if progress != "" {
 		text += " — " + machine.Cut(progress, 200)
 	}
-	g.Notice(d.SessionID, d.Participant, d.Agent, text)
+	task, _ := store.TaskOfWorkflow(d.WorkflowID)
+	g.Notice(d.SessionID, d.Participant, task, d.Agent, text)
 }
 
 // clearNote takes a directive's note off its turn's line: it is over.
 func (g *Gateway) clearNote(d store.Directive) {
 	if g.Notice != nil && d.SessionID != "" && d.Kind != machine.KindLLM {
-		g.Notice(d.SessionID, d.Participant, d.Agent, "")
+		task, _ := store.TaskOfWorkflow(d.WorkflowID)
+		g.Notice(d.SessionID, d.Participant, task, d.Agent, "")
 	}
 }
 

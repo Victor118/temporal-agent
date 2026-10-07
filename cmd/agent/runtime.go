@@ -261,6 +261,7 @@ func workerWorkflows() []any {
 	return []any{
 		workflow.ParticipantWorkflow,
 		workflow.AgentWorkflow,
+		workflow.BackgroundTaskWorkflow,
 		workflow.AskUserWorkflow,
 		workflow.AnalyzeRepoWorkflow,
 		workflow.ImplementFeatureWorkflow,
