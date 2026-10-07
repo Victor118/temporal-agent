@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -73,6 +74,8 @@ type smokeEnv struct {
 	notes chan smokeNote
 	addr  string
 	base  string
+	// pingTimeout is the next gateways' (serve); zero = 1 s.
+	pingTimeout time.Duration
 
 	mu  sync.Mutex
 	g   *Gateway
@@ -189,7 +192,7 @@ func (e *smokeEnv) serve(ln net.Listener) {
 			default:
 			}
 		},
-		HeartbeatEvery: smokeHeartbeatEvery, PingTimeout: time.Second, SweepEvery: 2 * time.Second,
+		HeartbeatEvery: smokeHeartbeatEvery, PingTimeout: cmp.Or(e.pingTimeout, time.Second), SweepEvery: 2 * time.Second,
 		ClientAddr: func(r *http.Request) string { h, _, _ := net.SplitHostPort(r.RemoteAddr); return h }, AddrsKnown: true}
 	if err := g.Start(context.Background()); err != nil {
 		e.t.Fatal(err)

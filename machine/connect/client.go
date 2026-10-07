@@ -399,7 +399,9 @@ func (c *Client) pings(ctx context.Context, ws *websocket.Conn) {
 			return
 		case <-t.C:
 		}
-		pctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		// Its pong may wait behind a call to the model's request on a slow
+		// link: as long as the gateway's own write.
+		pctx, cancel := context.WithTimeout(ctx, machine.LLMWriteTimeout)
 		err := ws.Ping(pctx)
 		cancel()
 		if err != nil {
