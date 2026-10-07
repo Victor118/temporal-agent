@@ -71,6 +71,7 @@ flowchart LR
     subgraph WF[Workers — queue workflows]
         SW[ParticipantWorkflow]
         AW[AgentWorkflow]
+        BT[BackgroundTaskWorkflow]
         LLM[CallLLM]
     end
 
@@ -150,6 +151,7 @@ tools: [github_*]
 | `tools` | outil → queue, schéma, kind, propriétés (`sensitive`, `private_input`, `needs_call_context`), `schema_hash` | workers |
 | `messages`, `sessions`, `memory`, `users`, `task_logs` | données runtime | workflows / serveur |
 | `files`, `file_contents` | fichiers publiés par les agents (métadonnées, contenu à part) | workers (outils) |
+| `background_tasks` | tâches de fond des agents : qui l'a demandée, outil, tour et appel d'origine, état, message de fin, consignes de suite | workflows (`RegisterTask`, `PostTaskResult`) / serveur (arrêt, balayage) |
 | `skills_version` | signal de rechargement des skills | serveur |
 | `machines`, `machine_retired_tokens`, `machine_enrollments` | machines des utilisateurs (hash du jeton), jetons remplacés, inscriptions en attente | serveur (passerelle) |
 | `machine_directives` | directives des machines : réservation et directive sur une ligne, jeton de tâche, état ; un appel au modèle (`llm`) avec ce qui revient de la mémoire du prompt, jamais la requête | workers (`PickMachine`, `RunOnMachine`, `CallLLMOnMachine`) / passerelle |
@@ -231,6 +233,25 @@ La délégation passe donc par l'allowlist comme le reste : `agent_code-reviewer
 autorise un agent, `agent_*` tous les autres. Un agent ne reçoit jamais son
 propre outil. La cible vient du nom de l'outil, pas d'un paramètre rempli par
 le LLM : il n'y a pas d'`agent_id` à inventer.
+
+### Tâches de fond
+
+Un appel d'outil workflow (sous-agent, `analyze_repo`, `implement_feature` ;
+pas un outil `PrivateInput`) peut tourner **sans être attendu** : le
+catalogue ajoute un champ `background` au schéma de ces outils pour un tour
+de session, le modèle le pose, le dispatch le retire de l'entrée. Le tour
+enregistre la tâche (`background_tasks`, trois en cours au plus par
+participant), lance `BackgroundTaskWorkflow` (`<tour>:bg:<appel>`, enfant
+abandonné du tour) et continue avec « tâche lancée ». La tâche exécute
+l'outil en enfant, puis poste son résultat dans la session (`task_result`,
+16 Kio au plus, au-delà le résultat entier en fichier de l'appel) et réveille
+le participant par `SignalWithStart`, comme un message de membre : son tour
+répond à qui l'avait demandée, sur le canal d'origine, et lit les consignes
+attachées entre-temps (`when_task_done`). Le premier qui écrit la fin gagne
+(la tâche, ou un balayage du serveur pour une tâche close sans résultat).
+Annulée par un membre (le demandeur ou le créateur), elle poste sans
+réveiller. La suppression d'une session termine ses tâches avant elle.
+Conception : [design/async-tasks.md](design/async-tasks.md).
 
 ### Fichiers publiés
 
@@ -367,6 +388,11 @@ diagnostic.
   et le repli dans `AgentWorkflow`), sous-agents sur la machine de leur
   parent sauf `never`. Pas encore : client de bureau, serveur sans clé,
   résumés et rapports, tâches planifiées sur la machine (3.1).
+- **Tâches de fond** (`docs/design/async-tasks.md`, §12) : un appel d'outil
+  workflow lancé sans être attendu, dont la fin poste son résultat et réveille
+  l'agent. Pas encore : les tâches planifiées qui postent dans leur session
+  (chantier suivant), un plafond par utilisateur, des triggers généraux (fin
+  d'un workflow quelconque, heure).
 - **Tous les workflows et activities sont enregistrés sur toutes les queues**
   d'un worker, y compris sa queue d'outils. Les outils de type workflow
   (`ask_user`) tournent donc sur la queue de l'outil.

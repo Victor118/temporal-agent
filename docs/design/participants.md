@@ -314,7 +314,7 @@ Sources, dans l'ordre (`session.Participants`) : l'état en mémoire par partici
 
 **Écarts et limites.**
 - Le nombre en file vient de l'état en mémoire (messages livrés par ce serveur, pas encore commencés) : un message relayé n'y est pas compté. Un message resté « en attente » faute d'événement ne compte que tant que le participant tourne, ou dans les 30 s de sa livraison.
-- Les tâches de fond ne s'affichent que pour un participant lu par sa requête `state` (aucune n'existe avant la phase 4).
+- *Phase 4 :* les tâches de fond sont lues dans `background_tasks` par le serveur (`session.Participants`), plus par la requête `state` (`docs/design/async-tasks.md` §12).
 - *Corrigé à la relecture :* un « Arrêter » cliqué pendant `CheckTurn` nommait un tour pas encore annoncé et était jeté ; il l'arrête maintenant avant son début (le bouton d'un membre peut l'afficher dès la vérification quand la requête `state` le lit : après un redémarrage, ou un `turn_started` perdu).
 - Changement du contrat du participant (charge de `stop-turn`, champs de `state` et des événements de tour) : sans nouvelle commande de workflow, mais la boucle change ; à terminer au déploiement comme toute modification du participant.
 

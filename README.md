@@ -40,6 +40,7 @@ happens to answer has locally.
 
 - **Durable AI workflows** — ReAct loop (LLM reasoning + tool execution) powered by Temporal, with automatic retries and fault tolerance
 - **Multi-agent system** — Agents can spawn sub-agents for specialized tasks, each with isolated context
+- **Background tasks** — A session's agent may launch a long call (a sub-agent, `analyze_repo`, `implement_feature`) without waiting for it: it stays available, and the task's end posts its result in the session and wakes it, to report or go on with what it was asked meanwhile (`when_task_done`). Three at most per agent; shown, and stopped, in the Agents panel: see [docs/design/async-tasks.md](docs/design/async-tasks.md)
 - **Pluggable skills** — Skills loaded from Git repositories or local files, assigned to agents for domain-specific expertise
 - **Persistent memory** — PostgreSQL-backed storage for conversation history, key-value memory (user/project/session scoped), and task logs
 - **Real-time streaming** — SSE (Server-Sent Events) hub for live updates to connected clients
@@ -65,6 +66,7 @@ The system runs in three modes:
 - **ParticipantWorkflow** — An agent in a session: answers its messages in order, one at a time, in parallel with the other agents, and runs only while it has messages (a session has no workflow of its own)
 - **AgentWorkflow** — ReAct loop: calls LLM, executes tools, repeats until done. Loads the prompt, skills and allowed tools of its agent (`agent_id`)
 - **Sub-agents** — One-shot AgentWorkflows with isolated context; the parent only sees the final response
+- **BackgroundTaskWorkflow** — A tool call a session turn launched in the background (`<turn>:bg:<call>`): runs the tool, posts its result in the session (`task_result`) and wakes the agent's participant with it
 
 ### Agents, Tools & Task Queues
 
