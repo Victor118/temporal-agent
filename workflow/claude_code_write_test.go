@@ -15,6 +15,7 @@ import (
 	"go.temporal.io/sdk/testsuite"
 
 	"github.com/victor/temporal-agent/activity"
+	"github.com/victor/temporal-agent/tool"
 )
 
 type implementEnv struct {
@@ -350,5 +351,25 @@ func TestImplementFeatureWorkflow_InterruptedRunSaysWhatItDid(t *testing.T) {
 				t.Errorf("content:\n%s", out.Content)
 			}
 		})
+	}
+}
+
+// What an implementation left in its outputs is published on its worker,
+// for the call's turn, and listed for the agent; what was not, said.
+func TestImplementFeatureWorkflow_PublishesItsOutputs(t *testing.T) {
+	e := newImplementEnv(t, claudeCodeResult{Report: "Done.", Subtype: "success"}, nil, oneCommit(), nil)
+	e.outputs = activity.PublishOutputsOutput{Files: []tool.FileRef{{ID: "f-1", Name: "diagram.svg", Size: 2048}},
+		Unpublished: []string{"key: a link, not published"}}
+	call := tool.CallContext{UserID: "u-1", CallID: "call-1", AgentChain: []string{"jarvis"}, NotifyQueue: "agent",
+		Turn: &tool.TurnRef{SessionID: "s-1", TurnKey: "m3.jarvis"}}
+	out := e.run_(t, ImplementFeatureInput{Repo: "/src/repo", Task: "do it", CallContext: call})
+	if !e.run.Outputs || e.published == nil || e.published.Call.CallID != "call-1" || e.published.Call.Turn.TurnKey != "m3.jarvis" ||
+		e.published.Dir != e.run.Dir {
+		t.Fatalf("run %+v, published %+v", e.run, e.published)
+	}
+	for _, want := range []string{"files published", "diagram.svg (2.0 KB, id f-1)", "files not published", "key: a link"} {
+		if !strings.Contains(out.Content, want) {
+			t.Errorf("content lacks %q: %s", want, out.Content)
+		}
 	}
 }

@@ -915,8 +915,8 @@ printf '{"type":"result","subtype":"success","is_error":false,"result":"model=%s
 	}
 }
 
-// A run given its outputs is told where they are, may write there, and has
-// them as a directory of its own; one without is told nothing.
+// A run given its outputs is told where they are, and has them as a working
+// directory of its own; one without is told nothing.
 func TestRunClaudeCode_Outputs(t *testing.T) {
 	id := subproctest.Identity(t)
 	if os.Geteuid() == 0 && id == nil {
@@ -941,12 +941,12 @@ printf '{"type":"result","subtype":"success","is_error":false,"result":"%s","ses
 			t.Fatal(err)
 		}
 	}
-	res, err := a.RunClaudeCode(context.Background(), RunClaudeCodeInput{Dir: dir, Task: "x", PermissionMode: "plan", Outputs: true})
+	res, err := a.RunClaudeCode(context.Background(), RunClaudeCodeInput{Dir: dir, Task: "x", PermissionMode: "acceptEdits", Outputs: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	out := outputsDir(dir)
-	for _, want := range []string{"--add-dir " + out, "Edit(/" + out + "/**)", "write them in " + out} {
+	for _, want := range []string{"--add-dir " + out, "write them in " + out} {
 		if !strings.Contains(res.Report, want) {
 			t.Errorf("the CLI's args lack %q: %s", want, res.Report)
 		}
@@ -955,6 +955,54 @@ printf '{"type":"result","subtype":"success","is_error":false,"result":"%s","ses
 		t.Errorf("outputs without asking: %s", res.Report)
 	}
 }
+
+// The git a run starts runs no program the clone's configuration names:
+// a hook and a filesystem monitor the run wrote itself stay idle through
+// its own commit (machine.RunGitEnv).
+func TestRunClaudeCode_GitRunsNoProgramOfTheClone(t *testing.T) {
+	id := subproctest.Identity(t)
+	if os.Geteuid() == 0 && id == nil {
+		t.Skip("no identity to run as")
+	}
+	bin := filepath.Join(subproctest.Dir(t, nil), "fake-claude")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"+gitTrapScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: subproctest.Dir(t, nil), RunAs: id, Runner: &claudecode.Runner{Binary: bin}}
+	if id != nil {
+		a.Runs = subproc.NewRuns(id)
+	}
+	prepared, err := a.PrepareWorkspace(context.Background(), PrepareWorkspaceInput{Name: "run-1", Repo: initRepo(t), Branch: "agent/x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := a.RunClaudeCode(context.Background(), RunClaudeCodeInput{Dir: prepared.Dir, Task: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Report != "commit=0 hook=no fsmonitor=no editor=no" {
+		t.Errorf("the run's git: %s", res.Report)
+	}
+}
+
+// gitTrapScript is a stand-in CLI that sets traps in its clone's git
+// directory (a hook, core.fsmonitor, core.editor), commits, and reports
+// which went off.
+const gitTrapScript = `cat >/dev/null
+export GIT_AUTHOR_NAME=a GIT_AUTHOR_EMAIL=a@b GIT_COMMITTER_NAME=a GIT_COMMITTER_EMAIL=a@b
+mkdir -p .git/hooks
+printf '#!/bin/sh\ntouch "%s/hook"\n' "$PWD" > .git/hooks/pre-commit
+chmod +x .git/hooks/pre-commit
+printf '[core]\n\tfsmonitor = touch %s/fsmonitor; false\n\teditor = touch %s/editor; true\n' "$PWD" "$PWD" >> .git/config
+echo x > trapped.txt
+git add trapped.txt
+git commit --quiet --no-edit -e -m trap >/dev/null 2>&1
+c=$?
+git status --porcelain >/dev/null 2>&1
+h=no; f=no; e=no
+[ -e hook ] && h=yes; [ -e fsmonitor ] && f=yes; [ -e editor ] && e=yes
+printf '{"type":"result","subtype":"success","is_error":false,"result":"commit=%s hook=%s fsmonitor=%s editor=%s","session_id":"s"}\n' "$c" "$h" "$f" "$e"
+`
 
 // The payer the activity reports is the worker's choice, confirmed by the
 // CLI's apiKeySource; when they disagree, it names none.

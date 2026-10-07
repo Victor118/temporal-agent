@@ -96,6 +96,9 @@ func TestCoder_AnalyzeRun(t *testing.T) {
 			t.Errorf("args lack %q: %s", want, args)
 		}
 	}
+	if strings.Contains(string(args), "--add-dir") || strings.Contains(string(args), "outputs") {
+		t.Errorf("an analysis given outputs: %s", args)
+	}
 	env, _ := os.ReadFile(filepath.Join(seen, "env"))
 	if strings.Contains(string(env), "sk-should-not-leak") || strings.Contains(string(env), "CLAUDE_CONFIG_DIR") {
 		t.Errorf("the CLI's environment: %s", env)

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/victor/temporal-agent/machine"
 )
@@ -83,12 +84,17 @@ func TestPublish(t *testing.T) {
 		t.Errorf("%d published, refused %v", len(pub.files), refused)
 	}
 
-	// A run cancelled publishes nothing.
+	// A run stopped, or out of time, publishes nothing, and says so.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	pub = &published{}
-	if refused := Publish(ctx, dir, 32, pub.upload); len(pub.files) != 0 || refused != nil {
+	if refused := Publish(ctx, dir, 32, pub.upload); len(pub.files) != 0 || len(refused) != 1 || !strings.Contains(refused[0], "stopped") {
 		t.Errorf("cancelled: %v %v", pub.files, refused)
+	}
+	ctx, cancel = context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	if refused := Publish(ctx, dir, 32, pub.upload); len(pub.files) != 0 || len(refused) != 1 || !strings.Contains(refused[0], "time ran out") {
+		t.Errorf("out of time: %v %v", pub.files, refused)
 	}
 }
 

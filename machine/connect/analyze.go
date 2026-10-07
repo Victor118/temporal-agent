@@ -172,7 +172,7 @@ func (a *Coder) Sweep() error {
 }
 
 // Analyze is the analyze_repo executor: clone, run the CLI read-only,
-// publish what it left in its outputs, report, delete the clone. The output
+// report, delete the clone. The output
 // goes along with an error too (a partial report, how far it got).
 func (a *Coder) Analyze(ctx context.Context, input json.RawMessage, progress func(string)) (json.RawMessage, error) {
 	var in machine.AnalyzeInput
@@ -186,7 +186,7 @@ func (a *Coder) Analyze(ctx context.Context, input json.RawMessage, progress fun
 	if err := a.refuse(in.Repo); err != nil {
 		return nil, err
 	}
-	r, err := a.newRun()
+	r, err := a.newRun(false)
 	if err != nil {
 		return nil, err
 	}
@@ -202,16 +202,12 @@ func (a *Coder) Analyze(ctx context.Context, input json.RawMessage, progress fun
 		Cwd:                r.clone,
 		Task:               in.Task,
 		PermissionMode:     machine.AnalyzePermissionMode,
-		AppendSystemPrompt: machine.AnalyzeSystemPrompt + "\n" + machine.OutputsPrompt(r.outputs),
-		// Plan mode allows no edit: but this one, in the outputs.
-		AllowedTools: []string{machine.OutputsRule(r.outputs)},
-		AddDirs:      []string{r.outputs},
+		AppendSystemPrompt: machine.AnalyzeSystemPrompt,
 	}, &out, progress)
 	var refusal *Refusal
 	if errors.As(err, &refusal) {
 		return nil, err
 	}
-	out.Unpublished = a.publishOutputs(ctx, r.outputs)
 	raw, merr := json.Marshal(out)
 	if merr != nil {
 		return nil, merr
@@ -233,13 +229,13 @@ func (a *Coder) refuse(repo string) error {
 }
 
 // codingRun is one run's directory under WorkDir: the clone, and next to it
-// the outputs the CLI may leave and the copy of the clone's git
-// configuration, all deleted with it.
+// (an implementation's) the outputs the CLI may leave and the copy of the
+// clone's git configuration, all deleted with it.
 type codingRun struct {
 	dir, clone, outputs, gitConfig string
 }
 
-func (a *Coder) newRun() (*codingRun, error) {
+func (a *Coder) newRun(outputs bool) (*codingRun, error) {
 	if err := os.MkdirAll(a.WorkDir, 0o700); err != nil {
 		return nil, err
 	}
@@ -249,9 +245,11 @@ func (a *Coder) newRun() (*codingRun, error) {
 	}
 	r := &codingRun{dir: dir, clone: filepath.Join(dir, "repo"), outputs: filepath.Join(dir, machine.OutputsDir),
 		gitConfig: filepath.Join(dir, "gitconfig")}
-	if err := os.Mkdir(r.outputs, 0o700); err != nil {
-		os.RemoveAll(dir)
-		return nil, err
+	if outputs {
+		if err := os.Mkdir(r.outputs, 0o700); err != nil {
+			os.RemoveAll(dir)
+			return nil, err
+		}
 	}
 	return r, nil
 }
@@ -282,6 +280,9 @@ func (a *Coder) runCLI(ctx context.Context, p claudecode.Params, out *machine.Co
 	p.StrictMCPConfig = true
 	// The clone is deleted at the end: a transcript would outlive it.
 	p.NoSessionPersistence = true
+	// Whatever the clone's configuration says, the git the CLI starts runs
+	// no program of its (hooks, fsmonitor, editor, signing).
+	p.Env = append(p.Env, machine.RunGitEnv()...)
 	res, err := runner.Run(ctx, p)
 	if line := claudecode.AuthFailure(res, err); line != "" {
 		log.Printf("connect: Claude Code's login was refused (%q): Claude Code withdrawn", line)

@@ -44,7 +44,6 @@ func RegisterAnalyzeRepoTool(registry *Registry, workflowFunc interface{}, route
 			"It never modifies the repository: the clone is read-only and is deleted afterwards. " +
 			"It cannot fix what it finds: changing the code is implement_feature's job, if you have that tool. " +
 			"Ask a precise question — the answer comes back as a written report, and the agent cannot ask you for clarification mid-run. " +
-			"Files the coding agent leaves for the user (a report, a diagram) are published to the session. " +
 			where,
 		InputSchema: json.RawMessage(`{
 			"type": "object",

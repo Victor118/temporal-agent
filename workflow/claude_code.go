@@ -234,13 +234,9 @@ func analyzeRepo(ctx workflow.Context, rawInput json.RawMessage, probed *activit
 			Task:               input.Task,
 			PermissionMode:     analyzePermissionMode,
 			AppendSystemPrompt: analyzeSystemPrompt,
-			Outputs:            true,
 		},
 	).Get(r.ctx, &result)
 	ran := workflow.Now(ctx).Sub(runStarted)
-	if err == nil || !r.failed(err) {
-		out.publishOutputs(ctx, r, prepared.Dir, input.CallContext)
-	}
 	if err != nil {
 		if r.failed(err) {
 			out.Error = r.lostAt("before the analysis finished", "there is no report")
@@ -264,7 +260,7 @@ func analyzeRepo(ctx workflow.Context, rawInput json.RawMessage, probed *activit
 }
 
 // publishOutputs publishes, on the run's worker and before its clone goes,
-// what the run left in its outputs (activity.PublishOutputs), attached to
+// what an implementation left in its outputs (activity.PublishOutputs), attached to
 // the call's session turn, and tells the session's pages. Best effort: what
 // is not published is said in o, never the run's failure.
 func (o *ClaudeCodeOutput) publishOutputs(ctx workflow.Context, r *run, dir string, call tool.CallContext) {

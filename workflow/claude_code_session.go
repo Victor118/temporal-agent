@@ -43,7 +43,7 @@ const (
 	// The session outlives every step of its run, retries included: past
 	// it, the SDK fails the session and cancels whatever still runs.
 	analyzeSessionTimeout = prepareAttempts*prepareTimeout + analyzeTimeout +
-		publishOutputsAttempts*publishOutputsTimeout + cleanupAttempts*cleanupTimeout + runSessionMargin
+		cleanupAttempts*cleanupTimeout + runSessionMargin
 	implementSessionTimeout = prepareAttempts*prepareTimeout + implementTimeout +
 		publishOutputsAttempts*publishOutputsTimeout + inspectAttempts*inspectTimeout + pushAttempts*pushTimeout +
 		cleanupAttempts*cleanupTimeout + runSessionMargin

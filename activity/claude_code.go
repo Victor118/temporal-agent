@@ -694,8 +694,9 @@ type RunClaudeCodeInput struct {
 	MaxBudgetUSD       float64  `json:"max_budget_usd,omitempty"`
 	SessionID          string   `json:"session_id,omitempty"`
 	// Outputs lets the run leave files for the user in its outputs
-	// (outputsDir), and tells it where (machine.OutputsPrompt): the
-	// directory is the worker's to name.
+	// (outputsDir, a working directory of the run's), and tells it where
+	// (machine.OutputsPrompt): the directory is the worker's to name. Not
+	// for an analysis: plan mode refuses every write.
 	Outputs bool `json:"outputs,omitempty"`
 }
 
@@ -743,11 +744,11 @@ func (a *ClaudeCodeActivities) RunClaudeCode(ctx context.Context, in RunClaudeCo
 	if a.Runs != nil {
 		runner.Runs = a.Runs
 	}
-	allowed, prompt := in.AllowedTools, in.AppendSystemPrompt
+	prompt := in.AppendSystemPrompt
 	var addDirs []string
 	if in.Outputs {
+		// A working directory of the run's: acceptEdits writes there.
 		out := outputsDir(dir)
-		allowed = append(append([]string(nil), allowed...), machine.OutputsRule(out))
 		prompt = strings.TrimSpace(prompt + "\n" + machine.OutputsPrompt(out))
 		addDirs = []string{out}
 	}
@@ -761,7 +762,7 @@ func (a *ClaudeCodeActivities) RunClaudeCode(ctx context.Context, in RunClaudeCo
 		Task:               in.Task,
 		Model:              a.Model,
 		PermissionMode:     in.PermissionMode,
-		AllowedTools:       allowed,
+		AllowedTools:       in.AllowedTools,
 		DisallowedTools:    in.DisallowedTools,
 		AppendSystemPrompt: prompt,
 		AddDirs:            addDirs,
@@ -774,6 +775,9 @@ func (a *ClaudeCodeActivities) RunClaudeCode(ctx context.Context, in RunClaudeCo
 		// servers (.mcp.json) are the repository's, not the operator's.
 		SettingSources:  []string{"user"},
 		StrictMCPConfig: true,
+		// Whatever the clone's configuration says, the git the CLI starts
+		// runs no program of its (hooks, fsmonitor, editor, signing).
+		Env: machine.RunGitEnv(),
 	})
 	// Stopped is WorkerStopping whatever the CLI returned, a run that ended
 	// at the very instant of Stop included: its result is dropped. On

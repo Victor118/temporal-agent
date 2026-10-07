@@ -2,7 +2,6 @@ package machine
 
 import (
 	"fmt"
-	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -79,33 +78,80 @@ Your final message is a report read by another agent, not by a person, and no on
 )
 
 // ImplementAllowedTools are the git commands the run needs to commit its own
-// work. Splitting the changes and writing the messages is the part worth
-// paying a coding agent for; publishing them is the workflow's, or the
-// machine's, job.
+// work: no more. git log, diff and show are left out on purpose: their
+// --output=<file> writes any file the run's user can write (a machine's
+// owner's ~/.ssh/authorized_keys), and --ext-diff runs a program; the run
+// reads the tree with its file tools. What remains writes no file of the
+// caller's choosing (commit's -F, --template and add's or commit's
+// --pathspec-from-file only read one) and runs no program but those of the
+// configuration, which RunGitEnv neutralizes. Splitting the changes and
+// writing the messages is the part worth paying a coding agent for;
+// publishing them is the workflow's, or the machine's, job.
 var ImplementAllowedTools = []string{
 	"Bash(git add:*)",
 	"Bash(git commit:*)",
 	"Bash(git status:*)",
-	"Bash(git diff:*)",
-	"Bash(git log:*)",
-	"Bash(git show:*)",
 }
 
-// ImplementDeniedTools keeps publishing out of the run's hands. A guard rail,
-// not a wall: a run that can execute commands can reach a credential by
-// other means. What bounds the damage is the credential's own scope, and on
-// a machine, its owner's --repos and --allow-push.
+// ImplementDeniedTools keeps publishing out of the run's hands, and the
+// clone's git directory out of its edits (its configuration and hooks are
+// commands git would run). A guard rail, not a wall: a run that can execute
+// commands can reach a credential by other means. What bounds the damage is
+// the credential's own scope, and on a machine, its owner's --repos and
+// --allow-push.
 var ImplementDeniedTools = []string{
 	"Bash(git push:*)",
 	"Bash(git remote:*)",
 	"Bash(git config:*)",
+	"Edit(.git/**)",
 }
 
-// The outputs of a run: a directory next to the clone, never in it, where
-// the CLI may leave files for the user (a report, a diagram, a patch). They
-// are published to the session's turn after the run (on a machine through
-// PUT /machines/files, on a worker through its file store), regular files
-// only, links refused, within these bounds.
+// runGitConfig is the git configuration every git a run's CLI starts reads
+// last, over the clone's (RunGitEnv): what would make git add, commit or
+// status — or the CLI's own git calls — run a program. A run in acceptEdits
+// could otherwise write .git/config or .git/hooks and have it run at its
+// next commit, before anything restores the configuration.
+var runGitConfig = [][2]string{
+	{"core.hooksPath", "/dev/null"},
+	{"core.fsmonitor", "false"},
+	{"core.editor", "true"},
+	{"sequence.editor", "true"},
+	{"core.pager", "cat"},
+	// Empty: a diff that would run an external program fails instead.
+	{"diff.external", ""},
+	{"interactive.diffFilter", "cat"},
+	{"commit.gpgSign", "false"},
+	{"tag.gpgSign", "false"},
+	{"gpg.program", "false"},
+	{"gpg.openpgp.program", "false"},
+	{"gpg.ssh.program", "false"},
+	{"gpg.x509.program", "false"},
+	{"gpg.ssh.defaultKeyCommand", "false"},
+	{"submodule.recurse", "false"},
+	{"status.submoduleSummary", "false"},
+}
+
+// RunGitEnv is the environment that gives a run's git runGitConfig
+// (GIT_CONFIG_COUNT, GIT_CONFIG_KEY_n, GIT_CONFIG_VALUE_n: they win over
+// every configuration file). What it cannot cover are the drivers a
+// configuration names freely (filter.<driver>.clean, trailer.<token>.cmd):
+// the clone's own configuration cannot be edited by the run
+// (ImplementDeniedTools), and its owner's is theirs.
+func RunGitEnv() []string {
+	env := []string{fmt.Sprintf("GIT_CONFIG_COUNT=%d", len(runGitConfig))}
+	for i, kv := range runGitConfig {
+		env = append(env, fmt.Sprintf("GIT_CONFIG_KEY_%d=%s", i, kv[0]), fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", i, kv[1]))
+	}
+	return env
+}
+
+// The outputs of an implementation: a directory next to the clone, never in
+// it, where the CLI may leave files for the user (a report, a diagram, a
+// patch), added to its working directories (--add-dir: acceptEdits writes
+// there). They are published to the session's turn after the run (on a
+// machine through PUT /machines/files, on a worker through its file store),
+// regular files only, links refused, within these bounds. An analysis has
+// none: its plan mode refuses every write, before any permission rule.
 const (
 	// OutputsDir names it on a machine, next to the clone in the run's
 	// directory.
@@ -125,14 +171,6 @@ func OutputsPrompt(dir string) string {
 	return fmt.Sprintf("To hand files back to the user (a report, a diagram, a patch, data), write them in %s, not in the repository: "+
 		"once you finish, the files there (at most %d, regular files, no links) are published to the user's session, by their name. "+
 		"Nothing else you write outside the repository is kept.", dir, MaxOutputFiles)
-}
-
-// OutputsRule is the permission rule that lets a run write in its outputs
-// directory, an absolute path ("//" starts an absolute path in the CLI's
-// rules): read-only analyses included, whose plan mode allows no other
-// edit.
-func OutputsRule(dir string) string {
-	return "Edit(/" + filepath.ToSlash(filepath.Clean(dir)) + "/**)"
 }
 
 // maxAnalyzeTask bounds an analysis's task.

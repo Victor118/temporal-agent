@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/victor/temporal-agent/claudecode"
 	"github.com/victor/temporal-agent/machine"
@@ -42,7 +43,7 @@ func (a *Coder) Implement(ctx context.Context, input json.RawMessage, progress f
 	if err := a.refuse(in.Repo); err != nil {
 		return nil, err
 	}
-	r, err := a.newRun()
+	r, err := a.newRun(true)
 	if err != nil {
 		return nil, err
 	}
@@ -62,11 +63,15 @@ func (a *Coder) Implement(ctx context.Context, input json.RawMessage, progress f
 		return nil, err
 	}
 	out := machine.CodingOutput{Commit: base, Branch: in.Branch}
-	runErr := a.runCLI(ctx, claudecode.Params{
+	// The CLI stops before the directive's deadline: the push and the
+	// outputs keep their time.
+	cliCtx, cancel := context.WithDeadline(ctx, cliDeadline(ctx, time.Now()))
+	defer cancel()
+	runErr := a.runCLI(cliCtx, claudecode.Params{
 		Cwd:                r.clone,
 		Task:               in.Task,
 		PermissionMode:     machine.ImplementPermissionMode,
-		AllowedTools:       append(append([]string(nil), machine.ImplementAllowedTools...), machine.OutputsRule(r.outputs)),
+		AllowedTools:       machine.ImplementAllowedTools,
 		DisallowedTools:    machine.ImplementDeniedTools,
 		AppendSystemPrompt: machine.ImplementSystemPrompt + "\n" + machine.OutputsPrompt(r.outputs),
 		AddDirs:            []string{r.outputs},
@@ -90,6 +95,25 @@ func (a *Coder) Implement(ctx context.Context, input json.RawMessage, progress f
 		return nil, err
 	}
 	return raw, runErr
+}
+
+// pushReserve is what an implementation keeps of its directive's time for
+// what comes after its CLI: the inspection, the push, the outputs.
+const pushReserve = 10 * time.Minute
+
+// cliDeadline is when the CLI of an implementation must be done: pushReserve
+// before ctx's deadline, or half the time left when it is short; none:
+// far away.
+func cliDeadline(ctx context.Context, now time.Time) time.Time {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return now.Add(100 * 365 * 24 * time.Hour)
+	}
+	reserve := pushReserve
+	if left := deadline.Sub(now); left < 2*reserve {
+		reserve = left / 2
+	}
+	return deadline.Add(-reserve)
 }
 
 // publish inspects what the run produced and pushes it when it may.

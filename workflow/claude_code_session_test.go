@@ -124,7 +124,7 @@ func checkOneWorker(t *testing.T, runs []activityRun, steps ...string) {
 func TestAnalyzeRepoWorkflow_RunsOnOneWorker(t *testing.T) {
 	a := newAnalyzeEnv(t, nil, claudeCodeResult{Report: "ok", Subtype: "success"}, nil)
 	a.run_(t, AnalyzeRepoInput{Repo: "/src/repo", Task: "look"})
-	checkOneWorker(t, a.queues.all(), "PrepareWorkspace", "RunClaudeCode", "PublishOutputs", "CleanupWorkspace")
+	checkOneWorker(t, a.queues.all(), "PrepareWorkspace", "RunClaudeCode", "CleanupWorkspace")
 }
 
 func TestImplementFeatureWorkflow_RunsOnOneWorker(t *testing.T) {
@@ -628,7 +628,7 @@ func TestCodingRuns_CleanupAfterCancel(t *testing.T) {
 // SDK fails the session under a run still going. The values are written out:
 // changing a step's timeout or attempts must come with a look at these.
 func TestRunSessionTimeouts(t *testing.T) {
-	if want := 107*time.Minute + 30*time.Second; analyzeSessionTimeout != want {
+	if want := 98*time.Minute + 30*time.Second; analyzeSessionTimeout != want {
 		t.Errorf("analyze session %s, want %s", analyzeSessionTimeout, want)
 	}
 	if want := 216*time.Minute + 30*time.Second; implementSessionTimeout != want {

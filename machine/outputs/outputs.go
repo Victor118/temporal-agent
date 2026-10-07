@@ -33,10 +33,13 @@ type Upload func(ctx context.Context, name string, content []byte) error
 // machine.MaxOutputDepth directories deep, machine.MaxOutputEntries entries
 // read, within Budget. The run must be over: nothing should change the
 // directory under the walk, and what does cannot lead it out of dir. A
-// context already done publishes nothing.
+// context already done publishes nothing, and says why.
 func Publish(ctx context.Context, dir string, max int64, upload Upload) []string {
-	if ctx.Err() != nil {
-		return nil
+	switch err := ctx.Err(); {
+	case errors.Is(err, context.DeadlineExceeded):
+		return []string{"outputs not published: the run's time ran out"}
+	case err != nil:
+		return []string{"outputs not published: the run was stopped"}
 	}
 	ctx, cancel := context.WithTimeout(ctx, Budget)
 	defer cancel()

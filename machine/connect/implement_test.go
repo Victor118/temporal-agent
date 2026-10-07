@@ -103,17 +103,58 @@ func TestCoder_Implement(t *testing.T) {
 		t.Errorf("outputs published: %v", pub.files)
 	}
 	args, _ := os.ReadFile(filepath.Join(seen, "args"))
-	for _, want := range []string{"--permission-mode acceptEdits", "Bash(git commit:*)", "--disallowedTools Bash(git push:*)",
-		"--max-budget-usd 1 ", "--add-dir ", "/outputs/**)", "--setting-sources user", "--strict-mcp-config", "Commit your work on that branch"} {
+	for _, want := range []string{"--permission-mode acceptEdits", "Bash(git commit:*)", "--disallowedTools Bash(git push:*)", "Edit(.git/**)",
+		"--max-budget-usd 1 ", "--add-dir ", "/outputs", "--setting-sources user", "--strict-mcp-config", "Commit your work on that branch"} {
 		if !strings.Contains(string(args), want) {
 			t.Errorf("args lack %q: %s", want, args)
 		}
+	}
+	for _, unwanted := range []string{"git log", "git diff", "git show"} {
+		if strings.Contains(string(args), unwanted) {
+			t.Errorf("args allow %q: %s", unwanted, args)
+		}
+	}
+	env, _ := os.ReadFile(filepath.Join(seen, "env"))
+	if !strings.Contains(string(env), "GIT_CONFIG_KEY_0=core.hooksPath") || !strings.Contains(string(env), "GIT_CONFIG_VALUE_0=/dev/null") {
+		t.Errorf("the CLI's git environment: %s", env)
 	}
 	if progresses[0] != machine.CloneProgress || progresses[len(progresses)-1] != machine.PushProgress {
 		t.Errorf("progresses %v", progresses)
 	}
 	if entries, _ := os.ReadDir(a.WorkDir); len(entries) != 0 {
 		t.Errorf("clone left behind: %v", entries)
+	}
+}
+
+// The git the run starts runs no program its clone's configuration names:
+// a hook, a filesystem monitor and an editor it set itself stay idle through
+// its own commit (machine.RunGitEnv); and the configuration it changed means
+// nothing is pushed.
+func TestCoder_ImplementGitRunsNoProgramOfTheClone(t *testing.T) {
+	a, remote, _, _ := newImplementer(t, `export GIT_AUTHOR_NAME=a GIT_AUTHOR_EMAIL=a@b GIT_COMMITTER_NAME=a GIT_COMMITTER_EMAIL=a@b
+mkdir -p .git/hooks
+printf '#!/bin/sh\ntouch "%s/../hook"\n' "$PWD" > .git/hooks/pre-commit
+chmod +x .git/hooks/pre-commit
+printf '[core]\n\tfsmonitor = touch %s/../fsmonitor; false\n\teditor = touch %s/../editor; true\n' "$PWD" "$PWD" >> .git/config
+echo x > trapped.txt
+git add trapped.txt
+git commit --quiet -e -m trap
+git status --porcelain >/dev/null
+for f in hook fsmonitor editor; do [ -e ../$f ] && cp ../$f ../outputs/$f; done
+echo '{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"s"}'
+`)
+	pub := &published{}
+	a.Upload = pub.upload
+	raw, err := a.Implement(context.Background(), implementInput(remote), func(string) {})
+	var out machine.CodingOutput
+	if err != nil || json.Unmarshal(raw, &out) != nil {
+		t.Fatalf("implement: %s %v", raw, err)
+	}
+	if len(pub.files) != 0 {
+		t.Errorf("git ran the clone's programs: %v", pub.files)
+	}
+	if len(out.Commits) != 1 || out.Pushed || !strings.Contains(out.Error, "git configuration") {
+		t.Errorf("output %+v", out)
 	}
 }
 
