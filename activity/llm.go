@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"slices"
+	"strings"
 	"time"
 
 	"go.temporal.io/sdk/temporal"
@@ -75,6 +77,15 @@ type LLMActivities struct {
 	Machines     LLMMachineStore
 	Handoff      DirectiveHandoff
 	OnlineWindow time.Duration
+	// Tasks lists the background tasks a session turn's participant runs,
+	// which its prompt names; nil = none listed.
+	Tasks TaskLister
+}
+
+// TaskLister lists the background tasks running in a session, of one
+// participant.
+type TaskLister interface {
+	ListRunningTasks(ctx context.Context, sessionID, participant string) ([]store.BackgroundTask, error)
 }
 
 // LLMTurnRequest is one call of a turn. The conversation is given inline
@@ -304,7 +315,72 @@ func (a *LLMActivities) systemPrompt(ctx context.Context, req LLMTurnRequest, to
 			}
 		}
 	}
+	if h := req.History; h != nil {
+		prompt += a.tasksSection(ctx, h, tools, backgrounds)
+	}
 	return prompt + p.PartNote, held
+}
+
+// tasksSection is the prompt section of a session turn on background tasks:
+// when to launch one, if it may (backgrounds), and those its participant
+// runs, but those this turn launched: their results told the model, and
+// the prompt, a cached prefix, does not change under the turn. Tasks that
+// cannot be read cost their list, not the call.
+func (a *LLMActivities) tasksSection(ctx context.Context, h *TurnHistory, tools []string, backgrounds bool) string {
+	var running []store.BackgroundTask
+	if a.Tasks != nil {
+		var err error
+		if running, err = a.Tasks.ListRunningTasks(ctx, h.SessionID, store.TurnParticipant(h.TurnKey)); err != nil {
+			log.Printf("LLM call: background tasks of %s not listed: %v", h.TurnKey, err)
+		}
+		running = slices.DeleteFunc(running, func(t store.BackgroundTask) bool { return t.TurnKey == h.TurnKey })
+	}
+	return TasksSection(running, backgrounds, slices.Contains(tools, "when_task_done"))
+}
+
+// TasksSection is the prompt section on background tasks: how to launch
+// one (backgrounds: a tool offers it), and the tasks running, with what
+// to do while they run (followUps: when_task_done is offered). Empty when
+// there is nothing to say.
+func TasksSection(running []store.BackgroundTask, backgrounds, followUps bool) string {
+	if !backgrounds && len(running) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("\n## Background tasks\n\n")
+	if backgrounds {
+		sb.WriteString("Some of your tools take a `background` field: the call then runs as a background task, your turn goes on " +
+			"without its result, and when it ends a message brings you the result in a new turn. By default, wait for the " +
+			"result. Run a call in the background when the work is long and the user may want something else from you " +
+			"meanwhile, or when they ask for it (\"in the background\", \"tell me when it's done\"); then tell them it runs.")
+		if followUps {
+			sb.WriteString(" When the user says what to do once a task of yours is done, attach it to the task with when_task_done.")
+		}
+		sb.WriteString("\n")
+	}
+	if len(running) > 0 {
+		sb.WriteString("\nYour background tasks running now. Never start one of them again; a request that depends on one waits for " +
+			"its end: say so")
+		if followUps {
+			sb.WriteString(", and attach what to do then with when_task_done")
+		}
+		sb.WriteString(".\n")
+		for _, t := range running {
+			fmt.Fprintf(&sb, "- %s: %s", t.ID, t.Tool)
+			if t.Summary != "" {
+				fmt.Fprintf(&sb, " (%s)", t.Summary)
+			}
+			if t.UserName != "" {
+				fmt.Fprintf(&sb, ", for %s", t.UserName)
+			}
+			fmt.Fprintf(&sb, ", since %s", t.StartedAt.UTC().Format("2006-01-02 15:04 UTC"))
+			if n := len(t.FollowUps); n > 0 {
+				fmt.Fprintf(&sb, ", %d instruction(s) attached", n)
+			}
+			sb.WriteString("\n")
+		}
+	}
+	return sb.String()
 }
 
 func (a *LLMActivities) maxContextBytes() int {

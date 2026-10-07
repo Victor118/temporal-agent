@@ -96,9 +96,18 @@ type SignalStarter interface {
 	SignalWithStartWorkflow(ctx context.Context, workflowID, signalName string, signalArg interface{}, options client.StartWorkflowOptions, workflow interface{}, workflowArgs ...interface{}) (client.WorkflowRun, error)
 }
 
-// RelayActivities hand a message from a participant to the next one.
+// RelayActivities hand a message from a participant to the next one, or
+// a background task's end to its participant.
 type RelayActivities struct {
 	Client SignalStarter
+	// Sessions reads a session before a delivery that asks it
+	// (RelayInput.SessionID).
+	Sessions SessionReader
+}
+
+// SessionReader reads a session; nil when it is gone.
+type SessionReader interface {
+	GetSession(ctx context.Context, sessionID string) (*store.Session, error)
 }
 
 // RelayInput is a delivery to a participant, started if it does not run:
@@ -112,6 +121,10 @@ type RelayInput struct {
 	Signal       string          `json:"signal"`
 	Message      json.RawMessage `json:"message"`
 	Start        json.RawMessage `json:"start"`
+	// SessionID, when set, is read just before the delivery: a session
+	// deleted meanwhile gets none, which would start a participant for
+	// nothing. A task's end sets it: it may come long after its turn.
+	SessionID string `json:"session_id,omitempty"`
 }
 
 // Relay delivers a message to a participant, as the server does: one
@@ -119,6 +132,15 @@ type RelayInput struct {
 // do it itself (a signal to another workflow starts nothing). A retry may
 // deliver the message twice: the participant answers it once (CheckTurn).
 func (a *RelayActivities) Relay(ctx context.Context, in RelayInput) error {
+	if in.SessionID != "" && a.Sessions != nil {
+		sess, err := a.Sessions.GetSession(ctx, in.SessionID)
+		if err != nil {
+			return fmt.Errorf("read session: %w", err)
+		}
+		if sess == nil {
+			return nil // deleted: nobody to deliver to
+		}
+	}
 	if _, err := a.Client.SignalWithStartWorkflow(ctx, in.WorkflowID, in.Signal, in.Message, client.StartWorkflowOptions{
 		ID:        in.WorkflowID,
 		TaskQueue: in.TaskQueue,

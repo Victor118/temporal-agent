@@ -207,7 +207,7 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 	}
 	acts := workerActivities(activityDeps{
 		llm: llmProvider, store: st, catalog: catalog, skills: skillAct, maxContext: maxContext,
-		code: codeAct, registry: registry, notifiers: notifiers, web: opts.web, schedules: tc.ScheduleClient(), relay: tc,
+		code: codeAct, registry: registry, notifiers: notifiers, web: opts.web, schedules: tc.ScheduleClient(), relay: tc, publisher: pub,
 		machines: opts.machines, handoff: opts.handoff, routing: routing,
 	})
 	rt := &workerRuntime{queues: queues, workflows: workerConf.Workflows, skills: skills, endRuns: endRuns, releaseRuns: releaseRuns}
@@ -288,6 +288,7 @@ type activityDeps struct {
 	web        activity.Notifier
 	schedules  activity.ScheduleHandles
 	relay      activity.SignalStarter
+	publisher  *tool.Publisher
 	machines   activity.MachineStore
 	handoff    activity.DirectiveHandoff
 	routing    activity.CodingRouting
@@ -302,11 +303,12 @@ type activityDeps struct {
 func workerActivities(d activityDeps) []any {
 	return []any{
 		&activity.LLMActivities{Provider: d.llm, Store: d.store, Catalog: d.catalog, Prompts: d.skills.Prompts, MaxContextBytes: d.maxContext,
-			Machines: d.machines, Handoff: d.handoff},
+			Machines: d.machines, Handoff: d.handoff, Tasks: d.store},
 		&activity.ForkActivities{Store: d.store, LLM: d.llm, Private: d.catalog},
 		&activity.MemoryActivities{Store: d.store},
 		&activity.TurnActivities{Store: d.store},
-		&activity.RelayActivities{Client: d.relay},
+		&activity.RelayActivities{Client: d.relay, Sessions: d.store},
+		&activity.TaskActivities{Store: d.store, Publisher: d.publisher},
 		&activity.ForkPostActivities{Store: d.store},
 		d.code,
 		&activity.ToolActivities{Registry: d.registry, Catalog: d.catalog},
@@ -353,6 +355,7 @@ func buildRegistry(cfg *config.Config, st store.Store, tc client.Client, runAs *
 	})
 	tool.RegisterAskUserTool(registry, workflow.AskUserWorkflow)
 	tool.RegisterMemoryTools(registry, st)
+	tool.RegisterTaskTools(registry, st)
 	tool.RegisterQueryWorkflowTool(registry, tc)
 	tool.RegisterScheduleTools(registry, tc.ScheduleClient(), st, workflow.ScheduledAgentWorkflow, cfg.WorkflowQueue)
 

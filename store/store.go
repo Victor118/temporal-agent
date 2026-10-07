@@ -92,6 +92,16 @@ type Store interface {
 	LoadMemory(ctx context.Context, scope MemoryScope, scopeID string) (Memory, error)
 	SaveMemory(ctx context.Context, scope MemoryScope, scopeID string, content string, expected int64) (int64, error)
 
+	// Background tasks (background_task.go)
+	RegisterTask(ctx context.Context, t BackgroundTask, max int) error
+	DropTask(ctx context.Context, id string) error
+	GetTask(ctx context.Context, id string) (*BackgroundTask, error)
+	ListRunningTasks(ctx context.Context, sessionID, participant string) ([]BackgroundTask, error)
+	ListTasksRunningSince(ctx context.Context, before time.Time) ([]BackgroundTask, error)
+	AddTaskFollowUp(ctx context.Context, sessionID, participant, id string, f TaskFollowUp, max int) error
+	SetTaskCancelledBy(ctx context.Context, id, name string) error
+	EndTask(ctx context.Context, id, by, state string, build func(BackgroundTask) Message) (TaskEnding, error)
+
 	// Task logs (scheduled tasks)
 	SaveTaskLog(ctx context.Context, log TaskLog) error
 	ListTaskLogsByUser(ctx context.Context, userID string) ([]TaskLog, error)
