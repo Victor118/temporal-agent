@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -59,16 +60,37 @@ func (f *filesStore) ListCallFiles(_ context.Context, session, turn, call string
 	return out, nil
 }
 
-func (f *filesStore) SaveFile(_ context.Context, fl store.File, _ []byte) (store.File, error) {
+func (f *filesStore) SaveDirectiveFile(_ context.Context, id, machineID string, fl store.File, _ []byte, limit store.DirectiveFileLimit) (store.File, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	d, ok := f.directives[id]
+	switch {
+	case !ok || d.MachineID != machineID:
+		return store.File{}, store.ErrDirectiveNotFound
+	case d.State == store.DirectiveReserved:
+		return store.File{}, store.ErrDirectiveNotStarted
+	case d.State != store.DirectiveRunning:
+		return store.File{}, store.ErrDirectiveClosed
+	}
+	fl.SessionID, fl.TurnKey, fl.CallID, fl.AgentID, fl.UserID = d.SessionID, d.TurnKey, d.CallID, d.AgentID, d.UserID
+	n, total := 0, int64(0)
 	for _, old := range f.files {
-		if old.SessionID == fl.SessionID && old.TurnKey == fl.TurnKey && old.CallID == fl.CallID && old.Name == fl.Name {
-			if old.SHA256 != fl.SHA256 {
-				return store.File{}, store.ErrFileExists
+		if old.SessionID == fl.SessionID && old.TurnKey == fl.TurnKey && old.CallID == fl.CallID {
+			if old.Name == fl.Name {
+				if old.SHA256 != fl.SHA256 {
+					return store.File{}, store.ErrFileExists
+				}
+				return old, nil
 			}
-			return old, nil
+			n++
+			total += old.Size
 		}
+	}
+	if n >= limit.Files {
+		return store.File{}, store.ErrDirectiveFilesFull
+	}
+	if total+fl.Size > limit.Bytes {
+		return store.File{}, store.ErrDirectiveBytesFull
 	}
 	f.files = append(f.files, fl)
 	return fl, nil
@@ -81,6 +103,8 @@ func TestServeFiles(t *testing.T) {
 			"d-run":   {ID: "d-run", MachineID: "m-1", UserID: "u-1", State: store.DirectiveRunning, SessionID: "s-1", TurnKey: "m7.jarvis", CallID: "call-1", AgentID: "jarvis"},
 			"d-other": {ID: "d-other", MachineID: "m-2", State: store.DirectiveRunning, SessionID: "s-1", TurnKey: "m7.jarvis", CallID: "call-2"},
 			"d-over":  {ID: "d-over", MachineID: "m-1", State: store.DirectiveCompleted, SessionID: "s-1", TurnKey: "m7.jarvis", CallID: "call-3"},
+			"d-new":   {ID: "d-new", MachineID: "m-1", State: store.DirectiveReserved, SessionID: "s-1", TurnKey: "m7.jarvis", CallID: "call-4"},
+			"d-big":   {ID: "d-big", MachineID: "m-1", State: store.DirectiveRunning, SessionID: "s-1", TurnKey: "m7.jarvis", CallID: "call-5"},
 			"d-none":  {ID: "d-none", MachineID: "m-1", State: store.DirectiveRunning},
 		}}
 	var told []string
@@ -133,6 +157,7 @@ func TestServeFiles(t *testing.T) {
 		{"another machine's directive", "agm_now", "d-other", "a.txt", strings.NewReader("x"), http.StatusNotFound, "unknown directive"},
 		{"unknown directive", "agm_now", "d-nope", "a.txt", strings.NewReader("x"), http.StatusNotFound, "unknown directive"},
 		{"directive over", "agm_now", "d-over", "a.txt", strings.NewReader("x"), http.StatusConflict, "over"},
+		{"directive not started", "agm_now", "d-new", "a.txt", strings.NewReader("x"), http.StatusConflict, "has not started"},
 		{"no session turn", "agm_now", "d-none", "a.txt", strings.NewReader("x"), http.StatusConflict, "no session turn"},
 		{"a path", "agm_now", "d-run", "../a.txt", strings.NewReader("x"), http.StatusBadRequest, "path"},
 		{"too large", "agm_now", "d-run", "big.bin", strings.NewReader(strings.Repeat("x", 17)), http.StatusRequestEntityTooLarge, "at most 16 B"},
@@ -148,9 +173,20 @@ func TestServeFiles(t *testing.T) {
 	if len(st.files) != 1 || st.revoked {
 		t.Errorf("stored %d files, revoked %v", len(st.files), st.revoked)
 	}
+	g.uploads = nil
+
+	// So many bytes in all per directive: 2 × MaxFileBytes.
+	for i, want := range []int{http.StatusOK, http.StatusOK, http.StatusConflict} {
+		g.uploads = nil // past the rate
+		if code, _, msg := put("agm_now", "d-big", fmt.Sprintf("part%d.bin", i), strings.NewReader(strings.Repeat("x", 16))); code != want ||
+			(want != http.StatusOK && !strings.Contains(msg, "as much as it may")) {
+			t.Errorf("part %d: %d %q", i, code, msg)
+		}
+	}
 
 	// The most a directive may publish: then only its retries.
-	for i := len(st.files); i < maxFilesPerDirective; i++ {
+	g.uploads = nil
+	for i := len(st.files); i < maxFilesPerDirective+2; i++ {
 		st.files = append(st.files, store.File{ID: "f", SessionID: "s-1", TurnKey: "m7.jarvis", CallID: "call-1", Name: "f" + string(rune('a'+i))})
 	}
 	if code, _, msg := put("agm_now", "d-run", "one-more.txt", strings.NewReader("x")); code != http.StatusConflict || !strings.Contains(msg, "the most") {
@@ -179,5 +215,30 @@ func TestCallFiles(t *testing.T) {
 	res, _ := completion(machine.Message{Status: machine.StatusError, Error: "boom"}, refs)
 	if len(res.Files) != 1 {
 		t.Errorf("result %+v", res)
+	}
+}
+
+// A machine's uploads are limited: a burst of a run's outputs, then a rate.
+func TestServeFiles_Rate(t *testing.T) {
+	st := &filesStore{tokens: map[string]store.TokenUse{machine.HashToken("agm_now"): store.TokenCurrent},
+		directives: map[string]store.Directive{"d-run": {ID: "d-run", MachineID: "m-1", State: store.DirectiveRunning, SessionID: "s-1", TurnKey: "t", CallID: "c"}}}
+	g := &Gateway{Store: st, MaxFileBytes: 1 << 20}
+	srv := httptest.NewServer(http.HandlerFunc(g.ServeFiles))
+	defer srv.Close()
+	limited := 0
+	for i := range uploadBurst + 5 {
+		req, _ := http.NewRequest(http.MethodPut, fmt.Sprintf("%s?directive=d-run&name=f%d.txt", srv.URL, i), strings.NewReader("x"))
+		req.Header.Set("Authorization", "Bearer agm_now")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusTooManyRequests {
+			limited++
+		}
+	}
+	if limited < 4 || limited > 5 {
+		t.Errorf("%d limited", limited)
 	}
 }

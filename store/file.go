@@ -67,34 +67,8 @@ const fileColumns = "id, session_id, turn_key, call_id, agent_id, user_id, name,
 // or ErrFileExists if its content differs.
 func (s *PostgresStore) SaveFile(ctx context.Context, f File, content []byte) (File, error) {
 	err := s.inTx(ctx, func(tx *sql.Tx) error {
-		err := tx.QueryRowContext(ctx, `
-			INSERT INTO files (id, session_id, turn_key, call_id, agent_id, user_id, name, content_type, size, sha256)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-			ON CONFLICT (session_id, turn_key, call_id, name) DO NOTHING
-			RETURNING created_at`,
-			f.ID, f.SessionID, f.TurnKey, f.CallID, f.AgentID, f.UserID, f.Name, f.ContentType, f.Size, f.SHA256,
-		).Scan(&f.CreatedAt)
-		if errors.Is(err, sql.ErrNoRows) {
-			// Stored already: the first write stands, content included.
-			stored, err := scanFile(tx.QueryRowContext(ctx, `SELECT `+fileColumns+` FROM files
-				WHERE session_id = $1 AND turn_key = $2 AND call_id = $3 AND name = $4`,
-				f.SessionID, f.TurnKey, f.CallID, f.Name))
-			switch {
-			case errors.Is(err, sql.ErrNoRows):
-				// Gone between the two statements: its session was deleted.
-				return ErrFileSessionGone
-			case err != nil:
-				return err
-			case stored.SHA256 != f.SHA256:
-				return ErrFileExists
-			}
-			f = stored
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO file_contents (file_id, data) VALUES ($1, $2)`, f.ID, content)
+		var err error
+		f, err = saveFile(ctx, tx, f, content)
 		return err
 	})
 	if isForeignKeyViolation(err) {
@@ -104,6 +78,38 @@ func (s *PostgresStore) SaveFile(ctx context.Context, f File, content []byte) (F
 		return File{}, err
 	}
 	return f, nil
+}
+
+// saveFile is SaveFile within tx.
+func saveFile(ctx context.Context, tx *sql.Tx, f File, content []byte) (File, error) {
+	err := tx.QueryRowContext(ctx, `
+		INSERT INTO files (id, session_id, turn_key, call_id, agent_id, user_id, name, content_type, size, sha256)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		ON CONFLICT (session_id, turn_key, call_id, name) DO NOTHING
+		RETURNING created_at`,
+		f.ID, f.SessionID, f.TurnKey, f.CallID, f.AgentID, f.UserID, f.Name, f.ContentType, f.Size, f.SHA256,
+	).Scan(&f.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		// Stored already: the first write stands, content included.
+		stored, err := scanFile(tx.QueryRowContext(ctx, `SELECT `+fileColumns+` FROM files
+			WHERE session_id = $1 AND turn_key = $2 AND call_id = $3 AND name = $4`,
+			f.SessionID, f.TurnKey, f.CallID, f.Name))
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			// Gone between the two statements: its session was deleted.
+			return File{}, ErrFileSessionGone
+		case err != nil:
+			return File{}, err
+		case stored.SHA256 != f.SHA256:
+			return File{}, ErrFileExists
+		}
+		return stored, nil
+	}
+	if err != nil {
+		return File{}, err
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO file_contents (file_id, data) VALUES ($1, $2)`, f.ID, content)
+	return f, err
 }
 
 // isForeignKeyViolation reports a row referring to one that does not exist,

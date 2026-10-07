@@ -492,3 +492,86 @@ func TestMachineSettingsAndStatus(t *testing.T) {
 		t.Errorf("a paused machine was picked: %v", err)
 	}
 }
+
+// A machine's file goes to its directive's turn, within the directive's
+// limits, checked and stored under the directive's lock: uploads at once
+// never pass them together.
+func TestSaveDirectiveFile(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	machineUser(t, s, "zz-dfile-ann")
+	enrollMachine(t, s, "zz-dfile-ann", "zz-dfile-m", "zz-dfile-tok", []string{"echo"}, 2)
+	if _, err := s.MachineConnected(ctx, "zz-dfile-m", "gw", "", MachineInfo{Capabilities: []string{"echo"}, MaxDirectives: 2}); err != nil {
+		t.Fatal(err)
+	}
+	s.db.Exec("DELETE FROM sessions WHERE session_id = 'zz-dfile-s'")
+	t.Cleanup(func() { s.db.Exec("DELETE FROM sessions WHERE session_id = 'zz-dfile-s'") })
+	if err := s.CreateSession(ctx, Session{SessionID: "zz-dfile-s", CreatedBy: "zz-dfile-ann", Channel: "web"}); err != nil {
+		t.Fatal(err)
+	}
+	req := pick("zz-dfile-ann", "zz-dfile-run", "c", time.Now().Add(-time.Minute))
+	req.SessionID, req.TurnKey, req.CallID, req.AgentID = "zz-dfile-s", "m3.jarvis", "call-1", "jarvis"
+	d, _, err := s.PickMachine(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := func(id, name string, size int) File {
+		return File{ID: id, Name: name, ContentType: "text/plain", Size: int64(size), SHA256: name + "-sum"}
+	}
+	limit := DirectiveFileLimit{Files: 3, Bytes: 10}
+	if _, err := s.SaveDirectiveFile(ctx, d.ID, "zz-dfile-m", file("zz-dfile-0", "a.txt", 1), []byte("a"), limit); !errors.Is(err, ErrDirectiveNotStarted) {
+		t.Errorf("reserved: %v", err)
+	}
+	if _, err := s.StartDirective(ctx, d.ID, []byte("token"), "1", time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SaveDirectiveFile(ctx, d.ID, "another", file("zz-dfile-0", "a.txt", 1), []byte("a"), limit); !errors.Is(err, ErrDirectiveNotFound) {
+		t.Errorf("another machine: %v", err)
+	}
+	f, err := s.SaveDirectiveFile(ctx, d.ID, "zz-dfile-m", file("zz-dfile-1", "a.txt", 4), []byte("aaaa"), limit)
+	if err != nil || f.SessionID != "zz-dfile-s" || f.TurnKey != "m3.jarvis" || f.CallID != "call-1" || f.AgentID != "jarvis" || f.UserID != "zz-dfile-ann" {
+		t.Fatalf("saved %+v %v", f, err)
+	}
+	if again, err := s.SaveDirectiveFile(ctx, d.ID, "zz-dfile-m", file("zz-dfile-2", "a.txt", 4), []byte("aaaa"), limit); err != nil || again.ID != f.ID {
+		t.Errorf("retry: %+v %v", again, err)
+	}
+	other := file("zz-dfile-3", "a.txt", 4)
+	other.SHA256 = "other"
+	if _, err := s.SaveDirectiveFile(ctx, d.ID, "zz-dfile-m", other, []byte("bbbb"), limit); !errors.Is(err, ErrFileExists) {
+		t.Errorf("other content: %v", err)
+	}
+	if _, err := s.SaveDirectiveFile(ctx, d.ID, "zz-dfile-m", file("zz-dfile-4", "big.txt", 7), []byte("1234567"), limit); !errors.Is(err, ErrDirectiveBytesFull) {
+		t.Errorf("past the bytes: %v", err)
+	}
+	// Eight at once for the two files left: two pass.
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	saved, full := 0, 0
+	for i := range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := s.SaveDirectiveFile(ctx, d.ID, "zz-dfile-m", file(fmt.Sprintf("zz-dfile-c%d", i), fmt.Sprintf("c%d.txt", i), 1), []byte("c"), limit)
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case err == nil:
+				saved++
+			case errors.Is(err, ErrDirectiveFilesFull):
+				full++
+			default:
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	if saved != 2 || full != 6 {
+		t.Errorf("at once: %d saved, %d refused", saved, full)
+	}
+	if _, err := s.CloseDirective(ctx, d.ID, DirectiveCompleted, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SaveDirectiveFile(ctx, d.ID, "zz-dfile-m", file("zz-dfile-5", "late.txt", 1), []byte("l"), limit); !errors.Is(err, ErrDirectiveClosed) {
+		t.Errorf("closed: %v", err)
+	}
+}

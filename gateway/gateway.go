@@ -24,6 +24,7 @@ import (
 	"github.com/google/uuid"
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/sdk/temporal"
+	"golang.org/x/time/rate"
 
 	"github.com/victor/temporal-agent/auth"
 	"github.com/victor/temporal-agent/machine"
@@ -61,7 +62,7 @@ type Store interface {
 	CloseDirective(ctx context.Context, id, state, errText string) (bool, error)
 	SweepDirectives(ctx context.Context, now time.Time) ([]store.Directive, error)
 
-	SaveFile(ctx context.Context, f store.File, content []byte) (store.File, error)
+	SaveDirectiveFile(ctx context.Context, directiveID, machineID string, f store.File, content []byte, limit store.DirectiveFileLimit) (store.File, error)
 	ListCallFiles(ctx context.Context, sessionID, turnKey, callID string) ([]store.File, error)
 }
 
@@ -144,8 +145,10 @@ type Gateway struct {
 	// dupAlerts: when each machine's owner last heard of duplicate
 	// connections.
 	dupAlerts map[string]time.Time
-	ctx       context.Context // the gateway's life: Run's
-	stop      context.CancelFunc
+	// uploads limit each machine's uploads (uploadAllowed).
+	uploads map[string]*rate.Limiter
+	ctx     context.Context // the gateway's life: Run's
+	stop    context.CancelFunc
 	// completeWait is the first wait between two tries of a completion
 	// (doubled each time); zero = 1 s. The tests shorten it.
 	completeWait time.Duration

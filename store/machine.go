@@ -978,3 +978,83 @@ func (s *PostgresStore) PendingDirectiveResults(ctx context.Context) ([]Directiv
 	}
 	return scanDirectives(rows)
 }
+
+// DirectiveFileLimit is what one directive may publish: so many files, so
+// many bytes in all (retries of a file stored already are not counted).
+type DirectiveFileLimit struct {
+	Files int
+	Bytes int64
+}
+
+// ErrDirectiveFilesFull and ErrDirectiveBytesFull refuse a file past a
+// directive's DirectiveFileLimit; ErrDirectiveNotStarted one for a
+// directive still reserved.
+var (
+	ErrDirectiveFilesFull  = errors.New("the directive published as many files as it may")
+	ErrDirectiveBytesFull  = errors.New("the directive published as many bytes as it may")
+	ErrDirectiveNotStarted = errors.New("directive not started")
+	// ErrDirectiveNoTurn: the directive works for no session turn (a
+	// scheduled task): there is no session to attach a file to.
+	ErrDirectiveNoTurn = errors.New("the directive belongs to no session turn")
+)
+
+// SaveDirectiveFile stores a file a machine publishes for its directive:
+// attached to the directive's session turn, call and agent, as SaveFile
+// does, in one transaction that holds the directive's row, so that two
+// uploads at once never both pass its limit. The directive must be
+// machineID's (else ErrDirectiveNotFound) and running (ErrDirectiveClosed,
+// ErrDirectiveNotStarted). The same name and content again is the file
+// stored first, past the limit too.
+func (s *PostgresStore) SaveDirectiveFile(ctx context.Context, directiveID, machineID string, f File, content []byte, limit DirectiveFileLimit) (File, error) {
+	err := s.inTx(ctx, func(tx *sql.Tx) error {
+		var state, mid string
+		err := tx.QueryRowContext(ctx, `SELECT state, machine_id, session_id, turn_key, call_id, agent_id, user_id
+			FROM machine_directives WHERE id = $1 FOR UPDATE`, directiveID).
+			Scan(&state, &mid, &f.SessionID, &f.TurnKey, &f.CallID, &f.AgentID, &f.UserID)
+		switch {
+		case errors.Is(err, sql.ErrNoRows) || (err == nil && mid != machineID):
+			return ErrDirectiveNotFound
+		case err != nil:
+			return err
+		case state == DirectiveReserved:
+			return ErrDirectiveNotStarted
+		case state != DirectiveRunning:
+			return ErrDirectiveClosed
+		case f.SessionID == "" || f.TurnKey == "" || f.CallID == "":
+			return ErrDirectiveNoTurn
+		}
+		var stored File
+		stored, err = scanFile(tx.QueryRowContext(ctx, `SELECT `+fileColumns+` FROM files
+			WHERE session_id = $1 AND turn_key = $2 AND call_id = $3 AND name = $4`, f.SessionID, f.TurnKey, f.CallID, f.Name))
+		switch {
+		case err == nil && stored.SHA256 == f.SHA256:
+			f = stored // a retry
+			return nil
+		case err == nil:
+			return ErrFileExists
+		case !errors.Is(err, sql.ErrNoRows):
+			return err
+		}
+		var n int
+		var total int64
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(size), 0) FROM files
+			WHERE session_id = $1 AND turn_key = $2 AND call_id = $3`, f.SessionID, f.TurnKey, f.CallID).Scan(&n, &total); err != nil {
+			return err
+		}
+		switch {
+		case limit.Files > 0 && n >= limit.Files:
+			return ErrDirectiveFilesFull
+		case limit.Bytes > 0 && total+f.Size > limit.Bytes:
+			return ErrDirectiveBytesFull
+		}
+		f, err = saveFile(ctx, tx, f, content)
+		return err
+	})
+	if isForeignKeyViolation(err) {
+		return File{}, ErrFileSessionGone
+	}
+	if err != nil {
+		return File{}, err
+	}
+	return f, nil
+}
