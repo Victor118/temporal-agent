@@ -407,3 +407,18 @@ func TestRetryWait(t *testing.T) {
 		}
 	}
 }
+
+// A machine that lost the call by connecting again is back: excluded for the
+// turn, not set aside for the next ones.
+func TestAgentWorkflow_MachineBackIsNotSetAside(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+	w := &machineWorld{modes: map[string]string{"jarvis": store.LLMOnMachinePrefer}, free: []string{"m1"},
+		answer: machineAnswers(temporal.NewNonRetryableApplicationError("reconnected", machine.ErrTypeLost, nil))}
+	w.register(env, fetchTools)
+	f := registerLLM(env, answers(done))
+	out := runTurn(t, env, f)
+	if out.Response != "done" || len(w.aside) != 0 || len(f.model.sent()) != 1 {
+		t.Errorf("out %+v, aside %v", out, w.aside)
+	}
+}

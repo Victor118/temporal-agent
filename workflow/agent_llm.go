@@ -188,7 +188,10 @@ func (r *llmRoute) call(ctx workflow.Context, llmCtx workflow.Context, queue str
 			return resp, m, err
 		case failureMachine, failureRefused:
 			workflow.GetLogger(ctx).Warn("The machine of the turn's model failed it", "machine", m.ID, "error", err)
-			if kind == failureMachine {
+			// Set aside until it connects again; not one that lost the call
+			// by connecting again (DirectiveLost): it is back already, and
+			// would stay aside until its next connection.
+			if kind == failureMachine && !hasErrorType(err, machine.ErrTypeLost) {
 				r.setAside(ctx, m.ID)
 			}
 			r.excluded = append(r.excluded, m.ID)
