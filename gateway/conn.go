@@ -200,7 +200,7 @@ func (c *conn) readHello() (machine.Message, error) {
 	ctx, cancel := context.WithTimeout(c.ctx, helloTimeout)
 	defer cancel()
 	var hello machine.Message
-	if err := c.read(ctx, &hello); err != nil {
+	if _, err := c.read(ctx, &hello); err != nil {
 		return hello, fmt.Errorf("read hello: %w", err)
 	}
 	if hello.Type != machine.TypeHello {
@@ -460,21 +460,21 @@ func (c *conn) write(m machine.Message) {
 	}
 }
 
-// read reads one message: up to machine.MaxReadBytes on the wire, then the
-// limit of its kind (readLimitFor). One past it is a bad message
-// (machine.ErrBadMessage).
-func (c *conn) read(ctx context.Context, m *machine.Message) error {
+// read reads one message, and says its size: up to machine.MaxReadBytes on
+// the wire, then the limit of its type (readLimitFor). One past it is a bad
+// message (machine.ErrBadMessage).
+func (c *conn) read(ctx context.Context, m *machine.Message) (int, error) {
 	_, data, err := c.ws.Read(ctx)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if err := json.Unmarshal(data, m); err != nil {
-		return fmt.Errorf("%w: %v", machine.ErrBadMessage, err)
+		return len(data), fmt.Errorf("%w: %v", machine.ErrBadMessage, err)
 	}
-	if limit := c.readLimitFor(*m); len(data) > limit {
-		return fmt.Errorf("%w: %s of %d bytes, over %d", machine.ErrBadMessage, m.Type, len(data), limit)
+	if limit := readLimitFor(*m); len(data) > limit {
+		return len(data), fmt.Errorf("%w: %s of %d bytes, over %d", machine.ErrBadMessage, m.Type, len(data), limit)
 	}
-	return nil
+	return len(data), nil
 }
 
 func (c *conn) closeWith(code int, reason string) {
@@ -487,7 +487,8 @@ func (c *conn) readLoop(maxDirectives, maxLLM int) {
 	limit := rate.NewLimiter(messageLimit(maxDirectives, maxLLM))
 	for {
 		var m machine.Message
-		if err := c.read(c.ctx, &m); err != nil {
+		size, err := c.read(c.ctx, &m)
+		if err != nil {
 			if errors.Is(err, machine.ErrBadMessage) {
 				log.Printf("machines: machine %s: %v", c.m.ID, err)
 				c.write(machine.Message{Type: machine.TypeError, Code: machine.CodeBadMessage, Text: err.Error()})
@@ -521,7 +522,7 @@ func (c *conn) readLoop(maxDirectives, maxLLM int) {
 			c.status(m)
 		case machine.TypeResult:
 			if c.g.claim(m.ID) {
-				go c.result(m)
+				go c.result(m, size)
 			}
 		default:
 			c.write(machine.Message{Type: machine.TypeError, Code: machine.CodeBadMessage, Text: "unexpected " + m.Type})
@@ -673,7 +674,7 @@ func closedState(status string) string {
 // stays: closing it would only rotate the token at every reconnection while
 // Temporal is away. A database error closes it (1011): the machine sends the
 // result again when it is back.
-func (c *conn) result(m machine.Message) {
+func (c *conn) result(m machine.Message, size int) {
 	defer c.g.release(m.ID)
 	// The gateway's context, not the connection's: a result that came in is
 	// handled even if its machine leaves meanwhile (sent, then gone).
@@ -689,6 +690,13 @@ func (c *conn) result(m machine.Message) {
 		log.Printf("machines: result of directive %s from %s dropped: not an open directive of this machine", m.ID, c.m.ID)
 		c.detach(m.ID)
 		ack()
+		return
+	}
+	if d.Kind != machine.KindLLM && size > machine.MaxMessageBytes {
+		// Only a call to the model's answer may weigh more.
+		log.Printf("machines: machine %s: result of %s directive %s of %d bytes, over %d", c.m.ID, d.Kind, m.ID, size, machine.MaxMessageBytes)
+		c.write(machine.Message{Type: machine.TypeError, Code: machine.CodeBadMessage, Text: "result too large"})
+		c.closeWith(machine.ClosePolicy, "bad message")
 		return
 	}
 	if d.Kind == machine.KindLLM {

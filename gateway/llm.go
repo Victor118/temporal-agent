@@ -203,16 +203,15 @@ func llmCompletion(d store.Directive, m machine.Message) (any, error) {
 	return nil, temporal.NewNonRetryableApplicationError(msg, machine.ErrTypeFailed, nil, f)
 }
 
-// readLimitFor is what a message of a connection may weigh once read: an
-// llm directive's result, up to machine.MaxReadBytes (CheckLLMOutput bounds
-// its answer); anything else, machine.MaxMessageBytes.
-func (c *conn) readLimitFor(m machine.Message) int {
-	if m.Type != machine.TypeResult {
-		return machine.MaxMessageBytes
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if a := c.directives[m.ID]; a != nil && a.d.Kind == machine.KindLLM {
+// readLimitFor is what a message may weigh once read: a result, up to
+// machine.MaxReadBytes, its directive's kind deciding once it is known (an
+// llm directive's answer is bounded by CheckLLMOutput, any other result by
+// machine.MaxMessageBytes: conn.result); any other message,
+// machine.MaxMessageBytes. A result is not judged by the directives the
+// connection carries: one a machine sends again at its welcome is carried by
+// none.
+func readLimitFor(m machine.Message) int {
+	if m.Type == machine.TypeResult {
 		return machine.MaxReadBytes
 	}
 	return machine.MaxMessageBytes
