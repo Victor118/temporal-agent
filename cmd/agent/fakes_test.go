@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"time"
 
 	"github.com/victor/temporal-agent/store"
 )
@@ -65,4 +66,35 @@ func (f *routeStore) ListSessionFiles(_ context.Context, sessionID string) ([]st
 		}
 	}
 	return out, nil
+}
+
+func (f *routeStore) ListRunningTasks(_ context.Context, sessionID, participant string) ([]store.BackgroundTask, error) {
+	var out []store.BackgroundTask
+	for _, t := range f.tasks {
+		if t.SessionID == sessionID && (participant == "" || t.Participant == participant) && t.State == store.BackgroundRunning {
+			out = append(out, t)
+		}
+	}
+	return out, nil
+}
+func (f *routeStore) GetTask(_ context.Context, id string) (*store.BackgroundTask, error) {
+	for _, t := range f.tasks {
+		if t.ID == id {
+			return &t, nil
+		}
+	}
+	return nil, nil
+}
+func (f *routeStore) SetTaskCancelledBy(_ context.Context, id, name string) error {
+	if f.cancelledBy == nil {
+		f.cancelledBy = map[string]string{}
+	}
+	f.cancelledBy[id] = name
+	return nil
+}
+func (f *routeStore) ListTasksRunningSince(context.Context, time.Time) ([]store.BackgroundTask, error) {
+	return nil, nil
+}
+func (f *routeStore) EndTask(context.Context, string, string, string, func(store.BackgroundTask) store.Message) (store.TaskEnding, error) {
+	return store.TaskEnding{Gone: true}, nil
 }

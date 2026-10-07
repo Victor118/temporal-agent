@@ -92,6 +92,26 @@
   {{template "fork-action" itemOf $.Page .}}
 </div>
 
+{{else if eq .Kind "task"}}
+{{/* A background task's end: its agent's work, posted by nobody, linked
+     to the turn that launched it, with the files of its call. */}}
+<div class="msg task" id="m{{.ID}}">
+  <div class="agent-mark"></div>
+  <div class="msg-body">
+    <div class="msg-head"><span class="who">⧗ {{.TaskTitle}}{{with .Task}} · <code>{{.Tool}}</code>{{end}}</span><span class="agent-meta">— {{.Agent.Name}}{{with .TaskSpan}}, {{.}}{{end}}</span><span class="when">{{clock .Time}}</span></div>
+    <div class="agent-card task-card">
+      {{with .Task}}{{with .Summary}}<div class="note">{{.}}</div>{{end}}
+      {{with .FollowUps}}<div class="note">Consignes pour la suite :{{range .}} « {{.Text}} »{{with .UserName}} ({{.}}){{end}}{{end}}</div>{{end}}{{end}}
+      <div class="prose">{{.HTML}}</div>
+      {{with .Task}}{{with .File}}<div class="note">Résultat complet : <a href="/files/{{.ID}}">{{.Name}}</a> — ci-dessus, son début.</div>{{end}}{{end}}
+      {{template "files" .Files}}
+      {{with .Origin}}<div class="tools"><a href="#{{.}}">Le tour qui l'a lancée</a></div>{{end}}
+    </div>
+    {{template "forks" .}}
+  </div>
+  {{template "fork-action" itemOf $.Page .}}
+</div>
+
 {{else if eq .Kind "reported"}}
 <div class="divider reported" id="reported"><span>⑂ Rapport envoyé à la session parente · {{clock .Time}}{{if .Report.Accessible}} · <a href="/s/{{.Report.SessionID}}#m{{.Report.MessageID}}">le voir</a>{{end}}</span></div>
 

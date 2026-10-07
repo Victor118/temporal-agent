@@ -41,6 +41,7 @@ type readStore interface {
 	ListSessionFiles(ctx context.Context, sessionID string) ([]store.File, error)
 	DeleteMessage(ctx context.Context, sessionID string, id int64) error
 	DeleteMessagesBySession(ctx context.Context, sessionID string) error
+	ListRunningTasks(ctx context.Context, sessionID, participant string) ([]store.BackgroundTask, error)
 }
 
 // api is the JSON API: it decodes a request, calls the session service or
@@ -288,6 +289,52 @@ func (a *api) clearParticipant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeStopped(w, a.sessions.Clear(r.Context(), sess, chi.URLParam(r, "agent"), auth.UserFrom(r.Context())))
+}
+
+// stopTaskRequest names the background task to stop.
+type stopTaskRequest struct {
+	Task string `json:"task"`
+}
+
+// stopTask stops a background task of the session: by who asked for it,
+// or the session's creator. 202 once cancelled, 403 to a member who may
+// not, 409 when it ended, 404 when the session has no such task.
+func (a *api) stopTask(w http.ResponseWriter, r *http.Request) {
+	var req stopTaskRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Task == "" {
+		http.Error(w, "Invalid request body: {\"task\": \"<its ID>\"}", http.StatusBadRequest)
+		return
+	}
+	sess, err := a.sessions.Get(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "Session not found", http.StatusNotFound)
+		return
+	}
+	switch err := a.sessions.StopTask(r.Context(), sess, req.Task, auth.UserFrom(r.Context())); {
+	case errors.Is(err, session.ErrStopNotAllowed):
+		http.Error(w, err.Error(), http.StatusForbidden)
+	case errors.Is(err, session.ErrTaskOver):
+		http.Error(w, err.Error(), http.StatusConflict)
+	case errors.Is(err, session.ErrNoSuchTask):
+		http.Error(w, err.Error(), http.StatusNotFound)
+	case err != nil:
+		http.Error(w, fmt.Sprintf("Failed to stop: %v", err), http.StatusInternalServerError)
+	default:
+		w.WriteHeader(http.StatusAccepted)
+	}
+}
+
+// listTasks lists the background tasks running in the session.
+func (a *api) listTasks(w http.ResponseWriter, r *http.Request) {
+	tasks, err := a.store.ListRunningTasks(r.Context(), chi.URLParam(r, "id"), "")
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to list the tasks: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if tasks == nil {
+		tasks = []store.BackgroundTask{}
+	}
+	writeJSON(w, http.StatusOK, tasks)
 }
 
 // writeStopped answers a stop: 202 once sent, 403 to a member who may not,

@@ -643,3 +643,28 @@ func TestRender_Files(t *testing.T) {
 		t.Error("the thread does not reload on file_published")
 	}
 }
+
+// A task's end renders as its card, and a task running under its agent,
+// with its stop for who may.
+func TestRender_Tasks(t *testing.T) {
+	p := testPage("thread")
+	p.Thread = append(p.Thread, ThreadItem{Kind: ItemTask, ID: 40, Time: t0, Agent: AgentInfo{ID: "smith", Name: "Smith"}, HTML: "<p>the report</p>",
+		Origin: "m4", TaskFor: "Bob", Files: []FileLink{{ID: "f9", Name: "chart.svg", Size: "5 o"}},
+		Task: &store.TaskRef{Tool: "analyze_repo", State: store.BackgroundCancelled, CancelledBy: "Alice", StartedAt: t0, EndedAt: t0.Add(2 * time.Minute),
+			FollowUps: []store.TaskFollowUp{{Text: "then <fix> it", UserName: "Bob"}}, File: &store.TaskFile{ID: "f8", Name: "resultat-analyze_repo.md"}}})
+	p.Participants.Rows[1].Tasks = []TaskRow{{ID: "s1:p:smith:m4:bg:c1", Tool: "analyze_repo", For: "Bob", Since: t0, Note: "attend un worker", CanStop: true}}
+	page := render(t, "page", p)
+	for _, want := range []string{
+		`class="msg task" id="m40"`, "Tâche annulée par Alice", "lancée à", "pour Bob · 2 minutes", "<p>the report</p>",
+		"« then &lt;fix&gt; it » (Bob)", `href="/files/f8"`, `href="/files/f9"`, `href="#m4"`,
+		`id="task-s1:p:smith:m4:bg:c1"`, `hx-post="/s/fork/tasks/stop"`, `name="task" value="s1:p:smith:m4:bg:c1"`, "⏳ attend un worker",
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("page lacks %s", want)
+		}
+	}
+	p.Participants.Rows[1].Tasks[0].CanStop = false
+	if page := render(t, "page", p); strings.Contains(page, "/tasks/stop") {
+		t.Error("a stop the viewer may not use")
+	}
+}

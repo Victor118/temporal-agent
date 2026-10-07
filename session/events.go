@@ -44,6 +44,7 @@ var StateEvents = []string{
 	workflow.EventTurnStarted, workflow.EventTurnDone, activity.EventAskUser,
 	workflow.EventForkReady, workflow.EventForkFailed,
 	workflow.EventForkReport, workflow.EventForkReported, workflow.EventForkReportFailed,
+	workflow.EventTaskResult,
 }
 
 // ThreadEvents are the session's events after which its thread shows
@@ -57,9 +58,10 @@ var ThreadEvents = slices.Concat(StateEvents, []string{EventUserMessage, activit
 var ReportEvents = slices.Concat(StateEvents, []string{EventUserMessage, activity.EventMessage})
 
 // AgentsEvents are the session's events after which its Agents panel may
-// change: a turn or a question (StateEvents), a message delivered (a
-// participant's queue), what a turn waits for (a notice).
-var AgentsEvents = slices.Concat(StateEvents, []string{EventUserMessage, activity.EventNotice})
+// change: a turn, a question or a task's end (StateEvents), a message
+// delivered (a participant's queue), what a turn or a task waits for (a
+// notice), a task started.
+var AgentsEvents = slices.Concat(StateEvents, []string{EventUserMessage, activity.EventNotice, workflow.EventTaskStarted})
 
 // publishMembersLeft tells the session's streams that these users are out
 // of it.

@@ -15,7 +15,6 @@
     <table>
       <tr><td class="sub">Queue</td><td><a class="link mono" href="/admin/queues#q-{{.TaskQueue}}">{{.TaskQueue}}</a></td></tr>
       {{with .WorkflowName}}<tr><td class="sub">Workflow</td><td class="mono">{{.}}</td></tr>{{end}}
-      {{if .FireAndForget}}<tr><td class="sub">Mode</td><td>fire-and-forget</td></tr>{{end}}
       <tr><td class="sub">Schéma</td><td class="mono">{{shortHash .SchemaHash}}</td></tr>
       <tr><td class="sub">Publié</td><td>{{ago .UpdatedAt}}</td></tr>
     </table>

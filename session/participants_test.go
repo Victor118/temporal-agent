@@ -30,7 +30,7 @@ func creatorSession() *store.Session {
 func answering(agentID string, message int64, userID string) workflow.ParticipantState {
 	return workflow.ParticipantState{Current: &workflow.CurrentMessage{
 		MessageID: message, Turn: store.TurnKey(message, agentID), UserID: userID,
-	}, Background: []string{}}
+	}}
 }
 
 // startedBy is a turn_started event on a member's message.
@@ -202,10 +202,12 @@ func TestParticipants(t *testing.T) {
 		},
 		states: map[string]interface{}{smith: workflow.ParticipantState{
 			Current: &workflow.CurrentMessage{MessageID: 5, Turn: "m5.smith", UserID: "u-carol", UserName: "Carol"},
-			Queued:  2, Background: []string{"analyse"},
+			Queued:  2,
 		}},
 	}
-	s := newTest(&memStore{}, tc)
+	// Smith runs a background task, which the store tells.
+	s := newTest(&memStore{tasks: []store.BackgroundTask{{ID: smith + ":m3:bg:c1", SessionID: sid, Participant: "smith", Tool: "analyze_repo",
+		UserID: "u-carol", UserName: "Carol", State: store.BackgroundRunning}}}, tc)
 	now := time.Now()
 	s.turns.now = func() time.Time { return now }
 	s.Observe(sid, startedBy("jarvis", "Jarvis", 4, bob, "Bob"))
@@ -222,7 +224,7 @@ func TestParticipants(t *testing.T) {
 	if !j.Working || j.Name != "Jarvis" || j.Turn != "m4.jarvis" || j.UserID != bob.ID || j.UserName != "Bob" || !j.Since.Equal(now) || j.Queued != 1 || !j.Waiting {
 		t.Errorf("jarvis %+v", j)
 	}
-	if !sm.Working || sm.Turn != "m5.smith" || sm.UserName != "Carol" || sm.Queued != 2 || fmt.Sprint(sm.Background) != "[analyse]" || sm.Waiting {
+	if !sm.Working || sm.Turn != "m5.smith" || sm.UserName != "Carol" || sm.Queued != 2 || len(sm.Tasks) != 1 || sm.Tasks[0].Tool != "analyze_repo" || sm.Waiting {
 		t.Errorf("smith %+v", sm)
 	}
 	if w.Participant != "watson" || w.Working || w.Turn != "" {
@@ -237,7 +239,7 @@ func TestParticipants(t *testing.T) {
 	}
 
 	// Between two turns, as its query says: not working.
-	tc.states[smith] = workflow.ParticipantState{Background: []string{}}
+	tc.states[smith] = workflow.ParticipantState{}
 	s.statuses.invalidate()
 	if ps := s.Participants(ctx, sid); ps[1].Working {
 		t.Errorf("smith between turns %+v", ps[1])
@@ -367,7 +369,7 @@ func TestParticipants_StateQueriedWhenUnclear(t *testing.T) {
 		// Holmes ended a moment ago, still within the retention: Temporal
 		// answers its query, at rest. NotFound is a participant unknown, or
 		// purged.
-		states: map[string]interface{}{jarvis: answering("jarvis", 3, bob.ID), holmes: workflow.ParticipantState{Background: []string{}}},
+		states: map[string]interface{}{jarvis: answering("jarvis", 3, bob.ID), holmes: workflow.ParticipantState{}},
 		queryErrs: map[string]error{
 			smith:  serviceerror.NewNotFound("ended"),
 			watson: serviceerror.NewNotFound("ended"),

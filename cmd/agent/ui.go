@@ -619,6 +619,26 @@ func (u *ui) clearForm(w http.ResponseWriter, r *http.Request) {
 	u.renderAgents(w, r, u.stopFailure(sess.SessionID, err))
 }
 
+// stopTaskForm stops a background task, the one its line showed (task), by
+// who asked for it or the session's creator, and answers with the panel.
+func (u *ui) stopTaskForm(w http.ResponseWriter, r *http.Request) {
+	sess, err := u.sessions.Get(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	err = u.sessions.StopTask(r.Context(), sess, r.FormValue("task"), auth.UserFrom(r.Context()))
+	switch {
+	case errors.Is(err, session.ErrStopNotAllowed):
+		u.renderAgents(w, r, "Seul le membre qui a demandé une tâche, ou le créateur de la session, peut l'arrêter.")
+	case err == nil, errors.Is(err, session.ErrTaskOver), errors.Is(err, session.ErrNoSuchTask):
+		u.renderAgents(w, r, "")
+	default:
+		log.Printf("ui: stop a task in %s: %v", sess.SessionID, err)
+		u.renderAgents(w, r, "L'arrêt de la tâche n'a pas pu être envoyé.")
+	}
+}
+
 // stopFailure is why a stop did not go, in words; "" when it went, or had
 // nothing left to stop (the panel shows it).
 func (u *ui) stopFailure(sessionID string, err error) string {

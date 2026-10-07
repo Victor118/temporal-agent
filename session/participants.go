@@ -41,9 +41,9 @@ type Participant struct {
 	// Queued are the messages it has waiting: those this server delivered
 	// and saw not started, or as its state query says.
 	Queued int
-	// Background are its background tasks, as its state query says; none
-	// when the events told enough.
-	Background []string
+	// Tasks are its background tasks running, oldest first, as the store
+	// has them: they outlive its runs.
+	Tasks []Task
 	// known: the turn events told of it; gone: it is not running, and
 	// nothing tells of it.
 	known bool
@@ -61,8 +61,9 @@ func (p Participant) working() Working {
 // at once, each answer kept statusesTTL: one running that no event told of
 // (after the server restarted), or one working on a turn no event named (a
 // turn_started lost). One that Temporal knows no more has ended: shown idle
-// if the events told of it, not at all otherwise. In the order of their
-// names.
+// if the events told of it, not at all otherwise. Each has its background
+// tasks running, read in the store; an agent with tasks and nothing else
+// running has its row, idle. In the order of their names.
 func (s *Service) Participants(ctx context.Context, sessionID string) []Participant {
 	v := s.statuses.get(ctx, s.loadVisible)
 	ps := s.turns.snapshot(sessionID, v.runningIn(sessionID))
@@ -84,7 +85,7 @@ func (s *Service) Participants(ctx context.Context, sessionID string) []Particip
 				return // working, as far as anyone knows
 			}
 			st := q.state
-			p.Working, p.Queued, p.Background = st.Current != nil, st.Queued, st.Background
+			p.Working, p.Queued = st.Current != nil, st.Queued
 			if c := st.Current; c != nil {
 				p.Turn, p.UserID, p.UserName, p.Since = c.Turn, c.UserID, c.UserName, c.Since
 			}
@@ -96,6 +97,15 @@ func (s *Service) Participants(ctx context.Context, sessionID string) []Particip
 	for i := range ps {
 		ps[i].Waiting = ps[i].Working && slices.Contains(asking, ps[i].Participant)
 	}
+	tasks := s.tasksOf(ctx, sessionID, v)
+	for i := range ps {
+		ps[i].Tasks = tasks[ps[i].Participant]
+		delete(tasks, ps[i].Participant)
+	}
+	for name, ts := range tasks {
+		ps = append(ps, Participant{Participant: name, AgentID: name, Tasks: ts})
+	}
+	slices.SortFunc(ps, func(a, b Participant) int { return strings.Compare(a.Participant, b.Participant) })
 	return ps
 }
 

@@ -674,6 +674,9 @@ func newHTTPHandler(cfg *config.Config, st store.Store, tc client.Client, hub *s
 	warnClosedWebhooks(cfg)
 	srv := newServer(cfg, st, tc, hub, authSvc, adminUI.Routes())
 	srv.machines = opts.machines // nil when MACHINES_ENABLED=false
+	// The background tasks whose workflow closed without ending them: one
+	// sweep per server (one replica).
+	go srv.sessions.RunTaskSweep(context.Background())
 	return srv.routes()
 }
 

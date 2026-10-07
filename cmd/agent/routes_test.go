@@ -53,6 +53,9 @@ type routeStore struct {
 	contents map[string][]byte
 	// fileLists counts the reads of a session's files.
 	fileLists int
+	// tasks are the background tasks; cancelledBy who stopped each.
+	tasks       []store.BackgroundTask
+	cancelledBy map[string]string
 }
 
 func (f *routeStore) user(match func(store.User) bool) *store.User {
@@ -317,6 +320,8 @@ type fakeTemporal struct {
 	started []string // workflow IDs
 	signals []interface{}
 	states  map[string]interface{} // query answers, by workflow ID
+	// cancelled are the workflows cancelled (a background task stopped).
+	cancelled []string
 }
 
 func (f *fakeTemporal) QueryWorkflow(_ context.Context, id, _, _ string, _ ...interface{}) (converter.EncodedValue, error) {
@@ -340,6 +345,11 @@ func (e encodedJSON) Get(v interface{}) error {
 
 func (f *fakeTemporal) TerminateWorkflow(context.Context, string, string, string, ...interface{}) error {
 	return errors.New("not running")
+}
+
+func (f *fakeTemporal) CancelWorkflow(_ context.Context, id, _ string) error {
+	f.cancelled = append(f.cancelled, id)
+	return nil
 }
 
 func (f *fakeTemporal) ExecuteWorkflow(_ context.Context, opts client.StartWorkflowOptions, _ interface{}, _ ...interface{}) (client.WorkflowRun, error) {
@@ -1110,7 +1120,7 @@ func TestRoutes_ListHasNoActive(t *testing.T) {
 func TestRoutes_StopAParticipant(t *testing.T) {
 	jarvis := liveSID + ":p:jarvis"
 	tc := &fakeTemporal{states: map[string]interface{}{jarvis: workflow.ParticipantState{
-		Current: &workflow.CurrentMessage{MessageID: 4, Turn: "m4.jarvis", UserID: "u-alice"}, Background: []string{},
+		Current: &workflow.CurrentMessage{MessageID: 4, Turn: "m4.jarvis", UserID: "u-alice"},
 	}}}
 	h, st := newRouteTestWith(t, tc)
 	st.session.SessionID = liveSID
@@ -1146,7 +1156,7 @@ func TestRoutes_StopAParticipant(t *testing.T) {
 		t.Fatalf("signalled %v", tc.signals)
 	}
 
-	tc.states[jarvis] = workflow.ParticipantState{Current: &workflow.CurrentMessage{MessageID: 6, Turn: "m6.jarvis", UserID: "u-bob"}, Background: []string{}}
+	tc.states[jarvis] = workflow.ParticipantState{Current: &workflow.CurrentMessage{MessageID: 6, Turn: "m6.jarvis", UserID: "u-bob"}}
 	if w := call(t, h, http.MethodPost, stop, `{"turn":"m4.jarvis"}`, bob); w.Code != http.StatusConflict {
 		t.Errorf("a turn over: %d", w.Code)
 	}
@@ -1165,5 +1175,39 @@ func TestRoutes_StopAParticipant(t *testing.T) {
 	}
 	if fmt.Sprint(tc.signals) != "[{m6.jarvis} <nil>]" {
 		t.Errorf("signalled %v", tc.signals)
+	}
+}
+
+// A background task is stopped by who asked for it, or the session's
+// creator, members only; listed in JSON to the members.
+func TestRoutes_StopATask(t *testing.T) {
+	tc := &fakeTemporal{}
+	h, st := newRouteTestWith(t, tc)
+	st.session.SessionID = liveSID
+	task := liveSID + ":p:jarvis:m4:bg:c1"
+	st.tasks = []store.BackgroundTask{{ID: task, SessionID: liveSID, Participant: "jarvis", UserID: "u-alice", Tool: "analyze_repo", State: store.BackgroundRunning}}
+	alice, bob, carol := logIn(t, h, "alice@example.com"), logIn(t, h, "bob@example.com"), logIn(t, h, "carol@example.com")
+	stop := "/sessions/" + liveSID + "/tasks/stop"
+
+	if w := call(t, h, http.MethodGet, "/sessions/"+liveSID+"/tasks", "", bob); w.Code != 200 || !strings.Contains(w.Body.String(), task) {
+		t.Errorf("a member's list: %d %s", w.Code, w.Body)
+	}
+	if w := call(t, h, http.MethodPost, stop, `{"task":"`+task+`"}`, carol); w.Code != http.StatusNotFound {
+		t.Errorf("a non-member: %d", w.Code)
+	}
+	if w := call(t, h, http.MethodPost, stop, `{"task":"`+task+`"}`, bob); w.Code != http.StatusForbidden {
+		t.Errorf("bob stopping alice's task: %d %s", w.Code, w.Body)
+	}
+	if w := call(t, h, http.MethodPost, stop, `{"task":"nope"}`, alice); w.Code != http.StatusNotFound {
+		t.Errorf("no such task: %d", w.Code)
+	}
+	if w := form(t, h, "/s/"+liveSID+"/tasks/stop", url.Values{"task": {task}}, bob); w.Code != 200 || !strings.Contains(w.Body.String(), "Seul le membre qui a demandé une tâche") {
+		t.Errorf("bob's form: %d %s", w.Code, w.Body)
+	}
+	if len(tc.cancelled) != 0 {
+		t.Fatalf("cancelled %v", tc.cancelled)
+	}
+	if w := call(t, h, http.MethodPost, stop, `{"task":"`+task+`"}`, alice); w.Code != http.StatusAccepted || len(tc.cancelled) != 1 || tc.cancelled[0] != task {
+		t.Errorf("alice: %d, cancelled %v", w.Code, tc.cancelled)
 	}
 }

@@ -397,8 +397,8 @@ func TestDeliver_QueuedBehind(t *testing.T) {
 func TestState_ThePartipantsStates(t *testing.T) {
 	jarvis, smith := sid+":p:jarvis", sid+":p:smith"
 	tc := &fakeTemporal{running: []string{smith, jarvis}, states: map[string]interface{}{
-		jarvis: workflow.ParticipantState{Current: &workflow.CurrentMessage{MessageID: 4, UserName: "Alice"}, Queued: 2, Background: []string{}},
-		smith:  workflow.ParticipantState{Queued: 0, Background: []string{}},
+		jarvis: workflow.ParticipantState{Current: &workflow.CurrentMessage{MessageID: 4, UserName: "Alice"}, Queued: 2},
+		smith:  workflow.ParticipantState{Queued: 0},
 	}}
 	got, err := newTest(&memStore{}, tc).State(context.Background(), sid)
 	if err != nil || len(got) != 2 {

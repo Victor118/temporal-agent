@@ -14,6 +14,7 @@ import (
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/api/workflowservice/v1"
 
+	"github.com/victor/temporal-agent/store"
 	"github.com/victor/temporal-agent/workflow"
 )
 
@@ -273,8 +274,11 @@ type visible struct {
 	statuses map[string]Status
 	// participants are the participants running, by session.
 	participants map[string][]string
-	// asking are the participants with a question waiting, by session.
-	asking map[string][]string
+	// asking are the participants with a question of a turn's waiting, by
+	// session; taskAsking the background tasks with one, by session: a
+	// task's question does not make its participant wait.
+	asking     map[string][]string
+	taskAsking map[string][]string
 }
 
 // runningIn is the participants v sees running in a session; none for a nil
@@ -293,6 +297,15 @@ func (v *visible) askingIn(sessionID string) []string {
 		return nil
 	}
 	return v.asking[sessionID]
+}
+
+// taskAskingIn is the background tasks v sees with a question waiting in a
+// session.
+func (v *visible) taskAskingIn(sessionID string) []string {
+	if v == nil {
+		return nil
+	}
+	return v.taskAsking[sessionID]
 }
 
 // Statuses tells what each session is doing: from Temporal, cached for
@@ -326,7 +339,7 @@ func (s *Service) Statuses(ctx context.Context) map[string]Status {
 // written. Three visibility queries, whatever the number of sessions. A
 // failed query degrades the states shown, nothing else.
 func (s *Service) loadVisible(ctx context.Context) *visible {
-	v := &visible{statuses: map[string]Status{}, participants: map[string][]string{}, asking: map[string][]string{}}
+	v := &visible{statuses: map[string]Status{}, participants: map[string][]string{}, asking: map[string][]string{}, taskAsking: map[string][]string{}}
 	each := func(workflowType string, of func(id string)) {
 		resp, err := s.temporal.ListWorkflow(ctx, &workflowservice.ListWorkflowExecutionsRequest{
 			Namespace: s.cfg.Namespace,
@@ -355,10 +368,18 @@ func (s *Service) loadVisible(ctx context.Context) *visible {
 			v.statuses[sid] = v.statuses[sid].Stronger(StatusWorking)
 		}
 	})
-	// "<turn>:tool:ask_user:…", from an agent or a sub-agent of it.
+	// "<turn>:tool:ask_user:…", from an agent or a sub-agent of it; or
+	// "<turn>:bg:<call>:…", from a background task: the session waits for
+	// an answer, the task's participant does not.
 	each("AskUserWorkflow", func(id string) {
 		if sid := sessionOf(id); sid != "" {
 			v.statuses[sid] = v.statuses[sid].Stronger(StatusWaiting)
+			if task, ok := store.TaskOfWorkflow(id); ok {
+				if !slices.Contains(v.taskAsking[sid], task) {
+					v.taskAsking[sid] = append(v.taskAsking[sid], task)
+				}
+				return
+			}
 			if agent, ok := workflow.ParticipantOf(id); ok && !slices.Contains(v.asking[sid], agent) {
 				v.asking[sid] = append(v.asking[sid], agent)
 			}

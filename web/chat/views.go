@@ -197,6 +197,7 @@ const (
 	ItemError    = "error"    // why a turn failed
 	ItemReport   = "report"   // a fork's report to this session
 	ItemReported = "reported" // in a fork: where its latest report stopped
+	ItemTask     = "task"     // a background task's end: neither a member's message nor a turn
 	// ItemFiles: the files of a turn the thread does not show yet (it
 	// wrote nothing so far), on their own until it does (AttachFiles).
 	ItemFiles = "files"
@@ -257,10 +258,54 @@ type ThreadItem struct {
 	WorkflowID string   // question
 	AgentChain []string // question: the agents that led to it
 
+	// Task is the background task a task item ends; TaskFor names who
+	// asked for it ("toi" for the viewer); Origin is the element of the
+	// turn that launched it, "" when the thread does not show it.
+	Task    *store.TaskRef
+	TaskFor string
+	Origin  string
+
 	turn string // agent answer, error: the turn it shows ("" for none)
 	// models: agent answer, where its model ran, in order, without
 	// repeats: a machine's label (machineLabel), "" for the server's key.
 	models []string
+}
+
+// TaskTitle is a task item's title: how the task ended.
+func (it ThreadItem) TaskTitle() string {
+	if it.Task == nil {
+		return "Tâche terminée"
+	}
+	switch it.Task.State {
+	case store.BackgroundFailed:
+		return "Tâche échouée"
+	case store.BackgroundCancelled:
+		if it.Task.CancelledBy != "" {
+			return "Tâche annulée par " + it.Task.CancelledBy
+		}
+		return "Tâche annulée"
+	}
+	return "Tâche terminée"
+}
+
+// TaskSpan is when a task ran: « lancée à 10:02 pour Alice · 14 min ».
+func (it ThreadItem) TaskSpan() string {
+	t := it.Task
+	if t == nil || t.StartedAt.IsZero() {
+		return ""
+	}
+	s := "lancée à " + clock(t.StartedAt)
+	if it.TaskFor != "" {
+		s += " pour " + it.TaskFor
+	}
+	if d := t.EndedAt.Sub(t.StartedAt); !t.EndedAt.IsZero() && d >= 0 {
+		if d < time.Minute {
+			s += fmt.Sprintf(" · %d s", int(d/time.Second))
+		} else {
+			s += " · " + pluralize(int(d.Round(time.Minute)/time.Minute), "minute")
+		}
+	}
+	return s
 }
 
 // Via says where an agent answer's model ran when a machine wrote any of
@@ -522,6 +567,18 @@ func threadItems(ordered []store.MessageWithID, states map[string]turnState, vie
 			if reason := store.TurnEndError(m.Message); reason != "" {
 				items = append(items, ThreadItem{Kind: ItemError, ID: m.ID, Time: m.CreatedAt, Text: reason, Agent: agents.Signer(m.Message), turn: turn})
 			}
+		case m.Kind == store.KindTaskResult:
+			// A task's end is its agent's work, posted by nobody: a card
+			// of its own, linked to the turn that launched it.
+			it := ThreadItem{Kind: ItemTask, ID: m.ID, Time: m.CreatedAt, Agent: agents.Signer(m.Message),
+				HTML: Markdown(text(m.Content)), Task: m.Task}
+			if m.Task != nil {
+				it.TaskFor = m.Task.RequestedBy
+			}
+			if m.UserID != "" && m.UserID == viewerID {
+				it.TaskFor = "toi"
+			}
+			add(m, it)
 		case m.Kind == store.KindForkReport:
 			add(m, ThreadItem{
 				Kind: ItemReport, ID: m.ID, Time: m.CreatedAt,
@@ -575,6 +632,21 @@ func threadItems(ordered []store.MessageWithID, states map[string]turnState, vie
 	}
 	closeAgent()
 
+	// A task's card links to the turn that launched it: its last item.
+	turnItem := map[string]int64{}
+	for _, it := range items {
+		if it.Kind == ItemAgent && it.turn != "" {
+			turnItem[it.turn] = it.ID
+		}
+	}
+	for i := range items {
+		if t := items[i].Task; t != nil {
+			if id, ok := turnItem[t.TurnKey]; ok {
+				items[i].Origin = fmt.Sprintf("m%d", id)
+			}
+		}
+	}
+
 	for i := range items {
 		if items[i].ForkID == 0 {
 			items[i].ForkID = items[i].ID
@@ -610,11 +682,20 @@ func (f FileLink) Href() string { return "/files/" + f.ID }
 // first step, or from a sub-agent, before writing anything — gets an item
 // of its own at the thread's end, before the questions, until it shows.
 // A file a turn published twice, same name and same content (the model
-// called again), shows once.
+// called again), shows once. A file of a background task's call (its own
+// call, or one of a sub-agent it launched: "<call>/…") shows on the task's
+// card once it ended, not under the turn, long finished, that launched it.
 func AttachFiles(items []ThreadItem, files []store.File, agents AgentDirectory) []ThreadItem {
 	if len(files) == 0 {
 		return items
 	}
+	taskAt := map[string]int{} // "<turn> <call>": a task card
+	for i, it := range items {
+		if it.Kind == ItemTask && it.Task != nil {
+			taskAt[it.Task.TurnKey+" "+it.Task.CallID] = i
+		}
+	}
+	byTask := map[int][]store.File{}
 	var order []string // turns, in the order of their first file
 	byTurn := map[string][]store.File{}
 	seen := map[[3]string]bool{}
@@ -624,10 +705,18 @@ func AttachFiles(items []ThreadItem, files []store.File, agents AgentDirectory) 
 			continue
 		}
 		seen[k] = true
+		call, _, _ := strings.Cut(f.CallID, "/")
+		if i, ok := taskAt[f.TurnKey+" "+call]; ok {
+			byTask[i] = append(byTask[i], f)
+			continue
+		}
 		if _, ok := byTurn[f.TurnKey]; !ok {
 			order = append(order, f.TurnKey)
 		}
 		byTurn[f.TurnKey] = append(byTurn[f.TurnKey], f)
+	}
+	for i, fs := range byTask {
+		items[i].Files = fileLinks(fs, agents)
 	}
 	agentAt, errorAt := map[string]int{}, map[string]int{}
 	for i, it := range items {
@@ -702,6 +791,11 @@ func quoteOf(it ThreadItem, m store.MessageWithID) *Quote {
 		q.Target, q.Label = "brief", "en réponse au brief"
 	case ItemReport:
 		q.Label = "en réponse au rapport du fork « " + it.Report.Title + " »"
+	case ItemTask:
+		q.Label = "en réponse à la fin de la tâche"
+		if it.Task != nil {
+			q.Label += " " + it.Task.Tool
+		}
 	case ItemAgent:
 		q.Label, q.Text = "en réponse à "+it.Agent.Name, clipLine(text(m.Content), maxQuoteRunes)
 	default:
@@ -765,7 +859,7 @@ func MarkReported(items []ThreadItem, fork store.Session, parentVisible bool) []
 func LastMessageID(items []ThreadItem) int64 {
 	var last int64
 	for _, it := range items {
-		if it.Kind == ItemHuman || it.Kind == ItemAgent || it.Kind == ItemReport {
+		if it.Kind == ItemHuman || it.Kind == ItemAgent || it.Kind == ItemReport || it.Kind == ItemTask {
 			last = max(last, it.ForkID)
 		}
 	}
@@ -812,11 +906,44 @@ type AgentRow struct {
 	Since       time.Time // when its turn started; zero if not known
 	Note        string    // what its turn waits for (a worker)
 	Queued      int
-	Background  []string
+	// Tasks are its background tasks running: it is available meanwhile.
+	Tasks []TaskRow
 	// Turn is the turn shown: a stop names it, and stops no other.
 	Turn     string
 	CanStop  bool // the viewer may stop its turn (session.MayStop)
 	CanClear bool // the viewer may drop its queue too (session.MayClear)
+}
+
+// TaskRow is a background task running, under its agent's row.
+type TaskRow struct {
+	ID      string
+	Tool    string
+	Summary string
+	For     string // who asked for it; "" if not known
+	Mine    bool   // the viewer asked for it
+	Since   time.Time
+	Note    string // what it waits for (a worker, a machine)
+	Waiting bool   // a question of it waits for a member's answer
+	CanStop bool   // the viewer may stop it (session.MayStop)
+}
+
+// Status says where a task stands, in words: « Pour toi depuis 10:02 ·
+// attend une réponse ».
+func (t TaskRow) Status() string {
+	line := "En cours"
+	switch {
+	case t.Mine:
+		line = "Pour toi"
+	case t.For != "":
+		line = "Pour " + t.For
+	}
+	if !t.Since.IsZero() {
+		line += " depuis " + clock(t.Since)
+	}
+	if t.Waiting {
+		line += " · attend une réponse"
+	}
+	return line
 }
 
 // Status says where the participant stands, in words: "Disponible",
@@ -854,7 +981,14 @@ func (r AgentRow) ClearConfirm() string {
 	if r.Queued > 0 {
 		what = "jeter " + pluralize(r.Queued, "message") + " de sa file"
 	}
-	return "Arrêter " + r.Agent.Name + " et " + what + ", ceux des autres membres compris ?"
+	s := "Arrêter " + r.Agent.Name + " et " + what + ", ceux des autres membres compris ?"
+	switch n := len(r.Tasks); {
+	case n == 1:
+		s += " Sa tâche de fond continue : arrête-la à part."
+	case n > 1:
+		s += fmt.Sprintf(" Ses %d tâches de fond continuent : arrête-les une à une.", n)
+	}
+	return s
 }
 
 // State is the row's dot: "waiting", "working" or "idle".
@@ -884,7 +1018,13 @@ func BuildAgents(ps []session.Participant, sess store.Session, viewerID string, 
 		r := AgentRow{
 			Participant: p.Participant, Agent: agent, Working: p.Working, Waiting: p.Waiting,
 			Author: p.UserName, Mine: p.UserID != "" && p.UserID == viewerID, Since: p.Since,
-			Note: p.Note, Queued: p.Queued, Background: p.Background, Turn: p.Turn,
+			Note: p.Note, Queued: p.Queued, Turn: p.Turn,
+		}
+		for _, t := range p.Tasks {
+			r.Tasks = append(r.Tasks, TaskRow{
+				ID: t.ID, Tool: t.Tool, Summary: t.Summary, For: t.UserName, Mine: t.UserID != "" && t.UserID == viewerID,
+				Since: t.Since, Note: t.Note, Waiting: t.Waiting, CanStop: session.MayStop(&sess, t.UserID, viewerID),
+			})
 		}
 		r.CanStop = p.Working && session.MayStop(&sess, p.UserID, viewerID)
 		r.CanClear = (p.Working || p.Queued > 0) && session.MayClear(&sess, viewerID)

@@ -1052,3 +1052,91 @@ func TestBuildThread_SaysTheMachine(t *testing.T) {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
+
+// A background task's end is a card of its own, neither a member's message
+// nor a turn: linked to the turn that launched it, with the files of its
+// call (a sub-agent's included), which no longer show under that turn. The
+// turn it wakes quotes it.
+func TestBuildThread_TaskResult(t *testing.T) {
+	jarvis := AgentInfo{ID: "jarvis", Name: "Jarvis", Mention: "jarvis"}
+	launch := store.TurnKey(1, "jarvis")
+	taskID := "s1:p:jarvis:m1:bg:c1"
+	ref := &store.TaskRef{ID: taskID, Tool: "analyze_repo", TurnKey: launch, CallID: "c1", State: store.BackgroundDone,
+		RequestedBy: "Victor", StartedAt: t0, EndedAt: t0.Add(14 * time.Minute)}
+	woken := store.TurnKey(6, "jarvis")
+	msgs := []store.MessageWithID{
+		{ID: 1, Key: store.HumanMessageKey("a"), Message: store.Message{Role: store.RoleUser, Content: j("analyse it in the background"), UserID: "u-victor", Author: "Victor"}},
+		{ID: 2, Key: store.TurnMessageKey(launch, 0), Message: store.Message{Role: store.RoleAssistant, AgentID: "jarvis", ToolCalls: []store.ToolCall{{ID: "c1", Name: "analyze_repo"}}}},
+		{ID: 3, Key: store.TurnMessageKey(launch, 1), Message: store.Message{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "c1", Content: "Background task started"}}},
+		{ID: 4, Key: store.TurnMessageKey(launch, 2), Message: store.Message{Role: store.RoleAssistant, AgentID: "jarvis", Content: j("It runs.")}},
+		{ID: 5, Key: store.TurnEndKey(launch), Message: store.TurnEnd("jarvis", "")},
+		{ID: 6, Key: store.TaskResultKey(taskID), Message: store.Message{Role: store.RoleUser, Kind: store.KindTaskResult, UserID: "u-victor", AgentID: "jarvis", Content: j("**the report**"), Task: ref}},
+		{ID: 7, Key: store.HumanMessageKey("b"), Message: store.Message{Role: store.RoleUser, Content: j("meanwhile"), UserID: "u-alice", Author: "Alice"}},
+		{ID: 8, Key: store.TurnMessageKey(woken, 0), Message: store.Message{Role: store.RoleAssistant, AgentID: "jarvis", Content: j("Done: here it is.")}},
+		{ID: 9, Key: store.TurnEndKey(woken), Message: store.TurnEnd("jarvis", "")},
+	}
+	directory := AgentDirectory{ByID: map[string]AgentInfo{"jarvis": jarvis}, Session: jarvis}
+	items := BuildThread(msgs, "u-victor", nil, nil, directory)
+	items = AttachFiles(items, []store.File{
+		{ID: "f1", TurnKey: launch, CallID: "c1", AgentID: "jarvis", Name: "resultat-analyze_repo.md", Size: 40000},
+		{ID: "f2", TurnKey: launch, CallID: "c1/c7", AgentID: "smith", Name: "chart.svg", Size: 5, SHA256: "x"},
+		{ID: "f3", TurnKey: launch, CallID: "c0", AgentID: "jarvis", Name: "notes.md", Size: 5, SHA256: "y"},
+	}, directory)
+	if got := shape(items); !strings.Contains(got, "task") {
+		t.Fatalf("shape %s", got)
+	}
+	var task, launched, answer ThreadItem
+	for _, it := range items {
+		switch {
+		case it.Kind == ItemTask:
+			task = it
+		case it.Kind == ItemAgent && it.ID == 4:
+			launched = it
+		case it.Kind == ItemAgent && it.ID == 8:
+			answer = it
+		}
+	}
+	if task.ID != 6 || task.Origin != "m4" || task.TaskFor != "toi" || task.TaskTitle() != "Tâche terminée" || task.Agent.ID != "jarvis" ||
+		!strings.Contains(string(task.HTML), "<strong>the report</strong>") || task.TaskSpan() != "lancée à "+clock(t0)+" pour toi · 14 minutes" {
+		t.Errorf("task card %+v (%s)", task, task.TaskSpan())
+	}
+	if len(task.Files) != 2 || task.Files[0].ID != "f1" || task.Files[1].Via == "" {
+		t.Errorf("the task's files %+v", task.Files)
+	}
+	if len(launched.Files) != 1 || launched.Files[0].ID != "f3" {
+		t.Errorf("the launching turn's files %+v", launched.Files)
+	}
+	if answer.Quote == nil || answer.Quote.Target != "m6" || answer.Quote.Label != "en réponse à la fin de la tâche analyze_repo" {
+		t.Errorf("the woken turn's quote %+v", answer.Quote)
+	}
+	if LastMessageID(items) != 9 {
+		t.Errorf("last message %d", LastMessageID(items))
+	}
+}
+
+// An agent's background tasks show under its row, each stopped by who
+// asked for it or the session's creator; Tout arrêter says they go on.
+func TestBuildAgents_Tasks(t *testing.T) {
+	jarvis := AgentInfo{ID: "jarvis", Name: "Jarvis", Mention: "jarvis"}
+	directory := AgentDirectory{ByID: map[string]AgentInfo{"jarvis": jarvis}, Session: jarvis}
+	ps := []session.Participant{{Participant: "jarvis", AgentID: "jarvis", Working: true, UserID: "u-bob", Tasks: []session.Task{
+		{ID: "t1", Tool: "analyze_repo", UserID: "u-bob", UserName: "Bob", Since: t0, Waiting: true},
+		{ID: "t2", Tool: "agent_smith", UserID: "u-carol", UserName: "Carol", Since: t0, Note: "attend un worker"},
+	}}}
+	sess := store.Session{SessionID: "s1", CreatedBy: "u-alice"}
+	rows := BuildAgents(ps, sess, "u-bob", directory).Rows
+	if len(rows) != 1 || len(rows[0].Tasks) != 2 {
+		t.Fatalf("rows %+v", rows)
+	}
+	t1, t2 := rows[0].Tasks[0], rows[0].Tasks[1]
+	if !t1.Mine || !t1.CanStop || t1.Status() != "Pour toi depuis "+clock(t0)+" · attend une réponse" {
+		t.Errorf("Bob's task %+v %q", t1, t1.Status())
+	}
+	if t2.CanStop || t2.Status() != "Pour Carol depuis "+clock(t0) || t2.Note != "attend un worker" {
+		t.Errorf("Carol's task %+v", t2)
+	}
+	creator := BuildAgents(ps, sess, "u-alice", directory).Rows[0]
+	if !creator.Tasks[1].CanStop || !strings.Contains(creator.ClearConfirm(), "Ses 2 tâches de fond continuent") {
+		t.Errorf("the creator's row %+v: %q", creator.Tasks, creator.ClearConfirm())
+	}
+}

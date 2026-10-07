@@ -112,7 +112,9 @@
 
 {{/* A stop names the turn its row shows: a turn started since, another
      member's maybe, goes on. Tout arrêter drops the queue too, other
-     members' messages included: the session's creator alone has it. */}}
+     members' messages included: the session's creator alone has it; it
+     stops no background task, each stopped on its own line (by who asked
+     for it, or the creator). */}}
 {{define "agents"}}
 {{$sid := .Node.Session.SessionID}}
 <div class="agents-inner" data-version="{{index .Versions "agents"}}">
@@ -124,7 +126,19 @@
       <div class="note">{{.Status}}</div>
       {{with .Note}}<div class="note">⏳ {{.}}</div>{{end}}
       {{if .Queued}}<div class="note">{{plural .Queued "message"}} en file</div>{{end}}
-      {{range .Background}}<div class="note">Tâche de fond : {{.}}</div>{{end}}
+      {{range .Tasks}}
+      <div class="agent-task" id="task-{{.ID}}">
+        <div class="note"><span class="dot working"></span>Tâche de fond · <code>{{.Tool}}</code>{{with .Summary}} — {{.}}{{end}}</div>
+        <div class="note">{{.Status}}</div>
+        {{with .Note}}<div class="note">⏳ {{.}}</div>{{end}}
+        {{if .CanStop}}
+        <form hx-post="/s/{{$sid}}/tasks/stop" hx-target="#agents" hx-swap="morph:innerHTML" hx-confirm="Arrêter la tâche {{.Tool}} ? Ce qu'elle a fait jusqu'ici est perdu.">
+          <input type="hidden" name="task" value="{{.ID}}">
+          <button class="btn" type="submit" title="Annule cette tâche ; l'agent n'est pas réveillé">Arrêter la tâche</button>
+        </form>
+        {{end}}
+      </div>
+      {{end}}
       {{if or .CanStop .CanClear}}
       <div class="agent-actions">
         {{if .CanStop}}

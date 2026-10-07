@@ -783,7 +783,7 @@ func TestParticipant_State(t *testing.T) {
 	if err := h.run("jarvis", m1, m2); err != nil {
 		t.Fatal(err)
 	}
-	if state.Current == nil || state.Current.MessageID != m1.MessageID || state.Current.UserName != "Alice" || state.Current.UserID != "u-Alice" || state.Current.Turn != "m1.jarvis" || state.Queued != 2 || state.Background == nil {
+	if state.Current == nil || state.Current.MessageID != m1.MessageID || state.Current.UserName != "Alice" || state.Current.UserID != "u-Alice" || state.Current.Turn != "m1.jarvis" || state.Queued != 2 {
 		t.Errorf("state %+v (current %+v), want M1 answered, 2 waiting", state, state.Current)
 	}
 	if len(h.turns) != 3 {

@@ -55,6 +55,10 @@ type participantTurns struct {
 type turns struct {
 	mu sync.Mutex
 	m  map[string]map[string]*participantTurns
+	// taskNotes are what the background tasks running wait for, as their
+	// last notice said, by session then task: never a participant's note.
+	// Dropped at the task's end, or with its session.
+	taskNotes map[string]map[string]taskNote
 	// now is the clock; nil = time.Now. Tests set it.
 	now func() time.Time
 }
@@ -192,11 +196,54 @@ func (t *turns) setNote(sessionID, participant, note string) {
 	}
 }
 
-// forget drops the session's participants: the session is gone.
+// forget drops the session's participants and tasks: the session is gone.
 func (t *turns) forget(sessionID string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	delete(t.m, sessionID)
+	delete(t.taskNotes, sessionID)
+}
+
+// taskNote is a background task's note, and when it came.
+type taskNote struct {
+	text string
+	at   time.Time
+}
+
+// setTaskNote records what a background task waits for; "" takes it off.
+// A note older than turnForget is dropped: its task ended unseen.
+func (t *turns) setTaskNote(sessionID, task, note string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	now := t.clock()
+	for sid, notes := range t.taskNotes {
+		for id, n := range notes {
+			if now.Sub(n.at) >= turnForget {
+				delete(notes, id)
+			}
+		}
+		if len(notes) == 0 {
+			delete(t.taskNotes, sid)
+		}
+	}
+	if note == "" {
+		delete(t.taskNotes[sessionID], task)
+		return
+	}
+	if t.taskNotes == nil {
+		t.taskNotes = map[string]map[string]taskNote{}
+	}
+	if t.taskNotes[sessionID] == nil {
+		t.taskNotes[sessionID] = map[string]taskNote{}
+	}
+	t.taskNotes[sessionID][task] = taskNote{text: note, at: now}
+}
+
+// taskNote is what a background task waits for, "" when nothing is known.
+func (t *turns) taskNote(sessionID, task string) string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.taskNotes[sessionID][task].text
 }
 
 // snapshot is where the participants of a session stand, as far as the
@@ -316,13 +363,28 @@ func (s *Service) Observe(topic string, ev activity.SSEEvent) {
 		var n struct {
 			Text        string `json:"text"`
 			Participant string `json:"participant"`
+			Task        string `json:"task"`
 		}
 		if err := json.Unmarshal(ev.Data, &n); err != nil {
 			log.Printf("session %s: %s: %v", topic, ev.Type, err)
 			return
 		}
+		// A background task's notice is its own, never its participant's:
+		// the participant may answer another message meanwhile.
+		if n.Task != "" {
+			s.turns.setTaskNote(topic, n.Task, n.Text)
+			return
+		}
 		s.turns.setNote(topic, n.Participant, n.Text)
 		return
+	}
+	if ev.Type == workflow.EventTaskResult {
+		var e struct {
+			Task string `json:"task"`
+		}
+		if json.Unmarshal(ev.Data, &e) == nil && e.Task != "" {
+			s.turns.setTaskNote(topic, e.Task, "")
+		}
 	}
 	if !slices.Contains(StateEvents, ev.Type) {
 		return

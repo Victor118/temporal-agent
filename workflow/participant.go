@@ -38,6 +38,7 @@ const (
 //	participant      <session>:p:<agent>
 //	its turn         <session>:p:<agent>:m<message id>
 //	a turn's tools   <turn>:tool:<tool>:<call>   (ask_user, sub-agents…)
+//	a background task <turn>:bg:<call>, its tool <turn>:bg:<call>:tool:<tool>:<call>
 const (
 	participantMark = ":p:"
 	toolMark        = ":tool:"
@@ -140,11 +141,12 @@ type StopTurn struct {
 }
 
 // ParticipantState is what the state query answers: the message the
-// participant answers, how many wait, and its background tasks (none yet).
+// participant answers, and how many wait. Its background tasks are not the
+// participant's to tell: they outlive its runs, and the server reads them
+// in the store (background_tasks).
 type ParticipantState struct {
-	Current    *CurrentMessage `json:"current"`
-	Queued     int             `json:"queued"`
-	Background []string        `json:"background"`
+	Current *CurrentMessage `json:"current"`
+	Queued  int             `json:"queued"`
 }
 
 // CurrentMessage is the message a participant answers: its turn, and its
@@ -292,7 +294,7 @@ type participant struct {
 // the inbox and those delivered but not yet received (the participant was
 // in an activity).
 func (p *participant) state(messages workflow.ReceiveChannel) ParticipantState {
-	return ParticipantState{Current: p.current, Queued: len(p.inbox) + messages.Len(), Background: []string{}}
+	return ParticipantState{Current: p.current, Queued: len(p.inbox) + messages.Len()}
 }
 
 // receive moves the messages delivered so far to the inbox.

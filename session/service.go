@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/client"
@@ -66,6 +67,13 @@ type Store interface {
 
 	AppendMessage(ctx context.Context, sessionID, key string, msg store.Message) (int64, error)
 	LoadMessagesUpTo(ctx context.Context, sessionID string, lastID int64) ([]store.MessageWithID, error)
+
+	// The agents' background tasks (tasks.go).
+	ListRunningTasks(ctx context.Context, sessionID, participant string) ([]store.BackgroundTask, error)
+	GetTask(ctx context.Context, id string) (*store.BackgroundTask, error)
+	SetTaskCancelledBy(ctx context.Context, id, name string) error
+	ListTasksRunningSince(ctx context.Context, before time.Time) ([]store.BackgroundTask, error)
+	EndTask(ctx context.Context, id, by, state string, build func(store.BackgroundTask) store.Message) (store.TaskEnding, error)
 }
 
 // Temporal is what the service needs of the Temporal client: start, signal,
@@ -78,6 +86,7 @@ type Temporal interface {
 	DescribeWorkflowExecution(ctx context.Context, workflowID, runID string) (*workflowservice.DescribeWorkflowExecutionResponse, error)
 	ListWorkflow(ctx context.Context, request *workflowservice.ListWorkflowExecutionsRequest) (*workflowservice.ListWorkflowExecutionsResponse, error)
 	TerminateWorkflow(ctx context.Context, workflowID, runID, reason string, details ...interface{}) error
+	CancelWorkflow(ctx context.Context, workflowID, runID string) error
 }
 
 // Publisher shows an event to the members watching a session, live.

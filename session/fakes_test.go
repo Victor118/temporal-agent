@@ -40,6 +40,73 @@ type memStore struct {
 	title       string
 	agents      []store.Agent // nil: the default agent alone
 	loads       int           // conversations loaded
+	// tasks are the background tasks, ended or not; cancelledBy who
+	// stopped each, by ID.
+	tasks       []store.BackgroundTask
+	cancelledBy map[string]string
+	tasksMu     sync.Mutex
+	onDelete    func() // called as the session is deleted
+}
+
+func (m *memStore) ListRunningTasks(_ context.Context, sessionID, participant string) ([]store.BackgroundTask, error) {
+	m.tasksMu.Lock()
+	defer m.tasksMu.Unlock()
+	var out []store.BackgroundTask
+	for _, t := range m.tasks {
+		if t.SessionID == sessionID && (participant == "" || t.Participant == participant) && t.State == store.BackgroundRunning {
+			out = append(out, t)
+		}
+	}
+	return out, nil
+}
+func (m *memStore) GetTask(_ context.Context, id string) (*store.BackgroundTask, error) {
+	m.tasksMu.Lock()
+	defer m.tasksMu.Unlock()
+	for _, t := range m.tasks {
+		if t.ID == id {
+			return &t, nil
+		}
+	}
+	return nil, nil
+}
+func (m *memStore) SetTaskCancelledBy(_ context.Context, id, name string) error {
+	m.tasksMu.Lock()
+	defer m.tasksMu.Unlock()
+	if m.cancelledBy == nil {
+		m.cancelledBy = map[string]string{}
+	}
+	m.cancelledBy[id] = name
+	return nil
+}
+func (m *memStore) ListTasksRunningSince(_ context.Context, before time.Time) ([]store.BackgroundTask, error) {
+	m.tasksMu.Lock()
+	defer m.tasksMu.Unlock()
+	var out []store.BackgroundTask
+	for _, t := range m.tasks {
+		if t.State == store.BackgroundRunning && t.StartedAt.Before(before) {
+			out = append(out, t)
+		}
+	}
+	return out, nil
+}
+func (m *memStore) EndTask(_ context.Context, id, by, state string, build func(store.BackgroundTask) store.Message) (store.TaskEnding, error) {
+	m.tasksMu.Lock()
+	defer m.tasksMu.Unlock()
+	for i := range m.tasks {
+		t := &m.tasks[i]
+		if t.ID != id {
+			continue
+		}
+		if t.State != store.BackgroundRunning {
+			return store.TaskEnding{Task: *t, MessageID: t.ResultMessageID, Mine: t.EndedBy == by}, nil
+		}
+		now := time.Now()
+		t.State, t.EndedAt, t.EndedBy = state, &now, by
+		m.appended = append(m.appended, build(*t))
+		t.ResultMessageID = int64(len(m.appended))
+		return store.TaskEnding{Task: *t, MessageID: t.ResultMessageID, Mine: true}, nil
+	}
+	return store.TaskEnding{Gone: true}, nil
 }
 
 func (m *memStore) CreateSession(_ context.Context, s store.Session) error {
@@ -55,7 +122,12 @@ func (m *memStore) GetSession(_ context.Context, id string) (*store.Session, err
 func (m *memStore) GetActiveSessionByChannel(context.Context, string, string, string) (*store.Session, error) {
 	return nil, nil
 }
-func (m *memStore) DeleteSession(context.Context, string) error { return nil }
+func (m *memStore) DeleteSession(context.Context, string) error {
+	if m.onDelete != nil {
+		m.onDelete()
+	}
+	return nil
+}
 func (m *memStore) UpdateSessionTitle(_ context.Context, _, title string) error {
 	m.titleMu.Lock()
 	defer m.titleMu.Unlock()
@@ -123,6 +195,17 @@ type fakeTemporal struct {
 	signalErr    error                  // fails every SignalWorkflow, recorded all the same
 	queried      []string               // workflow IDs queried
 	terminated   []string
+	cancelled    []string
+	cancelErr    error // fails every CancelWorkflow
+	// describeNotFound are the workflows Temporal knows no more.
+	describeNotFound []string
+}
+
+func (f *fakeTemporal) CancelWorkflow(_ context.Context, id, _ string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.cancelled = append(f.cancelled, id)
+	return f.cancelErr
 }
 
 // signalStart is a SignalWithStartWorkflow call.
@@ -207,6 +290,9 @@ func (f *fakeTemporal) DescribeWorkflowExecution(_ context.Context, id, _ string
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.describes++
+	if slices.Contains(f.describeNotFound, id) {
+		return nil, serviceerror.NewNotFound("no such workflow")
+	}
 	if status, ok := f.closed[id]; ok {
 		at, ok := f.closedAt[id]
 		if !ok {

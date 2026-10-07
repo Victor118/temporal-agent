@@ -85,9 +85,11 @@ func (s *Service) Delete(ctx context.Context, sessionID, by string) error {
 	if sess.CreatedBy != by {
 		return ErrNotCreator
 	}
-	// Its participants end with it: a turn would write into a session gone,
-	// and a question wait for days.
+	// Its participants and its background tasks end with it: a turn would
+	// write into a session gone, a question wait for days, a task run for
+	// nobody.
 	s.terminateParticipants(ctx, sessionID, "session deleted by user")
+	s.terminateTasks(ctx, sessionID, "session deleted by user")
 	members, _ := s.store.ListSessionMembers(ctx, sessionID)
 	if err := s.store.DeleteSession(ctx, sessionID); err != nil {
 		return err
@@ -131,6 +133,7 @@ func (s *Service) Leave(ctx context.Context, sessionID, userID string) error {
 	members, err := s.store.ListSessionMembers(ctx, sessionID)
 	if err == nil && len(members) == 0 {
 		s.terminateParticipants(ctx, sessionID, "last member left")
+		s.terminateTasks(ctx, sessionID, "last member left")
 		if err := s.store.DeleteSession(ctx, sessionID); err != nil {
 			log.Printf("Session %s: delete after last member left: %v", sessionID, err)
 		}
