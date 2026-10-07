@@ -44,12 +44,13 @@ func TestAgentLifecycle(t *testing.T) {
 	if err != nil || a == nil {
 		t.Fatalf("get: %v %v", a, err)
 	}
-	// A nil allowlist is stored as [], which grants nothing.
-	if a.Tools == nil || len(a.Tools) != 0 || a.Revision != 1 {
+	// A nil allowlist is stored as [], which grants nothing; and its model
+	// runs on the server's key unless said.
+	if a.Tools == nil || len(a.Tools) != 0 || a.Revision != 1 || a.LLMOnMachine != LLMOnMachineNever {
 		t.Errorf("created %+v", a)
 	}
 
-	rev, err := s.UpdateAgent(ctx, Agent{ID: id, Name: "Renamed", Tools: []string{"read_file"}}, 1)
+	rev, err := s.UpdateAgent(ctx, Agent{ID: id, Name: "Renamed", Tools: []string{"read_file"}, LLMOnMachine: LLMOnMachinePrefer}, 1)
 	if err != nil || rev != 2 {
 		t.Fatalf("update: rev %d, %v", rev, err)
 	}
@@ -61,7 +62,7 @@ func TestAgentLifecycle(t *testing.T) {
 	}
 
 	a, _ = s.GetAgent(ctx, id)
-	if a.Name != "Renamed" || !reflect.DeepEqual(a.Tools, []string{"read_file"}) || a.UpdatedAt.Before(a.CreatedAt) {
+	if a.Name != "Renamed" || !reflect.DeepEqual(a.Tools, []string{"read_file"}) || a.UpdatedAt.Before(a.CreatedAt) || a.LLMOnMachine != LLMOnMachinePrefer {
 		t.Errorf("after update %+v", a)
 	}
 

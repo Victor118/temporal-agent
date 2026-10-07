@@ -26,6 +26,14 @@
       <label for="f-desc">Description <span class="hint">montrée aux agents qui peuvent lui déléguer</span></label>
       <input type="text" id="f-desc" name="description" value="{{.Description}}">
 
+      <label for="f-llm">Modèle sur la machine de l'auteur <span class="hint">qui paie et fait tourner le modèle de ses tours</span></label>
+      <select id="f-llm" name="llm_on_machine">
+        <option value="never" {{if or (eq .LLMOnMachine "") (eq .LLMOnMachine "never")}}selected{{end}}>Jamais : la clé du serveur</option>
+        <option value="prefer" {{if eq .LLMOnMachine "prefer"}}selected{{end}}>De préférence : la machine de l'auteur si elle offre un modèle, sinon la clé du serveur</option>
+        <option value="require" {{if eq .LLMOnMachine "require"}}selected{{end}}>Seulement : la machine de l'auteur, sinon le tour s'arrête</option>
+      </select>
+      <p class="note">Hors « jamais », la machine de l'auteur du message reçoit le prompt de l'agent, ses skills, les définitions de ses outils, la conversation de la session et la mémoire de l'auteur, et décide des appels d'outils du tour (dans l'allowlist ci-dessous) : elle a l'autorité de l'agent. Un sous-agent suit la machine de son appelant, sauf s'il est réglé sur « jamais ».</p>
+
       {{/* Every keystroke or click in here refreshes the preview. */}}
       <div hx-get="/admin/allowlist/preview" hx-trigger="input delay:300ms" hx-include="#agent-form" hx-target="#allowlist-preview">
       <label for="f-skills">Skills <span class="hint">un par ligne</span></label>

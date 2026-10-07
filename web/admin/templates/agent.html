@@ -10,7 +10,8 @@
 <div class="toolbar"><a class="btn" href="/admin/agents/{{.ID}}/edit">Modifier</a></div>
 </div>
 <p class="lead">{{with .Description}}{{.}}{{else}}<span class="empty">Pas de description.</span>{{end}}<br>
-  <span class="sub">{{.Sessions}} session{{if gt .Sessions 1}}s{{end}} · créé {{ago .CreatedAt}} · modifié {{ago .UpdatedAt}}</span></p>
+  <span class="sub">{{.Sessions}} session{{if gt .Sessions 1}}s{{end}} · créé {{ago .CreatedAt}} · modifié {{ago .UpdatedAt}}</span><br>
+  <span class="sub">Modèle : {{if eq .LLMOn "prefer"}}sur la machine de l'auteur de préférence, sinon la clé du serveur{{else if eq .LLMOn "require"}}sur la machine de l'auteur seulement{{else}}la clé du serveur{{end}}</span></p>
 
 <div class="card">
   <h2>Allowlist</h2>

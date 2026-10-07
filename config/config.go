@@ -178,6 +178,9 @@ type AgentDefinition struct {
 	Description string   `yaml:"description" json:"description"`
 	Skills      []string `yaml:"skills" json:"skills"`
 	Tools       []string `yaml:"tools" json:"tools"` // Allowed tool name globs; omitted = no tool, "*" = all
+	// LLMOnMachine is where its turns call their model: never (default),
+	// prefer or require (store.LLMOnMachine*).
+	LLMOnMachine string `yaml:"llm_on_machine" json:"llm_on_machine"`
 }
 
 func Load() *Config {
@@ -308,6 +311,11 @@ func (a AgentDefinition) Validate() error {
 	}
 	if a.Mention != "" && !MentionPattern.MatchString(a.Mention) {
 		return fmt.Errorf("agent %q: invalid mention %q (letters, digits, - and _, at most 32)", a.ID, a.Mention)
+	}
+	switch a.LLMOnMachine {
+	case "", "never", "prefer", "require":
+	default:
+		return fmt.Errorf("agent %q: llm_on_machine %q (never, prefer or require)", a.ID, a.LLMOnMachine)
 	}
 	for _, g := range a.Tools {
 		if err := CheckToolGlob(g); err != nil {

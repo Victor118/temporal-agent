@@ -143,13 +143,44 @@ type Agent struct {
 	Name string `json:"name"`
 	// Mention is what members write to call the agent (@jarvis); empty = the
 	// ID (MentionName). Unique, case aside.
-	Mention     string    `json:"mention"`
-	Description string    `json:"description"`
-	Skills      []string  `json:"skills"`
-	Tools       []string  `json:"tools"`    // Allowed tool name globs; empty = no tool, "*" = all
-	Revision    int64     `json:"revision"` // bumped on every update
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	Mention     string   `json:"mention"`
+	Description string   `json:"description"`
+	Skills      []string `json:"skills"`
+	Tools       []string `json:"tools"` // Allowed tool name globs; empty = no tool, "*" = all
+	// LLMOnMachine says where its turns' model runs (LLMOnMachine*): the
+	// server's key, or the machine of the turn's author.
+	LLMOnMachine string    `json:"llm_on_machine"`
+	Revision     int64     `json:"revision"` // bumped on every update
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+// Where an agent's turns call their model (docs/design/machine-llm.md §3):
+// never on a machine, the server's key (the default); on the machine of the
+// turn's author when it offers its model, else the server's key; or there
+// only, the turn stopping when no machine of the author's offers one.
+const (
+	LLMOnMachineNever   = "never"
+	LLMOnMachinePrefer  = "prefer"
+	LLMOnMachineRequire = "require"
+)
+
+// ValidLLMOnMachine reports an LLMOnMachine value; empty is never.
+func ValidLLMOnMachine(v string) bool {
+	switch v {
+	case "", LLMOnMachineNever, LLMOnMachinePrefer, LLMOnMachineRequire:
+		return true
+	}
+	return false
+}
+
+// LLMOn is where the agent's turns call their model: LLMOnMachine, never
+// when unset.
+func (a Agent) LLMOn() string {
+	if a.LLMOnMachine == "" {
+		return LLMOnMachineNever
+	}
+	return a.LLMOnMachine
 }
 
 // MentionName is what calls the agent in a session: its mention, or its ID.

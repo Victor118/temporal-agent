@@ -345,13 +345,14 @@ func TestCreateAgent(t *testing.T) {
 
 	w := do(h, http.MethodPost, "/admin/agents", url.Values{
 		"id": {"writer"}, "name": {"Writer"}, "skills": {"a\n\nb\na"}, "tool": {"read_file", "exec"}, "globs": {" web_* \nread_file\n"},
+		"llm_on_machine": {"require"},
 	}, c)
 	if w.Code != http.StatusSeeOther || !strings.HasPrefix(w.Header().Get("Location"), "/admin/agents/writer?saved=") {
 		t.Fatalf("create: %d %q %s", w.Code, w.Header().Get("Location"), w.Body)
 	}
 	got, _ := st.GetAgent(context.Background(), "writer")
 	// Checked tools first, then the patterns, without the duplicate.
-	if !reflect.DeepEqual(got.Tools, []string{"read_file", "exec", "web_*"}) || !reflect.DeepEqual(got.Skills, []string{"a", "b"}) {
+	if !reflect.DeepEqual(got.Tools, []string{"read_file", "exec", "web_*"}) || !reflect.DeepEqual(got.Skills, []string{"a", "b"}) || got.LLMOnMachine != "require" {
 		t.Errorf("stored %+v", got)
 	}
 
@@ -367,6 +368,7 @@ func TestCreateAgent(t *testing.T) {
 		"invalid id":   {"id": {"Bad_ID"}, "name": {"Bad"}},
 		"no name":      {"id": {"nameless"}},
 		"invalid glob": {"id": {"globby"}, "name": {"Globby"}, "globs": {"read_[file"}},
+		"llm anywhere": {"id": {"anywhere"}, "name": {"Anywhere"}, "llm_on_machine": {"always"}},
 	} {
 		before := len(st.agents)
 		w := do(h, http.MethodPost, "/admin/agents", form, c)

@@ -53,3 +53,13 @@ func TestAgentDefinition_Mention(t *testing.T) {
 		}
 	}
 }
+
+// Where an agent's model runs: one of three words, empty = never.
+func TestAgentDefinition_LLMOnMachine(t *testing.T) {
+	for v, ok := range map[string]bool{"": true, "never": true, "prefer": true, "require": true, "always": false, "Prefer": false} {
+		err := AgentDefinition{ID: "default", Name: "Default", LLMOnMachine: v}.Validate()
+		if (err == nil) != ok {
+			t.Errorf("llm_on_machine %q: %v, want ok %v", v, err, ok)
+		}
+	}
+}

@@ -34,7 +34,9 @@ type agentForm struct {
 	Name        string
 	Mention     string // empty = the ID
 	Description string
-	Skills      string // one per line
+	// LLMOnMachine is where its turns' model runs (store.LLMOnMachine*).
+	LLMOnMachine string
+	Skills       string // one per line
 	// The allowlist, split in two: published tools checked by name, and
 	// everything else (patterns, names of tools not published right now), one
 	// per line. Saving joins them back.
@@ -84,12 +86,13 @@ func formFromAgent(a store.Agent, tools []store.ToolRecord, agents []store.Agent
 		}
 	}
 	f := agentForm{
-		ID:          a.ID,
-		Name:        a.Name,
-		Mention:     a.Mention,
-		Description: a.Description,
-		Skills:      strings.Join(a.Skills, "\n"),
-		Revision:    a.Revision,
+		ID:           a.ID,
+		Name:         a.Name,
+		Mention:      a.Mention,
+		Description:  a.Description,
+		LLMOnMachine: a.LLMOn(),
+		Skills:       strings.Join(a.Skills, "\n"),
+		Revision:     a.Revision,
 	}
 	var globs []string
 	for _, g := range a.Tools {
@@ -107,14 +110,15 @@ func formFromRequest(r *http.Request) agentForm {
 	r.ParseForm()
 	rev, _ := strconv.ParseInt(r.FormValue("revision"), 10, 64)
 	return agentForm{
-		ID:          strings.TrimSpace(r.FormValue("id")),
-		Name:        strings.TrimSpace(r.FormValue("name")),
-		Mention:     strings.TrimPrefix(strings.TrimSpace(r.FormValue("mention")), "@"),
-		Description: strings.TrimSpace(r.FormValue("description")),
-		Skills:      r.FormValue("skills"),
-		Picked:      r.Form["tool"],
-		Globs:       r.FormValue("globs"),
-		Revision:    rev,
+		ID:           strings.TrimSpace(r.FormValue("id")),
+		Name:         strings.TrimSpace(r.FormValue("name")),
+		Mention:      strings.TrimPrefix(strings.TrimSpace(r.FormValue("mention")), "@"),
+		Description:  strings.TrimSpace(r.FormValue("description")),
+		LLMOnMachine: r.FormValue("llm_on_machine"),
+		Skills:       r.FormValue("skills"),
+		Picked:       r.Form["tool"],
+		Globs:        r.FormValue("globs"),
+		Revision:     rev,
 	}
 }
 
@@ -126,17 +130,19 @@ func (f agentForm) allowlist() []string {
 // agent turns the form into an agent, validated like a seed entry.
 func (f agentForm) agent() (store.Agent, error) {
 	def := config.AgentDefinition{
-		ID:          f.ID,
-		Name:        f.Name,
-		Mention:     f.Mention,
-		Description: f.Description,
-		Skills:      lines(f.Skills),
-		Tools:       f.allowlist(),
+		ID:           f.ID,
+		Name:         f.Name,
+		Mention:      f.Mention,
+		Description:  f.Description,
+		Skills:       lines(f.Skills),
+		Tools:        f.allowlist(),
+		LLMOnMachine: f.LLMOnMachine,
 	}
 	if err := def.Validate(); err != nil {
 		return store.Agent{}, err
 	}
-	return store.Agent{ID: def.ID, Name: def.Name, Mention: def.Mention, Description: def.Description, Skills: def.Skills, Tools: def.Tools}, nil
+	return store.Agent{ID: def.ID, Name: def.Name, Mention: def.Mention, Description: def.Description, Skills: def.Skills, Tools: def.Tools,
+		LLMOnMachine: def.LLMOnMachine}, nil
 }
 
 // lines splits a textarea into its non-empty, trimmed, distinct lines. It never

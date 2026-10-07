@@ -60,6 +60,8 @@ func seedAgents(st agentSeeder, path string) error {
 			Description: def.Description,
 			Skills:      def.Skills,
 			Tools:       def.Tools,
+			// Where its turns' model runs: never on a machine unless said.
+			LLMOnMachine: def.LLMOnMachine,
 		})
 		if err != nil {
 			return err
@@ -87,6 +89,8 @@ func loadAgentsFromDB(ctx context.Context, st catalogSource) ([]activity.AgentCa
 			Description: a.Description,
 			Skills:      a.Skills,
 			Tools:       a.Tools,
+			// Where its turns call their model: read at a turn's start.
+			LLMOnMachine: a.LLMOn(),
 		}
 	}
 	return catalog, nil

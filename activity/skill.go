@@ -75,6 +75,9 @@ type AgentCatalogEntry struct {
 	Description string   `json:"description"`
 	Skills      []string `json:"skills"`
 	Tools       []string `json:"tools"` // Allowed tool name globs; empty = no tool, "*" = all
+	// LLMOnMachine is where its turns call their model
+	// (store.LLMOnMachine*); empty = never.
+	LLMOnMachine string `json:"llm_on_machine,omitempty"`
 }
 
 // SkillActivities serves an agent's prompt and name to the workflows, built
@@ -108,22 +111,29 @@ type LoadSkillsForAgentOutput struct {
 	// Name is the agent's name, which signs its messages; its ID when the
 	// catalog does not know it.
 	Name string `json:"name,omitempty"`
+	// LLMOnMachine is where its turns call their model
+	// (store.LLMOnMachine*); empty = never, the server's key.
+	LLMOnMachine string `json:"llm_on_machine,omitempty"`
 }
 
-// LoadSkillsForAgent returns the agent's name and its prompt for the tools its
-// allowlist grants.
+// LoadSkillsForAgent returns the agent's name, its prompt for the tools its
+// allowlist grants, and where its turns call their model.
 func (a *SkillActivities) LoadSkillsForAgent(ctx context.Context, input LoadSkillsForAgentInput) (LoadSkillsForAgentOutput, error) {
 	var tools []string
 	for name := range a.catalog.AllowedTools(input.AgentID).Resolutions {
 		tools = append(tools, name)
 	}
-	name := input.AgentID
+	name, onMachine := input.AgentID, ""
 	for _, e := range a.catalog.Agents() {
-		if e.ID == input.AgentID && e.Name != "" {
+		if e.ID != input.AgentID {
+			continue
+		}
+		if e.Name != "" {
 			name = e.Name
 		}
+		onMachine = e.LLMOnMachine
 	}
-	return LoadSkillsForAgentOutput{SystemPrompt: a.Prompts.AgentPrompt(input.AgentID, tools), Name: name}, nil
+	return LoadSkillsForAgentOutput{SystemPrompt: a.Prompts.AgentPrompt(input.AgentID, tools), Name: name, LLMOnMachine: onMachine}, nil
 }
 
 // matchSkills returns the skills named in names, in order, skipping unknown ones.
