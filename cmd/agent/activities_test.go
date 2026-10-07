@@ -122,6 +122,7 @@ func TestWorkerActivities_AreTheActivities(t *testing.T) {
 		"SetMachineAside",
 		"SummarizeConversation",
 		"SummarizeForkReport",
+		"TaskWoken",
 	}
 	var got []string
 	for _, act := range testActivities() {

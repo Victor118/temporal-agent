@@ -101,6 +101,10 @@ type Store interface {
 	AddTaskFollowUp(ctx context.Context, sessionID, participant, id string, f TaskFollowUp, max int) error
 	SetTaskCancelledBy(ctx context.Context, id, name string) error
 	EndTask(ctx context.Context, id, by, state string, build func(BackgroundTask) Message) (TaskEnding, error)
+	ListTasksToWake(ctx context.Context, endedBefore time.Time) ([]BackgroundTask, error)
+	ListTasksToCancel(ctx context.Context) ([]BackgroundTask, error)
+	SetTaskWoken(ctx context.Context, id string) error
+	SetTaskCancelSent(ctx context.Context, id string) error
 
 	// Task logs (scheduled tasks)
 	SaveTaskLog(ctx context.Context, log TaskLog) error

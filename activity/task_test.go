@@ -68,6 +68,15 @@ func (m *memTasks) GetTask(_ context.Context, id string) (*store.BackgroundTask,
 	c := *t
 	return &c, nil
 }
+func (m *memTasks) SetTaskWoken(_ context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if t, ok := m.tasks[id]; ok {
+		now := time.Now()
+		t.WokenAt = &now
+	}
+	return nil
+}
 func (m *memTasks) EndTask(_ context.Context, id, by, state string, build func(store.BackgroundTask) store.Message) (store.TaskEnding, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -174,7 +183,8 @@ func TestPostTaskResult_FirstWriterWins(t *testing.T) {
 	}
 	a := &TaskActivities{Store: st}
 	out, err := a.PostTaskResult(context.Background(), PostTaskResultInput{TaskID: task.ID, State: store.BackgroundDone, Content: "late"})
-	if err != nil || out.Wake || len(st.messages) != 1 {
+	// Nothing to do: no message to tell of, nobody to wake.
+	if err != nil || out.Wake || out.MessageID != 0 || len(st.messages) != 1 {
 		t.Errorf("after the sweep: %+v %v, %d messages", out, err, len(st.messages))
 	}
 

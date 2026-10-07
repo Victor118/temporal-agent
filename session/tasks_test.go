@@ -188,3 +188,73 @@ func TestSweepTasks(t *testing.T) {
 		t.Errorf("swept twice: %d messages, %d wakes", len(st.appended), len(tc.signalStarts))
 	}
 }
+
+// The sweep ends a closed task a member stopped as cancelled, waking
+// nobody; tells again a stop its workflow never heard; leaves a task whose
+// workflow Temporal knows not while its start may still come.
+func TestSweepTasks_StoppedAndLate(t *testing.T) {
+	stopped, untold, recent := bgTask("c1", bob.ID), bgTask("c2", bob.ID), bgTask("c3", bob.ID)
+	sent := time.Now().Add(-time.Hour)
+	stopped.CancelledBy, stopped.CancelSentAt = "Alice", &sent
+	untold.CancelledBy = "Bob"
+	recent.StartedAt = time.Now().Add(-10 * time.Minute)
+	st := &memStore{session: &store.Session{SessionID: sid, CreatedBy: "u-alice", AgentID: "jarvis"},
+		tasks: []store.BackgroundTask{stopped, untold, recent}}
+	tc := &fakeTemporal{
+		byType:           map[string][]string{"BackgroundTaskWorkflow": {untold.ID}},
+		closed:           map[string]enumspb.WorkflowExecutionStatus{stopped.ID: enumspb.WORKFLOW_EXECUTION_STATUS_TERMINATED},
+		describeNotFound: []string{recent.ID},
+	}
+	s := newTest(st, tc)
+	s.SweepTasks(context.Background())
+	if st.tasks[0].State != store.BackgroundCancelled || len(st.appended) != 1 || st.appended[0].Task.CancelledBy != "Alice" || len(tc.signalStarts) != 0 {
+		t.Errorf("stopped: %+v, posted %+v, woken %d", st.tasks[0], st.appended, len(tc.signalStarts))
+	}
+	if !slices.Contains(tc.cancelled, untold.ID) || st.tasks[1].CancelSentAt == nil || slices.Contains(tc.cancelled, stopped.ID) {
+		t.Errorf("cancels %v, untold %+v", tc.cancelled, st.tasks[1])
+	}
+	if st.tasks[2].State != store.BackgroundRunning {
+		t.Errorf("a task whose start may still come was ended: %+v", st.tasks[2])
+	}
+}
+
+// An ended task whose participant was never woken (its waker stopped in
+// between) is woken by the sweep, once it is old enough; a failed wake is
+// tried again, then given up: its turn ended saying so, its channel told.
+func TestSweepTasks_WakesAgain(t *testing.T) {
+	ended := func(call string, ago time.Duration) store.BackgroundTask {
+		task := bgTask(call, bob.ID)
+		at := time.Now().Add(-ago)
+		task.State, task.EndedAt, task.ResultMessageID, task.Channel, task.ChannelID = store.BackgroundDone, &at, 9, "", ""
+		return task
+	}
+	fresh, late, old := ended("c1", time.Minute), ended("c2", 10*time.Minute), ended("c3", time.Hour)
+	st := &memStore{session: &store.Session{SessionID: sid, CreatedBy: "u-alice", AgentID: "jarvis"}, tasks: []store.BackgroundTask{fresh, late, old}}
+	tc := &fakeTemporal{}
+	s := newTest(st, tc)
+	s.SweepTasks(context.Background())
+	if len(tc.signalStarts) != 2 || st.tasks[0].WokenAt != nil || st.tasks[1].WokenAt == nil || st.tasks[2].WokenAt == nil {
+		t.Fatalf("woken %d: %+v", len(tc.signalStarts), st.tasks)
+	}
+
+	// Temporal refuses: tried again later, given up past the bound.
+	late.WokenAt, old.WokenAt = nil, nil
+	hub := &nopHub{}
+	st = &memStore{session: &store.Session{SessionID: sid, CreatedBy: "u-alice", AgentID: "jarvis"}, tasks: []store.BackgroundTask{late, old}}
+	tc = &fakeTemporal{startErr: errors.New("temporal away")}
+	s = New(st, tc, hub, Config{WorkflowQueue: "agent"})
+	s.SweepTasks(context.Background())
+	if st.tasks[0].WokenAt != nil || st.tasks[1].WokenAt == nil {
+		t.Errorf("after a failed wake: %+v", st.tasks)
+	}
+	if len(st.appended) != 1 || store.TurnEndError(st.appended[0]) == "" {
+		t.Errorf("the given-up turn's end: %+v", st.appended)
+	}
+	told := false
+	for _, ev := range hub.on(sid) {
+		told = told || (ev.Type == activity.EventMessage && strings.Contains(string(ev.Data), "Error processing message"))
+	}
+	if !told {
+		t.Error("the channel was not told")
+	}
+}

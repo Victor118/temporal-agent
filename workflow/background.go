@@ -67,10 +67,19 @@ func BackgroundTaskWorkflow(ctx workflow.Context, in BackgroundTaskInput) error 
 	var raw json.RawMessage
 	err := workflow.ExecuteChildWorkflow(childCtx, in.Workflow, in.Input).Get(ctx, &raw)
 
+	// The tool has ended: whatever comes now (a member's stop) changes no
+	// more than the state its end says. The end is posted, told and woken
+	// from a disconnected context: a cancellation arriving meanwhile would
+	// abandon an activity half way, its message written (done) and nobody
+	// woken.
+	cancelled := ctx.Err() != nil
+	ctx, cancel := workflow.NewDisconnectedContext(ctx)
+	defer cancel()
+
 	end := activity.PostTaskResultInput{TaskID: taskID, State: store.BackgroundDone}
 	isError := false
 	switch {
-	case ctx.Err() != nil:
+	case cancelled:
 		end.State = store.BackgroundCancelled
 	case err != nil:
 		end.Content, isError = "The task failed: "+childFailure(err), true
@@ -84,11 +93,6 @@ func BackgroundTaskWorkflow(ctx workflow.Context, in BackgroundTaskInput) error 
 	}
 	end.Content = truncateTo(end.Content, maxTaskResultBytes)
 
-	if ctx.Err() != nil {
-		var cancel workflow.CancelFunc
-		ctx, cancel = workflow.NewDisconnectedContext(ctx)
-		defer cancel()
-	}
 	var taskAct *activity.TaskActivities
 	var out activity.PostTaskResultOutput
 	if err := workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, storeStepOptions), taskAct.PostTaskResult, end).Get(ctx, &out); err != nil {
@@ -109,6 +113,11 @@ func BackgroundTaskWorkflow(ctx workflow.Context, in BackgroundTaskInput) error 
 	}
 	if out.Wake {
 		wakeParticipant(ctx, in.AgentID, out)
+		// Done with, delivered or given up: the sweep wakes again a task
+		// whose wake was never said done.
+		if err := workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, storeStepOptions), taskAct.TaskWoken, taskID).Get(ctx, nil); err != nil {
+			logger.Warn("Background task's wake not recorded: the sweep will wake again", "task", taskID, "error", err)
+		}
 	}
 	return nil
 }
@@ -172,10 +181,11 @@ func childFailure(err error) string {
 }
 
 // backgroundStart is a background task the turn launches: what it records,
-// and the workflow it starts.
+// the workflow it starts, and the context it is started on (launch).
 type backgroundStart struct {
 	task  store.BackgroundTask
 	input BackgroundTaskInput
+	ctx   workflow.Context
 }
 
 // newBackgroundStart is the background task a turn's call launches:
@@ -204,19 +214,27 @@ func newBackgroundStart(input AgentWorkflowInput, tc provider.ToolCallInfo, tool
 	}, nil
 }
 
-// launch records the task, then starts its workflow, abandoned by the turn:
-// the future settles once it started. A refusal (the cap) is for the model.
-func (b backgroundStart) launch(ctx workflow.Context) (future workflow.Future, refused string) {
+// launch records the task, then starts its workflow, abandoned by the turn,
+// from a context disconnected from the turn's: a stop of the turn (its
+// context cancelled) would otherwise ask Temporal to cancel the child as
+// well, which ABANDON does not prevent, only the close of the parent. The
+// record too: a task recorded always gets its workflow, a stop of the turn
+// meanwhile notwithstanding. The future settles once it started. A refusal
+// (the cap) is for the model.
+func (b *backgroundStart) launch(ctx workflow.Context) (future workflow.Future, refused string) {
+	// Never cancelled: the task is cancelled on its own (StopTask), and the
+	// turn closing abandons it.
+	b.ctx, _ = workflow.NewDisconnectedContext(ctx)
 	var taskAct *activity.TaskActivities
 	var reg activity.RegisterTaskOutput
-	if err := workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, storeStepOptions), taskAct.RegisterTask,
-		activity.RegisterTaskInput{Task: b.task}).Get(ctx, &reg); err != nil {
+	if err := workflow.ExecuteActivity(workflow.WithActivityOptions(b.ctx, storeStepOptions), taskAct.RegisterTask,
+		activity.RegisterTaskInput{Task: b.task}).Get(b.ctx, &reg); err != nil {
 		return nil, "The background task could not be recorded: " + failureText(err)
 	}
 	if reg.Refused != "" {
 		return nil, reg.Refused
 	}
-	child := workflow.ExecuteChildWorkflow(workflow.WithChildOptions(ctx, workflow.ChildWorkflowOptions{
+	child := workflow.ExecuteChildWorkflow(workflow.WithChildOptions(b.ctx, workflow.ChildWorkflowOptions{
 		WorkflowID: b.task.ID,
 		// It runs where the participants run, and outlives the turn: the
 		// default policy would terminate it as soon as the turn closes.
@@ -228,19 +246,19 @@ func (b backgroundStart) launch(ctx workflow.Context) (future workflow.Future, r
 	return child.GetChildWorkflowExecution(), ""
 }
 
-// started is what the model reads of a task launched, or why it did not
-// start: the row is then dropped.
-func (b backgroundStart) started(ctx workflow.Context, err error) (string, bool) {
-	if err != nil {
-		dctx, cancel := workflow.NewDisconnectedContext(ctx)
-		defer cancel()
+// started waits for the start of a task launched, on the context it was
+// started on (a stop of the turn meanwhile must not read as a failed start,
+// and drop a task that runs), and says what the model reads of it, or why
+// it did not start: the row is then dropped.
+func (b *backgroundStart) started(ctx workflow.Context, future workflow.Future) (string, bool) {
+	if err := future.Get(b.ctx, nil); err != nil {
 		var taskAct *activity.TaskActivities
-		if derr := workflow.ExecuteActivity(workflow.WithActivityOptions(dctx, storeStepOptions), taskAct.DropTask, b.task.ID).Get(dctx, nil); derr != nil {
+		if derr := workflow.ExecuteActivity(workflow.WithActivityOptions(b.ctx, storeStepOptions), taskAct.DropTask, b.task.ID).Get(b.ctx, nil); derr != nil {
 			workflow.GetLogger(ctx).Error("A background task that did not start was not dropped: the sweep will end it", "task", b.task.ID, "error", derr)
 		}
 		return "The background task could not start: " + failureText(err), true
 	}
-	notifySession(ctx, b.task.SessionID, EventTaskStarted, map[string]string{"task": b.task.ID, "agent_id": b.task.Participant})
+	notifySession(b.ctx, b.task.SessionID, EventTaskStarted, map[string]string{"task": b.task.ID, "agent_id": b.task.Participant})
 	return fmt.Sprintf("Background task started, ID %s. Its result will reach you in a message when it ends, in a new turn: "+
 		"do not wait for it, nor start it again. Tell the user it runs.", b.task.ID), false
 }

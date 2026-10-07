@@ -29,6 +29,7 @@ type TaskStore interface {
 	DropTask(ctx context.Context, id string) error
 	GetTask(ctx context.Context, id string) (*store.BackgroundTask, error)
 	EndTask(ctx context.Context, id, by, state string, build func(store.BackgroundTask) store.Message) (store.TaskEnding, error)
+	SetTaskWoken(ctx context.Context, id string) error
 }
 
 // TaskPublisher publishes a task's whole result as a file of its call
@@ -85,11 +86,14 @@ type PostTaskResultInput struct {
 type PostTaskResultOutput struct {
 	// Gone: the task is no more, its session deleted: nothing was written,
 	// nobody is woken.
-	Gone      bool  `json:"gone,omitempty"`
+	Gone bool `json:"gone,omitempty"`
+	// MessageID is its end's message, when this task ended itself (now or
+	// in an earlier attempt); 0 when the sweep did: it told the members
+	// and woke the participant, nothing is left to do.
 	MessageID int64 `json:"message_id,omitempty"`
 	// Wake: this task ended itself, not cancelled: its participant is to
-	// be woken by its message. A task the sweep ended first, or a
-	// cancelled one, wakes nobody.
+	// be woken by its message (then TaskWoken). A cancelled one wakes
+	// nobody.
 	Wake bool `json:"wake,omitempty"`
 	// The task's, for the wake and the events.
 	SessionID   string `json:"session_id,omitempty"`
@@ -126,7 +130,7 @@ func (a *TaskActivities) PostTaskResult(ctx context.Context, in PostTaskResultIn
 		return PostTaskResultOutput{Gone: true}, nil
 	}
 	if t.State != store.BackgroundRunning && t.EndedBy != store.TaskEndedByTask {
-		return PostTaskResultOutput{MessageID: t.ResultMessageID, SessionID: t.SessionID, Participant: t.Participant}, nil
+		return PostTaskResultOutput{}, nil // the sweep ended it, told and woke
 	}
 	content, file := in.Content, (*tool.FileRef)(nil)
 	if len(content) > MaxTaskMessageBytes && in.State != store.BackgroundCancelled {
@@ -153,14 +157,14 @@ func (a *TaskActivities) PostTaskResult(ctx context.Context, in PostTaskResultIn
 	if end.Gone {
 		return PostTaskResultOutput{Gone: true}, nil
 	}
+	if !end.Mine {
+		return PostTaskResultOutput{}, nil // the sweep came first
+	}
 	ended := end.Task
 	out := PostTaskResultOutput{
 		MessageID: end.MessageID, SessionID: ended.SessionID, Participant: ended.Participant, TurnKey: ended.TurnKey,
 		UserID: ended.UserID, UserName: ended.UserName, Channel: ended.Channel, ChannelID: ended.ChannelID,
-		Wake: end.Mine && ended.State != store.BackgroundCancelled,
-	}
-	if end.Mine {
-		out.File = file
+		Wake: ended.State != store.BackgroundCancelled, File: file,
 	}
 	if !out.Wake {
 		return out, nil
@@ -176,6 +180,13 @@ func (a *TaskActivities) PostTaskResult(ctx context.Context, in PostTaskResultIn
 	out.SessionChannel, out.SessionChannelID = sess.Channel, sess.ChannelID
 	out.SignReply = TaskSignsReply(*sess, ended.Participant)
 	return out, nil
+}
+
+// TaskWoken records that the wake of a task's participant is done with:
+// delivered, or given up with an end of the turn saying so. Until then,
+// the sweep wakes it again.
+func (a *TaskActivities) TaskWoken(ctx context.Context, id string) error {
+	return a.Store.SetTaskWoken(ctx, id)
 }
 
 // TaskSignsReply tells whether the turn a task's end wakes signs its answer

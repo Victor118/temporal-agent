@@ -7,12 +7,14 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
+	"github.com/victor/temporal-agent/activity"
 	"github.com/victor/temporal-agent/auth"
 	"github.com/victor/temporal-agent/config"
 	"github.com/victor/temporal-agent/gateway"
 	"github.com/victor/temporal-agent/machine"
 	"github.com/victor/temporal-agent/session"
 	"github.com/victor/temporal-agent/sse"
+	"github.com/victor/temporal-agent/telegram"
 	"github.com/victor/temporal-agent/web/chat"
 )
 
@@ -53,11 +55,17 @@ type server struct {
 
 // newServer wires the adapters over one session service.
 func newServer(cfg *config.Config, st serverStore, tc session.Temporal, hub *sse.Hub, authSvc *auth.Service, adminUI http.Handler) *server {
+	// What the server tells a session itself goes out as a worker's would.
+	channels := map[string]activity.Notifier{activity.ChannelWeb: activity.HubNotifier{Hub: hub}}
+	if cfg.TelegramBotToken != "" {
+		channels[telegram.Channel] = &telegram.Notifier{Client: telegram.NewClient(cfg.TelegramBotToken)}
+	}
 	sessions := session.New(st, tc, hub, session.Config{
 		Namespace:      cfg.TemporalNamespace,
 		WorkflowQueue:  cfg.WorkflowQueue,
 		DefaultAgentID: cfg.DefaultAgentID,
 		SummaryModel:   cfg.SummaryModel,
+		Channels:       channels,
 	})
 	// Every event the hub publishes, from the workers or from here, goes
 	// through the service first: the turn events feed what it shows.

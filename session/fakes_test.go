@@ -76,6 +76,55 @@ func (m *memStore) SetTaskCancelledBy(_ context.Context, id, name string) error 
 		m.cancelledBy = map[string]string{}
 	}
 	m.cancelledBy[id] = name
+	for i := range m.tasks {
+		if m.tasks[i].ID == id {
+			m.tasks[i].CancelledBy = name
+		}
+	}
+	return nil
+}
+func (m *memStore) ListTasksToWake(_ context.Context, endedBefore time.Time) ([]store.BackgroundTask, error) {
+	m.tasksMu.Lock()
+	defer m.tasksMu.Unlock()
+	var out []store.BackgroundTask
+	for _, t := range m.tasks {
+		if (t.State == store.BackgroundDone || t.State == store.BackgroundFailed) && t.WokenAt == nil && t.EndedAt != nil && t.EndedAt.Before(endedBefore) {
+			out = append(out, t)
+		}
+	}
+	return out, nil
+}
+func (m *memStore) ListTasksToCancel(context.Context) ([]store.BackgroundTask, error) {
+	m.tasksMu.Lock()
+	defer m.tasksMu.Unlock()
+	var out []store.BackgroundTask
+	for _, t := range m.tasks {
+		if t.State == store.BackgroundRunning && t.CancelledBy != "" && t.CancelSentAt == nil {
+			out = append(out, t)
+		}
+	}
+	return out, nil
+}
+func (m *memStore) SetTaskWoken(_ context.Context, id string) error {
+	m.tasksMu.Lock()
+	defer m.tasksMu.Unlock()
+	for i := range m.tasks {
+		if m.tasks[i].ID == id {
+			now := time.Now()
+			m.tasks[i].WokenAt = &now
+		}
+	}
+	return nil
+}
+func (m *memStore) SetTaskCancelSent(_ context.Context, id string) error {
+	m.tasksMu.Lock()
+	defer m.tasksMu.Unlock()
+	for i := range m.tasks {
+		if m.tasks[i].ID == id {
+			now := time.Now()
+			m.tasks[i].CancelSentAt = &now
+		}
+	}
 	return nil
 }
 func (m *memStore) ListTasksRunningSince(_ context.Context, before time.Time) ([]store.BackgroundTask, error) {
@@ -102,6 +151,9 @@ func (m *memStore) EndTask(_ context.Context, id, by, state string, build func(s
 		}
 		now := time.Now()
 		t.State, t.EndedAt, t.EndedBy = state, &now, by
+		if state != store.BackgroundCancelled {
+			t.CancelledBy = ""
+		}
 		m.appended = append(m.appended, build(*t))
 		t.ResultMessageID = int64(len(m.appended))
 		return store.TaskEnding{Task: *t, MessageID: t.ResultMessageID, Mine: true}, nil

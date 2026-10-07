@@ -429,7 +429,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 			// This call's context: the run's, and the call's own ID, under
 			// the call that launched this run if it is a sub-agent.
 			cc := call
-			cc.CallID = input.CallPrefix + tc.ID
+			cc.CallID = input.CallPrefix + callKey(tc.ID, i, j)
 			// The model may ask a tool that allows it to run in the
 			// background: the field is the dispatch's, never the tool's.
 			toolInput := tc.Input
@@ -529,7 +529,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 				content = d.unavailable
 				isError = true
 			} else if d.background != nil {
-				content, isError = d.background.started(ctx, d.future.Get(ctx, nil))
+				content, isError = d.background.started(ctx, d.future)
 			} else if d.kind == tool.ToolKindWorkflow {
 				var result json.RawMessage
 				if err := d.future.Get(ctx, &result); err != nil {

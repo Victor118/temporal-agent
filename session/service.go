@@ -74,6 +74,10 @@ type Store interface {
 	SetTaskCancelledBy(ctx context.Context, id, name string) error
 	ListTasksRunningSince(ctx context.Context, before time.Time) ([]store.BackgroundTask, error)
 	EndTask(ctx context.Context, id, by, state string, build func(store.BackgroundTask) store.Message) (store.TaskEnding, error)
+	ListTasksToWake(ctx context.Context, endedBefore time.Time) ([]store.BackgroundTask, error)
+	ListTasksToCancel(ctx context.Context) ([]store.BackgroundTask, error)
+	SetTaskWoken(ctx context.Context, id string) error
+	SetTaskCancelSent(ctx context.Context, id string) error
 }
 
 // Temporal is what the service needs of the Temporal client: start, signal,
@@ -100,6 +104,10 @@ type Config struct {
 	WorkflowQueue  string // where the participants and fork workflows run
 	DefaultAgentID string // the agent of a session that names none
 	SummaryModel   string // writes a fork's summary; empty = the workers' default
+	// Channels are the channels' notifiers, by name, for what the server
+	// tells a session itself (a background task's wake given up by the
+	// sweep); the web is the hub when absent.
+	Channels map[string]activity.Notifier
 }
 
 // Service applies the rules of a conversation. Build it with New.

@@ -92,6 +92,14 @@ func (f *routeStore) SetTaskCancelledBy(_ context.Context, id, name string) erro
 	f.cancelledBy[id] = name
 	return nil
 }
+func (f *routeStore) ListTasksToWake(context.Context, time.Time) ([]store.BackgroundTask, error) {
+	return nil, nil
+}
+func (f *routeStore) ListTasksToCancel(context.Context) ([]store.BackgroundTask, error) {
+	return nil, nil
+}
+func (f *routeStore) SetTaskWoken(context.Context, string) error      { return nil }
+func (f *routeStore) SetTaskCancelSent(context.Context, string) error { return nil }
 func (f *routeStore) ListTasksRunningSince(context.Context, time.Time) ([]store.BackgroundTask, error) {
 	return nil, nil
 }

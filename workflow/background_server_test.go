@@ -144,6 +144,7 @@ func TestBackgroundTask_WakesTheParticipant_RealServer(t *testing.T) {
 		return activity.PostTaskResultOutput{MessageID: taskMessageBase + i, Wake: true, SessionID: sessionID, Participant: "jarvis",
 			UserID: "u-smoke", UserName: "Smoke"}, nil
 	}, "PostTaskResult")
+	register(func(context.Context, string) error { return nil }, "TaskWoken")
 	w.RegisterActivity(&activity.RelayActivities{Client: c, Sessions: smokeSessions{}})
 	if err := w.Start(); err != nil {
 		t.Fatalf("worker: %v", err)

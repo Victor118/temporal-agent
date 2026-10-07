@@ -90,8 +90,29 @@ func (m *memTasks) EndTask(_ context.Context, id, by, state string, build func(s
 	}
 	now := time.Now()
 	t.State, t.EndedAt, t.EndedBy = state, &now, by
+	if state != store.BackgroundCancelled {
+		t.CancelledBy = ""
+	}
 	t.ResultMessageID = m.session.add(store.TaskResultKey(id), build(*t))
 	return store.TaskEnding{Task: *t, MessageID: t.ResultMessageID, Mine: true}, nil
+}
+
+func (m *memTasks) SetTaskWoken(_ context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if t, ok := m.tasks[id]; ok {
+		now := time.Now()
+		t.WokenAt = &now
+	}
+	return nil
+}
+
+// woken reports whether a task's wake was recorded done with.
+func (m *memTasks) woken(id string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	t, ok := m.tasks[id]
+	return ok && t.WokenAt != nil
 }
 
 // deleteSession deletes the session, and its tasks with it.
@@ -145,6 +166,7 @@ type taskEnv struct {
 	tasks    *memTasks
 	starts   *recordedStarts
 	files    *taskFiles
+	taskAct  *activity.TaskActivities // its Store may be replaced before run
 	mu       sync.Mutex
 	notified []activity.NotifyInput
 }
@@ -157,7 +179,8 @@ func newTaskEnv(t *testing.T, tool func(sdkworkflow.Context, json.RawMessage) (t
 	e := &taskEnv{env: suite.NewTestWorkflowEnvironment(), session: &memSession{memory: map[string]store.Memory{}}, starts: &recordedStarts{}, files: &taskFiles{}}
 	e.tasks = newMemTasks(e.session)
 	e.env.RegisterWorkflowWithOptions(tool, sdkworkflow.RegisterOptions{Name: "FakeToolWorkflow"})
-	e.env.RegisterActivity(&activity.TaskActivities{Store: e.tasks, Publisher: e.files})
+	e.taskAct = &activity.TaskActivities{Store: e.tasks, Publisher: e.files}
+	e.env.RegisterActivity(e.taskAct)
 	e.env.RegisterActivity(&activity.RelayActivities{Client: e.starts, Sessions: e.tasks})
 	turnAct := &activity.TurnActivities{Store: e.session}
 	e.env.RegisterActivityWithOptions(turnAct.EndTurn, sdkactivity.RegisterOptions{Name: "EndTurn"})
@@ -241,6 +264,62 @@ func TestBackgroundTask_PostsItsResultAndWakesItsParticipant(t *testing.T) {
 	if ev := e.events(EventTaskResult); len(ev) != 1 || !strings.Contains(string(ev[0].Event.Data), testTaskID) || ev[0].Channel != "" {
 		t.Errorf("task_result events %+v", ev)
 	}
+	if !e.tasks.woken(testTaskID) {
+		t.Error("the wake was not recorded: the sweep would wake again")
+	}
+}
+
+// The sweep ended the task first (its workflow was thought gone): the task
+// posts nothing, tells nothing, wakes nobody.
+func TestBackgroundTask_SweptFirstDoesNothing(t *testing.T) {
+	e := newTaskEnv(t, func(sdkworkflow.Context, json.RawMessage) (tool.Result, error) {
+		return tool.Result{Content: "the report"}, nil
+	})
+	if _, err := e.tasks.EndTask(context.Background(), testTaskID, store.TaskEndedBySweep, store.BackgroundFailed, func(t store.BackgroundTask) store.Message {
+		return activity.TaskResultMessage(t, "stopped without a result", nil)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	e.run()
+	if err := e.env.GetWorkflowError(); err != nil {
+		t.Fatal(err)
+	}
+	if len(e.taskResults()) != 1 || len(e.events(EventTaskResult)) != 0 || len(e.starts.all()) != 0 {
+		t.Errorf("results %d, task_result events %d, wakes %d", len(e.taskResults()), len(e.events(EventTaskResult)), len(e.starts.all()))
+	}
+}
+
+// A member's stop that comes once the tool has ended changes nothing: the
+// task ended done, its end is posted and its participant woken, from a
+// context the stop does not reach; the message names no canceller.
+func TestBackgroundTask_StopAfterTheToolStillWakes(t *testing.T) {
+	e := newTaskEnv(t, func(sdkworkflow.Context, json.RawMessage) (tool.Result, error) {
+		return tool.Result{Content: "the report"}, nil
+	})
+	e.tasks.tasks[testTaskID].CancelledBy = "Bob"
+	// The stop lands while the end is being written.
+	e.taskAct.Store = &cancellingTasks{memTasks: e.tasks, cancel: e.env.CancelWorkflow}
+	e.run()
+	results := e.taskResults()
+	if len(results) != 1 || results[0].Task.State != store.BackgroundDone || results[0].Task.CancelledBy != "" {
+		t.Fatalf("results %+v", results)
+	}
+	if len(e.starts.all()) != 1 || !e.tasks.woken(testTaskID) {
+		t.Errorf("wakes %d, recorded %v", len(e.starts.all()), e.tasks.woken(testTaskID))
+	}
+}
+
+// cancellingTasks cancels the task's workflow as its end is written.
+type cancellingTasks struct {
+	*memTasks
+	cancel func()
+	once   sync.Once
+}
+
+func (c *cancellingTasks) EndTask(ctx context.Context, id, by, state string, build func(store.BackgroundTask) store.Message) (store.TaskEnding, error) {
+	c.once.Do(c.cancel)
+	time.Sleep(300 * time.Millisecond) // for the cancellation to be handled
+	return c.memTasks.EndTask(ctx, id, by, state, build)
 }
 
 // A failed tool is a failed task: its message says why, and wakes its
@@ -359,6 +438,10 @@ type turnEnv struct {
 	launched []BackgroundTaskInput
 	children []json.RawMessage // inputs of SlowWorkflow
 	notified []activity.NotifyInput
+	// task and slow, when set, run instead of recording the task's
+	// workflow, and of answering SlowWorkflow at once.
+	task func(sdkworkflow.Context, BackgroundTaskInput) error
+	slow func(sdkworkflow.Context, json.RawMessage) (tool.Result, error)
 }
 
 func newTurnEnv(t *testing.T, calls ...provider.ToolCallInfo) *turnEnv {
@@ -385,16 +468,22 @@ func newTurnEnv(t *testing.T, calls ...provider.ToolCallInfo) *turnEnv {
 		e.notified = append(e.notified, in)
 		return nil
 	}, sdkactivity.RegisterOptions{Name: "NotifyStep"})
-	e.env.RegisterWorkflowWithOptions(func(_ sdkworkflow.Context, in BackgroundTaskInput) error {
+	e.env.RegisterWorkflowWithOptions(func(ctx sdkworkflow.Context, in BackgroundTaskInput) error {
 		e.mu.Lock()
-		defer e.mu.Unlock()
 		e.launched = append(e.launched, in)
+		e.mu.Unlock()
+		if e.task != nil {
+			return e.task(ctx, in)
+		}
 		return nil
 	}, sdkworkflow.RegisterOptions{Name: "BackgroundTaskWorkflow"})
-	e.env.RegisterWorkflowWithOptions(func(_ sdkworkflow.Context, in json.RawMessage) (tool.Result, error) {
+	e.env.RegisterWorkflowWithOptions(func(ctx sdkworkflow.Context, in json.RawMessage) (tool.Result, error) {
 		e.mu.Lock()
-		defer e.mu.Unlock()
 		e.children = append(e.children, in)
+		e.mu.Unlock()
+		if e.slow != nil {
+			return e.slow(ctx, in)
+		}
 		return tool.Result{Content: "slow result"}, nil
 	}, sdkworkflow.RegisterOptions{Name: "SlowWorkflow"})
 	return e
@@ -582,5 +671,59 @@ func TestParticipant_AnswersATaskResultInItsTurn(t *testing.T) {
 				t.Errorf("ends %v", ends)
 			}
 		})
+	}
+}
+
+// A stop of the turn that launched a task (stop-turn, clear: its context
+// cancelled) does not reach the task: it was started from a context the
+// turn's cancellation does not cancel, and outlives it.
+func TestAgentWorkflow_StopOfTheTurnSparesItsTask(t *testing.T) {
+	e := newTurnEnv(t,
+		provider.ToolCallInfo{ID: "c1", Name: "slow_tool", Input: json.RawMessage(`{"background":true}`)})
+	// The second step waits on a call in the foreground, an hour long: the
+	// stop comes then.
+	e.f.model.answer = answers(
+		provider.ChatResponse{ToolCalls: []provider.ToolCallInfo{{ID: "c1", Name: "slow_tool", Input: json.RawMessage(`{"background":true}`)}}},
+		provider.ChatResponse{ToolCalls: []provider.ToolCallInfo{{ID: "c2", Name: "slow_tool", Input: json.RawMessage(`{}`)}}},
+		done)
+	var mu sync.Mutex
+	ran, cancelled := false, false
+	e.task = func(ctx sdkworkflow.Context, _ BackgroundTaskInput) error {
+		mu.Lock()
+		ran = true
+		mu.Unlock()
+		err := sdkworkflow.Sleep(ctx, 2*time.Hour)
+		mu.Lock()
+		cancelled = err != nil || ctx.Err() != nil
+		mu.Unlock()
+		return nil
+	}
+	e.slow = func(ctx sdkworkflow.Context, _ json.RawMessage) (tool.Result, error) {
+		if err := sdkworkflow.Sleep(ctx, time.Hour); err != nil {
+			return tool.Result{}, err
+		}
+		return tool.Result{Content: "slow result"}, nil
+	}
+	e.env.RegisterDelayedCallback(e.env.CancelWorkflow, 10*time.Minute)
+	e.runTurn()
+	mu.Lock()
+	defer mu.Unlock()
+	if !ran || cancelled || len(e.tasks.registered) != 1 {
+		t.Errorf("task ran %v, cancelled with the turn %v, registered %d", ran, cancelled, len(e.tasks.registered))
+	}
+}
+
+// A call the model gave no ID: its task, and the files of a sub-agent it
+// launches, are named by its place in the turn, never by an empty ID.
+func TestAgentWorkflow_CallWithoutID(t *testing.T) {
+	e := newTurnEnv(t, provider.ToolCallInfo{Name: "agent_smith", Input: json.RawMessage(`{"task":"review","background":true}`)})
+	e.runTurn()
+	if len(e.launched) != 1 || len(e.tasks.registered) != 1 {
+		t.Fatalf("launched %+v", e.launched)
+	}
+	var sub AgentWorkflowInput
+	json.Unmarshal(e.launched[0].Input, &sub)
+	if r := e.tasks.registered[0]; r.ID != "s1:p:jarvis:m1:bg:0-0" || r.CallID != "0-0" || sub.CallPrefix != "0-0/" {
+		t.Errorf("task %s, call %q, prefix %q", r.ID, r.CallID, sub.CallPrefix)
 	}
 }

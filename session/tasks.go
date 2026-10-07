@@ -1,6 +1,7 @@
 package session
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -99,9 +100,12 @@ func (s *Service) StopTask(ctx context.Context, sess *store.Session, taskID stri
 	var gone *serviceerror.NotFound
 	switch {
 	case errors.As(err, &gone):
-		return ErrTaskOver // closed: the sweep ends its row
+		return ErrTaskOver // closed: the sweep ends its row, cancelled
 	case err != nil:
-		return fmt.Errorf("cancel the task: %w", err)
+		return fmt.Errorf("cancel the task (the sweep tries again): %w", err)
+	}
+	if err := s.store.SetTaskCancelSent(ctx, taskID); err != nil {
+		log.Printf("Session %s: record the cancel of %s (the sweep sends it again): %v", sess.SessionID, taskID, err)
 	}
 	log.Printf("Session %s: background task %s stopped by %s", sess.SessionID, taskID, me.ID)
 	return nil
@@ -141,12 +145,19 @@ func (s *Service) terminateTasks(ctx context.Context, sessionID, reason string) 
 	}
 }
 
-// Sweep timing: a task the sweep looks at has run this long at least, so
-// that a workflow just started, which the visibility may not list yet, is
-// left alone.
+// Sweep timing. A task the sweep may end has run taskSweepAge at least:
+// its workflow, just started, may not be listed yet. One its workflow
+// Temporal knows not is ended only past taskStartGrace: the turn records
+// it before starting the workflow, and that start may wait for a worker.
+// An ended task's wake is the sweep's again past taskWakeGrace (its own
+// workflow wakes it at once, and retries a minute), and given up past
+// taskWakeGiveUp, its turn ended saying so.
 const (
 	taskSweepEvery = time.Minute
 	taskSweepAge   = 5 * time.Minute
+	taskStartGrace = 15 * time.Minute
+	taskWakeGrace  = 5 * time.Minute
+	taskWakeGiveUp = 30 * time.Minute
 	taskSweepLoad  = 30 * time.Second
 )
 
@@ -170,16 +181,60 @@ func (s *Service) RunTaskSweep(ctx context.Context) {
 	}
 }
 
-// SweepTasks ends the background tasks whose workflow closed without
-// ending them: terminated by an admin, out of time, its end not written.
-// Without it, such a task would count for ever against its participant's
-// cap, and in its prompt. The tasks running for taskSweepAge at least, in
-// the store, are crossed with the task workflows the visibility lists
-// running; one it does not list is described, and ended if closed or
-// unknown: failed, its message posted, its participant woken. A task its
-// workflow ends meanwhile is not ended twice (store.EndTask: the first
-// writer wins).
+// SweepTasks catches up with what the background tasks left undone:
+//   - a stop recorded whose workflow was not told (CancelWorkflow failed):
+//     told again;
+//   - a task whose workflow closed without ending it (terminated by an
+//     admin, out of time, its end not written): ended, failed (cancelled
+//     if a member stopped it), its message posted, its participant woken
+//     unless cancelled. Without it, such a task would count for ever
+//     against its participant's cap, and in its prompt. The tasks running
+//     for taskSweepAge at least, in the store, are crossed with the task
+//     workflows the visibility lists running; one it does not list is
+//     described, and ended if closed, or unknown to Temporal past
+//     taskStartGrace. A task its workflow ends meanwhile is not ended
+//     twice (store.EndTask: the first writer wins);
+//   - an ended task whose participant was never woken (the waker stopped
+//     between the end and the signal): woken again, CheckTurn
+//     deduplicating.
 func (s *Service) SweepTasks(ctx context.Context) {
+	s.resendCancels(ctx)
+	s.endClosedTasks(ctx)
+	late, err := s.store.ListTasksToWake(ctx, time.Now().Add(-taskWakeGrace))
+	if err != nil {
+		log.Printf("Background tasks sweep: list those to wake: %v", err)
+		return
+	}
+	for _, t := range late {
+		s.wakeTask(ctx, t)
+	}
+}
+
+// resendCancels tells again the workflows of the tasks a member stopped
+// that were not told.
+func (s *Service) resendCancels(ctx context.Context) {
+	stopped, err := s.store.ListTasksToCancel(ctx)
+	if err != nil {
+		log.Printf("Background tasks sweep: list those stopped: %v", err)
+		return
+	}
+	for _, t := range stopped {
+		err := s.temporal.CancelWorkflow(ctx, t.ID, "")
+		var gone *serviceerror.NotFound
+		switch {
+		case errors.As(err, &gone): // closed: ended below, cancelled
+		case err != nil:
+			log.Printf("Background tasks sweep: cancel %s: %v", t.ID, err)
+		default:
+			if err := s.store.SetTaskCancelSent(ctx, t.ID); err != nil {
+				log.Printf("Background tasks sweep: record the cancel of %s: %v", t.ID, err)
+			}
+		}
+	}
+}
+
+// endClosedTasks ends the tasks whose workflow closed without ending them.
+func (s *Service) endClosedTasks(ctx context.Context) {
 	rows, err := s.store.ListTasksRunningSince(ctx, time.Now().Add(-taskSweepAge))
 	if err != nil {
 		log.Printf("Background tasks sweep: list: %v", err)
@@ -202,24 +257,25 @@ func (s *Service) SweepTasks(ctx context.Context) {
 		running[e.Execution.WorkflowId] = true
 	}
 	for _, t := range rows {
-		if running[t.ID] || !s.taskClosed(ctx, t.ID) {
+		if running[t.ID] || !s.taskClosed(ctx, t) {
 			continue
 		}
 		s.endSwept(ctx, t)
 	}
 }
 
-// taskClosed reports whether a task's workflow is closed, or unknown to
-// Temporal: Temporal said so. In doubt (it does not answer), false.
-func (s *Service) taskClosed(ctx context.Context, id string) bool {
-	desc, err := s.temporal.DescribeWorkflowExecution(ctx, id, "")
+// taskClosed reports whether a task's workflow is closed: Temporal says so,
+// or knows it not and the task was recorded long enough ago for its start
+// to have happened. In doubt (Temporal does not answer), false.
+func (s *Service) taskClosed(ctx context.Context, t store.BackgroundTask) bool {
+	desc, err := s.temporal.DescribeWorkflowExecution(ctx, t.ID, "")
 	var gone *serviceerror.NotFound
 	switch {
 	case errors.As(err, &gone):
-		return true
+		return time.Since(t.StartedAt) > taskStartGrace
 	case err != nil || desc.WorkflowExecutionInfo == nil:
 		if err != nil {
-			log.Printf("Background tasks sweep: describe %s: %v", id, err)
+			log.Printf("Background tasks sweep: describe %s: %v", t.ID, err)
 		}
 		return false
 	}
@@ -227,10 +283,15 @@ func (s *Service) taskClosed(ctx context.Context, id string) bool {
 }
 
 // endSwept ends a task the sweep found closed, and wakes its participant,
-// unless its workflow ended it meanwhile.
+// unless a member stopped it (it ends cancelled, waking nobody) or its
+// workflow ended it meanwhile.
 func (s *Service) endSwept(ctx context.Context, t store.BackgroundTask) {
-	end, err := s.store.EndTask(ctx, t.ID, store.TaskEndedBySweep, store.BackgroundFailed, func(t store.BackgroundTask) store.Message {
-		return activity.TaskResultMessage(t, sweptReason, nil)
+	state, content := store.BackgroundFailed, sweptReason
+	if t.CancelledBy != "" {
+		state, content = store.BackgroundCancelled, ""
+	}
+	end, err := s.store.EndTask(ctx, t.ID, store.TaskEndedBySweep, state, func(t store.BackgroundTask) store.Message {
+		return activity.TaskResultMessage(t, content, nil)
 	})
 	switch {
 	case err != nil:
@@ -239,29 +300,81 @@ func (s *Service) endSwept(ctx context.Context, t store.BackgroundTask) {
 	case end.Gone || !end.Mine:
 		return
 	}
-	log.Printf("Background tasks sweep: task %s closed without ending: ended as failed", t.ID)
+	log.Printf("Background tasks sweep: task %s closed without ending: ended %s", t.ID, state)
 	data, _ := json.Marshal(map[string]string{"type": workflow.EventTaskResult, "task": t.ID, "agent_id": t.Participant, "message_id": fmt.Sprint(end.MessageID)})
 	s.hub.Publish(t.SessionID, activity.SSEEvent{Type: workflow.EventTaskResult, Data: data})
+	if state != store.BackgroundCancelled {
+		s.wakeTask(ctx, end.Task)
+	}
+}
+
+// wakeTask delivers an ended task's message to its participant, as its
+// workflow does: the session read first (gone: nobody to wake), a
+// SignalWithStart, its wake then recorded. A failure is tried again at the
+// next sweep, and given up past taskWakeGiveUp: its message gets an end
+// under the turn that would have answered it, so that no late delivery
+// answers it, and the launching turn's channel is told.
+func (s *Service) wakeTask(ctx context.Context, t store.BackgroundTask) {
 	sess, err := s.store.GetSession(ctx, t.SessionID)
 	if err != nil || sess == nil {
+		if err != nil {
+			log.Printf("Background tasks sweep: read the session of %s: %v", t.ID, err)
+		}
 		return
 	}
+	sign := activity.TaskSignsReply(*sess, t.Participant)
 	msg := workflow.ParticipantMessage{
-		MessageID: end.MessageID, UserID: t.UserID, UserName: t.UserName,
-		SignReply: activity.TaskSignsReply(*sess, t.Participant), Channel: t.Channel, ChannelID: t.ChannelID,
+		MessageID: t.ResultMessageID, UserID: t.UserID, UserName: t.UserName,
+		SignReply: sign, Channel: t.Channel, ChannelID: t.ChannelID,
 	}
 	id := workflow.ParticipantWorkflowID(t.SessionID, t.Participant)
-	if _, err := s.temporal.SignalWithStartWorkflow(ctx, id, workflow.SignalMessage, msg, client.StartWorkflowOptions{
+	_, err = s.temporal.SignalWithStartWorkflow(ctx, id, workflow.SignalMessage, msg, client.StartWorkflowOptions{
 		ID:        id,
 		TaskQueue: s.cfg.WorkflowQueue,
 	}, workflow.ParticipantWorkflow, workflow.ParticipantInput{
 		SessionID: t.SessionID, AgentID: t.Participant, Channel: sess.Channel, ChannelID: sess.ChannelID,
-	}); err != nil {
-		// Its message gets an end, so that no late delivery answers it.
+	})
+	if err != nil {
 		log.Printf("Background tasks sweep: wake %s for %s: %v", id, t.ID, err)
-		reason := fmt.Sprintf("la fin de la tâche n'a pas pu réveiller @%s : %v", t.Participant, err)
-		if _, err := s.store.AppendMessage(ctx, t.SessionID, store.TurnEndKey(store.TurnKey(end.MessageID, t.Participant)), store.TurnEnd(t.Participant, reason)); err != nil {
-			log.Printf("Background tasks sweep: end the turn of %s: %v", t.ID, err)
+		if t.EndedAt == nil || time.Since(*t.EndedAt) < taskWakeGiveUp {
+			return // the next sweep tries again
 		}
+		reason := fmt.Sprintf("la fin de la tâche n'a pas pu réveiller @%s : %v", t.Participant, err)
+		if _, err := s.store.AppendMessage(ctx, t.SessionID, store.TurnEndKey(store.TurnKey(t.ResultMessageID, t.Participant)), store.TurnEnd(t.Participant, reason)); err != nil {
+			log.Printf("Background tasks sweep: end the turn of %s: %v", t.ID, err)
+			return
+		}
+		signer := ""
+		if sign {
+			signer = t.Participant
+		}
+		s.tell(ctx, t.SessionID, t.Channel, t.ChannelID, signer, "Error processing message: "+reason)
+	}
+	if err := s.store.SetTaskWoken(ctx, t.ID); err != nil {
+		log.Printf("Background tasks sweep: record the wake of %s: %v", t.ID, err)
+	}
+}
+
+// tell sends an agent's word to a session's channel, as a turn's answer
+// goes (activity.EventMessage), by the channel's notifier
+// (Config.Channels); the web by the hub when it has none.
+func (s *Service) tell(ctx context.Context, sessionID, channel, channelID, signer, text string) {
+	payload := map[string]string{"type": activity.EventMessage, "content": text}
+	if signer != "" {
+		payload["agent"] = signer
+	}
+	data, _ := json.Marshal(payload)
+	ev := activity.SSEEvent{Type: activity.EventMessage, Data: data}
+	n, ok := s.cfg.Channels[cmp.Or(channel, activity.ChannelWeb)]
+	if !ok {
+		if channel != "" && channel != activity.ChannelWeb {
+			log.Printf("Session %s: no notifier for channel %s", sessionID, channel)
+			return
+		}
+		s.hub.Publish(sessionID, ev)
+		return
+	}
+	if err := n.Notify(ctx, activity.Notification{SessionID: sessionID, ChannelID: channelID, Event: ev}); err != nil {
+		log.Printf("Session %s: tell %s: %v", sessionID, channel, err)
 	}
 }

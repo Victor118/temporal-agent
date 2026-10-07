@@ -122,6 +122,16 @@ func TestBackgroundTasks(t *testing.T) {
 	if err := s.SetTaskCancelledBy(ctx, first.ID, "Alice"); err != nil {
 		t.Fatal(err)
 	}
+	// Stopped, its workflow not told yet: the sweep's to tell.
+	if stopped, err := s.ListTasksToCancel(ctx); err != nil || len(stopped) != 1 || stopped[0].ID != first.ID {
+		t.Fatalf("to cancel: %+v %v", stopped, err)
+	}
+	if err := s.SetTaskCancelSent(ctx, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	if stopped, _ := s.ListTasksToCancel(ctx); len(stopped) != 0 {
+		t.Errorf("told, still to cancel: %+v", stopped)
+	}
 
 	// The first to end a task writes its message and its state; a second
 	// writer does nothing; the first again (a retry) finds it its own.
@@ -134,8 +144,25 @@ func TestBackgroundTasks(t *testing.T) {
 	if err != nil || !end.Mine || end.Gone || end.MessageID == 0 || end.Task.State != BackgroundDone {
 		t.Fatalf("end: %+v %v", end, err)
 	}
-	if len(end.Task.FollowUps) != 1 || end.Task.CancelledBy != "Alice" {
+	// Stopped too late: it ended done, cancelled by nobody.
+	if len(end.Task.FollowUps) != 1 || end.Task.CancelledBy != "" || end.Task.WokenAt != nil {
 		t.Errorf("its instructions and canceller: %+v", end.Task)
+	}
+	if got, _ := s.GetTask(ctx, first.ID); got.CancelledBy != "" {
+		t.Errorf("stored canceller %q", got.CancelledBy)
+	}
+	// Ended, not woken: the sweep's to wake, once it is old enough.
+	if late, err := s.ListTasksToWake(ctx, time.Now().Add(time.Minute)); err != nil || len(late) != 1 || late[0].ID != first.ID {
+		t.Errorf("to wake: %+v %v", late, err)
+	}
+	if late, _ := s.ListTasksToWake(ctx, time.Now().Add(-time.Minute)); len(late) != 0 {
+		t.Errorf("to wake, too recent: %+v", late)
+	}
+	if err := s.SetTaskWoken(ctx, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	if late, _ := s.ListTasksToWake(ctx, time.Now().Add(time.Minute)); len(late) != 0 {
+		t.Errorf("woken, still to wake: %+v", late)
 	}
 	again, err := s.EndTask(ctx, first.ID, TaskEndedByTask, BackgroundFailed, build)
 	if err != nil || !again.Mine || again.MessageID != end.MessageID || again.Task.State != BackgroundDone {
