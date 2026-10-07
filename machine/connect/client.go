@@ -475,13 +475,15 @@ func (c *Client) start(m machine.Message) {
 	if c.jobs[m.ID] != nil || c.State.HasResult(m.ID) || !idPattern.MatchString(m.ID) {
 		return
 	}
-	fail := func(why string) {
-		r := machine.Message{Type: machine.TypeResult, ID: m.ID, Status: machine.StatusRefused, Error: why}
+	// code: machine.CodeBusy for a refusal that is passing (full now).
+	refuse := func(why, code string) {
+		r := machine.Message{Type: machine.TypeResult, ID: m.ID, Status: machine.StatusRefused, Error: why, Code: code}
 		if err := c.State.SaveResult(r); err != nil {
 			c.logf("connect: keep result %s: %v", m.ID, err)
 		}
 		go c.send(r)
 	}
+	fail := func(why string) { refuse(why, "") }
 	exec := c.Executors[m.Kind]
 	switch {
 	case exec == nil:
@@ -492,7 +494,7 @@ func (c *Client) start(m machine.Message) {
 			strings.Join(machine.CapabilitiesOf(m.Kind), ", ")))
 		return
 	case c.running(machine.FamilyOf(m.Kind)) >= c.capOf(machine.FamilyOf(m.Kind)):
-		fail(fmt.Sprintf("this machine runs %d %s directives at most", c.capOf(machine.FamilyOf(m.Kind)), machine.FamilyOf(m.Kind)))
+		refuse(fmt.Sprintf("this machine runs %d %s directives at most", c.capOf(machine.FamilyOf(m.Kind)), machine.FamilyOf(m.Kind)), machine.CodeBusy)
 		return
 	}
 	if err := c.State.MarkRunning(m.ID); err != nil {

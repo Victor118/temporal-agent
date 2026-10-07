@@ -83,3 +83,36 @@ func TestModeler(t *testing.T) {
 		t.Errorf("after the refusal: %v", err)
 	}
 }
+
+// A machine at its cap of calls to the model refuses the next as busy:
+// passing, not a refusal of the machine.
+func TestClient_FullIsBusy(t *testing.T) {
+	release := make(chan struct{})
+	block := func(ctx context.Context, _ json.RawMessage, _ func(string)) (json.RawMessage, error) {
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return json.RawMessage(`{}`), nil
+	}
+	c := &Client{State: State{Dir: t.TempDir()}, Executors: map[string]Executor{machine.KindLLM: block, machine.KindEcho: Echo},
+		MaxDirectives: 1, MaxLLM: 1}
+	if err := c.State.Init(); err != nil {
+		t.Fatal(err)
+	}
+	c.jobs = map[string]*job{}
+	c.runCtx, c.kill = context.WithCancelCause(context.Background())
+	defer func() { close(release); c.kill(errStopping); c.jobsWG.Wait() }()
+
+	c.start(machine.Message{Type: machine.TypeDirective, ID: "d-1", Kind: machine.KindLLM})
+	c.start(machine.Message{Type: machine.TypeDirective, ID: "d-2", Kind: machine.KindLLM})
+	c.start(machine.Message{Type: machine.TypeDirective, ID: "d-3", Kind: "unknown"})
+	results, _ := c.State.Results()
+	codes := map[string]string{}
+	for _, r := range results {
+		codes[r.ID] = r.Status + "/" + r.Code
+	}
+	if codes["d-2"] != machine.StatusRefused+"/"+machine.CodeBusy || codes["d-3"] != machine.StatusRefused+"/" || codes["d-1"] != "" {
+		t.Errorf("results %v", codes)
+	}
+}

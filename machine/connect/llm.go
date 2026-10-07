@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"sync/atomic"
 
 	"github.com/victor/temporal-agent/machine"
@@ -80,8 +81,13 @@ func (m *Modeler) failure(err error) (json.RawMessage, error) {
 	case errors.Is(err, provider.ErrContextTooLong):
 		return failure(machine.LLMFailure{Type: machine.LLMFailContextTooLong}, err)
 	case errors.As(err, &permErr) && permErr.Credentials:
-		if m.refused.CompareAndSwap(false, true) && m.OnRefused != nil {
-			m.OnRefused()
+		if m.refused.CompareAndSwap(false, true) {
+			// The provider's own words: a key refused, no credit left, or a
+			// model this key may not use.
+			log.Printf("connect: the model's provider refused this machine's key (no more calls to the model until agent connect starts again): %v", err)
+			if m.OnRefused != nil {
+				m.OnRefused()
+			}
 		}
 		return failure(machine.LLMFailure{Type: machine.LLMFailCredentials}, err)
 	case errors.As(err, &permErr):

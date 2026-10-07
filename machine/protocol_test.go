@@ -215,7 +215,8 @@ func TestCheckLLMOutput(t *testing.T) {
 		"call without name": `{"tool_calls":[{"id":"a","input":{}}],"stop_reason":"tool_use"}`,
 		"too many calls":    `{"tool_calls":[` + strings.Join(calls, ",") + `],"stop_reason":"tool_use"}`,
 		"long model":        `{"stop_reason":"end_turn","model":"` + strings.Repeat("m", MaxLLMModelBytes+1) + `"}`,
-		"too large":         `{"stop_reason":"end_turn","content":"` + strings.Repeat("x", MaxLLMOutputBytes) + `"}`,
+		"too large":         `{"stop_reason":"end_turn","tool_calls":[{"id":"a","name":"t","input":{"x":"` + strings.Repeat("x", MaxLLMOutputBytes) + `"}}]}`,
+		"text too long":     `{"stop_reason":"end_turn","content":"` + strings.Repeat("x", MaxLLMContentBytes+1) + `"}`,
 	} {
 		if _, err := CheckLLMOutput(json.RawMessage(raw)); err == nil {
 			t.Errorf("%s: accepted", name)

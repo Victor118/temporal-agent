@@ -2,6 +2,7 @@ package machine
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"time"
@@ -50,6 +51,9 @@ const (
 	// usage): it becomes the payload of the activity's completion, then the
 	// input of the turn's rewrite, and Temporal refuses a payload past 2 MB.
 	MaxLLMOutputBytes = 1536 << 10
+	// MaxLLMContentBytes bounds an answer's text: a turn keeps its answers,
+	// and returns them in its output, which Temporal bounds too.
+	MaxLLMContentBytes = 256 << 10
 	// MaxLLMToolCalls bounds the tool calls of one answer, and
 	// MaxLLMModelBytes the name of the model.
 	MaxLLMToolCalls  = 64
@@ -149,7 +153,26 @@ const (
 	ErrTypeRetryAfter     = "RetryAfterError"
 	// ErrTypeBadResult: the machine's answer broke the rules (CheckLLMOutput).
 	ErrTypeBadResult = "MachineBadResult"
+	// ErrTypeBusy: the machine is at its cap of calls to the model (in the
+	// store, or as it says itself): passing, the same machine later.
+	ErrTypeBusy = "MachineBusy"
+	// ErrTypeHandoffFailed: the gateway could not be reached with the call
+	// (the server away): nothing ran, the machine is not to blame.
+	ErrTypeHandoffFailed = "HandoffFailed"
+	// ErrTypeNoGateway: the worker that took the call hands none to a
+	// machine (no gateway configured on it: MACHINES_ENABLED, NOTIFY_URL,
+	// INTERNAL_API_KEY on the worker of CallLLM's queue). The worker's
+	// fault, not the machine's.
+	ErrTypeNoGateway = "WorkerNoGateway"
 )
+
+// CodeBusy is a refused result's code when the machine was at its cap of
+// directives of that family.
+const CodeBusy = "busy"
+
+// ErrUnreachable is a call to the model the gateway could not send to its
+// machine now (not connected, or the write failed): the gateway closed it.
+var ErrUnreachable = errors.New("machine unreachable")
 
 // StopReasons are the stop reasons an answer may give.
 var StopReasons = []string{"end_turn", "max_tokens", "stop_sequence", "tool_use", "pause_turn", "refusal", "model_context_window_exceeded"}
@@ -166,6 +189,9 @@ func CheckLLMOutput(raw json.RawMessage) (provider.ChatResponse, error) {
 	}
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return resp, fmt.Errorf("answer unreadable: %v", err)
+	}
+	if len(resp.Content) > MaxLLMContentBytes {
+		return resp, fmt.Errorf("answer text of %d bytes, over %d", len(resp.Content), MaxLLMContentBytes)
 	}
 	if len(resp.ToolCalls) > MaxLLMToolCalls {
 		return resp, fmt.Errorf("%d tool calls, over %d", len(resp.ToolCalls), MaxLLMToolCalls)
