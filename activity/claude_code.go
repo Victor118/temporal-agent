@@ -595,9 +595,10 @@ func cliConfigDir(dir string) string { return dir + ".claude" }
 func outputsDir(dir string) string { return dir + ".outputs" }
 
 // removeWorkspace deletes a run's directory, the copy of its git
-// configuration, its CLI configuration and its outputs.
+// configuration, its CLI configuration, its outputs and its git
+// (subproc.GitShimDir).
 func removeWorkspace(dir string) error {
-	for _, path := range []string{dir, cliConfigDir(dir), outputsDir(dir)} {
+	for _, path := range []string{dir, cliConfigDir(dir), outputsDir(dir), subproc.GitShimDir(dir)} {
 		if err := os.RemoveAll(path); err != nil {
 			return err
 		}
@@ -752,6 +753,16 @@ func (a *ClaudeCodeActivities) RunClaudeCode(ctx context.Context, in RunClaudeCo
 		prompt = strings.TrimSpace(prompt + "\n" + machine.OutputsPrompt(out))
 		addDirs = []string{out}
 	}
+	// The run's git: the worker's, in Root, not the run's to change. No
+	// workspace: the runner says so.
+	env := machine.RunGitEnv()
+	if _, err := os.Stat(dir); err == nil {
+		shim, err := subproc.WriteGitShim(dir)
+		if err != nil {
+			return claudecode.Result{}, stepError("claude code: the run's git", err)
+		}
+		env = append(env, subproc.WithPath(os.Environ(), shim))
+	}
 	// Until the CLI is gone, the steps after the run wait (awaitRunEnd).
 	defer a.live.hold(dir)()
 	ctx, stopped, cancel := a.endOnStop(ctx)
@@ -776,8 +787,10 @@ func (a *ClaudeCodeActivities) RunClaudeCode(ctx context.Context, in RunClaudeCo
 		SettingSources:  []string{"user"},
 		StrictMCPConfig: true,
 		// Whatever the clone's configuration says, the git the CLI starts
-		// runs no program of its (hooks, fsmonitor, editor, signing).
-		Env: machine.RunGitEnv(),
+		// runs no program of its (hooks, fsmonitor, editor, signing), and
+		// reads no file outside the clone for a commit (the shim first in
+		// its PATH).
+		Env: env,
 	})
 	// Stopped is WorkerStopping whatever the CLI returned, a run that ended
 	// at the very instant of Stop included: its result is dropped. On

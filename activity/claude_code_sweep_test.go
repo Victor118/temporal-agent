@@ -227,6 +227,7 @@ func TestIsRunEntry(t *testing.T) {
 		"run-0e2f.claude":    true,
 		"run-0e2f.gitconfig": true,
 		"run-0e2f.outputs":   true,
+		"run-0e2f.bin":       true,
 		"run-":               false,
 		"run-.claude":        false,
 		"other":              false,

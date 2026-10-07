@@ -82,6 +82,9 @@ func remoteBranch(t *testing.T, remote, branch string) string {
 }
 
 func TestCoder_Implement(t *testing.T) {
+	// The owner's git identity may live in a configuration directory of
+	// their own.
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "xdg"))
 	a, remote, seen, pub := newImplementer(t, commitScript(""))
 	var progresses []string
 	raw, err := a.Implement(context.Background(), implementInput(remote), func(p string) { progresses = append(progresses, p) })
@@ -115,6 +118,9 @@ func TestCoder_Implement(t *testing.T) {
 		}
 	}
 	env, _ := os.ReadFile(filepath.Join(seen, "env"))
+	if !strings.Contains(string(env), "XDG_CONFIG_HOME="+os.Getenv("XDG_CONFIG_HOME")) || !strings.Contains(string(env), "repo.bin:") {
+		t.Errorf("the CLI's XDG_CONFIG_HOME or PATH: %s", env)
+	}
 	if !strings.Contains(string(env), "GIT_CONFIG_KEY_0=core.hooksPath") || !strings.Contains(string(env), "GIT_CONFIG_VALUE_0=/dev/null") {
 		t.Errorf("the CLI's git environment: %s", env)
 	}
@@ -155,6 +161,34 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"done","ses
 	}
 	if len(out.Commits) != 1 || out.Pushed || !strings.Contains(out.Error, "git configuration") {
 		t.Errorf("output %+v", out)
+	}
+}
+
+// The run's git reads a commit's message from the clone only: a secret of
+// its owner's, outside, never reaches a pushed commit (subproc.WriteGitShim).
+func TestCoder_ImplementCommitsNoFileFromOutside(t *testing.T) {
+	secret := filepath.Join(t.TempDir(), "id_ed25519")
+	os.WriteFile(secret, []byte("PRIVATE KEY"), 0o600)
+	a, remote, _, _ := newImplementer(t, `export GIT_AUTHOR_NAME=a GIT_AUTHOR_EMAIL=a@b GIT_COMMITTER_NAME=a GIT_COMMITTER_EMAIL=a@b
+echo hello > health.txt
+git add health.txt
+git commit --quiet -F '`+secret+`' && exit 3
+/usr/bin/env git commit --quiet --file='`+secret+`' && exit 4
+echo "Add health, from the clone" > msg.txt
+git commit --quiet -F msg.txt || exit 5
+echo '{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"s"}'
+`)
+	raw, err := a.Implement(context.Background(), implementInput(remote), func(string) {})
+	var out machine.CodingOutput
+	if err != nil || json.Unmarshal(raw, &out) != nil {
+		t.Fatalf("implement: %s %v", raw, err)
+	}
+	if !out.Pushed || len(out.Commits) != 1 || out.Commits[0].Subject != "Add health, from the clone" {
+		t.Fatalf("output %+v", out)
+	}
+	log, _ := exec.Command("git", "-C", remote, "log", "--all", "--format=%B").Output()
+	if strings.Contains(string(log), "PRIVATE") {
+		t.Errorf("a secret pushed: %s", log)
 	}
 }
 

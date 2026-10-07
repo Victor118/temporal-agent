@@ -985,6 +985,57 @@ func TestRunClaudeCode_GitRunsNoProgramOfTheClone(t *testing.T) {
 	}
 }
 
+// The run's git reads a commit's message from the clone only: a file of
+// the run's user's outside it (its CLI's credentials, next to the clone) is
+// refused, one of the clone is read (subproc.WriteGitShim).
+func TestRunClaudeCode_GitReadsNoFileFromOutside(t *testing.T) {
+	id := subproctest.Identity(t)
+	if os.Geteuid() == 0 && id == nil {
+		t.Skip("no identity to run as")
+	}
+	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: subproctest.Dir(t, nil), RunAs: id}
+	if id != nil {
+		a.Runs = subproc.NewRuns(id)
+	}
+	prepared, err := a.PrepareWorkspace(context.Background(), PrepareWorkspaceInput{Name: "run-1", Repo: initRepo(t), Branch: "agent/x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := prepared.Dir + ".claude-secret"
+	os.WriteFile(secret, []byte("PRIVATE KEY"), 0o644)
+	bin := filepath.Join(subproctest.Dir(t, nil), "fake-claude")
+	script := `#!/bin/sh
+cat >/dev/null
+export GIT_AUTHOR_NAME=a GIT_AUTHOR_EMAIL=a@b GIT_COMMITTER_NAME=a GIT_COMMITTER_EMAIL=a@b
+echo x > f.txt
+git add f.txt
+git commit --quiet -F '` + secret + `' >/dev/null 2>&1; outside=$?
+echo "From the clone" > msg.txt
+git commit --quiet -F msg.txt >/dev/null 2>&1; inside=$?
+printf '{"type":"result","subtype":"success","is_error":false,"result":"outside=%s inside=%s","session_id":"s"}\n' "$outside" "$inside"
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a.Runner = &claudecode.Runner{Binary: bin}
+	res, err := a.RunClaudeCode(context.Background(), RunClaudeCodeInput{Dir: prepared.Dir, Task: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Report != "outside=128 inside=0" {
+		t.Errorf("the run's git: %s", res.Report)
+	}
+	if _, err := os.Stat(subproc.GitShimDir(prepared.Dir)); err != nil {
+		t.Errorf("no shim: %v", err)
+	}
+	if err := a.CleanupWorkspace(context.Background(), CleanupWorkspaceInput{Dir: prepared.Dir}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(subproc.GitShimDir(prepared.Dir)); !os.IsNotExist(err) {
+		t.Errorf("shim left: %v", err)
+	}
+}
+
 // gitTrapScript is a stand-in CLI that sets traps in its clone's git
 // directory (a hook, core.fsmonitor, core.editor), commits, and reports
 // which went off.

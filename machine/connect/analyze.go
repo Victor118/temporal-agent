@@ -281,8 +281,19 @@ func (a *Coder) runCLI(ctx context.Context, p claudecode.Params, out *machine.Co
 	// The clone is deleted at the end: a transcript would outlive it.
 	p.NoSessionPersistence = true
 	// Whatever the clone's configuration says, the git the CLI starts runs
-	// no program of its (hooks, fsmonitor, editor, signing).
+	// no program of its (hooks, fsmonitor, editor, signing), and reads no
+	// file outside the clone for a commit (subproc.WriteGitShim, first in
+	// its PATH). Its owner's identity may live in a configuration directory
+	// of their own.
+	shim, err := subproc.WriteGitShim(p.Cwd)
+	if err != nil {
+		return fmt.Errorf("the run's git: %w", err)
+	}
 	p.Env = append(p.Env, machine.RunGitEnv()...)
+	p.Env = append(p.Env, subproc.WithPath(a.environ(), shim))
+	if xdg, ok := lookupEnv(a.environ(), "XDG_CONFIG_HOME"); ok {
+		p.Env = append(p.Env, "XDG_CONFIG_HOME="+xdg)
+	}
 	res, err := runner.Run(ctx, p)
 	if line := claudecode.AuthFailure(res, err); line != "" {
 		log.Printf("connect: Claude Code's login was refused (%q): Claude Code withdrawn", line)
@@ -310,6 +321,24 @@ func (a *Coder) runCLI(ctx context.Context, p claudecode.Params, out *machine.Co
 		}
 	}
 	return err
+}
+
+// environ is the machine's environment: Environ, else this process's.
+func (a *Coder) environ() []string {
+	if a.Environ != nil {
+		return a.Environ
+	}
+	return os.Environ()
+}
+
+// lookupEnv is name's value in environ.
+func lookupEnv(environ []string, name string) (string, bool) {
+	for i := len(environ) - 1; i >= 0; i-- {
+		if v, ok := strings.CutPrefix(environ[i], name+"="); ok {
+			return v, true
+		}
+	}
+	return "", false
 }
 
 // lowerCap is the smaller of two budget caps, where zero means none: what a
