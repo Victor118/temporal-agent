@@ -111,7 +111,7 @@ func (c *Catalog) AllowedTools(agentID string) ListToolsOutput {
 			Kind:             t.Kind,
 			WorkflowName:     t.WorkflowName,
 			TaskQueue:        t.TaskQueue,
-			FireAndForget:    t.FireAndForget,
+			Background:       Backgroundable(t.Kind, t.PrivateInput, t.InputSchema),
 			PrivateInput:     t.PrivateInput,
 			NeedsCallContext: t.NeedsCallContext,
 			Timeout:          t.Timeout,
@@ -127,7 +127,7 @@ func (c *Catalog) AllowedTools(agentID string) ListToolsOutput {
 		out.Tools = append(out.Tools, agentDefinition(a))
 		// No task queue: a sub-agent runs where its parent runs, which only
 		// the dispatching workflow knows.
-		out.Resolutions[name] = ToolResolution{Kind: string(tool.ToolKindWorkflow), AgentID: a.ID}
+		out.Resolutions[name] = ToolResolution{Kind: string(tool.ToolKindWorkflow), AgentID: a.ID, Background: true}
 	}
 
 	sort.Slice(out.Tools, func(i, j int) bool { return out.Tools[i].Name < out.Tools[j].Name })
@@ -150,35 +150,45 @@ func agentDefinition(a AgentCatalogEntry) provider.ToolDefinition {
 // order, as AllowedTools gives them, and the names the catalog no longer
 // knows. The allowlist is not applied again: the names are what a turn may
 // dispatch, decided at its start, and the model is offered exactly those.
-func (c *Catalog) ToolDefinitions(names []string) (defs []provider.ToolDefinition, missing []string) {
+// With background (a session's turn), the tools whose calls may run in the
+// background (Backgroundable) are offered BackgroundField, and backgrounds
+// says whether any is.
+func (c *Catalog) ToolDefinitions(names []string, background bool) (defs []provider.ToolDefinition, missing []string, backgrounds bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	for _, name := range names {
-		if def, ok := c.definition(name); ok {
-			defs = append(defs, def)
-		} else {
+		def, eligible, ok := c.definition(name)
+		if !ok {
 			missing = append(missing, name)
+			continue
 		}
+		if background && eligible {
+			def.InputSchema = WithBackgroundField(def.InputSchema)
+			backgrounds = true
+		}
+		defs = append(defs, def)
 	}
-	return defs, missing
+	return defs, missing, backgrounds
 }
 
-// definition finds name among the agent tools, or else the published ones.
-// The caller holds the lock.
-func (c *Catalog) definition(name string) (provider.ToolDefinition, bool) {
+// definition finds name among the agent tools, or else the published ones,
+// and whether its calls may run in the background. The caller holds the
+// lock.
+func (c *Catalog) definition(name string) (def provider.ToolDefinition, background bool, ok bool) {
 	if id, ok := strings.CutPrefix(name, AgentToolPrefix); ok {
 		for _, a := range c.agents {
 			if a.ID == id {
-				return agentDefinition(a), true
+				return agentDefinition(a), true, true
 			}
 		}
-		return provider.ToolDefinition{}, false
+		return provider.ToolDefinition{}, false, false
 	}
 	i := sort.Search(len(c.tools), func(i int) bool { return c.tools[i].Name >= name })
 	if i < len(c.tools) && c.tools[i].Name == name {
-		return publishedDefinition(c.tools[i]), true
+		t := c.tools[i]
+		return publishedDefinition(t), Backgroundable(t.Kind, t.PrivateInput, t.InputSchema), true
 	}
-	return provider.ToolDefinition{}, false
+	return provider.ToolDefinition{}, false, false
 }
 
 // AgentLabels names every agent of the catalog by ID, its ID when it has no

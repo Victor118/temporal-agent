@@ -193,13 +193,12 @@ func (a Agent) MentionName() string {
 
 // ToolRecord is a tool published by a worker: where it runs and its contract.
 type ToolRecord struct {
-	Name          string          `json:"name"`
-	TaskQueue     string          `json:"task_queue"`
-	Description   string          `json:"description"`
-	InputSchema   json.RawMessage `json:"input_schema"`
-	Kind          string          `json:"kind"`
-	WorkflowName  string          `json:"workflow_name,omitempty"`
-	FireAndForget bool            `json:"fire_and_forget,omitempty"`
+	Name         string          `json:"name"`
+	TaskQueue    string          `json:"task_queue"`
+	Description  string          `json:"description"`
+	InputSchema  json.RawMessage `json:"input_schema"`
+	Kind         string          `json:"kind"`
+	WorkflowName string          `json:"workflow_name,omitempty"`
 	// What the tool is (see tool.Tool): readable from here by the processes
 	// that run no tool, the server first.
 	Sensitive        bool `json:"sensitive,omitempty"`

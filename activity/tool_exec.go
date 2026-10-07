@@ -36,10 +36,13 @@ type ExecuteToolOutput struct {
 
 // ToolResolution tells the workflow how to dispatch a tool call.
 type ToolResolution struct {
-	Kind          string `json:"kind"`
-	WorkflowName  string `json:"workflow_name,omitempty"`
-	TaskQueue     string `json:"task_queue"`
-	FireAndForget bool   `json:"fire_and_forget,omitempty"`
+	Kind         string `json:"kind"`
+	WorkflowName string `json:"workflow_name,omitempty"`
+	TaskQueue    string `json:"task_queue"`
+	// Background: a call may be launched in the background, if the model
+	// asks (BackgroundField) from a session's turn: a workflow tool whose
+	// input is not private (Backgroundable).
+	Background bool `json:"background,omitempty"`
 	// AgentID is set on an agent_<id> tool: the agent the call delegates to.
 	AgentID string `json:"agent_id,omitempty"`
 	// PrivateInput: the call's input and result are hidden from the

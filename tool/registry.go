@@ -28,14 +28,13 @@ const (
 type ExecuteFunc func(ctx context.Context, input json.RawMessage) (string, error)
 
 type Tool struct {
-	Name          string          `json:"name"`
-	Description   string          `json:"description"`
-	InputSchema   json.RawMessage `json:"input_schema"`
-	Kind          ToolKind        `json:"-"`
-	Execute       ExecuteFunc     `json:"-"`
-	WorkflowFunc  interface{}     `json:"-"` // Workflow function for ToolKindWorkflow
-	TaskQueue     string          `json:"-"` // Target task queue for workflow tools
-	FireAndForget bool            `json:"-"` // If true, don't wait for workflow result
+	Name         string          `json:"name"`
+	Description  string          `json:"description"`
+	InputSchema  json.RawMessage `json:"input_schema"`
+	Kind         ToolKind        `json:"-"`
+	Execute      ExecuteFunc     `json:"-"`
+	WorkflowFunc interface{}     `json:"-"` // Workflow function for ToolKindWorkflow
+	TaskQueue    string          `json:"-"` // Target task queue for workflow tools
 
 	// What the tool is, published with it so that every process — the
 	// server included, which runs no tool — knows it from the tools table
@@ -92,7 +91,6 @@ func (t *Tool) SchemaHash() string {
 		string(t.InputSchema),
 		string(t.Kind),
 		t.WorkflowName(),
-		fmt.Sprint(t.FireAndForget),
 		fmt.Sprint(t.Sensitive, t.PrivateInput, t.NeedsCallContext, t.Timeout),
 	} {
 		h.Write([]byte(part))

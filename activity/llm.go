@@ -46,7 +46,7 @@ type ConversationLoader interface {
 // LLMCatalog is what the LLM call reads of the worker's catalog: the tools'
 // definitions, the agents' names, and which tool inputs are private.
 type LLMCatalog interface {
-	ToolDefinitions(names []string) ([]provider.ToolDefinition, []string)
+	ToolDefinitions(names []string, background bool) (defs []provider.ToolDefinition, missing []string, backgrounds bool)
 	AgentLabels() map[string]conversation.Label
 	PrivateInput(name string) bool
 }
@@ -182,7 +182,10 @@ func (a *LLMActivities) buildRequest(ctx context.Context, req LLMTurnRequest) (p
 	}
 	chat := conversation.Convert(messages, conversation.View{Self: req.AgentID, User: req.UserID, Agents: a.Catalog.AgentLabels(), Private: a.Catalog})
 
-	tools, missing := a.Catalog.ToolDefinitions(req.Tools)
+	// A session's turn may launch a call in the background; a sub-agent, a
+	// scheduled task or a background task itself may not (no tasks of
+	// tasks, outside any cap): the field is not offered there.
+	tools, missing, backgrounds := a.Catalog.ToolDefinitions(req.Tools, req.History != nil)
 	offered := make([]string, len(tools))
 	for i, t := range tools {
 		offered[i] = t.Name
@@ -198,7 +201,7 @@ func (a *LLMActivities) buildRequest(ctx context.Context, req LLMTurnRequest) (p
 	if len(chat) >= 2 {
 		chat[len(chat)-2].CacheBreakpoint = true
 	}
-	system, memory := a.systemPrompt(ctx, req, offered)
+	system, memory := a.systemPrompt(ctx, req, offered, backgrounds)
 	return provider.ChatRequest{
 		Model:       req.Model,
 		System:      system,
@@ -282,7 +285,7 @@ func (a *LLMActivities) conversation(ctx context.Context, req LLMTurnRequest) ([
 // for the tools offered, the user's memory, the part note; and returns what
 // it holds of that memory. A memory that cannot be read costs the
 // personalisation, not the call, and its saves: their version is unknown.
-func (a *LLMActivities) systemPrompt(ctx context.Context, req LLMTurnRequest, tools []string) (string, PromptMemory) {
+func (a *LLMActivities) systemPrompt(ctx context.Context, req LLMTurnRequest, tools []string, backgrounds bool) (string, PromptMemory) {
 	p := req.Prompt
 	prompt := p.Override
 	if prompt == "" {

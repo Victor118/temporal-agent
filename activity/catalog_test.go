@@ -142,7 +142,7 @@ func TestCatalog_FindsToolsInCollationOrder(t *testing.T) {
 	if collated[0].Name != "ab" {
 		t.Errorf("the caller's slice was reordered: %+v", collated)
 	}
-	defs, missing := c.ToolDefinitions([]string{"ab", "a_c", "a", "B"})
+	defs, missing, _ := c.ToolDefinitions([]string{"ab", "a_c", "a", "B"}, false)
 	if len(defs) != 4 || len(missing) != 0 {
 		t.Errorf("found %+v, missing %v", defs, missing)
 	}

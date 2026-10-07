@@ -252,7 +252,6 @@ const schema = `
 			input_schema    JSONB NOT NULL,
 			kind            TEXT NOT NULL,
 			workflow_name   TEXT NOT NULL DEFAULT '',
-			fire_and_forget BOOLEAN NOT NULL DEFAULT FALSE,
 			schema_hash     TEXT NOT NULL,
 			updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		);
@@ -279,6 +278,9 @@ const schema = `
 		-- default.
 		ALTER TABLE tools ADD COLUMN IF NOT EXISTS timeout_seconds INTEGER NOT NULL DEFAULT 0
 			CHECK (timeout_seconds >= 0);
+		-- No tool is fire-and-forget any more: a call is launched in the
+		-- background by the model's choice (docs/design/async-tasks.md).
+		ALTER TABLE tools DROP COLUMN IF EXISTS fire_and_forget;
 		-- The spawn_session row the workers published: nothing else deletes from
 		-- tools, and no worker publishes it any more.
 		DELETE FROM tools WHERE name = 'spawn_session';
@@ -797,16 +799,15 @@ func scanAgent(row interface{ Scan(...any) error }) (*Agent, error) {
 // Callers decide beforehand whether taking over another queue's tool is allowed.
 func (s *PostgresStore) UpsertTool(ctx context.Context, t ToolRecord) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO tools (name, task_queue, description, input_schema, kind, workflow_name, fire_and_forget,
+		INSERT INTO tools (name, task_queue, description, input_schema, kind, workflow_name,
 		                   sensitive, private_input, needs_call_context, timeout_seconds, schema_hash)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		ON CONFLICT (name) DO UPDATE SET
 			task_queue = EXCLUDED.task_queue,
 			description = EXCLUDED.description,
 			input_schema = EXCLUDED.input_schema,
 			kind = EXCLUDED.kind,
 			workflow_name = EXCLUDED.workflow_name,
-			fire_and_forget = EXCLUDED.fire_and_forget,
 			sensitive = EXCLUDED.sensitive,
 			private_input = EXCLUDED.private_input,
 			needs_call_context = EXCLUDED.needs_call_context,
@@ -814,7 +815,7 @@ func (s *PostgresStore) UpsertTool(ctx context.Context, t ToolRecord) error {
 			schema_hash = EXCLUDED.schema_hash,
 			updated_at = NOW()`,
 		t.Name, t.TaskQueue, t.Description, string(t.InputSchema), t.Kind, t.WorkflowName,
-		t.FireAndForget, t.Sensitive, t.PrivateInput, t.NeedsCallContext, int(t.Timeout/time.Second), t.SchemaHash)
+		t.Sensitive, t.PrivateInput, t.NeedsCallContext, int(t.Timeout/time.Second), t.SchemaHash)
 	return err
 }
 
@@ -833,7 +834,7 @@ func (s *PostgresStore) DeleteTool(ctx context.Context, name, taskQueue string) 
 func (s *PostgresStore) ListTools(ctx context.Context) ([]ToolRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT name, task_queue, description, input_schema, kind, workflow_name,
-		       fire_and_forget, sensitive, private_input, needs_call_context, timeout_seconds, schema_hash, updated_at
+		       sensitive, private_input, needs_call_context, timeout_seconds, schema_hash, updated_at
 		FROM tools ORDER BY name`)
 	if err != nil {
 		return nil, err
@@ -846,7 +847,7 @@ func (s *PostgresStore) ListTools(ctx context.Context) ([]ToolRecord, error) {
 		var schema string
 		var timeoutSeconds int
 		if err := rows.Scan(&t.Name, &t.TaskQueue, &t.Description, &schema, &t.Kind, &t.WorkflowName,
-			&t.FireAndForget, &t.Sensitive, &t.PrivateInput, &t.NeedsCallContext, &timeoutSeconds, &t.SchemaHash, &t.UpdatedAt); err != nil {
+			&t.Sensitive, &t.PrivateInput, &t.NeedsCallContext, &timeoutSeconds, &t.SchemaHash, &t.UpdatedAt); err != nil {
 			return nil, err
 		}
 		t.InputSchema = json.RawMessage(schema)

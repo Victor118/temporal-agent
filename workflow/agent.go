@@ -402,13 +402,12 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 
 		// Execute all tools in parallel, each on its tool's task queue
 		type toolDispatch struct {
-			future        workflow.Future
-			kind          tool.ToolKind
-			agent         bool // an agent_<id> tool: the child is an AgentWorkflow
-			fireAndForget bool
-			workflowID    string
-			taskQueue     string
-			unavailable   string // non-empty: error returned without dispatching
+			future      workflow.Future
+			kind        tool.ToolKind
+			agent       bool // an agent_<id> tool: the child is an AgentWorkflow
+			workflowID  string
+			taskQueue   string
+			unavailable string // non-empty: error returned without dispatching
 		}
 		dispatches := make([]toolDispatch, len(response.ToolCalls))
 		for j, tc := range response.ToolCalls {
@@ -419,12 +418,19 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 				continue
 			}
 			d := toolDispatch{kind: tool.ToolKind(res.Kind), agent: res.AgentID != "", taskQueue: res.TaskQueue}
-			// Only a workflow can outlive the turn: an activity's result
-			// would be dropped with it, so an activity tool is always awaited.
-			d.fireAndForget = res.FireAndForget && d.kind == tool.ToolKindWorkflow
 			// This call's context: the run's, and the call's own ID.
 			cc := call
 			cc.CallID = tc.ID
+			// The model may ask a tool that allows it to run in the
+			// background: the field is the dispatch's, never the tool's.
+			toolInput := tc.Input
+			if res.Background {
+				var err error
+				if toolInput, _, err = activity.TakeBackground(tc.Input); err != nil {
+					dispatches[j] = toolDispatch{unavailable: err.Error()}
+					continue
+				}
+			}
 
 			if d.kind == tool.ToolKindWorkflow {
 				d.workflowID = childWorkflowID(workflow.GetInfo(ctx).WorkflowExecution.ID, tc.Name, tc.ID, i, j)
@@ -433,7 +439,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 				// queue, and its model on the machine this turn's runs on now.
 				parent := input
 				parent.LLMMachine, parent.LLMExcluded = route.machine, slices.Clone(route.excluded)
-				childWorkflow, childInput, err := buildChildInput(tc.Input, parent, d.workflowID, &res, cc, currentAgentID, workflow.GetInfo(ctx).TaskQueueName)
+				childWorkflow, childInput, err := buildChildInput(toolInput, parent, d.workflowID, &res, cc, currentAgentID, workflow.GetInfo(ctx).TaskQueueName)
 				if err == nil && d.agent {
 					err = delegationRefusal(currentChain, res.AgentID)
 				}
@@ -446,19 +452,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 					WorkflowID: d.workflowID,
 					TaskQueue:  res.TaskQueue,
 				}
-				if d.fireAndForget {
-					// Not waited for: it must outlive the turn, which ends
-					// long before it. The default policy would terminate it
-					// as soon as the turn closes.
-					childOpts.ParentClosePolicy = enumspb.PARENT_CLOSE_POLICY_ABANDON
-				}
-				child := workflow.ExecuteChildWorkflow(workflow.WithChildOptions(ctx, childOpts), childWorkflow, childInput)
-				d.future = child
-				if d.fireAndForget {
-					// What is awaited is its start: a turn that closed
-					// before it would leave it never started.
-					d.future = child.GetChildWorkflowExecution()
-				}
+				d.future = workflow.ExecuteChildWorkflow(workflow.WithChildOptions(ctx, childOpts), childWorkflow, childInput)
 			} else {
 				opts := toolOpts
 				opts.TaskQueue = res.TaskQueue
@@ -473,7 +467,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 				execCtx := workflow.WithActivityOptions(ctx, opts)
 				execInput := activity.ExecuteToolInput{
 					Name:      tc.Name,
-					Input:     tc.Input,
+					Input:     toolInput,
 					SessionID: input.SessionID,
 					AgentID:   currentAgentID,
 					UserID:    input.UserID,
@@ -495,14 +489,6 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 			if d.unavailable != "" {
 				content = d.unavailable
 				isError = true
-			} else if d.fireAndForget {
-				// Started, not awaited: the LLM gets its ID to query it later.
-				if err := d.future.Get(ctx, nil); err != nil {
-					content = fmt.Sprintf("Workflow failed to start: %s", err.Error())
-					isError = true
-				} else {
-					content = fmt.Sprintf("Workflow started (workflow_id: %s). Use query_workflow to check its status.", d.workflowID)
-				}
 			} else if d.kind == tool.ToolKindWorkflow {
 				var result json.RawMessage
 				if err := d.future.Get(ctx, &result); err != nil {
