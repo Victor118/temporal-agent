@@ -78,6 +78,10 @@ type AgentWorkflowInput struct {
 	// inherits it: its answer goes to its parent only, but its questions to
 	// the user.
 	SignReply bool `json:"sign_reply,omitempty"`
+	// LLMMachine is the machine a sub-agent's parent runs its model on: the
+	// sub-agent's calls go there too, unless its own agent is set to never
+	// (docs/design/machine-llm.md §8). Nil: its own agent's setting decides.
+	LLMMachine *activity.LLMMachine `json:"llm_machine,omitempty"`
 }
 
 type AgentWorkflowOutput struct {
@@ -128,6 +132,9 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 		llmOpts.TaskQueue = q
 	}
 	llmCtx := workflow.WithActivityOptions(ctx, llmOpts)
+	// A call on a machine shares CallLLM's queue: its worker builds the
+	// request, and must reach the gateway.
+	llmQueue := queueMap["CallLLM"]
 
 	// Tool execution: no retry on application errors — let the LLM decide.
 	// Each call is routed to its tool's task queue, and bounded by its
@@ -241,6 +248,19 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 		signed = agentName
 	}
 
+	// Where the turn's model runs: the server's key, or the machine of its
+	// author, chosen once for all its steps (the same model, the same prompt
+	// cache).
+	route, err := startLLMRoute(ctx, input, skillsResult.LLMOnMachine, signed)
+	defer route.clearNote(ctx)
+	if err != nil {
+		cancelSafeFlush()
+		return AgentWorkflowOutput{NewMessages: turn, Error: llmFailure(err), ErrorType: failureType(err)}, nil
+	}
+	if ctx.Err() != nil {
+		return cancelledOutput(turn), nil
+	}
+
 	// Load the tools this agent may use, with the queue serving each one
 	var toolAct *activity.ToolActivities
 	var toolList activity.ListToolsOutput
@@ -305,9 +325,8 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 			return cancelledOutput(turn), nil
 		}
 
-		var llmAct *activity.LLMActivities
-		var response activity.LLMTurnResponse
-		if err := workflow.ExecuteActivity(llmCtx, llmAct.CallLLM, llmRequest()).Get(ctx, &response); err != nil {
+		response, answeredOn, err := route.call(ctx, llmCtx, llmQueue, i, input.UserID, llmRequest)
+		if err != nil {
 			cancelSafeFlush()
 			if ctx.Err() != nil {
 				return cancelledOutput(turn), nil
@@ -330,13 +349,15 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 		if len(response.ToolCalls) == 0 {
 			if response.Content != "" {
 				respJSON, _ := json.Marshal(response.Content)
-				turn = append(turn, store.Message{
+				answer := store.Message{
 					Role:    store.RoleAssistant,
 					Content: string(respJSON),
 					UserID:  input.UserID,
 					AgentID: currentAgentID,
 					Author:  agentName,
-				})
+				}
+				stampAnswer(&answer, response.ChatResponse, answeredOn)
+				turn = append(turn, answer)
 			}
 
 			cancelSafeFlush()
@@ -371,6 +392,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 			cJSON, _ := json.Marshal(response.Content)
 			assistantMsg.Content = string(cJSON)
 		}
+		stampAnswer(&assistantMsg, response.ChatResponse, answeredOn)
 		turn = append(turn, assistantMsg)
 
 		notifyToolCalls(ctx, input.SessionID, replyChannel, replyChannelID, response.ToolCalls, toolList.Resolutions)
@@ -401,8 +423,11 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 			if d.kind == tool.ToolKindWorkflow {
 				d.workflowID = childWorkflowID(workflow.GetInfo(ctx).WorkflowExecution.ID, tc.Name, tc.ID, i, j)
 
-				// Build input first — a sub-agent runs on the current workflow queue
-				childWorkflow, childInput, err := buildChildInput(tc.Input, input, d.workflowID, &res, cc, currentAgentID, workflow.GetInfo(ctx).TaskQueueName)
+				// Build input first — a sub-agent runs on the current workflow
+				// queue, and its model on the machine this turn's runs on now.
+				parent := input
+				parent.LLMMachine = route.machine
+				childWorkflow, childInput, err := buildChildInput(tc.Input, parent, d.workflowID, &res, cc, currentAgentID, workflow.GetInfo(ctx).TaskQueueName)
 				if err == nil && d.agent {
 					err = delegationRefusal(currentChain, res.AgentID)
 				}
@@ -688,6 +713,9 @@ func subAgentInput(rawInput json.RawMessage, parent AgentWorkflowInput, childID 
 		SignReply: parent.SignReply,
 		// And publishes its files under the session turn it works for.
 		SessionTurn: parentCall.Turn,
+		// And calls its model where its parent does, unless its agent says
+		// never.
+		LLMMachine: parent.LLMMachine,
 	}, nil
 }
 
@@ -797,8 +825,14 @@ func failureText(err error) string {
 // the call to retry, but of the session to fork.
 func llmFailure(err error) string {
 	var appErr *temporal.ApplicationError
-	if errors.As(err, &appErr) && appErr.Type() == activity.ErrContextTooLong {
-		return appErr.Message()
+	if errors.As(err, &appErr) {
+		switch appErr.Type() {
+		case activity.ErrContextTooLong:
+			// The same advice from a machine's model.
+			return activity.ContextTooLongMessage
+		case ErrTypeMachineRequired:
+			return appErr.Message()
+		}
 	}
 	return "call LLM: " + failureText(err)
 }
@@ -828,6 +862,8 @@ func subAgentContent(result json.RawMessage) (content string, isError bool) {
 			return agent.Response, false
 		case agent.ErrorType == activity.ErrContextTooLong:
 			return subAgentTooLong, true
+		case agent.ErrorType == ErrTypeMachineRequired:
+			return subAgentNoMachine, true
 		case agent.Error != "":
 			return "The agent stopped without an answer: " + agent.Error, true
 		}
