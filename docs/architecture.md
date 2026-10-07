@@ -240,9 +240,10 @@ Un appel d'outil workflow (sous-agent, `analyze_repo`, `implement_feature` ;
 pas un outil `PrivateInput`) peut tourner **sans être attendu** : le
 catalogue ajoute un champ `background` au schéma de ces outils pour un tour
 de session, le modèle le pose, le dispatch le retire de l'entrée. Le tour
-enregistre la tâche (`background_tasks`, trois en cours au plus par
-participant), lance `BackgroundTaskWorkflow` (`<tour>:bg:<appel>`, enfant
-abandonné du tour) et continue avec « tâche lancée ». La tâche exécute
+enregistre la tâche (`background_tasks`, trois en cours au plus par agent
+dans une session), lance `BackgroundTaskWorkflow` (`<tour>:bg:<appel>`, enfant
+abandonné du tour, démarré d'un contexte détaché : arrêter le tour ne
+l'atteint pas) et continue avec « tâche lancée ». La tâche exécute
 l'outil en enfant, puis poste son résultat dans la session (`task_result`,
 16 Kio au plus, au-delà le résultat entier en fichier de l'appel) et réveille
 le participant par `SignalWithStart`, comme un message de membre : son tour
@@ -250,7 +251,8 @@ répond à qui l'avait demandée, sur le canal d'origine, et lit les consignes
 attachées entre-temps (`when_task_done`). Le premier qui écrit la fin gagne
 (la tâche, ou un balayage du serveur pour une tâche close sans résultat).
 Annulée par un membre (le demandeur ou le créateur), elle poste sans
-réveiller. La suppression d'une session termine ses tâches avant elle.
+réveiller. Le balayage rattrape aussi un réveil ou un arrêt qui n'a pas
+abouti. La suppression d'une session termine ses tâches avant elle.
 Conception : [design/async-tasks.md](design/async-tasks.md).
 
 ### Fichiers publiés

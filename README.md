@@ -40,7 +40,7 @@ happens to answer has locally.
 
 - **Durable AI workflows** — ReAct loop (LLM reasoning + tool execution) powered by Temporal, with automatic retries and fault tolerance
 - **Multi-agent system** — Agents can spawn sub-agents for specialized tasks, each with isolated context
-- **Background tasks** — A session's agent may launch a long call (a sub-agent, `analyze_repo`, `implement_feature`) without waiting for it: it stays available, and the task's end posts its result in the session and wakes it, to report or go on with what it was asked meanwhile (`when_task_done`). Three at most per agent; shown, and stopped, in the Agents panel: see [docs/design/async-tasks.md](docs/design/async-tasks.md)
+- **Background tasks** — A session's agent may launch a long call (a sub-agent, `analyze_repo`, `implement_feature`) without waiting for it: it stays available, and the task's end posts its result in the session and wakes it, to report or go on with what it was asked meanwhile (`when_task_done`). Three running at most per agent in a session; shown, and stopped, in the Agents panel: see [docs/design/async-tasks.md](docs/design/async-tasks.md)
 - **Pluggable skills** — Skills loaded from Git repositories or local files, assigned to agents for domain-specific expertise
 - **Persistent memory** — PostgreSQL-backed storage for conversation history, key-value memory (user/project/session scoped), and task logs
 - **Real-time streaming** — SSE (Server-Sent Events) hub for live updates to connected clients
