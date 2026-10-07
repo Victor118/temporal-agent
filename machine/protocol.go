@@ -18,10 +18,11 @@ import (
 // machines run the binary their owner installed, the one place where two
 // versions of the project really meet. 2: a machine's capabilities change
 // while connected; 3: implement_feature, git-push, and the files a machine
-// publishes (phase 2).
+// publishes (phase 2); 4: the model on the machine (llm directives, a cap
+// per family, 4 MiB messages, compression).
 const (
-	Protocol    = 3
-	MinProtocol = 3
+	Protocol    = 4
+	MinProtocol = 4
 )
 
 // Message types. A machine sends hello, rotated, progress, result and
@@ -74,9 +75,10 @@ const (
 )
 
 // Limits on what a machine sends. What it says is not trusted (§11 of the
-// design): a message past MaxMessageBytes ends the connection, a progress
-// is cut to MaxProgressBytes (it ends up in the workflow's history, through
-// the heartbeats).
+// design): a message past MaxMessageBytes ends the connection (an llm
+// directive's result aside, up to MaxReadBytes and checked by
+// CheckLLMOutput), a progress is cut to MaxProgressBytes (it ends up in the
+// workflow's history, through the heartbeats).
 const (
 	MaxMessageBytes  = 256 << 10
 	MaxProgressBytes = 1024
@@ -107,6 +109,14 @@ type Message struct {
 	// ClaudeCode is the state of the machine's claude CLI (hello and
 	// capabilities): "ok", "logged_out", "absent" (claudecode.LoginStatus).
 	ClaudeCode string `json:"claude_code,omitempty"`
+	// MaxLLM is how many calls to the model the machine makes at once (its
+	// llm family's cap, apart from MaxDirectives); LLMProvider and LLMModel
+	// are the provider and model it calls (hello); LLM the state of its
+	// model (hello and capabilities: LLMState*, "" = none).
+	MaxLLM      int    `json:"max_llm,omitempty"`
+	LLMProvider string `json:"llm_provider,omitempty"`
+	LLMModel    string `json:"llm_model,omitempty"`
+	LLM         string `json:"llm,omitempty"`
 
 	// welcome
 	MachineID string `json:"machine_id,omitempty"`
@@ -155,6 +165,9 @@ func CheckFromMachine(m *Message) error {
 		if m.MaxDirectives < 1 || m.MaxDirectives > MaxDirectives {
 			return bad("max_directives %d", m.MaxDirectives)
 		}
+		if m.MaxLLM < 0 || m.MaxLLM > MaxLLM {
+			return bad("max_llm %d", m.MaxLLM)
+		}
 		if len(m.Running)+len(m.Finished) > MaxListedIDs {
 			return bad("%d directives listed", len(m.Running)+len(m.Finished))
 		}
@@ -165,6 +178,8 @@ func CheckFromMachine(m *Message) error {
 		}
 		m.OS = Cut(m.OS, 64)
 		m.AgentVersion = Cut(m.AgentVersion, 64)
+		m.LLMProvider = Cut(m.LLMProvider, 64)
+		m.LLMModel = Cut(m.LLMModel, MaxLLMModelBytes)
 		if err := checkStatus(m); err != nil {
 			return err
 		}
@@ -213,6 +228,11 @@ func checkStatus(m *Message) error {
 	case "", "ok", "logged_out", "absent":
 	default:
 		return bad("claude_code %q", m.ClaudeCode)
+	}
+	switch m.LLM {
+	case "", LLMStateOK, LLMStateRefused:
+	default:
+		return bad("llm %q", m.LLM)
 	}
 	return nil
 }

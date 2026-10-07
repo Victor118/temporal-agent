@@ -170,3 +170,63 @@ func TestAnalyzeInput_Check(t *testing.T) {
 		t.Errorf("progress %q", got)
 	}
 }
+
+// A hello says how many calls to the model the machine makes at once, and
+// which model: bounded, cut, never trusted further.
+func TestCheckFromMachine_LLM(t *testing.T) {
+	m := Message{Type: TypeHello, Protocol: Protocol, MaxDirectives: 1, MaxLLM: 4, Capabilities: []string{CapLLM},
+		LLMProvider: "anthropic", LLMModel: strings.Repeat("m", 300), LLM: LLMStateOK}
+	if err := CheckFromMachine(&m); err != nil || len(m.LLMModel) > MaxLLMModelBytes {
+		t.Errorf("hello: %v, model of %d bytes", err, len(m.LLMModel))
+	}
+	for name, m := range map[string]Message{
+		"too many calls": {Type: TypeHello, Protocol: Protocol, MaxDirectives: 1, MaxLLM: MaxLLM + 1},
+		"negative":       {Type: TypeHello, Protocol: Protocol, MaxDirectives: 1, MaxLLM: -1},
+		"unknown state":  {Type: TypeCapabilities, LLM: "maybe"},
+	} {
+		if err := CheckFromMachine(&m); !errors.Is(err, ErrBadMessage) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
+func TestCheckLLMOutput(t *testing.T) {
+	ok := []string{
+		`{"content":"hi","stop_reason":"end_turn","model":"claude","usage":{"input_tokens":1,"output_tokens":2}}`,
+		`{"content":"","tool_calls":[{"id":"a","name":"exec","input":{}},{"id":"b","name":"x","input":{"k":1}}],"stop_reason":"tool_use"}`,
+	}
+	for _, raw := range ok {
+		if _, err := CheckLLMOutput(json.RawMessage(raw)); err != nil {
+			t.Errorf("%s: %v", raw, err)
+		}
+	}
+	calls := make([]string, MaxLLMToolCalls+1)
+	for i := range calls {
+		calls[i] = `{"id":"c` + strings.Repeat("x", i) + `","name":"t","input":{}}`
+	}
+	for name, raw := range map[string]string{
+		"not JSON":          `{`,
+		"unknown stop":      `{"stop_reason":"done"}`,
+		"no stop reason":    `{"content":"hi"}`,
+		"call without ID":   `{"tool_calls":[{"name":"t","input":{}}],"stop_reason":"tool_use"}`,
+		"same ID twice":     `{"tool_calls":[{"id":"a","name":"t","input":{}},{"id":"a","name":"u","input":{}}],"stop_reason":"tool_use"}`,
+		"input not object":  `{"tool_calls":[{"id":"a","name":"t","input":[1]}],"stop_reason":"tool_use"}`,
+		"input missing":     `{"tool_calls":[{"id":"a","name":"t"}],"stop_reason":"tool_use"}`,
+		"call without name": `{"tool_calls":[{"id":"a","input":{}}],"stop_reason":"tool_use"}`,
+		"too many calls":    `{"tool_calls":[` + strings.Join(calls, ",") + `],"stop_reason":"tool_use"}`,
+		"long model":        `{"stop_reason":"end_turn","model":"` + strings.Repeat("m", MaxLLMModelBytes+1) + `"}`,
+		"too large":         `{"stop_reason":"end_turn","content":"` + strings.Repeat("x", MaxLLMOutputBytes) + `"}`,
+	} {
+		if _, err := CheckLLMOutput(json.RawMessage(raw)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+func TestFamilyOf(t *testing.T) {
+	for kind, want := range map[string]string{KindLLM: FamilyLLM, KindAnalyzeRepo: FamilyCoding, KindImplementFeature: FamilyCoding, KindEcho: FamilyCoding} {
+		if got := FamilyOf(kind); got != want {
+			t.Errorf("%s: %s", kind, got)
+		}
+	}
+}
