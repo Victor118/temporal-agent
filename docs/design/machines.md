@@ -1,6 +1,6 @@
 # Conception : des machines hors du réseau privé
 
-Statut : **version 2.2** ; **phases 0 et 1 faites** le 6 octobre 2026 (§16 et §17 : ce qui est fait, et les écarts à ce document), **phase 2 faite** le même jour (§18), phases 1 bis et 3 et suivantes à faire. Version 1 le 5 octobre 2026, révisée le même jour après deux relectures contre le code et le SDK Temporal (v1.33) : les points de la première sont marqués *[rev. 1…15]*, ceux de la seconde *[rev2 A…J]*. La 2.2 (6 octobre) ajoute ce qu'une discussion a précisé : inscription par code, jetons, exécutable natif, plusieurs machines, transport.
+Statut : **version 2.2** ; **phases 0 et 1 faites** le 6 octobre 2026 (§16 et §17 : ce qui est fait, et les écarts à ce document), **phase 2 faite** le même jour (§18), **phase 3.0 faite** le 7 octobre (le modèle sur la machine : `machine-llm.md` §14), phases 1 bis, 3.1 et suivantes à faire. Version 1 le 5 octobre 2026, révisée le même jour après deux relectures contre le code et le SDK Temporal (v1.33) : les points de la première sont marqués *[rev. 1…15]*, ceux de la seconde *[rev2 A…J]*. La 2.2 (6 octobre) ajoute ce qu'une discussion a précisé : inscription par code, jetons, exécutable natif, plusieurs machines, transport.
 
 Origine : une note proposait d'exposer Temporal aux machines des utilisateurs (sans base de données pour elles). L'option retenue est différente : une passerelle, Temporal et la base restent privés (§3).
 
@@ -212,7 +212,7 @@ C'est une couche au-dessus d'`agent connect` : aucun protocole nouveau, sauf le 
 | **1** (fait, §17) | `CodingRunWorkflow`, repli par outil avec sonde, `analyze_repo` sur la machine (Linux), « Mes machines » | Alice lance une analyse avec son abonnement, depuis chez elle, sans VPN |
 | **1 bis** | Client de bureau (Linux d'abord ; `machine/connect/analyze.go` et `subproc` sont Unix seulement : macOS à vérifier, Windows à écrire) | Une seule chose à lancer |
 | **2** (fait, §18) | Upload de fichiers depuis la machine ; `implement_feature` sur la machine (push avec ses identifiants) | Les runs rendent des fichiers ; le code part de sa machine |
-| **3** | `CallLLM` sur la machine, avec sa conception et la politique par agent (§10) | Un utilisateur sans clé sur le serveur a un agent |
+| **3** (3.0 fait : `machine-llm.md` §14) | `CallLLM` sur la machine, avec sa conception et la politique par agent (§10) | Un utilisateur sans clé sur le serveur a un agent |
 | **4** | Conception puis code de `CLIAgentWorkflow`, `agent mcp-bridge`, Update `call_tool` | La CLI fait tout le tour avec les outils de la plateforme |
 | **5** | Plusieurs répliques, publication d'un agent au groupe, macOS et Windows | Montée en charge, partage consenti |
 

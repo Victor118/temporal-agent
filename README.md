@@ -46,7 +46,7 @@ happens to answer has locally.
 - **Built-in tools** — File system operations, web access, shell execution, user interaction, workflow queries, scheduling
 - **Published files** — An agent hands the members a file (`publish_file` for a text it writes, `exec`'s `publish` for a file a command made), attached to its answer and downloaded by the session's members only
 - **Documents** — `render_pdf` (Markdown or typst to PDF) and `make_slides` (Markdown to an editable pptx or a PDF deck), rendered by pandoc and typst on the main worker and published like any file
-- **Machines** — A user's own machine, outside the private network, connects to the server with `agent connect` (an outgoing WebSocket, no VPN, no database nor Temporal access) and runs the directives of their agents' turns; enrolled by a code typed in « Mes machines ». `analyze_repo` and `implement_feature` run there, with the user's own Claude Code login and git identity (an implementation pushes its branch from their machine, only where they allowed it), and fall back to the installation's coding workers when no machine of theirs takes them; what an implementation leaves in its outputs is published to the session: see [docs/design/machines.md](docs/design/machines.md)
+- **Machines** — A user's own machine, outside the private network, connects to the server with `agent connect` (an outgoing WebSocket, no VPN, no database nor Temporal access) and runs the directives of their agents' turns; enrolled by a code typed in « Mes machines ». `analyze_repo` and `implement_feature` run there, with the user's own Claude Code login and git identity (an implementation pushes its branch from their machine, only where they allowed it), and fall back to the installation's coding workers when no machine of theirs takes them; what an implementation leaves in its outputs is published to the session. The model of a turn can run there too, with the user's key and model, for the agents an admin allows: see [docs/design/machines.md](docs/design/machines.md) and [docs/design/machine-llm.md](docs/design/machine-llm.md)
 - **Remote MCP servers** — A worker declares MCP servers in its `worker.yaml` (Streamable HTTP, or the older HTTP+SSE) and publishes their tools; a server that is down is retried in the background, and tools it adds or removes are picked up within 30 s
 
 ## Architecture
@@ -202,6 +202,40 @@ the agent. Regular files only (no link, no file another path shares), 20 at
 most, 4 levels deep, `FILES_MAX_BYTES` each and twice that in all (the
 server's). An analysis has none: the CLI's `plan` mode refuses every write.
 
+To run the model of your own turns on your machine, with your key and your
+model, start `agent connect` with a provider; an admin chooses, agent by agent,
+whether its turns may run there (`/admin`, « Modèle sur la machine de
+l'auteur » : `never`, the default, `prefer`, `require`):
+
+```bash
+AGENT_CONNECT_LLM_API_KEY=sk-ant-… agent connect --llm-provider anthropic --llm-model claude-sonnet-5
+```
+
+| Flag (env) | Meaning |
+|---|---|
+| `--llm-provider` (`AGENT_CONNECT_LLM_PROVIDER`) | The provider the machine calls (`anthropic`); empty = no model on this machine |
+| `--llm-model` (`AGENT_CONNECT_LLM_MODEL`) | The model of your turns, whatever the server's request names (required with a provider) |
+| `AGENT_CONNECT_LLM_API_KEY` | Your API key, read from the environment only (never `ANTHROPIC_API_KEY`, which Claude Code's runs read by their own rule) |
+| `--llm-max-concurrent` | Calls to the model at once (default 4, at most 16), apart from the coding runs: a machine busy with an analysis still serves the model |
+
+For an agent set to `prefer` or `require`, a turn chooses at its start a
+machine of its author with a model (online, not paused, the highest
+priority, the least busy) and makes every call of the turn there; the
+server builds each request (prompt, skills, tools, the session's conversation,
+your memory) and sends it to the machine over its WebSocket, never through
+Temporal nor the database. **The machine has the agent's authority**: it reads
+all that, and its answers decide which of the agent's tools the turn calls.
+A passing failure is retried on the same machine (six attempts, the
+provider's `Retry-After` waited); a machine that is lost or unreachable is
+set aside until it connects again, and the turn goes on with the server's
+key (`prefer`) or another machine of yours (`require`; none: the turn stops
+and says so). A key the provider refuses, or an account with no credit left,
+withdraws the model until `agent connect` starts again (you are told). A
+sub-agent runs on its parent's machine unless its own agent is set to
+`never`. The thread signs such an answer « via la machine de … · model »;
+each answer keeps its model and its token usage. Scheduled tasks, fork
+summaries and reports still use the server's key (phase 3.1).
+
 Every worker of a coding queue (the fallback queues `analyze_repo` and `implement_feature` run on) must have the `claude` CLI installed. A worker without it on that queue still answers a run's first check, and the run fails at once saying so: with N workers there of which one lacks the CLI, about one run in N fails that way.
 
 A worker that stops ends its coding runs first, then gives the tasks under way 30 seconds to answer before it exits: each run's answer, that its worker stopped, is recorded by Temporal before the process ends, and read by the next worker of the queue (another replica, or this one once restarted). A stop takes 30 to 50 seconds in all. Give a worker's container a `stop_grace_period` of 60 seconds: Docker's default, 10 seconds, kills it before the answer goes out, and the workflow then waits a minute or two for the missed heartbeats.
@@ -238,13 +272,13 @@ A worker that stops ends its coding runs first, then gives the tasks under way 3
 | `CLAUDE_CODE_QUEUE_WAIT` | How long a coding run waits for a worker of its queue with a run to spare, as a Go duration (default `30m`). A run waiting more than a minute tells its user so on the turn's channel; past the wait it fails, saying the workers are busy. A run first checks that some worker answers on the queue: none within a minute, it fails at once saying no worker is available. Not a positive duration = the worker does not start |
 | `CLAUDE_CODE_STALL_TIMEOUT` | How long the CLI of a coding run may write nothing before the run is ended as stuck, as a Go duration (default `12m`, above the CLI's 10 min maximum for a Bash command; raise it with `BASH_MAX_TIMEOUT_MS`). `0` = never. The run's result then says how far it got. Not a duration = the worker does not start |
 | `CLAUDE_CODE_WORKSPACE` | Directory of a coding worker's clones, one per run, all of a run's steps on that worker (default `./claude-code-runs`); keep it apart from `WORKSPACE_PATH`. At startup the worker deletes the `run-*` entries a worker that died left there; if another live worker process shares the directory, only those older than a run's longest lifetime. Every worker process holds a lock on `.workers.lock` there; one that cannot take it does not start (one sweeping it is waited for up to 2 minutes, then the worker exits, to be restarted by whatever runs it) |
-| `MACHINES_ENABLED` | `true` (default) or `false`: coding runs go to the users' machines first, and the server serves their gateway (`/machines/*`); `false` = no gateway, no machine route, no routing to machines. Set the same value on the server and every worker. Anything else = the process does not start |
+| `MACHINES_ENABLED` | `true` (default) or `false`: coding runs go to the users' machines first, so do the turns' calls to the model of the agents that allow it, and the server serves their gateway (`/machines/*`); `false` = no gateway, no machine route, no routing to machines. Set the same value on the server and every worker. Anything else = the process does not start |
 | `CLAUDE_CODE_ANALYZE_QUEUE` | Main worker: where `analyze_repo` runs when no machine of the user's takes it, a coding queue serving `AnalyzeRepoWorkflow` (default `tools-claude-code-ro`, the read-only coding container's); `none` = no fallback (the run then fails saying the user's machine is not connected) |
 | `CLAUDE_CODE_IMPLEMENT_QUEUE` | Main worker: where `implement_feature` runs when no machine of the user's takes it (none connected, or none with `--allow-push`), a coding queue serving `ImplementFeatureWorkflow` (default `tools-claude-code`, the writing coding container's, which holds the push key); `none` = no fallback |
 | `CLAUDE_CODE_AUTH` | How coding runs authenticate: `api` (bills `ANTHROPIC_API_KEY`) or `subscription` (`CLAUDE_CODE_OAUTH_TOKEN`, made with `claude setup-token`, or the CLI's login). The other mode's credential never reaches the CLI. Empty = the one credential set; both set = the worker does not start |
 | `CLAUDE_CODE_OAUTH_TOKEN` | A Claude subscription's long-lived token, for `CLAUDE_CODE_AUTH=subscription`. The runs then count against the subscription's usage limits, and the dollar cap is only an estimate |
 | `INTERNAL_ADDR` | Address of the internal API that receives worker notifications and the directives workers hand to the machines' gateway (default `:9999`). Keep it off the public network |
-| `NOTIFY_URL` | Base URL a worker posts its notifications and its machines' directives to (default `http://localhost:9999`) |
+| `NOTIFY_URL` | Base URL a worker posts its notifications and its machines' directives to (default `http://localhost:9999`), the calls to the model a machine runs included, with their request (up to 4 MiB): the worker that serves `CallLLM` (its `activity_queues` entry too) must reach it |
 | `INTERNAL_API_KEY` | Secret shared by the server and its workers for `/internal/notify` and `/internal/machines/directives` (`Authorization: Bearer …`). Empty = the server refuses every notification and every directive; a worker checks it at startup and logs a refusal as an error |
 | `TRUSTED_PROXIES` | Comma-separated addresses or CIDR ranges of the reverse proxies in front of the server, whose `X-Forwarded-For` gives the client's address; `none` when clients connect directly. Empty (default) = the client's address is unknown, and failed logins are limited per account only; so is a login a trusted proxy forwards without naming the client. The same goes for machines' enrollment requests (20 per address in 10 minutes only when it is known; 500 pending at most in any case) |
 | `SKILLS_REPO`, `SKILLS_BRANCH` | Git repository (and branch) the skills are loaded from |
@@ -347,7 +381,13 @@ agent/
   machines » (10 minutes, wrong codes limited per user, a warning against
   approving someone else's code), or by a single-use enrollment token read on
   standard input. What a machine sends is untrusted and bounded (256 KiB per
-  message, a rate scaled to its number of directives). `agent connect` needs `https`, its certificate
+  message, 4 MiB for the answer of a call to the model, itself checked:
+  1.5 MiB, 64 tool calls with unique IDs and JSON object inputs, a known stop
+  reason; a rate scaled to its number of directives). A machine that runs an
+  agent's model (an admin's choice per agent, off by default) has that
+  agent's authority: it reads its prompt, tools and the session's
+  conversation, and its answers choose the tools the turn calls, always
+  within the agent's allowlist. `agent connect` needs `https`, its certificate
   checked, except to this very host (development). Revoking a machine cuts it
   and ends its directives at once. A file a machine publishes
   (`PUT /machines/files`) needs its token and an open directive of its own,

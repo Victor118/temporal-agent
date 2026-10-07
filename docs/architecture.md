@@ -111,8 +111,11 @@ la machine de l'utilisateur, sinon à leur queue de repli.
 - **Passerelle des machines** (`gateway/`, dans le serveur) : les machines
   des utilisateurs, hors du réseau privé, s'y connectent en WebSocket
   (`agent connect`) ; elle leur remet les directives de `RunOnMachine` et
-  parle à Temporal en client (heartbeats, complétion). Une machine n'a ni la
-  base ni Temporal. Conception : [design/machines.md](design/machines.md).
+  les appels au modèle de `CallLLMOnMachine` (la requête dans la WebSocket,
+  jamais en base ni dans Temporal), et parle à Temporal en client
+  (heartbeats, complétion). Une machine n'a ni la base ni Temporal.
+  Conception : [design/machines.md](design/machines.md),
+  [design/machine-llm.md](design/machine-llm.md).
 
 ### Configuration
 
@@ -149,7 +152,7 @@ tools: [github_*]
 | `files`, `file_contents` | fichiers publiés par les agents (métadonnées, contenu à part) | workers (outils) |
 | `skills_version` | signal de rechargement des skills | serveur |
 | `machines`, `machine_retired_tokens`, `machine_enrollments` | machines des utilisateurs (hash du jeton), jetons remplacés, inscriptions en attente | serveur (passerelle) |
-| `machine_directives` | directives des machines : réservation et directive sur une ligne, jeton de tâche, état | workers (`PickMachine`, `RunOnMachine`) / passerelle |
+| `machine_directives` | directives des machines : réservation et directive sur une ligne, jeton de tâche, état ; un appel au modèle (`llm`) avec ce qui revient de la mémoire du prompt, jamais la requête | workers (`PickMachine`, `RunOnMachine`, `CallLLMOnMachine`) / passerelle |
 | `agent_executions`, `user_questions` | arbre d'exécution, questions (prévu) | workflows |
 
 ## Flux principaux
@@ -357,7 +360,13 @@ diagnostic.
   `CLAUDE_CODE_IMPLEMENT_QUEUE`), sinon une erreur claire ; la note du tour
   suit la machine (web). Ce qu'une implémentation laisse dans ses sorties est publié pour
   le tour (machine : `PUT /machines/files` ; worker : son magasin de
-  fichiers). Pas encore : client de bureau, `CallLLM` sur la machine.
+  fichiers). Phase 3.0 faite (`docs/design/machine-llm.md`, §14) : le
+  modèle d'un tour sur la machine de son auteur, selon l'option de l'agent
+  (`agents.llm_on_machine` : `never`, `prefer`, `require`) ; `ChooseMachine`
+  au début du tour, `CallLLMOnMachine` à chaque étape (un essai, la relance
+  et le repli dans `AgentWorkflow`), sous-agents sur la machine de leur
+  parent sauf `never`. Pas encore : client de bureau, serveur sans clé,
+  résumés et rapports, tâches planifiées sur la machine (3.1).
 - **Tous les workflows et activities sont enregistrés sur toutes les queues**
   d'un worker, y compris sa queue d'outils. Les outils de type workflow
   (`ask_user`) tournent donc sur la queue de l'outil.
@@ -391,8 +400,9 @@ diagnostic.
 8. **Arbre d'exécution et questions utilisateur** (`agent_executions`,
    `user_questions`, refonte d'`AskUserWorkflow`).
 9. **Machines** ([design/machines.md](design/machines.md), §14) : phases 0,
-   1 et 2 faites ; ensuite le client de bureau (1 bis) et `CallLLM` sur la
-   machine (phase 3).
+   1, 2 et 3.0 (`CallLLM` sur la machine, [design/machine-llm.md](design/machine-llm.md))
+   faites ; ensuite la 3.1 (serveur sans clé, résumés, rapports et tâches
+   planifiées par la machine) et le client de bureau (1 bis).
 
 ## Questions ouvertes
 
