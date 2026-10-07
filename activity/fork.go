@@ -198,7 +198,7 @@ func toolCalls(msgs []store.MessageWithID) map[string]string {
 // tool call, nor a message of a kind it does not know.
 func Transcribed(m store.Message) bool {
 	switch {
-	case m.Kind == store.KindForkSummary, m.Kind == store.KindForkReport:
+	case m.Kind == store.KindForkSummary, m.Kind == store.KindForkReport, m.Kind == store.KindTaskResult:
 		return true
 	case m.Kind != "":
 		return false
@@ -235,6 +235,8 @@ func transcriptEntry(m store.Message, isPrivate func(tool string) bool, privateR
 			title = m.Fork.Title
 		}
 		return "[Report from fork « " + title + " », posted by " + cmp.Or(m.Author, "a member") + "]\n" + text
+	case m.Kind == store.KindTaskResult:
+		return taskTranscript(m, text)
 	case m.Role == store.RoleUser && m.Author != "":
 		return "User (" + m.Author + "): " + text
 	case m.Role == store.RoleUser:
@@ -262,6 +264,40 @@ func transcriptEntry(m store.Message, isPrivate func(tool string) bool, privateR
 		return label + ": " + clip(tool.DisplayResult(privateResult, m.ToolResult.Content), maxSummaryToolResultBytes)
 	}
 	return ""
+}
+
+// maxSummaryTaskResultBytes bounds what a transcript keeps of a background
+// task's result: more than a tool's, it is the work the task was for.
+const maxSummaryTaskResultBytes = 4000
+
+// taskTranscript is a background task's end as a transcript shows it:
+// labelled, a message of nobody.
+func taskTranscript(m store.Message, text string) string {
+	t := m.Task
+	if t == nil {
+		t = &store.TaskRef{}
+	}
+	label := "[Result of the background task " + cmp.Or(t.Tool, "a tool")
+	if t.Summary != "" {
+		label += " (" + t.Summary + ")"
+	}
+	if m.AgentID != "" {
+		label += " of agent " + m.AgentID
+	}
+	if t.RequestedBy != "" {
+		label += ", for " + t.RequestedBy
+	}
+	switch t.State {
+	case store.BackgroundFailed:
+		label += ", failed"
+	case store.BackgroundCancelled:
+		label += ", cancelled by " + cmp.Or(t.CancelledBy, "a member")
+	}
+	label += "]"
+	if text == "" {
+		return label
+	}
+	return label + "\n" + clip(text, maxSummaryTaskResultBytes)
 }
 
 // decodeText returns a message's content as text: it is stored as a JSON

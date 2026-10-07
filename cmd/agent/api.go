@@ -317,12 +317,14 @@ func (a *api) getHistory(w http.ResponseWriter, r *http.Request) {
 	// Convert store messages to a frontend-friendly format
 	type historyEntry struct {
 		ID        int64          `json:"id"`             // what a fork starts from
-		Type      string         `json:"type"`           // "message", "tool_calls", "fork_summary", "fork_report", "turn_error"
+		Type      string         `json:"type"`           // "message", "tool_calls", "fork_summary", "fork_report", "task_result", "turn_error"
 		Role      string         `json:"role,omitempty"` // "user", "assistant"
 		Content   string         `json:"content,omitempty"`
 		UserID    string         `json:"user_id,omitempty"` // author of a user message, sender of a report
 		Author    string         `json:"author,omitempty"`
 		Fork      *store.ForkRef `json:"fork,omitempty"` // the fork a report comes from
+		Task      *store.TaskRef `json:"task,omitempty"` // the background task a task_result ends
+		AgentID   string         `json:"agent_id,omitempty"`
 		ToolCalls interface{}    `json:"tool_calls,omitempty"`
 	}
 
@@ -343,6 +345,9 @@ func (a *api) getHistory(w http.ResponseWriter, r *http.Request) {
 			history = append(history, historyEntry{ID: msg.ID, Type: "fork_summary", Content: content})
 		case msg.Kind == store.KindForkReport:
 			history = append(history, historyEntry{ID: msg.ID, Type: "fork_report", Content: content, UserID: msg.UserID, Author: msg.Author, Fork: msg.Fork})
+		case msg.Kind == store.KindTaskResult:
+			// Nobody's words: the task's, for its agent.
+			history = append(history, historyEntry{ID: msg.ID, Type: "task_result", Content: content, UserID: msg.UserID, AgentID: msg.AgentID, Task: msg.Task})
 		case msg.Kind == store.KindTurnEnd:
 			// A turn's end shows only when it says why the turn failed: the
 			// system's words, not the agent's, which an assistant role would

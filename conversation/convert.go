@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/victor/temporal-agent/provider"
@@ -127,6 +128,10 @@ func Convert(messages []store.Message, view View) []provider.ChatMessage {
 		if msg.Kind == store.KindTurnEnd {
 			continue // for the members and the participants: never the model's
 		}
+		if msg.Kind == store.KindTaskResult {
+			result = appendUserText(result, view.taskResult(msg))
+			continue
+		}
 		if view.other(msg) {
 			result = appendUserText(result, view.otherTurn(msg))
 			continue
@@ -199,6 +204,85 @@ func otherResult(call otherCall, r *store.ToolResult, private bool) string {
 		what = "error from"
 	}
 	return fmt.Sprintf("[%s %s, called by %s] %s", what, call.tool, call.agent, Clip(tool.DisplayResult(private, r.Content), maxOtherToolResultBytes))
+}
+
+// taskResult is a background task's end as the model reads it: framed, a
+// message of nobody, never a member's words. Its own agent reads it whole,
+// the instructions attached while it ran first; another agent reads it
+// clipped, as it reads another agent's tool results: every call of every
+// participant reads it, for ever.
+func (v View) taskResult(m store.Message) string {
+	t := m.Task
+	if t == nil {
+		t = &store.TaskRef{}
+	}
+	mine := m.AgentID == "" || m.AgentID == v.Self
+	who := "you"
+	if !mine {
+		who = v.agentLabel(m.AgentID)
+	}
+	var sb strings.Builder
+	sb.WriteString("[Task result: " + cmp.Or(t.Tool, "a tool"))
+	if t.Summary != "" {
+		sb.WriteString(" (" + t.Summary + ")")
+	}
+	sb.WriteString(", a background task " + who + " started")
+	if t.RequestedBy != "" {
+		sb.WriteString(" for " + t.RequestedBy)
+	}
+	if !t.StartedAt.IsZero() {
+		sb.WriteString(" at " + t.StartedAt.UTC().Format("2006-01-02 15:04 UTC"))
+	}
+	sb.WriteString(", " + taskOutcome(t) + ". Not a message from a person.]")
+	if mine && len(t.FollowUps) > 0 {
+		sb.WriteString("\nInstructions to apply now, attached while it ran:")
+		for _, f := range t.FollowUps {
+			sb.WriteString("\n- ")
+			if f.UserName != "" {
+				sb.WriteString("(" + f.UserName + ") ")
+			}
+			sb.WriteString(f.Text)
+		}
+	}
+	text := messageText(m.Content)
+	if !mine {
+		text = Clip(text, maxOtherToolResultBytes)
+	}
+	if text != "" {
+		sb.WriteString("\n" + text)
+	}
+	if f := t.File; f != nil && mine {
+		fmt.Fprintf(&sb, "\n[The whole result (%d bytes) is the file %s (id %s), published in this session: above is its start.]", f.Size, f.Name, f.ID)
+	}
+	return sb.String()
+}
+
+// taskOutcome says how a task ended, and after how long.
+func taskOutcome(t *store.TaskRef) string {
+	after := ""
+	if !t.StartedAt.IsZero() && t.EndedAt.After(t.StartedAt) {
+		d := t.EndedAt.Sub(t.StartedAt)
+		if d < time.Minute {
+			after = fmt.Sprintf(" after %d s", int(d/time.Second))
+		} else {
+			after = fmt.Sprintf(" after %d min", int(d.Round(time.Minute)/time.Minute))
+		}
+	}
+	switch t.State {
+	case store.BackgroundFailed:
+		return "failed" + after
+	case store.BackgroundCancelled:
+		return "cancelled by " + cmp.Or(t.CancelledBy, "a member") + after + ": it was not finished"
+	}
+	return "done" + after
+}
+
+// agentLabel names an agent by its ID, as the history names it.
+func (v View) agentLabel(id string) string {
+	if a, ok := v.Agents[id]; ok {
+		return AgentLabel(a.Name, a.Mention)
+	}
+	return AgentLabel(id, "")
 }
 
 // plainUserText returns the text of a user message that is text alone.

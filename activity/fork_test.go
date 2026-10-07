@@ -44,6 +44,9 @@ func TestBuildTranscript(t *testing.T) {
 		// A fork reported back: labelled as its report, not as the member's words.
 		{ID: 9, Message: store.Message{Role: store.RoleUser, Kind: store.KindForkReport, Content: text("export done"), Author: "Victor",
 			Fork: &store.ForkRef{SessionID: "f1", Title: "Export CSV", UpToMessageID: 4}}},
+		// A background task's end: labelled, nobody's words.
+		{ID: 10, Message: store.Message{Role: store.RoleUser, Kind: store.KindTaskResult, Content: text("the report"), UserID: "u-victor", AgentID: "jarvis",
+			Task: &store.TaskRef{Tool: "analyze_repo", Summary: "cinesense", RequestedBy: "Victor", State: store.BackgroundDone}}},
 	}, memoryIsPrivate)
 	if truncated {
 		t.Error("a short conversation reported truncated")
@@ -56,6 +59,7 @@ func TestBuildTranscript(t *testing.T) {
 		"Tool error: (private)",
 		"Assistant (Agent Smith): it fits\nAssistant (Agent Smith) called web_search",
 		"[Report from fork « Export CSV », posted by Victor]\nexport done",
+		"[Result of the background task analyze_repo (cinesense) of agent jarvis, for Victor]\nthe report",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("transcript lacks %q", want)

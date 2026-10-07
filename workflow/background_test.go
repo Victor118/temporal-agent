@@ -532,3 +532,55 @@ func TestAgentWorkflow_NoTaskOutsideASessionTurn(t *testing.T) {
 		t.Error("something ran")
 	}
 }
+
+// A task's end is a message for its participant like a member's: it waits
+// behind the one being answered, or goes first, by the order they came in.
+// The turn it wakes answers the user who asked for the task, and reads it
+// framed; a member's message written after it is read after it.
+func TestParticipant_AnswersATaskResultInItsTurn(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		taskFirst bool
+	}{{"task first", true}, {"member first", false}} {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHarness(t, answers(done), nil)
+			h.human("analyse cinesense in the background", "Victor")
+			task := func() ParticipantMessage {
+				ref := store.TaskRef{ID: "s1:p:jarvis:m1:bg:c1", Tool: "analyze_repo", State: store.BackgroundDone, RequestedBy: "Victor"}
+				id := h.f.session.add(store.TaskResultKey(ref.ID), store.Message{Role: store.RoleUser, Kind: store.KindTaskResult,
+					UserID: "u-victor", AgentID: "jarvis", Content: `"the report"`, Task: &ref})
+				return ParticipantMessage{MessageID: id, UserID: "u-victor", UserName: "Victor", Channel: "telegram", ChannelID: "42"}
+			}
+			var inbox []ParticipantMessage
+			if c.taskFirst {
+				inbox = append(inbox, task(), h.human("and the tests?", "Alice"))
+			} else {
+				inbox = append(inbox, h.human("and the tests?", "Alice"), task())
+			}
+			if err := h.run("jarvis", inbox...); err != nil {
+				t.Fatal(err)
+			}
+			sent := h.f.model.sent()
+			if len(sent) != 2 {
+				t.Fatalf("%d calls", len(sent))
+			}
+			taskTurn, memberTurn := sent[0], sent[1]
+			if !c.taskFirst {
+				taskTurn, memberTurn = sent[1], sent[0]
+			}
+			last := read(taskTurn)[len(read(taskTurn))-1]
+			if !strings.Contains(last, "[Task result: analyze_repo, a background task you started for Victor") || !strings.HasSuffix(last, "the report") {
+				t.Errorf("the task's turn read %v", read(taskTurn))
+			}
+			// The member's message, stored after the task's end, reads it
+			// only when it came after it.
+			readsTask := strings.Contains(strings.Join(read(memberTurn), "\n"), "[Task result:")
+			if readsTask != c.taskFirst {
+				t.Errorf("the member's turn read the task: %v; %v", readsTask, read(memberTurn))
+			}
+			if ends := h.ends(); len(ends) != 2 {
+				t.Errorf("ends %v", ends)
+			}
+		})
+	}
+}

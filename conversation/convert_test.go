@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/victor/temporal-agent/provider"
 	"github.com/victor/temporal-agent/store"
@@ -347,5 +348,48 @@ func TestConvert_FramesForkReport(t *testing.T) {
 	// The member's message after it is theirs, joined to the same user turn.
 	if !strings.HasSuffix(got, "\n\n[Alice] @jarvis what do you think?") {
 		t.Errorf("the next message: %q", got)
+	}
+}
+
+// A background task's end reaches the model framed, a message of nobody:
+// its own agent reads it whole, the instructions attached while it ran
+// first, and where the rest of it is; another agent reads it clipped, as it
+// reads another agent's tool results.
+func TestConvert_FramesTaskResult(t *testing.T) {
+	start := time.Date(2026, 10, 7, 10, 2, 0, 0, time.UTC)
+	long := strings.Repeat("r", 5000)
+	task := store.Message{Role: store.RoleUser, Kind: store.KindTaskResult, UserID: "u-victor", AgentID: "jarvis", Content: `"` + long + `"`,
+		Task: &store.TaskRef{ID: "s1:p:jarvis:m4:bg:c1", Tool: "analyze_repo", Summary: "cinesense", State: store.BackgroundDone,
+			RequestedBy: "Victor", StartedAt: start, EndedAt: start.Add(14 * time.Minute),
+			FollowUps: []store.TaskFollowUp{{Text: "then implement the fix", UserName: "Alice"}},
+			File:      &store.TaskFile{ID: "f1", Name: "resultat-analyze_repo.md", Size: 40000}}}
+	msgs := []store.Message{{Role: store.RoleUser, Content: `"go on"`, Author: "Alice", UserID: "u-alice"}, task}
+	agents := map[string]Label{"jarvis": {Name: "Jarvis", Mention: "jarvis"}}
+
+	own := textOf(Convert(msgs, View{Self: "jarvis", User: "u-victor", Agents: agents})[0])
+	for _, want := range []string{
+		"[Task result: analyze_repo (cinesense), a background task you started for Victor at 2026-10-07 10:02 UTC, done after 14 min. Not a message from a person.]",
+		"\nInstructions to apply now, attached while it ran:\n- (Alice) then implement the fix\n" + long,
+		"[The whole result (40000 bytes) is the file resultat-analyze_repo.md (id f1)",
+	} {
+		if !strings.Contains(own, want) {
+			t.Errorf("its agent reads %q, lacking %q", own[:min(len(own), 400)], want)
+		}
+	}
+	if strings.Contains(own, "[Victor]") {
+		t.Error("read as Victor's words")
+	}
+
+	other := textOf(Convert(msgs, View{Self: "smith", User: "u-alice", Agents: agents})[0])
+	if !strings.Contains(other, "a background task agent Jarvis (@jarvis) started for Victor") || strings.Contains(other, "Instructions") ||
+		strings.Count(other, "r") > maxOtherToolResultBytes+50 || strings.Contains(other, "resultat-") {
+		t.Errorf("another agent reads %q", other)
+	}
+
+	cancelled := task
+	cancelled.Content = ""
+	cancelled.Task = &store.TaskRef{Tool: "agent_smith", State: store.BackgroundCancelled, CancelledBy: "Bob"}
+	if got := textOf(Convert([]store.Message{cancelled}, View{Self: "jarvis"})[0]); !strings.Contains(got, "cancelled by Bob: it was not finished") {
+		t.Errorf("cancelled: %q", got)
 	}
 }
