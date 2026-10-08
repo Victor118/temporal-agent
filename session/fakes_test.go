@@ -187,6 +187,13 @@ func (m *memStore) UpdateSessionTitle(_ context.Context, _, title string) error 
 	return nil
 }
 func (m *memStore) SetSessionAgentMode(context.Context, string, string) error { return nil }
+
+func (m *memStore) RenameSession(_ context.Context, _, title string) error {
+	m.titleMu.Lock()
+	defer m.titleMu.Unlock()
+	m.title = title
+	return nil
+}
 func (m *memStore) IsSessionMember(_ context.Context, sessionID, userID string) (bool, error) {
 	return !slices.Contains(m.outsiders[sessionID], userID), nil
 }

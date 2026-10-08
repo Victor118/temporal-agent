@@ -290,6 +290,13 @@ func (s *PostgresStore) DeleteSession(ctx context.Context, sessionID string) err
 	})
 }
 
+// RenameSession sets a session's title, whatever it was: a title a member
+// writes replaces the one taken from the first message.
+func (s *PostgresStore) RenameSession(ctx context.Context, sessionID, title string) error {
+	res, err := s.db.ExecContext(ctx, "UPDATE sessions SET title = $2 WHERE session_id = $1", sessionID, title)
+	return affectedOne(res, err, errors.New("session not found"))
+}
+
 // SetSessionAgentMode sets when human messages call the session's agent.
 func (s *PostgresStore) SetSessionAgentMode(ctx context.Context, sessionID, mode string) error {
 	res, err := s.db.ExecContext(ctx, "UPDATE sessions SET agent_mode = $2 WHERE session_id = $1", sessionID, mode)

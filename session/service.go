@@ -36,6 +36,7 @@ var (
 	ErrEmptyMessage    = errors.New("message content is required")
 	ErrSummaryPending  = errors.New("the summary of the parent session is still being written")
 	ErrBadMode         = errors.New("mode must be auto, always or mention")
+	ErrEmptyTitle      = errors.New("the title is empty")
 	ErrNothingToStop   = errors.New("no agent is working in this session")
 	ErrTurnOver        = errors.New("the turn to stop is over")
 	ErrStopNotAllowed  = errors.New("only the author of the message an agent answers, or the session's creator, may stop its turn")
@@ -55,6 +56,7 @@ type Store interface {
 	GetActiveSessionByChannel(ctx context.Context, userID, channel, channelID string) (*store.Session, error)
 	DeleteSession(ctx context.Context, sessionID string) error
 	UpdateSessionTitle(ctx context.Context, sessionID, title string) error
+	RenameSession(ctx context.Context, sessionID, title string) error
 	SetSessionAgentMode(ctx context.Context, sessionID, mode string) error
 	IsSessionMember(ctx context.Context, sessionID, userID string) (bool, error)
 	ListSessionMembers(ctx context.Context, sessionID string) ([]store.SessionMember, error)

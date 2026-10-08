@@ -1,7 +1,13 @@
 {{define "tree"}}
 <div class="tree-head">
   <span class="eyebrow">Sessions</span>
-  <form hx-post="/s/new"><button type="submit" aria-label="Nouvelle session" title="Nouvelle session">+</button></form>
+  <details class="new-session" id="new-session">
+    <summary aria-label="Nouvelle session" title="Nouvelle session">+</summary>
+    <form class="new-session-form" hx-post="/s/new">
+      <input class="input" name="title" maxlength="{{titleMax}}" placeholder="Titre (facultatif)" aria-label="Titre de la session" autocomplete="off">
+      <button class="btn primary" type="submit">Créer</button>
+    </form>
+  </details>
 </div>
 {{/* Refreshed in place: the container stays, so does its scroll, and a
      morph touches only the nodes that changed. Its stream rings when one of

@@ -262,6 +262,7 @@ var tmpl = template.Must(template.New("").Funcs(template.FuncMap{
 	"add":         func(a, b int) int { return a + b },
 	"itemOf":      func(p *Page, it ThreadItem) ItemView { return ItemView{Page: p, Item: it} },
 	"purposeMax":  func() int { return session.MaxPurposeRunes },
+	"titleMax":    func() int { return session.MaxTitleRunes },
 	"reloadOn":    reloadOn,
 	"sessionGone": func() string { return session.EventSessionGone },
 	"memberLeft":  func() string { return session.EventMemberLeft },

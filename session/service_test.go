@@ -483,3 +483,49 @@ func TestOpen_StartsNothing(t *testing.T) {
 		t.Errorf("started %v %v", tc.started, tc.signalStarts)
 	}
 }
+
+// A title a member writes is on one line, trimmed, and cut in characters.
+func TestCleanTitle(t *testing.T) {
+	long := strings.Repeat("é", MaxTitleRunes+10)
+	cases := map[string]string{
+		"  Export CSV  ":           "Export CSV",
+		"Export\nCSV\t du  client": "Export CSV du client",
+		"Export‮CSV":               "Export CSV",
+		"\x00\x07":                 "",
+		long:                       strings.Repeat("é", MaxTitleRunes),
+	}
+	for in, want := range cases {
+		if got := cleanTitle(in); got != want {
+			t.Errorf("cleanTitle(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// A session opens under the title its member gave; the first message then
+// does not replace it (UpdateSessionTitle only fills an empty title).
+func TestOpen_WithATitle(t *testing.T) {
+	st := &memStore{}
+	if _, err := newTest(st, &fakeTemporal{}).Open(context.Background(), &store.User{ID: "u-alice"}, OpenOptions{Title: " Analyse\ncinesense "}); err != nil {
+		t.Fatal(err)
+	}
+	if st.session.Title != "Analyse cinesense" {
+		t.Errorf("title %q", st.session.Title)
+	}
+}
+
+// Any member renames a session; an empty title is refused.
+func TestRename(t *testing.T) {
+	st := &memStore{}
+	s := newTest(st, &fakeTemporal{})
+	if err := s.Rename(context.Background(), "s1", "  \n "); !errors.Is(err, ErrEmptyTitle) {
+		t.Errorf("empty title: %v", err)
+	}
+	if err := s.Rename(context.Background(), "s1", "Export\nCSV"); err != nil {
+		t.Fatal(err)
+	}
+	st.titleMu.Lock()
+	defer st.titleMu.Unlock()
+	if st.title != "Export CSV" {
+		t.Errorf("title %q", st.title)
+	}
+}

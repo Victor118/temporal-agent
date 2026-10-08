@@ -173,6 +173,9 @@ if (!window.chatWired) {
 <div class="welcome">
   <h2>Aucune session ouverte</h2>
   <p class="note">Une session est une conversation avec l'agent, que tu peux partager et forker.</p>
-  <form hx-post="/s/new"><button class="btn primary" type="submit">Nouvelle session</button></form>
+  <form class="invite" hx-post="/s/new">
+    <input class="input" name="title" maxlength="{{titleMax}}" placeholder="Titre (facultatif)" aria-label="Titre de la session" autocomplete="off">
+    <button class="btn primary" type="submit">Nouvelle session</button>
+  </form>
 </div>
 {{end}}

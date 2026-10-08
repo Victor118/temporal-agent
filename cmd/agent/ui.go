@@ -412,7 +412,7 @@ func (u *ui) sessionStream(w http.ResponseWriter, r *http.Request) {
 // --- Actions ---
 
 func (u *ui) newSessionForm(w http.ResponseWriter, r *http.Request) {
-	id, err := u.sessions.Open(r.Context(), auth.UserFrom(r.Context()), session.OpenOptions{})
+	id, err := u.sessions.Open(r.Context(), auth.UserFrom(r.Context()), session.OpenOptions{Title: r.FormValue("title")})
 	if err != nil {
 		log.Printf("ui: new session: %v", err)
 		http.Error(w, "Impossible de créer la session", http.StatusInternalServerError)
@@ -533,6 +533,21 @@ func (u *ui) agentModeForm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	goTo(w, r, "/s/"+sessionID) // the composer's hint changes with the mode
+}
+
+// renameForm sets the session's title, by any member.
+func (u *ui) renameForm(w http.ResponseWriter, r *http.Request) {
+	sessionID := chi.URLParam(r, "id")
+	switch err := u.sessions.Rename(r.Context(), sessionID, r.FormValue("title")); {
+	case errors.Is(err, session.ErrEmptyTitle):
+		http.Error(w, "Le titre est vide.", http.StatusBadRequest)
+		return
+	case err != nil:
+		log.Printf("ui: rename %s: %v", sessionID, err)
+		http.Error(w, "Internal error", http.StatusInternalServerError)
+		return
+	}
+	goTo(w, r, "/s/"+sessionID) // the title shows in the top bar and the tree
 }
 
 func (u *ui) leaveForm(w http.ResponseWriter, r *http.Request) {

@@ -50,6 +50,7 @@ type Store interface {
 	ListSessionsByUser(ctx context.Context, userID string) ([]Session, error)
 	ListSessionStats(ctx context.Context, userID string) (map[string]SessionStats, error)
 	UpdateSessionTitle(ctx context.Context, sessionID, title string) error
+	RenameSession(ctx context.Context, sessionID, title string) error
 	DeleteSession(ctx context.Context, sessionID string) error
 	IsSessionMember(ctx context.Context, sessionID, userID string) (bool, error)
 	SessionMembership(ctx context.Context, sessionID, userID string) (members int, isMember bool, err error)

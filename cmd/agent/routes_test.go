@@ -48,6 +48,8 @@ type routeStore struct {
 	otherMembers map[string][]string
 	// loads counts the loads of each session's conversation.
 	loads map[string]int
+	// renamed is the last rename, "<session>=<title>".
+	renamed string
 	// Published files, and their content by ID.
 	files    []store.File
 	contents map[string][]byte
@@ -487,6 +489,11 @@ func (f *routeStore) SetSessionAgentMode(_ context.Context, _, mode string) erro
 }
 
 func (f *routeStore) UpdateSessionTitle(context.Context, string, string) error { return nil }
+
+func (f *routeStore) RenameSession(_ context.Context, sessionID, title string) error {
+	f.renamed = sessionID + "=" + title
+	return nil
+}
 
 func (f *fakeTemporal) ListWorkflow(context.Context, *workflowservice.ListWorkflowExecutionsRequest) (*workflowservice.ListWorkflowExecutionsResponse, error) {
 	return &workflowservice.ListWorkflowExecutionsResponse{}, nil
@@ -1209,5 +1216,29 @@ func TestRoutes_StopATask(t *testing.T) {
 	}
 	if w := call(t, h, http.MethodPost, stop, `{"task":"`+task+`"}`, alice); w.Code != http.StatusAccepted || len(tc.cancelled) != 1 || tc.cancelled[0] != task {
 		t.Errorf("alice: %d, cancelled %v", w.Code, tc.cancelled)
+	}
+}
+
+// A session is created under the title its form gives, and any member renames
+// it, from the interface as from the API; a non-member cannot.
+func TestRoutes_SessionTitle(t *testing.T) {
+	h, st := newRouteTest(t)
+	bob := logIn(t, h, "bob@example.com")
+	if w := form(t, h, "/s/new", url.Values{"title": {"Export CSV"}}, bob); w.Code != http.StatusOK || len(st.created) != 1 || st.created[0].Title != "Export CSV" {
+		t.Fatalf("new session: %d, created %+v", w.Code, st.created)
+	}
+	if w := form(t, h, "/s/s1/title", url.Values{"title": {"Export\nCSV v2"}}, bob); w.Code != http.StatusOK || st.renamed != "s1=Export CSV v2" {
+		t.Errorf("rename form: %d, renamed %q", w.Code, st.renamed)
+	}
+	if w := form(t, h, "/s/s1/title", url.Values{"title": {"  "}}, bob); w.Code != http.StatusBadRequest {
+		t.Errorf("empty title: %d", w.Code)
+	}
+	if w := call(t, h, http.MethodPut, "/sessions/s1/title", `{"title":"Par l'API"}`, bob); w.Code != http.StatusNoContent || st.renamed != "s1=Par l'API" {
+		t.Errorf("rename by the API: %d, renamed %q", w.Code, st.renamed)
+	}
+	carol := logIn(t, h, "carol@example.com")
+	st.renamed = ""
+	if w := call(t, h, http.MethodPut, "/sessions/s1/title", `{"title":"Pas à moi"}`, carol); w.Code == http.StatusNoContent || st.renamed != "" {
+		t.Errorf("a non-member renamed the session: %d", w.Code)
 	}
 }

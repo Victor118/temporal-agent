@@ -5,6 +5,13 @@
     <div class="eyebrow">Ce nœud</div>
     <div class="node-title">{{.Node.Title}}</div>
     <div class="note">{{kindLabel .Node}}, ouverte il y a {{ago .Node.Session.CreatedAt}} · {{statusLabel .Node.Status}}</div>
+    <details class="rename" id="rename-{{$sid}}">
+      <summary class="note">Renommer</summary>
+      <form class="invite" hx-post="/s/{{$sid}}/title">
+        <input class="input" name="title" value="{{.Node.Session.Title}}" maxlength="{{titleMax}}" aria-label="Titre de la session" autocomplete="off" required>
+        <button class="btn" type="submit">Renommer</button>
+      </form>
+    </details>
   </section>
 
   <section>

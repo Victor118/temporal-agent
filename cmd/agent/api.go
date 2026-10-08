@@ -134,6 +134,11 @@ func (a *api) me(w http.ResponseWriter, r *http.Request) {
 
 type createSessionRequest struct {
 	AgentID string `json:"agent_id,omitempty"`
+	Title   string `json:"title,omitempty"`
+}
+
+type renameRequest struct {
+	Title string `json:"title"`
 }
 
 type createSessionResponse struct {
@@ -145,7 +150,7 @@ func (a *api) createSession(w http.ResponseWriter, r *http.Request) {
 	if r.Body != nil {
 		json.NewDecoder(r.Body).Decode(&req)
 	}
-	sessionID, err := a.sessions.Open(r.Context(), auth.UserFrom(r.Context()), session.OpenOptions{AgentID: req.AgentID})
+	sessionID, err := a.sessions.Open(r.Context(), auth.UserFrom(r.Context()), session.OpenOptions{AgentID: req.AgentID, Title: req.Title})
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to create session: %v", err), http.StatusInternalServerError)
 		return
@@ -238,6 +243,23 @@ func (a *api) setAgentMode(w http.ResponseWriter, r *http.Request) {
 	}
 	switch err := a.sessions.SetAgentMode(r.Context(), chi.URLParam(r, "id"), req.Mode); {
 	case errors.Is(err, session.ErrBadMode):
+		http.Error(w, err.Error(), http.StatusBadRequest)
+	case err != nil:
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	default:
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// renameSession sets the session's title, by any member.
+func (a *api) renameSession(w http.ResponseWriter, r *http.Request) {
+	var req renameRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	switch err := a.sessions.Rename(r.Context(), chi.URLParam(r, "id"), req.Title); {
+	case errors.Is(err, session.ErrEmptyTitle):
 		http.Error(w, err.Error(), http.StatusBadRequest)
 	case err != nil:
 		http.Error(w, err.Error(), http.StatusInternalServerError)

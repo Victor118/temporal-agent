@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
+	"unicode"
 
 	"github.com/google/uuid"
 
@@ -15,6 +17,9 @@ type OpenOptions struct {
 	AgentID   string // empty = the default agent
 	Channel   string // where the user is reached; empty = the web
 	ChannelID string // the user's address on that channel (a Telegram chat)
+	// Title is the one the member gave, if any (cleanTitle); without one the
+	// first message titles the session.
+	Title string
 }
 
 // Open creates a session for me, and returns its ID. Nothing runs for it
@@ -36,6 +41,7 @@ func (s *Service) Open(ctx context.Context, me *store.User, o OpenOptions) (stri
 		AgentID:   agentID,
 		Channel:   channel,
 		ChannelID: o.ChannelID,
+		Title:     cleanTitle(o.Title),
 	}); err != nil {
 		return "", fmt.Errorf("persist session: %w", err)
 	}
@@ -151,6 +157,41 @@ func (s *Service) SetAgentMode(ctx context.Context, sessionID, mode string) erro
 		return ErrBadMode
 	}
 	return s.store.SetSessionAgentMode(ctx, sessionID, mode)
+}
+
+// Rename sets a session's title, as a member wrote it (cleanTitle). Any
+// member may: the session is shared. The trees show the new title.
+func (s *Service) Rename(ctx context.Context, sessionID, title string) error {
+	title = cleanTitle(title)
+	if title == "" {
+		return ErrEmptyTitle
+	}
+	if err := s.store.RenameSession(ctx, sessionID, title); err != nil {
+		return err
+	}
+	s.ringTrees(ctx, sessionID)
+	return nil
+}
+
+// MaxTitleRunes bounds a title a member writes.
+const MaxTitleRunes = 120
+
+// cleanTitle is a title a member wrote: on one line (line breaks, control
+// and format characters become spaces, spaces are collapsed), trimmed, and
+// cut to MaxTitleRunes characters (not bytes: Postgres refuses a split
+// letter).
+func cleanTitle(title string) string {
+	title = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return ' '
+		}
+		return r
+	}, title)
+	title = strings.Join(strings.Fields(title), " ")
+	if r := []rune(title); len(r) > MaxTitleRunes {
+		title = string(r[:MaxTitleRunes])
+	}
+	return title
 }
 
 // resolveAgentID returns requested if it is a known agent. With no request, it
