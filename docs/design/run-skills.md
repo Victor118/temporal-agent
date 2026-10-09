@@ -1,6 +1,6 @@
 # Conception : les skills d'un agent dans ses runs Claude Code
 
-Statut : **version 2.1**, proposition, rien n'est fait. Version 1 le 9 octobre 2026, révisée le même jour après deux relectures contre le code et contre la CLI 2.1.280 de l'image (lue dans son binaire, sans appel au modèle). Les points de la première sont marqués *[rev. 1…16]*, ceux de la seconde *[rev2 1…4]*.
+Statut : **version 2.2**, proposition, rien n'est fait ; vérifiée contre la vraie CLI le 10 octobre 2026 (§9). Version 1 le 9 octobre 2026, révisée le même jour après deux relectures contre le code et contre la CLI 2.1.280 de l'image (lue dans son binaire, sans appel au modèle). Les points de la première sont marqués *[rev. 1…16]*, ceux de la seconde *[rev2 1…4]*.
 
 ## 1. Pourquoi
 
@@ -26,6 +26,7 @@ Cas d'usage déclencheur : un agent « TDD » dont les implémentations suivent 
    - **sur un worker Claude Code** : `PrepareWorkspace` (nouveau champ d'entrée : les noms) les lit dans **sa propre** source de skills (`ClaudeCodeActivities` reçoit un lecteur).
 4. **La CLI les reçoit pour ce run seulement**, sous forme d'un **plugin local** passé par `--plugin-dir` : `<run>/plugin/.claude-plugin/plugin.json` et `<run>/plugin/skills/<nom>/SKILL.md`, effacé avec le run. Rien dans la configuration de l'utilisateur ni de l'opérateur. Plugin nommé `temporal-agent` (skills appelées `temporal-agent:tdd`) *[rev. 12]*.
 5. **Un seul code** dans le paquet `machine` (sans dépendre de `skill`, ni de la base, ni de Temporal ; `GOOS=windows go build ./machine/...` passe) écrit le plugin et ajoute l'option, partagé par `agent connect` et par les activities des workers *[rev. 12]*.
+6. **Le prompt système du run nomme les skills** *[vérif.]* : une skill disponible n'est pas une skill consultée (§9 : en analyse, la CLI ne l'a pas ouverte d'elle-même). Quand un run a des skills, une ligne s'ajoute au prompt système d'analyse ou d'implémentation : « The agent that started this run gave it skills: temporal-agent:tdd, … Load each with the Skill tool before you start, and follow them. » Composée par le même code que le plugin (`machine.SkillsPrompt(noms)`), depuis les noms validés seulement, jamais depuis une description ou un corps.
 
 ## 4. La garantie sur les droits *[rev. 2]*
 
@@ -62,6 +63,7 @@ Pas de version épinglée : un run utilise ce que lit celui qui le prépare. Cor
 - **`skill`** : `Skill.Runs` (frontmatter, booléen strict).
 - **Activities** : `LoadSkillsForAgentOutput.RunSkills` ; `tool.CallContext.RunSkills` ; `MachineActivities` et `ClaudeCodeActivities` reçoivent un lecteur de skills ; `PickMachine` compose `Skills` ; `PrepareWorkspaceInput` gagne les noms.
 - **`machine`** : `RunSkill`, `Skills` dans les entrées de directive, bornes dans `Check`, `WritePlugin` ; protocole +1 (`skills` absent = aucune, sans compatibilité) *[rev. 16]*.
+- **`machine`** (suite) : `SkillsPrompt`, ajouté à `AnalyzeSystemPrompt`/`ImplementSystemPrompt` quand le run a des skills, machine **et** worker.
 - **`claudecode`** : `--plugin-dir` ; lecture de `slash_commands` dans `init` ; détection de l'option par `claude --help` (machine).
 - **Workers** : le dossier compagnon `<dir>.plugin`, écrit de façon idempotente (`PrepareWorkspace` est retenté), lisible par `RUN_AS_UID`, ajouté au balayage du démarrage (`claude_code_sweep.go`) *[rev. 11]*.
 - **`agent connect`** : écrit le plugin dans le dossier du run, l'efface avec lui, journalise les skills.
@@ -72,6 +74,14 @@ Pas de version épinglée : un run utilise ce que lit celui qui le prépare. Cor
 ## 9. Vérification réelle, avant de coder
 
 Le binaire a répondu au reste (§2) ; il faut encore un vrai run, minuscule et plafonné, pour : un plugin passé par `--plugin-dir` en mode `plan` et en `acceptEdits`, avec `--setting-sources user`, `--strict-mcp-config`, `--permission-prompts none` : la skill figure-t-elle dans `slash_commands`, et la CLI la consulte-t-elle quand la tâche s'y prête ? Et, pour la question du `CLAUDE.md` d'un dépôt (§2) : `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD` avec `--add-dir <clone>` le charge-t-il sans les réglages du projet ? Si oui, une règle propre à un dépôt (« ce projet se code en TDD ») pourrait vivre dans son `CLAUDE.md` : chantier à part, à décider avec ce résultat.
+
+**Fait le 10 octobre 2026** : CLI 2.1.280 du conteneur `claude-code-ro`, abonnement, `sonnet`, six appels plafonnés à 0,50 $ (≈ 0,43 $ en tout), dépôt Go jetable avec un `CLAUDE.md` (« commence par MANGUE ») et un plugin `temporal-agent` à une skill `house-report` (« commence par BANANE ; un test d'abord »), options d'un vrai run (`-p`, stream-json, `--permission-prompts none`, `--strict-mcp-config`, `--setting-sources user`, `--no-session-persistence`, prompt sur stdin, prompts système des deux modes, listes d'outils de l'implémentation) :
+
+- **Chargement** : avec `--plugin-dir`, l'`init` liste le plugin (`temporal-agent@inline`, version du manifeste) et la skill dans `slash_commands` et `skills` (`temporal-agent:house-report`), en `plan` comme en `acceptEdits`. Sans lui, rien. L'outil `Skill` est là dans les deux modes.
+- **Consultation** : en **`acceptEdits`**, la CLI a appelé `Skill` d'elle-même et suivi la règle TDD (`main_test.go` écrit, commit « Add Sub function with test »). En **`plan`**, elle **ne l'a pas ouverte** : rapport sans BANANE. Avec la ligne du §3.6 dans le prompt système, elle l'a chargée en premier et l'a suivie. D'où le §3.6 : on nomme les skills, on ne compte pas sur la description.
+- **`CLAUDE.md` du dépôt** : avec `--setting-sources user` seul, pas chargé (pas de MANGUE), comme lu dans le binaire. Mais la CLI peut le **lire comme un fichier** : en implémentation, elle l'a ouvert, a vu la contradiction avec la skill, a suivi le dépôt et l'a dit dans son rapport. Avec `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1` et `--add-dir <clone>`, il est **chargé** (MANGUE), toujours sans les réglages du projet. Une règle propre à un dépôt peut donc vivre dans son `CLAUDE.md` : chantier à part, non retenu ici (il ferait suivre au run des consignes écrites par quiconque peut pousser sur le dépôt, `--repos` décide déjà lesquels).
+- **Divers** : `--add-dir` est variadique et avale un prompt passé en argument ; le runner passe la tâche sur stdin, rien à changer. `--plugin-dir` accepte aussi un `.zip` : non utilisé, `WritePlugin` écrit des fichiers qu'il nomme lui-même. Une commande non permise (`go version` en implémentation) est refusée sans bloquer (`permission_denials`).
+
 
 ## 10. Tests
 
