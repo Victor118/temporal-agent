@@ -1,6 +1,6 @@
 # Conception : les skills d'un agent dans ses runs Claude Code
 
-Statut : **version 2**, proposition, rien n'est fait. Version 1 le 9 octobre 2026, révisée le même jour après une relecture contre le code et contre la CLI 2.1.280 de l'image (lue dans son binaire, sans appel au modèle). Les points issus de la relecture sont marqués *[rev. 1…16]*.
+Statut : **version 2.1**, proposition, rien n'est fait. Version 1 le 9 octobre 2026, révisée le même jour après deux relectures contre le code et contre la CLI 2.1.280 de l'image (lue dans son binaire, sans appel au modèle). Les points de la première sont marqués *[rev. 1…16]*, ceux de la seconde *[rev2 1…4]*.
 
 ## 1. Pourquoi
 
@@ -10,7 +10,8 @@ Cas d'usage déclencheur : un agent « TDD » dont les implémentations suivent 
 
 ## 2. Ce que fait la CLI (lu dans le binaire 2.1.280)
 
-- `--plugin-dir <dossier>` charge un plugin **pour cette session seulement** (répétable ; `--plugin-dir-no-mcp` le charge sans ses serveurs MCP). Une skill de plugin s'appelle `<plugin>:<skill>`, son nom doit être celui de son dossier.
+- `--plugin-dir <dossier>` charge un plugin **pour cette session seulement** (répétable). Il existe aussi `--plugin-dir-no-mcp`, mais **caché** (`hideHelp`, pensé pour le SDK) : un contrat qui peut bouger, et qui n'apporte rien que `WritePlugin` n'offre déjà (aucun `.mcp.json` écrit). On prend `--plugin-dir`, documenté *[rev2 1]*. Une skill de plugin s'appelle `<plugin>:<skill>`, son nom doit être celui de son dossier.
+- `claude plugin validate` ne valide que le manifeste : un `SKILL.md` avec `allowed-tools` ou `hooks` passe. Ce n'est pas un test de notre garantie (§4) *[rev2 2]*.
 - Une skill de plugin peut porter, dans son frontmatter, bien plus qu'une consigne : `allowed-tools`, `hooks`, `mcpServers`, `shell`, `model`, `agent`, `context`… Un plugin peut aussi porter `hooks/hooks.json`, `.mcp.json`, `agents/`, `commands/` *[rev. 2]*.
 - Un plugin invalide est ignoré **sans erreur** ; mais des réglages gérés (politique d'entreprise) qui interdisent le chargement de plugins font **sortir la CLI en erreur** *[rev. 3]*.
 - Le message `system/init` du flux `stream-json` liste les commandes disponibles (`slash_commands`) : une skill de plugin chargée y figure. C'est le moyen de savoir si le plugin a pris *[rev. 9]*.
@@ -19,17 +20,17 @@ Cas d'usage déclencheur : un agent « TDD » dont les implémentations suivent 
 ## 3. Le principe
 
 1. **Une skill marquée pour les runs** : son `SKILL.md` porte `runs: true` (booléen strict : `true` seul) *[rev. 14]*. Seules celles-là partent avec un run.
-2. **Les noms voyagent, jamais le contenu** *[rev. 4]* : `LoadSkillsForAgent` (appelé au début de chaque tour et de chaque sous-agent) rend aussi `RunSkills`, les noms des skills `runs` de l'agent ; `AgentWorkflow` les met dans un nouveau champ de `tool.CallContext` (`RunSkills`, réservé d'office comme toute clé de contexte : le modèle ne peut pas le fournir). Le `CallContext` va à tout outil `NeedsCallContext` : quelques noms de plus par appel, assumé (« aucune liste de noms d'outils dans le code » interdit de cibler les deux outils de code). Sous-agent : son propre `LoadSkillsForAgent`. Tâche de fond : le `CallContext` du tour. Repli : l'entrée brute, `AnalyzeRepoInput` embarque le `CallContext`.
+2. **Les noms voyagent, jamais le contenu** *[rev. 4]* : `LoadSkillsForAgent` (appelé au début de chaque tour et de chaque sous-agent) rend aussi `RunSkills`, les noms des skills `runs` de l'agent ; `AgentWorkflow` les met dans un nouveau champ de `tool.CallContext` (`RunSkills`, réservé d'office comme toute clé de contexte : le modèle ne peut pas le fournir). Le `CallContext` va à tout outil `NeedsCallContext` : quelques noms de plus par appel, assumé (« aucune liste de noms d'outils dans le code » interdit de cibler les deux outils de code). Sous-agent : son propre `LoadSkillsForAgent`. Tâche de fond : le `CallContext` du tour. Tâche planifiée : elle est éligible aux machines (son `UserID` est posé) et emporte donc ses skills `runs`, comme un tour *[rev2 4]*. Les noms ne quittent pas le serveur : le `tool_use` persisté garde l'entrée du modèle, un outil activity ne reçoit le `CallContext` que dans son contexte Go, jamais vers un serveur MCP ; reste l'historique Temporal (≈ 1 Kio par appel). Repli : l'entrée brute, `AnalyzeRepoInput` embarque le `CallContext`.
 3. **Celui qui prépare le run lit les skills** et compose ce qu'il faut :
-   - **vers une machine** : **`PickMachine`** compose l'entrée finale de la directive (figée dans `machine_directives.input`, que la passerelle relit à l'envoi et au `hello`), pas `RunOnMachine`, qui ne reçoit qu'un ID *[rev. 1]*. `MachineActivities` reçoit un lecteur de skills (celui de `LLMActivities`, `activityDeps.skills`) et ajoute `Skills` (`machine.RunSkill{Name, Description, Content}`) à `AnalyzeInput`/`ImplementInput`, **avant** de réserver la machine : un refus (taille, nom invalide) ne réserve rien. Un nom introuvable (le worker n'a pas la skill, ou pas de source de skills du tout) est dit dans le résultat (« skills not found: tdd »), jamais en silence. L'idempotence de `PickMachine` sur `(run, appel)` garde l'entrée du premier essai ;
+   - **vers une machine** : **`PickMachine`** compose l'entrée finale de la directive (figée dans `machine_directives.input`, que la passerelle relit à l'envoi et au `hello`), pas `RunOnMachine`, qui ne reçoit qu'un ID *[rev. 1]*. `MachineActivities` reçoit un lecteur de skills (celui de `LLMActivities`, `activityDeps.skills`) et ajoute `Skills` (`machine.RunSkill{Name, Description, Content}`) à `AnalyzeInput`/`ImplementInput`, **avant** de réserver la machine. `PickMachineInput` gagne `Skills []string` (le workflow y met `CallContext.RunSkills`) ; un refus (taille, nom invalide) est un **résultat** (`PickMachineOutput.Refused`, comme `NoMachine`), qui mène au repli, jamais une erreur retentée, et ne réserve rien. Un nom introuvable (le worker n'a pas la skill, ou pas de source de skills du tout) est dit dans le résultat (« skills not found: tdd »), jamais en silence. L'idempotence de `PickMachine` sur `(run, appel)` garde l'entrée du premier essai ;
    - **sur un worker Claude Code** : `PrepareWorkspace` (nouveau champ d'entrée : les noms) les lit dans **sa propre** source de skills (`ClaudeCodeActivities` reçoit un lecteur).
-4. **La CLI les reçoit pour ce run seulement**, sous forme d'un **plugin local** passé par `--plugin-dir-no-mcp` : `<run>/plugin/.claude-plugin/plugin.json` et `<run>/plugin/skills/<nom>/SKILL.md`, effacé avec le run. Rien dans la configuration de l'utilisateur ni de l'opérateur. Plugin nommé `temporal-agent` (skills appelées `temporal-agent:tdd`) *[rev. 12]*.
+4. **La CLI les reçoit pour ce run seulement**, sous forme d'un **plugin local** passé par `--plugin-dir` : `<run>/plugin/.claude-plugin/plugin.json` et `<run>/plugin/skills/<nom>/SKILL.md`, effacé avec le run. Rien dans la configuration de l'utilisateur ni de l'opérateur. Plugin nommé `temporal-agent` (skills appelées `temporal-agent:tdd`) *[rev. 12]*.
 5. **Un seul code** dans le paquet `machine` (sans dépendre de `skill`, ni de la base, ni de Temporal ; `GOOS=windows go build ./machine/...` passe) écrit le plugin et ajoute l'option, partagé par `agent connect` et par les activities des workers *[rev. 12]*.
 
 ## 4. La garantie sur les droits *[rev. 2]*
 
 Une skill ne doit être qu'une consigne. La CLI, elle, honorerait `allowed-tools`, `hooks`, `mcpServers` d'un frontmatter de skill. D'où la règle : **`WritePlugin` n'écrit jamais le texte source**. Il écrit :
-- `plugin.json` qu'il compose lui-même (`name`, `version`) ;
+- `plugin.json` qu'il compose lui-même (`name`, `version`, `description`) ;
 - pour chaque skill, `skills/<nom>/SKILL.md` avec un frontmatter **qu'il compose** (`name` = le dossier, `description`) suivi du corps ;
 - rien d'autre (pas de `hooks/`, `.mcp.json`, `agents/`, `commands/`).
 
@@ -41,14 +42,15 @@ Le magasin actuel ne garde déjà que `name`, `description` et le corps : la gar
 
 ## 5. Ce qui peut empêcher le plugin
 
-- **Politique d'entreprise** *[rev. 3]* : la CLI sort en erreur avant le premier outil. Sur une machine : reconnu (ligne de stderr, pas de résultat) comme un **refus** (`Refusal` → `DirectiveRefused`) : rien n'a tourné, rien n'est payé, le run passe au repli dans le même run, avec la raison dans la note. Sur un worker (réglages gérés de l'opérateur) : échec clair.
+- **Politique d'entreprise** *[rev. 3]* : la CLI sort en erreur avant le premier outil. Sur une machine : reconnu (ligne de stderr, pas de résultat) comme un **refus** (`Refusal` → `DirectiveRefused`) : le clone a eu lieu, mais rien n'est payé *[rev2 3]*, le run passe au repli dans le même run, avec la raison dans la note. Sur un worker (réglages gérés de l'opérateur) : échec clair.
+- **CLI trop ancienne** *[rev2 1]* : `agent connect` ne vérifie aujourd'hui que la présence de `claude`. Au démarrage, il lit `claude --help` et note si `--plugin-dir` existe (journalisé, et annoncé avec la capacité `claude-code`) ; sans l'option, un run qui a des skills est refusé (`Refusal` → repli), un run sans skills tourne comme aujourd'hui.
 - **Plugin ignoré** *[rev. 9]* : le runner lit `slash_commands` du message `init` ; une skill attendue absente est dite dans le résultat (« skill tdd not loaded by the CLI »), le run continue.
 - **Taille** *[rev. 6]* : trois bornes, 64 Kio de skills par run et 16 skills au plus : `PickMachine` avant de réserver ; `AnalyzeInput.Check`/`ImplementInput.Check` sur la machine (elle ne se fie pas au serveur pour ce qui la protège, `machines.md` §17.5) ; `WritePlugin` sur un worker de repli.
 
 ## 6. La source des skills des conteneurs *[rev. 5]*
 
 Les conteneurs Claude Code n'ont aujourd'hui aucune source de skills. Un `SKILLS_REPO` privé cloné dans un conteneur garderait son jeton dans `.git/config`, lisible par l'utilisateur des runs (`RUN_AS_UID`) : sur `claude-code-ro`, c'est contredire sa promesse (une identité qui ne peut écrire nulle part). Donc :
-- **`SKILLS_DIR`** : nouvelle option d'`agent worker` (magasin `FileStore`, sans secret) ; le compose pointe les deux conteneurs sur `/app/skills`, déjà monté en lecture seule ;
+- **`SKILLS_DIR`** : nouvelle option (magasin `FileStore`, sans secret), honorée par **`agent worker`**, **`agent dev`** (qui code aujourd'hui `./skills` en dur : `SKILLS_DIR` devient son réglage, défaut `./skills`) et **`agent server`** (qui ne lit aujourd'hui que `SKILLS_REPO` : sans lui, `/admin/skills` serait vide et le badge n'existerait pas). `SKILLS_REPO` et `SKILLS_DIR` ensemble = refus au démarrage. Le `FileStore` se recharge comme le dépôt, sur un saut de `skills_version` (`watchSkills`), sinon chaque changement de skill demanderait de redémarrer les conteneurs. Le compose pointe les deux conteneurs sur `/app/skills`, déjà monté en lecture seule *[rev2 1]* ;
 - un `SKILLS_REPO` dans un conteneur reste possible pour un dépôt public ; privé, le cache passe dans un dossier 0700 du worker, et la documentation dit que son identité reste lisible par les runs.
 
 ## 7. Version *[rev. 10]*
@@ -60,7 +62,7 @@ Pas de version épinglée : un run utilise ce que lit celui qui le prépare. Cor
 - **`skill`** : `Skill.Runs` (frontmatter, booléen strict).
 - **Activities** : `LoadSkillsForAgentOutput.RunSkills` ; `tool.CallContext.RunSkills` ; `MachineActivities` et `ClaudeCodeActivities` reçoivent un lecteur de skills ; `PickMachine` compose `Skills` ; `PrepareWorkspaceInput` gagne les noms.
 - **`machine`** : `RunSkill`, `Skills` dans les entrées de directive, bornes dans `Check`, `WritePlugin` ; protocole +1 (`skills` absent = aucune, sans compatibilité) *[rev. 16]*.
-- **`claudecode`** : `--plugin-dir-no-mcp` ; lecture de `slash_commands` dans `init`.
+- **`claudecode`** : `--plugin-dir` ; lecture de `slash_commands` dans `init` ; détection de l'option par `claude --help` (machine).
 - **Workers** : le dossier compagnon `<dir>.plugin`, écrit de façon idempotente (`PrepareWorkspace` est retenté), lisible par `RUN_AS_UID`, ajouté au balayage du démarrage (`claude_code_sweep.go`) *[rev. 11]*.
 - **`agent connect`** : écrit le plugin dans le dossier du run, l'efface avec lui, journalise les skills.
 - **Compose** : `SKILLS_DIR=/app/skills` pour `claude-code` et `claude-code-ro`.
@@ -69,8 +71,8 @@ Pas de version épinglée : un run utilise ce que lit celui qui le prépare. Cor
 
 ## 9. Vérification réelle, avant de coder
 
-Le binaire a répondu au reste (§2) ; il faut encore un vrai run, minuscule et plafonné, pour : un plugin passé par `--plugin-dir-no-mcp` en mode `plan` et en `acceptEdits`, avec `--setting-sources user`, `--strict-mcp-config`, `--permission-prompts none` : la skill figure-t-elle dans `slash_commands`, et la CLI la consulte-t-elle quand la tâche s'y prête ? Et, pour la question du `CLAUDE.md` d'un dépôt (§2) : `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD` avec `--add-dir <clone>` le charge-t-il sans les réglages du projet ? Si oui, une règle propre à un dépôt (« ce projet se code en TDD ») pourrait vivre dans son `CLAUDE.md` : chantier à part, à décider avec ce résultat.
+Le binaire a répondu au reste (§2) ; il faut encore un vrai run, minuscule et plafonné, pour : un plugin passé par `--plugin-dir` en mode `plan` et en `acceptEdits`, avec `--setting-sources user`, `--strict-mcp-config`, `--permission-prompts none` : la skill figure-t-elle dans `slash_commands`, et la CLI la consulte-t-elle quand la tâche s'y prête ? Et, pour la question du `CLAUDE.md` d'un dépôt (§2) : `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD` avec `--add-dir <clone>` le charge-t-il sans les réglages du projet ? Si oui, une règle propre à un dépôt (« ce projet se code en TDD ») pourrait vivre dans son `CLAUDE.md` : chantier à part, à décider avec ce résultat.
 
 ## 10. Tests
 
-Unitaires : frontmatter `runs` strict, sélection, `WritePlugin` (arborescence, frontmatter recomposé sans `allowed-tools` ni `hooks`, noms refusés, dédoublonnés, taille), bornes de `Check`, options de la CLI, lecture de `slash_commands`. `RealServer` des machines (CLI factice) : la directive porte les skills (et les garde à la relecture du `hello`) ; la CLI factice reçoit `--plugin-dir-no-mcp` et y trouve le `SKILL.md` ; politique qui refuse le plugin → refus → repli ; skill absente de `init` dite dans le résultat ; repli sur un worker avec `SKILLS_DIR`. Puis un essai avec la skill `tdd` sur une machine et sur le repli.
+Unitaires : frontmatter `runs` strict, sélection, `WritePlugin` (arborescence, frontmatter recomposé sans `allowed-tools` ni `hooks`, noms refusés, dédoublonnés, taille), bornes de `Check`, options de la CLI, lecture de `slash_commands`. `RealServer` des machines (CLI factice) : la directive porte les skills (et les garde à la relecture du `hello`) ; la CLI factice reçoit `--plugin-dir` et y trouve le `SKILL.md` ; CLI sans l'option → refus → repli ; politique qui refuse le plugin → refus → repli ; skill absente de `init` dite dans le résultat ; repli sur un worker avec `SKILLS_DIR`. Puis un essai avec la skill `tdd` sur une machine et sur le repli.
