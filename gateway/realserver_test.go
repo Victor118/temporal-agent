@@ -1023,7 +1023,10 @@ EOF
 		if err := os.WriteFile(filepath.Join(remote, "hooks", "pre-receive"), []byte("#!/bin/sh\necho refused by policy >&2\nexit 1\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		a, _ := e.startCoder(t, sara, "atelier", remote, true, implementCommits)
+		// The CLI knows its branch, and leaves a file of the bundle's name in
+		// its outputs: not published, the name is the bundle's.
+		a, _ := e.startCoder(t, sara, "atelier", remote, true,
+			`echo fake > "../outputs/$(git rev-parse --abbrev-ref HEAD | tr / -).bundle"`+"\n"+implementCommits)
 		session := e.session(t, sara)
 		var out workflow.ClaudeCodeOutput
 		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
@@ -1033,7 +1036,8 @@ EOF
 		}
 		name := machine.BundleName(out.Branch)
 		if out.Pushed || out.Machine != "atelier" || len(out.Commits) != 1 || !strings.Contains(out.Error, "refused by policy") ||
-			out.Bundle == nil || out.Bundle.Name != name || len(out.Files) != 2 {
+			out.Bundle == nil || out.Bundle.Name != name || len(out.Files) != 2 || len(out.Unpublished) != 1 ||
+			!strings.Contains(out.Unpublished[0], "reserved for the branch's bundle") {
 			t.Fatalf("output %+v", out)
 		}
 		for _, want := range []string{"(not pushed)", "kept in " + name + " (id " + out.Bundle.ID, "pass these steps on to them",
