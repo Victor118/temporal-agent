@@ -990,6 +990,82 @@ EOF
 		}
 	})
 
+	t.Run("implement_feature on a machine whose git may not push there: refused before its CLI, the fallback runs it", func(t *testing.T) {
+		rita := e.user("rita")
+		remote := smokeBareRepo(t)
+		// The remote's receive-pack fails to start: a clone works, any push
+		// fails, a dry run included.
+		if out, err := exec.Command("git", "-C", remote, "config", "receive.unpackLimit", "notanumber").CombinedOutput(); err != nil {
+			t.Fatalf("config: %v %s", err, out)
+		}
+		ran := filepath.Join(t.TempDir(), "ran")
+		a, _ := e.startCoder(t, rita, "verrou", remote, true, "touch "+ran+"\n"+implementCommits)
+		var out workflow.ClaudeCodeOutput
+		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
+		if err := e.implement(t, e.session(t, rita), rita, remote).Get(ctx, &out); err != nil {
+			t.Fatal(err)
+		}
+		if out.Report != "implemented by the fallback, for "+rita || out.Machine != "" || !strings.Contains(out.Note, `your machine "verrou" turned it down`) ||
+			!strings.Contains(out.Note, "--dry-run") || !strings.Contains(out.Note, "receive.unpacklimit") {
+			t.Errorf("output %+v", out)
+		}
+		if _, err := os.Stat(ran); err == nil {
+			t.Error("the machine's CLI ran")
+		}
+		waitFor(t, "clone deleted", 10*time.Second, func() bool { entries, _ := os.ReadDir(a.WorkDir); return len(entries) == 0 })
+	})
+
+	t.Run("implement_feature whose push the remote refuses: its commits published as a bundle, the steps said", func(t *testing.T) {
+		sara := e.user("sara")
+		remote := smokeBareRepo(t)
+		// A hook refuses every push: a dry run runs none, the push does.
+		if err := os.WriteFile(filepath.Join(remote, "hooks", "pre-receive"), []byte("#!/bin/sh\necho refused by policy >&2\nexit 1\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		a, _ := e.startCoder(t, sara, "atelier", remote, true, implementCommits)
+		session := e.session(t, sara)
+		var out workflow.ClaudeCodeOutput
+		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
+		if err := e.implement(t, session, sara, remote).Get(ctx, &out); err != nil {
+			t.Fatal(err)
+		}
+		name := machine.BundleName(out.Branch)
+		if out.Pushed || out.Machine != "atelier" || len(out.Commits) != 1 || !strings.Contains(out.Error, "refused by policy") ||
+			out.Bundle == nil || out.Bundle.Name != name || len(out.Files) != 2 {
+			t.Fatalf("output %+v", out)
+		}
+		for _, want := range []string{"(not pushed)", "kept in " + name + " (id " + out.Bundle.ID, "pass these steps on to them",
+			"git fetch /path/to/" + name + " " + out.Branch + ":" + out.Branch, "git push origin " + out.Branch} {
+			if !strings.Contains(out.Content, want) {
+				t.Errorf("content lacks %q: %s", want, out.Content)
+			}
+		}
+		if got, _ := exec.Command("git", "-C", remote, "branch", "--list", "agent/*").Output(); len(strings.TrimSpace(string(got))) != 0 {
+			t.Errorf("a branch was pushed: %s", got)
+		}
+		// The file the gateway stored for the turn, fetched as its user
+		// would: the run's commit.
+		content, err := e.st.ReadFileContent(ctx, out.Bundle.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		saved := filepath.Join(dir, name)
+		os.WriteFile(saved, content, 0o600)
+		clone := filepath.Join(dir, "clone")
+		for _, args := range [][]string{{"clone", "--quiet", remote, clone}, {"-C", clone, "fetch", "--quiet", saved, out.Branch + ":" + out.Branch}} {
+			if got, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+				t.Fatalf("git %v: %v %s", args, err, got)
+			}
+		}
+		if got, _ := exec.Command("git", "-C", clone, "rev-parse", "refs/heads/"+out.Branch).Output(); strings.TrimSpace(string(got)) != out.Commits[0].SHA {
+			t.Errorf("fetched %s, want %s", got, out.Commits[0].SHA)
+		}
+		waitFor(t, "clone deleted", 10*time.Second, func() bool { entries, _ := os.ReadDir(a.WorkDir); return len(entries) == 0 })
+	})
+
 	t.Run("analyze_repo with the agent's skills: the machine's CLI loads them from --plugin-dir", func(t *testing.T) {
 		pia := e.user("pia")
 		repo := smokeGitRepo(t)
@@ -1201,6 +1277,17 @@ func smokeGitRepo(t *testing.T) string {
 		}
 	}
 	return repo
+}
+
+// smokeBareRepo makes a bare repository with one commit, which a machine
+// clones and pushes to.
+func smokeBareRepo(t *testing.T) string {
+	t.Helper()
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	if out, err := exec.Command("git", "clone", "--quiet", "--bare", smokeGitRepo(t), remote).CombinedOutput(); err != nil {
+		t.Fatalf("bare: %v %s", err, out)
+	}
+	return remote
 }
 
 // smokeSkills are the skills of the worker that picks the machines, as read
