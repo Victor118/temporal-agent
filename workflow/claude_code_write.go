@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -157,7 +158,7 @@ func implementFeature(ctx workflow.Context, rawInput json.RawMessage, probed *ac
 	).Get(r.ctx, &result)
 	ran := workflow.Now(ctx).Sub(runStarted)
 	if runErr == nil || !r.failed(runErr) {
-		out.publishOutputs(ctx, r, prepared.Dir, input.CallContext)
+		out.publishOutputs(ctx, r, prepared.Dir, branch, input.CallContext)
 	}
 
 	// The commits are in the clone, on the lost worker's disk: no other
@@ -254,10 +255,20 @@ func implementFeature(ctx workflow.Context, rawInput json.RawMessage, probed *ac
 		} else if hasErrorType(err, activity.ErrRunStillActive) {
 			out.Error = joinErrors(out.Error, stillActive)
 		} else {
-			out.Error = joinErrors(out.Error, "the commits were not pushed: "+failureText(err))
-			// git push itself failed: the commits are kept for the user to
-			// push. Not a workspace tampered with: nothing of it is kept.
-			if hasErrorType(err, activity.ErrPushFailed) {
+			var timeoutErr *temporal.TimeoutError
+			timedOut := errors.As(err, &timeoutErr)
+			if timedOut {
+				// Its worker is fine (not r.failed): the push hung, and was
+				// ended. It may have landed all the same.
+				out.Error = joinErrors(out.Error, fmt.Sprintf("the push did not finish in time (%s), so it may or may not have reached the remote; check %s there",
+					whyEnded(err, pushTimeout), branch))
+			} else {
+				out.Error = joinErrors(out.Error, "the commits were not pushed: "+failureText(err))
+			}
+			// git push itself failed, or hung: the commits are kept for the
+			// user to push. Not a workspace tampered with: nothing of it is
+			// kept.
+			if timedOut || hasErrorType(err, activity.ErrPushFailed) {
 				out.keepCommits(ctx, r, activity.BundleBranchInput{Dir: prepared.Dir, Base: prepared.Commit, Branch: branch,
 					Commit: inspected.Commits[0].SHA, Call: input.CallContext})
 			}

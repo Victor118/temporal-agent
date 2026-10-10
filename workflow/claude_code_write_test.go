@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -40,6 +41,8 @@ type implementEnv struct {
 	bundle    tool.FileRef
 	bundleErr error
 	bundled   *activity.BundleBranchInput
+	// steps are the run's last steps, in order: bundle, cleanup.
+	steps []string
 }
 
 func newImplementEnv(t *testing.T, result claudeCodeResult, runErr error, inspected activity.InspectWorkspaceOutput, pushErr error) *implementEnv {
@@ -82,6 +85,7 @@ func newImplementEnv(t *testing.T, result claudeCodeResult, runErr error, inspec
 
 	e.env.RegisterActivityWithOptions(func(ctx context.Context, in activity.CleanupWorkspaceInput) error {
 		e.cleaned = append(e.cleaned, in.Dir)
+		e.steps = append(e.steps, "cleanup")
 		return nil
 	}, sdkactivity.RegisterOptions{Name: "CleanupWorkspace"})
 
@@ -92,6 +96,7 @@ func newImplementEnv(t *testing.T, result claudeCodeResult, runErr error, inspec
 
 	e.env.RegisterActivityWithOptions(func(ctx context.Context, in activity.BundleBranchInput) (tool.FileRef, error) {
 		e.bundled = &in
+		e.steps = append(e.steps, "bundle")
 		return e.bundle, e.bundleErr
 	}, sdkactivity.RegisterOptions{Name: "BundleBranch"})
 
@@ -262,6 +267,9 @@ func TestImplementFeatureWorkflow_PushFailedKeepsTheCommits(t *testing.T) {
 		e.bundled.Branch != out.Branch || e.bundled.Call.CallID != "call-1" {
 		t.Fatalf("bundled %+v", e.bundled)
 	}
+	if !slices.Equal(e.steps, []string{"bundle", "cleanup"}) {
+		t.Errorf("steps %v, want the bundle before the clone goes", e.steps)
+	}
 	if out.Pushed || out.Bundle == nil || out.Bundle.ID != "f-9" || len(out.Files) != 1 || len(e.cleaned) != 1 ||
 		!strings.Contains(out.Error, "pre-receive hook declined") || strings.Contains(out.Error, "activity error") {
 		t.Fatalf("output %+v, cleaned %v", out, e.cleaned)
@@ -282,6 +290,21 @@ func TestImplementFeatureWorkflow_PushFailedKeepsTheCommits(t *testing.T) {
 	if out.Bundle != nil || len(out.Files) != 0 || strings.Contains(out.Content, "git fetch") ||
 		!strings.Contains(out.Content, "could not be kept either (the bundle is 30.0 MB, over the 20.0 MB") {
 		t.Errorf("output %+v", out)
+	}
+}
+
+// A push that hung until its timeout may have landed: said so, and its
+// commits kept all the same.
+func TestImplementFeatureWorkflow_PushTimedOutKeepsTheCommits(t *testing.T) {
+	e := newImplementEnv(t, claudeCodeResult{Report: "ok", Subtype: "success"}, nil, oneCommit(), nil)
+	e.env.OnActivity("PushBranch", mock.Anything, mock.Anything).Return(
+		temporal.NewTimeoutError(enumspb.TIMEOUT_TYPE_START_TO_CLOSE, nil))
+	e.bundle = tool.FileRef{ID: "f-9", Name: "agent-do-it.bundle", Size: 900}
+	out := e.run_(t, ImplementFeatureInput{Repo: "/src/repo", Task: "do it"})
+	if out.Pushed || out.Bundle == nil || !slices.Equal(e.steps, []string{"bundle", "cleanup"}) ||
+		!strings.Contains(out.Error, "did not finish in time") || !strings.Contains(out.Error, "check "+out.Branch+" there") ||
+		!strings.Contains(out.Content, "git fetch /path/to/agent-do-it.bundle") {
+		t.Errorf("steps %v, output %+v", e.steps, out)
 	}
 }
 
@@ -433,7 +456,7 @@ func TestImplementFeatureWorkflow_PublishesItsOutputs(t *testing.T) {
 		Turn: &tool.TurnRef{SessionID: "s-1", TurnKey: "m3.jarvis"}}
 	out := e.run_(t, ImplementFeatureInput{Repo: "/src/repo", Task: "do it", CallContext: call})
 	if !e.run.Outputs || e.published == nil || e.published.Call.CallID != "call-1" || e.published.Call.Turn.TurnKey != "m3.jarvis" ||
-		e.published.Dir != e.run.Dir {
+		e.published.Dir != e.run.Dir || e.published.Branch != out.Branch {
 		t.Fatalf("run %+v, published %+v", e.run, e.published)
 	}
 	for _, want := range []string{"files published", "diagram.svg (2.0 KB, id f-1)", "files not published", "key: a link"} {

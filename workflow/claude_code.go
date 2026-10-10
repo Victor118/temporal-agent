@@ -295,7 +295,7 @@ func (o *ClaudeCodeOutput) loadedSkills(res claudeCodeResult) {
 // what an implementation left in its outputs (activity.PublishOutputs), attached to
 // the call's session turn, and tells the session's pages. Best effort: what
 // is not published is said in o, never the run's failure.
-func (o *ClaudeCodeOutput) publishOutputs(ctx workflow.Context, r *run, dir string, call tool.CallContext) {
+func (o *ClaudeCodeOutput) publishOutputs(ctx workflow.Context, r *run, dir, branch string, call tool.CallContext) {
 	if r.lost {
 		return
 	}
@@ -308,7 +308,7 @@ func (o *ClaudeCodeOutput) publishOutputs(ctx workflow.Context, r *run, dir stri
 			RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: publishOutputsAttempts},
 		}),
 		ccAct.PublishOutputs,
-		activity.PublishOutputsInput{Dir: dir, Call: call},
+		activity.PublishOutputsInput{Dir: dir, Call: call, Branch: branch},
 	).Get(r.ctx, &res)
 	if err != nil {
 		if !r.failed(err) && !temporal.IsCanceledError(err) {
