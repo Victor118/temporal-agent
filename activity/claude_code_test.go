@@ -1545,16 +1545,23 @@ func TestStepErrorsKeepTheirType(t *testing.T) {
 	}
 }
 
-// fileSaver keeps the files a publisher stores.
-type fileSaver struct{ files []store.File }
+// fileSaver keeps the files a publisher stores, and their contents by name.
+type fileSaver struct {
+	files    []store.File
+	contents map[string][]byte
+}
 
-func (s *fileSaver) SaveFile(_ context.Context, f store.File, _ []byte) (store.File, error) {
+func (s *fileSaver) SaveFile(_ context.Context, f store.File, content []byte) (store.File, error) {
 	for _, old := range s.files {
 		if old.TurnKey == f.TurnKey && old.CallID == f.CallID && old.Name == f.Name {
 			return old, nil
 		}
 	}
 	s.files = append(s.files, f)
+	if s.contents == nil {
+		s.contents = map[string][]byte{}
+	}
+	s.contents[f.Name] = content
 	return f, nil
 }
 

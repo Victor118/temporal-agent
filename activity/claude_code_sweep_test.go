@@ -229,6 +229,7 @@ func TestIsRunEntry(t *testing.T) {
 		"run-0e2f.outputs":   true,
 		"run-0e2f.bin":       true,
 		"run-0e2f.plugin":    true,
+		"run-0e2f.bundle":    true,
 		"run-":               false,
 		"run-.claude":        false,
 		"other":              false,

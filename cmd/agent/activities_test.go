@@ -91,6 +91,7 @@ func TestRegister_RefusesAMethodWithNoResult(t *testing.T) {
 // must not be an exported method there. A new activity goes in this list.
 func TestWorkerActivities_AreTheActivities(t *testing.T) {
 	want := []string{
+		"BundleBranch",
 		"CallLLM",
 		"CallLLMOnMachine",
 		"CheckTurn",

@@ -388,7 +388,9 @@ type PrepareWorkspaceOutput struct {
 
 // PrepareWorkspace clones repo into a fresh directory under Root. It clones
 // with whatever credentials the worker has and no more: nothing here arranges
-// write access, because a read-only run has no use for it.
+// write access, because a read-only run has no use for it. A run that will
+// commit (Branch) has its push tried on the fresh clone (checkPush): one that
+// could not be published does not start.
 func (a *ClaudeCodeActivities) PrepareWorkspace(ctx context.Context, in PrepareWorkspaceInput) (PrepareWorkspaceOutput, error) {
 	dir, err := a.workspacePath(in.Name)
 	if err != nil {
@@ -451,6 +453,14 @@ func (a *ClaudeCodeActivities) PrepareWorkspace(ctx context.Context, in PrepareW
 		if out, err := a.git(ctx, dir, "checkout", "--quiet", "-b", in.Branch); err != nil {
 			return PrepareWorkspaceOutput{}, fmt.Errorf("create branch %s: %w: %s", in.Branch, err, out)
 		}
+		if err := a.checkPush(ctx, dir, in.Repo, strings.TrimSpace(commit), in.Branch); err != nil {
+			// No run will have this clone: the workflow cleans up after a
+			// workspace it got, not this one.
+			if rerr := removeWorkspace(dir); rerr != nil {
+				log.Printf("Warning: claude code: %s not deleted after its push check: %v", dir, rerr)
+			}
+			return PrepareWorkspaceOutput{}, err
+		}
 	}
 	if err := keepGitConfig(dir); err != nil {
 		return PrepareWorkspaceOutput{}, stepError("prepare workspace", err)
@@ -471,6 +481,41 @@ func (a *ClaudeCodeActivities) PrepareWorkspace(ctx context.Context, in PrepareW
 		return PrepareWorkspaceOutput{}, err
 	}
 	return out, nil
+}
+
+// ErrPushCheckFailed is the type of PrepareWorkspace's error when the branch
+// of a run that will commit could not be pushed (checkPush): never retried,
+// and said as it is.
+const ErrPushCheckFailed = "PushCheckFailed"
+
+// checkPush tries the push of a run's branch before the run: git push
+// --dry-run of the base to it, as PushBranch pushes (this worker's identity,
+// its options), within machine.PushCheckTimeout. It reaches the remote and
+// authenticates as a push does; it runs no hook of the server's and checks
+// no branch protection. A refusal is an ErrPushCheckFailed: the run's
+// commits would be published nowhere, so it does not start, and nothing is
+// paid.
+func (a *ClaudeCodeActivities) checkPush(ctx context.Context, dir, repo, base, branch string) error {
+	tryCtx, cancel := context.WithTimeout(ctx, machine.PushCheckTimeout)
+	defer cancel()
+	out, err := a.gitEnv(tryCtx, dir, a.sshEnv(), "push", "--dry-run", "--", repo, base+":refs/heads/"+branch)
+	switch {
+	case err == nil:
+		return nil
+	case ctx.Err() != nil:
+		return stepError("prepare workspace", ctx.Err())
+	case tryCtx.Err() != nil:
+		return temporal.NewNonRetryableApplicationError(fmt.Sprintf(
+			"could not check that this worker may push to %s: git push --dry-run did not answer within %s; nothing was run",
+			repo, machine.PushCheckTimeout), ErrPushCheckFailed, nil)
+	}
+	hint := ""
+	if a.SSHKeyPath == "" {
+		hint = " (this worker has no git identity of its own: its operator sets one with CLAUDE_CODE_SSH_KEY)"
+	}
+	return temporal.NewNonRetryableApplicationError(fmt.Sprintf(
+		"this worker may not push to %s (git push --dry-run, before the run): %v: %s%s; nothing was run",
+		repo, err, machine.Cut(strings.TrimSpace(out), 1024), hint), ErrPushCheckFailed, nil)
 }
 
 // runSkills reads the skills named for a run from this worker's own. Skills
@@ -658,17 +703,24 @@ func pluginDir(dir string) string { return dir + ".plugin" }
 // published after it (PublishOutputs) and deleted with it.
 func outputsDir(dir string) string { return dir + ".outputs" }
 
+// bundlePath is where the bundle of a run's commits that could not be pushed
+// is written (BundleBranch): next to the workspace, in Root, the worker's,
+// out of the run's reach and of its outputs, and deleted with it.
+func bundlePath(dir string) string { return dir + ".bundle" }
+
 // removeWorkspace deletes a run's directory, the copy of its git
-// configuration, its CLI configuration, its outputs, its plugin and its git
-// (subproc.GitShimDir).
+// configuration, its CLI configuration, its outputs, its plugin, its bundle
+// and its git (subproc.GitShimDir).
 func removeWorkspace(dir string) error {
 	for _, path := range []string{dir, cliConfigDir(dir), outputsDir(dir), pluginDir(dir), subproc.GitShimDir(dir)} {
 		if err := os.RemoveAll(path); err != nil {
 			return err
 		}
 	}
-	if err := os.Remove(gitConfigCopy(dir)); err != nil && !os.IsNotExist(err) {
-		return err
+	for _, path := range []string{gitConfigCopy(dir), bundlePath(dir)} {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
 	}
 	return nil
 }
@@ -931,11 +983,7 @@ func (a *ClaudeCodeActivities) PublishOutputs(ctx context.Context, in PublishOut
 	max := int64(tool.DefaultMaxFileBytes)
 	if a.Publisher != nil {
 		max = a.Publisher.MaxFileBytes()
-		ctx = tool.WithCall(ctx, in.Call)
-		ctx = tool.WithUserID(ctx, in.Call.UserID)
-		if n := len(in.Call.AgentChain); n > 0 {
-			ctx = tool.WithAgentID(ctx, in.Call.AgentChain[n-1])
-		}
+		ctx = publishingFor(ctx, in.Call)
 		upload = func(ctx context.Context, name string, content []byte) error {
 			f, err := a.Publisher.Publish(ctx, name, content)
 			if err == nil {
@@ -946,6 +994,17 @@ func (a *ClaudeCodeActivities) PublishOutputs(ctx context.Context, in PublishOut
 	}
 	out.Unpublished = outputs.Publish(ctx, outputsDir(dir), max, upload)
 	return out, nil
+}
+
+// publishingFor is ctx as the Publisher reads a call's: its session turn
+// and ID, its user, the agent that made it (the last of its chain).
+func publishingFor(ctx context.Context, call tool.CallContext) context.Context {
+	ctx = tool.WithCall(ctx, call)
+	ctx = tool.WithUserID(ctx, call.UserID)
+	if n := len(call.AgentChain); n > 0 {
+		ctx = tool.WithAgentID(ctx, call.AgentChain[n-1])
+	}
+	return ctx
 }
 
 // lowerCap is the smaller of two budget caps, where zero means none.
@@ -1152,9 +1211,87 @@ func (a *ClaudeCodeActivities) PushBranch(ctx context.Context, in PushBranchInpu
 	out, err := a.gitEnv(ctx, in.Dir, a.sshEnv(),
 		"push", "--", in.Remote, in.Commit+":refs/heads/"+in.Branch)
 	if err != nil {
-		return fmt.Errorf("push %s: %w: %s", in.Branch, err, out)
+		// Typed, and retried as any failure: the workflow keeps the commits
+		// of a push that failed for good (BundleBranch).
+		return temporal.NewApplicationError(fmt.Sprintf("git push of %s to %s: %v: %s",
+			in.Branch, in.Remote, err, machine.Cut(strings.TrimSpace(out), 2048)), ErrPushFailed)
 	}
 	return nil
+}
+
+// ErrPushFailed is the type of PushBranch's error when git push itself
+// failed (the remote refused it, a hook of its, the credentials): what
+// BundleBranch is for. Not a workspace tampered with, nor a run still
+// active: those keep nothing.
+const ErrPushFailed = "PushFailed"
+
+type BundleBranchInput struct {
+	Dir string `json:"dir"`
+	// Base is where the workspace started (PrepareWorkspaceOutput.Commit),
+	// Commit what the push tried to publish (PushBranchInput.Commit), both
+	// full SHAs: the bundle holds the commits between them, as Branch.
+	Base   string `json:"base"`
+	Branch string `json:"branch"`
+	Commit string `json:"commit"`
+	// Call is the run's call: the session turn and tool call the bundle
+	// goes to, as PublishOutputsInput's.
+	Call tool.CallContext `json:"call"`
+}
+
+// ErrBundleFailed is the type of BundleBranch's error when the bundle could
+// not be made or is too large to publish: never retried.
+const ErrBundleFailed = "BundleFailed"
+
+// BundleBranch keeps the commits of a push that failed (ErrPushFailed): a git
+// bundle of the branch at Commit, from Base (machine.WriteBundle), made by
+// the worker's git once the run is gone and the clone's configuration
+// restored (a changed one keeps nothing: WorkspaceTampered); written in Root
+// (bundlePath), never where the run's user or its outputs are; published as a
+// file of the call for its user to fetch and push themselves. Within the
+// Publisher's bound, which a bundle past it is said to exceed. Retried, it
+// stores nothing twice (the file of the call by that name).
+func (a *ClaudeCodeActivities) BundleBranch(ctx context.Context, in BundleBranchInput) (tool.FileRef, error) {
+	if !isFullSHA(in.Base) || !isFullSHA(in.Commit) || in.Branch == "" || strings.HasPrefix(in.Branch, "-") {
+		return tool.FileRef{}, temporal.NewNonRetryableApplicationError(
+			"bundle: a full base and commit SHA and a branch are required", "InvalidInput", nil)
+	}
+	dir, err := a.workspaceDir(in.Dir)
+	if err != nil {
+		return tool.FileRef{}, stepError("bundle", err)
+	}
+	if a.Publisher == nil {
+		return tool.FileRef{}, temporal.NewNonRetryableApplicationError("this worker publishes no file", ErrBundleFailed, nil)
+	}
+	if err := a.awaitRunEnd(ctx, dir); err != nil {
+		return tool.FileRef{}, stepError("bundle", err)
+	}
+	if changed, err := a.restoreGitConfig(dir); err != nil {
+		return tool.FileRef{}, stepError("bundle", err)
+	} else if changed {
+		return tool.FileRef{}, temporal.NewNonRetryableApplicationError(
+			"the clone's git configuration changed since the inspection", "WorkspaceTampered", nil)
+	}
+	path := bundlePath(dir)
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return tool.FileRef{}, stepError("bundle", err)
+	}
+	// The worker's git, as for the inspection: nothing goes to the network.
+	run := func(ctx context.Context, args ...string) (string, error) { return a.git(ctx, dir, args...) }
+	if err := machine.WriteBundle(ctx, run, in.Branch, in.Base, in.Commit, path); err != nil {
+		if ctx.Err() != nil {
+			return tool.FileRef{}, stepError("bundle", ctx.Err())
+		}
+		return tool.FileRef{}, temporal.NewNonRetryableApplicationError(err.Error(), ErrBundleFailed, nil)
+	}
+	content, err := machine.ReadBundle(path, a.Publisher.MaxFileBytes())
+	if err != nil {
+		return tool.FileRef{}, temporal.NewNonRetryableApplicationError(err.Error(), ErrBundleFailed, nil)
+	}
+	f, err := a.Publisher.Publish(publishingFor(ctx, in.Call), machine.BundleName(in.Branch), content)
+	if err != nil {
+		return tool.FileRef{}, stepError("bundle: publish", err)
+	}
+	return f, nil
 }
 
 // isFullSHA tells whether s is a full object name, SHA-1 or SHA-256: what
