@@ -212,10 +212,12 @@ them. Only their name, description and body: what else their frontmatter
 says (`allowed-tools`, `hooks`, `mcpServers`…) never reaches the CLI, and
 the run keeps its own tools. 16 skills and 64 KiB per run at most; a name
 in lower case letters, digits, `-` and `_`. `agent connect` reads the CLI's
-`--help` at start: a CLI too old to have `--plugin-dir` refuses a run that has
-skills (it goes to the installation's fallback; a run without skills runs
-there), and so does a CLI whose managed settings forbid plugins
-(`disableSideloadFlags`). It logs each run's skills; the result says which
+`--help` at start and announces `run-skills` when it has `--plugin-dir`: a
+machine without it is not chosen for a run that has skills (another of your
+machines that has it runs it, else the installation's fallback, saying why;
+a run without skills still runs there). A CLI whose managed settings forbid
+plugins (`disableSideloadFlags`) refuses such a run before any tool, and it
+goes to the fallback too. It logs each run's skills; the result says which
 the run was given, and which it went without (not found where it was
 prepared, or not loaded by the CLI). A skill speaks to your CLI, with your
 login and your git identity: an admin's skill is trusted like the admin is
@@ -302,7 +304,7 @@ A worker that stops ends its coding runs first, then gives the tasks under way 3
 | `INTERNAL_API_KEY` | Secret shared by the server and its workers for `/internal/notify` and `/internal/machines/directives` (`Authorization: Bearer …`). Empty = the server refuses every notification and every directive; a worker checks it at startup and logs a refusal as an error |
 | `TRUSTED_PROXIES` | Comma-separated addresses or CIDR ranges of the reverse proxies in front of the server, whose `X-Forwarded-For` gives the client's address; `none` when clients connect directly. Empty (default) = the client's address is unknown, and failed logins are limited per account only; so is a login a trusted proxy forwards without naming the client. The same goes for machines' enrollment requests (20 per address in 10 minutes only when it is known; 500 pending at most in any case) |
 | `SKILLS_REPO`, `SKILLS_BRANCH` | Git repository (and branch) the skills are loaded from, by the server and the workers (cloned into a cache of the process's own, 0700: a private repository's URL keeps its credentials there; on a coding worker, prefer `SKILLS_DIR`) |
-| `SKILLS_DIR` | Directory the skills are loaded from instead, as it is (no secret): the coding containers' source (`/app/skills` in the compose file), whose runs read the skills marked `runs: true`. `agent dev` defaults to `./skills`, loaded once; the server and the workers reload it when the skills version moves (`/webhooks/skills`, « Recharger » in `/admin`). With `SKILLS_REPO` = the process does not start |
+| `SKILLS_DIR` | Directory the skills are loaded from instead, as it is (no secret): the coding containers' source (`/app/skills` in the compose file), whose runs read the skills marked `runs: true`. `agent dev` defaults to `./skills` (with `SKILLS_REPO` alone, it reads the repository instead; the compose file's `agent` service sets `SKILLS_DIR=/app/skills`), loaded once; the server and the workers reload it when the skills version moves (`/webhooks/skills`, « Recharger » in `/admin`). With `SKILLS_REPO` = the process does not start |
 | `SKILLS_WEBHOOK_SECRET` | GitHub webhook secret for `/webhooks/skills`. Empty = the route is not served |
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token, to send messages |
 | `TELEGRAM_WEBHOOK_SECRET` | The `secret_token` passed to Telegram's `setWebhook`, checked on every update of `/webhooks/telegram`. Empty = the route is not served |
