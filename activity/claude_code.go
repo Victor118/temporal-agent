@@ -20,6 +20,7 @@ import (
 	"github.com/victor/temporal-agent/claudecode"
 	"github.com/victor/temporal-agent/machine"
 	"github.com/victor/temporal-agent/machine/outputs"
+	"github.com/victor/temporal-agent/store"
 	"github.com/victor/temporal-agent/subproc"
 	"github.com/victor/temporal-agent/tool"
 )
@@ -484,17 +485,18 @@ func (a *ClaudeCodeActivities) PrepareWorkspace(ctx context.Context, in PrepareW
 }
 
 // ErrPushCheckFailed is the type of PrepareWorkspace's error when the branch
-// of a run that will commit could not be pushed (checkPush): never retried,
-// and said as it is.
+// of a run that will commit could not be pushed (checkPush), said as it is:
+// for good when the remote refused the worker's identity, retried with the
+// preparation otherwise (the network, a remote that did not answer).
 const ErrPushCheckFailed = "PushCheckFailed"
 
 // checkPush tries the push of a run's branch before the run: git push
 // --dry-run of the base to it, as PushBranch pushes (this worker's identity,
 // its options), within machine.PushCheckTimeout. It reaches the remote and
 // authenticates as a push does; it runs no hook of the server's and checks
-// no branch protection. A refusal is an ErrPushCheckFailed: the run's
+// no branch protection. A failure is an ErrPushCheckFailed: the run's
 // commits would be published nowhere, so it does not start, and nothing is
-// paid.
+// paid; never retried when git's words are a refusal (pushRefused).
 func (a *ClaudeCodeActivities) checkPush(ctx context.Context, dir, repo, base, branch string) error {
 	tryCtx, cancel := context.WithTimeout(ctx, machine.PushCheckTimeout)
 	defer cancel()
@@ -505,17 +507,56 @@ func (a *ClaudeCodeActivities) checkPush(ctx context.Context, dir, repo, base, b
 	case ctx.Err() != nil:
 		return stepError("prepare workspace", ctx.Err())
 	case tryCtx.Err() != nil:
-		return temporal.NewNonRetryableApplicationError(fmt.Sprintf(
+		return temporal.NewApplicationError(fmt.Sprintf(
 			"could not check that this worker may push to %s: git push --dry-run did not answer within %s; nothing was run",
-			repo, machine.PushCheckTimeout), ErrPushCheckFailed, nil)
+			repo, machine.PushCheckTimeout), ErrPushCheckFailed)
 	}
+	out = strings.TrimSpace(out)
 	hint := ""
-	if a.SSHKeyPath == "" {
+	if a.SSHKeyPath == "" && isSSHRemote(repo) {
 		hint = " (this worker has no git identity of its own: its operator sets one with CLAUDE_CODE_SSH_KEY)"
 	}
-	return temporal.NewNonRetryableApplicationError(fmt.Sprintf(
-		"this worker may not push to %s (git push --dry-run, before the run): %v: %s%s; nothing was run",
-		repo, err, machine.Cut(strings.TrimSpace(out), 1024), hint), ErrPushCheckFailed, nil)
+	msg := fmt.Sprintf("this worker may not push to %s (git push --dry-run, before the run): %v: %s%s; nothing was run",
+		repo, err, machine.Cut(out, 1024), hint)
+	if pushRefused(out) {
+		return temporal.NewNonRetryableApplicationError(msg, ErrPushCheckFailed, nil)
+	}
+	return temporal.NewApplicationError(msg, ErrPushCheckFailed)
+}
+
+// pushRefusals are what git, ssh or a forge say when the remote turns the
+// identity down: the same push would be refused again. Anything else (a
+// connection reset, a name that did not resolve, a remote that broke
+// mid-answer) may pass at the next try.
+var pushRefusals = []string{
+	"permission denied", "authentication failed", "could not read username", "could not read password",
+	"terminal prompts disabled", "returned error: 401", "returned error: 403", "permission to ",
+	"host key verification failed", "not allowed to push", "repository not found",
+}
+
+// pushRefused tells a push's refusal, from git's words, from a failure
+// worth trying again.
+func pushRefused(out string) bool {
+	lower := strings.ToLower(out)
+	for _, r := range pushRefusals {
+		if strings.Contains(lower, r) {
+			return true
+		}
+	}
+	return false
+}
+
+// isSSHRemote tells a repository git reaches over ssh: ssh://… or the scp
+// form, host:path (a colon before any slash), as git reads it.
+func isSSHRemote(repo string) bool {
+	if strings.HasPrefix(repo, "ssh://") || strings.HasPrefix(repo, "git+ssh://") || strings.HasPrefix(repo, "ssh+git://") {
+		return true
+	}
+	if strings.Contains(repo, "://") {
+		return false
+	}
+	i := strings.Index(repo, ":")
+	return i > 0 && !strings.Contains(repo[:i], "/")
 }
 
 // runSkills reads the skills named for a run from this worker's own. Skills
@@ -955,6 +996,9 @@ type PublishOutputsInput struct {
 	// Call is the run's call: the session turn and tool call its files go
 	// to, the agent that made it (the last of its chain), the user.
 	Call tool.CallContext `json:"call"`
+	// Branch is the run's: the name of its bundle (machine.BundleName) is
+	// not the outputs' to take.
+	Branch string `json:"branch,omitempty"`
 }
 
 type PublishOutputsOutput struct {
@@ -992,7 +1036,11 @@ func (a *ClaudeCodeActivities) PublishOutputs(ctx context.Context, in PublishOut
 			return err
 		}
 	}
-	out.Unpublished = outputs.Publish(ctx, outputsDir(dir), max, upload)
+	var reserved []string
+	if in.Branch != "" {
+		reserved = append(reserved, machine.BundleName(in.Branch))
+	}
+	out.Unpublished = outputs.Publish(ctx, outputsDir(dir), max, upload, reserved...)
 	return out, nil
 }
 
@@ -1249,7 +1297,9 @@ const ErrBundleFailed = "BundleFailed"
 // (bundlePath), never where the run's user or its outputs are; published as a
 // file of the call for its user to fetch and push themselves. Within the
 // Publisher's bound, which a bundle past it is said to exceed. Retried, it
-// stores nothing twice (the file of the call by that name).
+// stores nothing twice: the same bytes are the file stored first
+// (machine.WriteBundle packs on one thread), and other bytes under the name,
+// which the outputs may not take, are an earlier attempt's bundle, returned.
 func (a *ClaudeCodeActivities) BundleBranch(ctx context.Context, in BundleBranchInput) (tool.FileRef, error) {
 	if !isFullSHA(in.Base) || !isFullSHA(in.Commit) || in.Branch == "" || strings.HasPrefix(in.Branch, "-") {
 		return tool.FileRef{}, temporal.NewNonRetryableApplicationError(
@@ -1287,7 +1337,16 @@ func (a *ClaudeCodeActivities) BundleBranch(ctx context.Context, in BundleBranch
 	if err != nil {
 		return tool.FileRef{}, temporal.NewNonRetryableApplicationError(err.Error(), ErrBundleFailed, nil)
 	}
-	f, err := a.Publisher.Publish(publishingFor(ctx, in.Call), machine.BundleName(in.Branch), content)
+	ctx = publishingFor(ctx, in.Call)
+	name := machine.BundleName(in.Branch)
+	f, err := a.Publisher.Publish(ctx, name, content)
+	if errors.Is(err, store.ErrFileExists) {
+		// Published by an attempt before this one: the outputs may not take
+		// the name (PublishOutputsInput.Branch), so the file is the bundle.
+		if stored, found, serr := a.Publisher.Stored(ctx, name); serr == nil && found {
+			return stored, nil
+		}
+	}
 	if err != nil {
 		return tool.FileRef{}, stepError("bundle: publish", err)
 	}

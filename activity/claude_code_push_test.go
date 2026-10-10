@@ -33,14 +33,19 @@ func TestPrepareWorkspaceChecksThePush(t *testing.T) {
 	gitIn(t, remote, "config", "receive.unpackLimit", "notanumber")
 	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: t.TempDir()}
 	_, err := a.PrepareWorkspace(context.Background(), PrepareWorkspaceInput{Name: "run-1", Repo: remote, Branch: "agent/x"})
+	// Not a refusal of the identity: retried with the preparation.
 	var appErr *temporal.ApplicationError
-	if !errors.As(err, &appErr) || appErr.Type() != ErrPushCheckFailed || !appErr.NonRetryable() {
-		t.Fatalf("PrepareWorkspace: %v, want a non-retryable %s", err, ErrPushCheckFailed)
+	if !errors.As(err, &appErr) || appErr.Type() != ErrPushCheckFailed || appErr.NonRetryable() {
+		t.Fatalf("PrepareWorkspace: %v, want a retryable %s", err, ErrPushCheckFailed)
 	}
-	for _, want := range []string{"may not push to " + remote, "--dry-run", "receive.unpacklimit", "CLAUDE_CODE_SSH_KEY", "nothing was run"} {
+	for _, want := range []string{"may not push to " + remote, "--dry-run", "receive.unpacklimit", "nothing was run"} {
 		if !strings.Contains(appErr.Message(), want) {
 			t.Errorf("message lacks %q: %s", want, appErr.Message())
 		}
+	}
+	// A local path is not reached with a key: no word of one.
+	if strings.Contains(appErr.Message(), "CLAUDE_CODE_SSH_KEY") {
+		t.Errorf("message: %s", appErr.Message())
 	}
 	if entries, _ := os.ReadDir(a.Root); len(entries) != 0 {
 		t.Errorf("left in Root: %v", entries)
@@ -50,9 +55,9 @@ func TestPrepareWorkspaceChecksThePush(t *testing.T) {
 	}
 }
 
-// pushRefused is a run whose push its remote refuses (a hook of the
+// refusedPushRun is a run whose push its remote refuses (a hook of the
 // remote's; a dry run runs none): prepared, committed, inspected.
-func pushRefused(t *testing.T, a *ClaudeCodeActivities) (remote string, prepared PrepareWorkspaceOutput, inspected InspectWorkspaceOutput) {
+func refusedPushRun(t *testing.T, a *ClaudeCodeActivities) (remote string, prepared PrepareWorkspaceOutput, inspected InspectWorkspaceOutput) {
 	t.Helper()
 	remote = bareRemote(t, initRepo(t))
 	if err := os.WriteFile(filepath.Join(remote, "hooks", "pre-receive"), []byte("#!/bin/sh\necho refused by policy >&2\nexit 1\n"), 0o755); err != nil {
@@ -77,7 +82,7 @@ func pushRefused(t *testing.T, a *ClaudeCodeActivities) (remote string, prepared
 func TestBundleBranchKeepsTheCommitsOfAFailedPush(t *testing.T) {
 	saver := &fileSaver{}
 	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: t.TempDir(), Publisher: &tool.Publisher{Store: saver}}
-	remote, prepared, inspected := pushRefused(t, a)
+	remote, prepared, inspected := refusedPushRun(t, a)
 	sha := inspected.Commits[0].SHA
 	err := a.PushBranch(context.Background(), PushBranchInput{Dir: prepared.Dir, Remote: remote, Branch: "agent/thing", Commit: sha})
 	var appErr *temporal.ApplicationError
@@ -131,7 +136,7 @@ func TestBundleBranchRefuses(t *testing.T) {
 	t.Run("configuration changed", func(t *testing.T) {
 		saver := &fileSaver{}
 		a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: t.TempDir(), Publisher: &tool.Publisher{Store: saver}}
-		_, prepared, inspected := pushRefused(t, a)
+		_, prepared, inspected := refusedPushRun(t, a)
 		appendGitConfig(t, prepared.Dir, "[core]\n\tfsmonitor = touch /tmp/pwned\n")
 		_, err := a.BundleBranch(context.Background(), BundleBranchInput{Dir: prepared.Dir, Base: prepared.Commit, Branch: "agent/thing",
 			Commit: inspected.Commits[0].SHA})
@@ -142,7 +147,7 @@ func TestBundleBranchRefuses(t *testing.T) {
 	t.Run("too large", func(t *testing.T) {
 		saver := &fileSaver{}
 		a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: t.TempDir(), Publisher: &tool.Publisher{Store: saver, MaxBytes: 10}}
-		_, prepared, inspected := pushRefused(t, a)
+		_, prepared, inspected := refusedPushRun(t, a)
 		_, err := a.BundleBranch(context.Background(), BundleBranchInput{Dir: prepared.Dir, Base: prepared.Commit, Branch: "agent/thing",
 			Commit: inspected.Commits[0].SHA})
 		var appErr *temporal.ApplicationError
@@ -158,4 +163,61 @@ func TestBundleBranchRefuses(t *testing.T) {
 			t.Errorf("BundleBranch: %v", err)
 		}
 	})
+}
+
+// A refusal of the identity is told from a failure worth trying again.
+func TestPushRefused(t *testing.T) {
+	for out, want := range map[string]bool{
+		"git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository.":                   true,
+		"fatal: could not read Username for 'https://github.com': terminal prompts disabled":                              true,
+		"remote: Permission to me/app.git denied to bot.\nfatal: unable to access: The requested URL returned error: 403": true,
+		"remote: You are not allowed to push code to this project.":                                                       true,
+		"ERROR: Repository not found.": true,
+		"ssh: connect to host github.com port 22: Connection refused\nfatal: Could not read from remote repository.": false,
+		"ssh: Could not resolve hostname github.com: Temporary failure in name resolution":                           false,
+		"fatal: unable to access 'https://github.com/me/app.git/': Recv failure: Connection reset by peer":           false,
+	} {
+		if got := pushRefused(out); got != want {
+			t.Errorf("pushRefused(%q) = %v, want %v", out, got, want)
+		}
+	}
+}
+
+func TestIsSSHRemote(t *testing.T) {
+	for repo, want := range map[string]bool{
+		"git@github.com:me/app.git": true, "ssh://git@host/app.git": true, "host:app": true,
+		"https://github.com/me/app.git": false, "/srv/git/app.git": false, "./a:b": false, "file:///srv/app.git": false,
+	} {
+		if got := isSSHRemote(repo); got != want {
+			t.Errorf("isSSHRemote(%q) = %v, want %v", repo, got, want)
+		}
+	}
+}
+
+// The outputs may not take the name of the branch's bundle: a file the run
+// left under it is not published, and the bundle is. An attempt that
+// published the bundle, then failed, leaves it for the next one, whose
+// bytes it returns whatever they are.
+func TestBundleBranchOwnsItsName(t *testing.T) {
+	saver := &fileSaver{}
+	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: t.TempDir(), Publisher: &tool.Publisher{Store: saver}}
+	_, prepared, inspected := refusedPushRun(t, a)
+	os.WriteFile(filepath.Join(outputsDir(prepared.Dir), "agent-thing.bundle"), []byte("fake"), 0o600)
+	call := tool.CallContext{UserID: "u-1", CallID: "call-1", AgentChain: []string{"jarvis"}, Turn: &tool.TurnRef{SessionID: "s-1", TurnKey: "m3.jarvis"}}
+	res, err := a.PublishOutputs(context.Background(), PublishOutputsInput{Dir: prepared.Dir, Call: call, Branch: "agent/thing"})
+	if err != nil || len(res.Files) != 0 || len(res.Unpublished) != 1 || !strings.Contains(res.Unpublished[0], "reserved for the branch's bundle") {
+		t.Fatalf("PublishOutputs: %+v %v", res, err)
+	}
+	in := BundleBranchInput{Dir: prepared.Dir, Base: prepared.Commit, Branch: "agent/thing", Commit: inspected.Commits[0].SHA, Call: call}
+	f, err := a.BundleBranch(context.Background(), in)
+	if err != nil || f.Name != "agent-thing.bundle" || string(saver.contents[f.Name]) == "fake" {
+		t.Fatalf("BundleBranch: %+v %v", f, err)
+	}
+
+	// Other bytes under the name, an earlier attempt's: that file.
+	saver.files[0].SHA256 = "an-earlier-attempt"
+	again, err := a.BundleBranch(context.Background(), in)
+	if err != nil || again.ID != f.ID || len(saver.files) != 1 {
+		t.Errorf("replay: %+v %v, %d files", again, err, len(saver.files))
+	}
 }

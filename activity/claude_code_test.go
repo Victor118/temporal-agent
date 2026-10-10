@@ -1554,6 +1554,9 @@ type fileSaver struct {
 func (s *fileSaver) SaveFile(_ context.Context, f store.File, content []byte) (store.File, error) {
 	for _, old := range s.files {
 		if old.TurnKey == f.TurnKey && old.CallID == f.CallID && old.Name == f.Name {
+			if old.SHA256 != f.SHA256 {
+				return store.File{}, store.ErrFileExists
+			}
 			return old, nil
 		}
 	}
@@ -1563,6 +1566,16 @@ func (s *fileSaver) SaveFile(_ context.Context, f store.File, content []byte) (s
 	}
 	s.contents[f.Name] = content
 	return f, nil
+}
+
+func (s *fileSaver) ListCallFiles(_ context.Context, sessionID, turnKey, callID string) ([]store.File, error) {
+	var files []store.File
+	for _, f := range s.files {
+		if f.SessionID == sessionID && f.TurnKey == turnKey && f.CallID == callID {
+			files = append(files, f)
+		}
+	}
+	return files, nil
 }
 
 // A run's outputs: made with its workspace, offered to the CLI, published
