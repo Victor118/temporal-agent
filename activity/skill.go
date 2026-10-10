@@ -145,11 +145,14 @@ func (a *SkillActivities) LoadSkillsForAgent(ctx context.Context, input LoadSkil
 		RunSkills: runSkills}, nil
 }
 
-// matchSkills returns the skills named in names, in order, skipping unknown ones.
+// matchSkills returns the skills named in names, in order, skipping unknown
+// ones and those marked "runs: true": a run's skill is written for the CLI
+// that codes, not for the agent that delegates to it, which would pay for it
+// at every call and might take it for its own rule.
 func matchSkills(byName map[string]skill.Skill, names []string) []skill.Skill {
 	var matched []skill.Skill
 	for _, name := range names {
-		if s, ok := byName[name]; ok {
+		if s, ok := byName[name]; ok && !s.Runs {
 			matched = append(matched, s)
 		}
 	}

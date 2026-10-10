@@ -104,6 +104,10 @@ func TestRunSkills(t *testing.T) {
 	if err != nil || len(out.RunSkills) != 1 || out.RunSkills[0] != "tdd" {
 		t.Fatalf("%+v %v", out.RunSkills, err)
 	}
+	// A run's skill is for the CLI that codes, never in the agent's prompt.
+	if strings.Contains(out.SystemPrompt, "RED, GREEN, REFACTOR.") || !strings.Contains(out.SystemPrompt, "Look twice.") {
+		t.Errorf("prompt:\n%s", out.SystemPrompt)
+	}
 	set := a.Prompts.RunSkills([]string{"tdd", "review", "tdd", "ghost"})
 	if len(set.Skills) != 1 || set.Skills[0].Name != "tdd" || set.Skills[0].Content != "RED, GREEN, REFACTOR." || set.Skills[0].Description != "Test first" ||
 		len(set.Missing) != 2 || set.Missing[0] != "review" || set.Missing[1] != "ghost" || set.Version != "c0ffee" {

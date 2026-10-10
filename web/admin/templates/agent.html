@@ -76,7 +76,7 @@
   <div class="card">
     <h2>Skills</h2>
     {{range .Skills}}
-    <div>{{if .Present}}<a class="chip" href="/admin/skills/{{.Name}}">{{.Name}}</a>{{if .Runs}} <span class="badge b-info" title="Part avec les runs Claude Code de l'agent (analyze_repo, implement_feature)">runs</span>{{end}}
+    <div>{{if .Present}}<a class="chip" href="/admin/skills/{{.Name}}">{{.Name}}</a>{{if .Runs}} <span class="badge b-info" title="Part avec les runs Claude Code de l'agent (analyze_repo, implement_feature), pas dans son prompt">runs</span>{{end}}
       {{else}}<span class="chip dead">{{.Name}}</span> <span class="badge b-warn">non chargé</span>{{end}}</div>
     {{else}}
     <p class="empty">Aucun skill.</p>
