@@ -607,6 +607,13 @@ func TestPickMachine_Extra(t *testing.T) {
 	if !errors.Is(err, ErrNoMachine) || !errors.As(err, &lacks) || lacks.Machine != "zz-mach-old" || !slices.Equal(lacks.Missing, []string{"run-skills"}) {
 		t.Errorf("lacking: %v", err)
 	}
+	// The call's directive, found without reserving anything.
+	if d, m, err := s.DirectiveOfCall(ctx, "zz-x1", "c"); err != nil || d.RunID != "zz-x1" || m.ID != "zz-mach-new" {
+		t.Errorf("directive of the call: %+v %+v %v", d, m, err)
+	}
+	if _, _, err := s.DirectiveOfCall(ctx, "zz-x2", "c"); !errors.Is(err, ErrDirectiveNotFound) {
+		t.Errorf("no directive: %v", err)
+	}
 	// Without the extra, the old one takes it.
 	r := req("zz-x3")
 	r.Extra = nil

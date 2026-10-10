@@ -38,6 +38,13 @@ func (f *fakeMachineStore) PickMachine(_ context.Context, req store.PickRequest)
 	return store.Directive{ID: req.DirectiveID}, store.Machine{ID: "m-1", Name: "maison"}, f.pickErr
 }
 
+func (f *fakeMachineStore) DirectiveOfCall(context.Context, string, string) (store.Directive, store.Machine, error) {
+	if f.existing != nil {
+		return *f.existing, store.Machine{ID: "m-1", Name: "maison"}, nil
+	}
+	return store.Directive{}, store.Machine{}, store.ErrDirectiveNotFound
+}
+
 func (f *fakeMachineStore) StartDirective(_ context.Context, id string, token []byte, _ string, _ time.Time) (store.Directive, error) {
 	f.token = token
 	d := f.start
@@ -230,6 +237,15 @@ func TestPickMachine_Skills(t *testing.T) {
 	if err != nil || out.Refused == "" || out.DirectiveID != "" || st.pick.UserID != "" {
 		t.Errorf("refused: %+v %v, reserved %+v", out, err, st.pick)
 	}
+	// Refused now, though an earlier attempt made the call's directive:
+	// that one, not a refusal that would leave it holding a slot.
+	firstInput, _ := json.Marshal(machine.AnalyzeInput{Repo: "r", Task: "t", Skills: []machine.RunSkill{{Name: "tdd", Content: "x"}}})
+	st.existing = &store.Directive{ID: "d-earlier", Input: firstInput}
+	out, err = pick("BAD")
+	if err != nil || out.Refused != "" || out.DirectiveID != "d-earlier" || out.MachineName != "maison" || !slices.Equal(out.Skills, []string{"tdd"}) {
+		t.Errorf("refused, a directive made: %+v %v", out, err)
+	}
+	st.existing = nil
 
 	// None found: the run goes without, said so; the input is the model's,
 	// and any machine with Claude Code takes it.

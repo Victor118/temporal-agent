@@ -84,12 +84,17 @@ func TestPrepareWorkspace_WritesThePlugin(t *testing.T) {
 func TestPrepareWorkspace_RefusesSkillsPastTheBounds(t *testing.T) {
 	src := initRepo(t)
 	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: t.TempDir(), Skills: skillReader{"Bad": {Name: "Bad", Content: "x"}}}
+	// What an earlier attempt left: a partial clone, its companions.
+	for _, leftover := range []string{"run-1", "run-1.plugin", "run-1.outputs"} {
+		os.MkdirAll(filepath.Join(a.Root, leftover, "x"), 0o755)
+	}
 	_, err := a.PrepareWorkspace(context.Background(), PrepareWorkspaceInput{Name: "run-1", Repo: src, Skills: []string{"Bad"}})
 	var appErr *temporal.ApplicationError
 	if !errors.As(err, &appErr) || !appErr.NonRetryable() || !strings.Contains(err.Error(), "skills cannot go") {
 		t.Errorf("%v", err)
 	}
-	// Refused before the clone: nothing was fetched.
+	// Refused before the clone: nothing fetched, and nothing of the earlier
+	// attempt left.
 	if entries, _ := os.ReadDir(a.Root); len(entries) != 0 {
 		t.Errorf("cloned before refusing: %v", entries)
 	}

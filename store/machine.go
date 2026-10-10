@@ -953,6 +953,22 @@ func (s *PostgresStore) PickMachine(ctx context.Context, req PickRequest) (Direc
 	return d, m, err
 }
 
+// DirectiveOfCall is the directive a call made (its run and call key, as
+// PickMachine made it), and its machine: what a PickMachine made again
+// finds without reserving anything. None: ErrDirectiveNotFound.
+func (s *PostgresStore) DirectiveOfCall(ctx context.Context, runID, callKey string) (Directive, Machine, error) {
+	d, err := scanDirective(s.db.QueryRowContext(ctx, `SELECT `+directiveColumns+` FROM machine_directives
+		WHERE run_id = $1 AND call_key = $2`, runID, callKey))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Directive{}, Machine{}, ErrDirectiveNotFound
+	}
+	if err != nil {
+		return Directive{}, Machine{}, err
+	}
+	m, err := scanMachine(s.db.QueryRowContext(ctx, `SELECT `+machineColumns+` FROM machines m WHERE m.id = $1`, d.MachineID))
+	return d, m, err
+}
+
 // MachineLacksError is a directive no machine of the user can take, though
 // Machine could but for Missing (PickRequest.Extra): it is an ErrNoMachine,
 // whose reason it tells.

@@ -23,6 +23,7 @@ import (
 // MachineStore is what the machine activities read and write.
 type MachineStore interface {
 	PickMachine(ctx context.Context, req store.PickRequest) (store.Directive, store.Machine, error)
+	DirectiveOfCall(ctx context.Context, runID, callKey string) (store.Directive, store.Machine, error)
 	ChooseLLMMachine(ctx context.Context, userID string, excluded []string, seenAfter time.Time) (store.Machine, error)
 	SetMachineAside(ctx context.Context, id string) error
 	CreateLLMDirective(ctx context.Context, req store.LLMDirectiveRequest) (store.Directive, store.Machine, error)
@@ -145,8 +146,9 @@ type PickMachineOutput struct {
 // and added to it (what the gateway sends, at once and at every hello, is
 // what the database holds), and the machine must then load them
 // (machine.CapRunSkills). Skills it cannot carry are a refusal, a result
-// too. Made again for the same call, it finds the first one's directive,
-// and says of its skills what that one's input holds.
+// too, unless the call's directive exists already. Made again for the same
+// call, it finds the first one's directive, and says of its skills what
+// that one's input holds.
 func (a *MachineActivities) PickMachine(ctx context.Context, in PickMachineInput) (PickMachineOutput, error) {
 	var out PickMachineOutput
 	var extra []string
@@ -156,6 +158,19 @@ func (a *MachineActivities) PickMachine(ctx context.Context, in PickMachineInput
 			return PickMachineOutput{}, err
 		}
 		if refused != "" {
+			// An earlier attempt may have made the call's directive, with
+			// the skills as they were: it holds a slot of its machine, and
+			// is the call's.
+			run := activity.GetInfo(ctx).WorkflowExecution.RunID
+			d, m, err := a.Store.DirectiveOfCall(ctx, run, in.CallKey)
+			switch {
+			case err == nil:
+				out := storedSkills(d.Input, in.Skills)
+				out.DirectiveID, out.MachineID, out.MachineName = d.ID, m.ID, m.Name
+				return out, nil
+			case !errors.Is(err, store.ErrDirectiveNotFound):
+				return PickMachineOutput{}, err
+			}
 			return PickMachineOutput{Refused: refused, SkillsMissing: out.SkillsMissing}, nil
 		}
 		in.Input = input

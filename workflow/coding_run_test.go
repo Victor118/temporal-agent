@@ -372,4 +372,11 @@ func TestCodingRun_Skills(t *testing.T) {
 	if err != nil || out.Report != "from the fallback" || !strings.Contains(out.Note, lacks) {
 		t.Errorf("lacks: %+v %v", out, err)
 	}
+	// No fallback: the machine is connected, its CLI is to update.
+	c = &codingRunCase{route: activity.CodingRouting{Machines: true}, pick: activity.PickMachineOutput{NoMachine: lacks, Lacks: lacks}}
+	out, err = runCodingRun(t, c, call)
+	if err != nil || !strings.Contains(out.Error, lacks) || !strings.Contains(out.Error, "update it, then try again") ||
+		strings.Contains(out.Error, "start agent connect") {
+		t.Errorf("lacks, no fallback: %+v %v", out, err)
+	}
 }

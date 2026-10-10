@@ -401,17 +401,16 @@ func (a *ClaudeCodeActivities) PrepareWorkspace(ctx context.Context, in PrepareW
 		return PrepareWorkspaceOutput{}, temporal.NewNonRetryableApplicationError(
 			fmt.Sprintf("prepare workspace: invalid ref %q or branch %q", in.Ref, in.Branch), "InvalidInput", nil)
 	}
-	// The run's skills, read and checked before anything is cloned: skills
-	// it cannot take end the step at once.
-	skills, err := a.runSkills(in.Skills)
-	if err != nil {
-		return PrepareWorkspaceOutput{}, err
-	}
-
 	// A retried attempt finds the previous one's half-written clone. Start over
 	// rather than trying to repair it.
 	if err := removeWorkspace(dir); err != nil {
 		return PrepareWorkspaceOutput{}, stepError("prepare workspace", err)
+	}
+	// The run's skills, read and checked before anything is cloned: skills
+	// it cannot take end the step at once, leaving nothing behind.
+	skills, err := a.runSkills(in.Skills)
+	if err != nil {
+		return PrepareWorkspaceOutput{}, err
 	}
 	if err := os.MkdirAll(a.Root, 0o755); err != nil {
 		return PrepareWorkspaceOutput{}, stepError("prepare workspace", err)
