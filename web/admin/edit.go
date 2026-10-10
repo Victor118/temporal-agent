@@ -346,7 +346,7 @@ func (a *Admin) allowlistPreview(w http.ResponseWriter, r *http.Request) {
 
 func (a *Admin) reloadSkills(w http.ResponseWriter, r *http.Request) {
 	if !a.cfg.SkillsReloadable {
-		http.Error(w, "Pas de dépôt de skills configuré (SKILLS_REPO).", http.StatusConflict)
+		http.Error(w, "Pas de source de skills configurée (SKILLS_REPO ou SKILLS_DIR).", http.StatusConflict)
 		return
 	}
 	v, err := a.cfg.Store.IncrementSkillsVersion(r.Context())

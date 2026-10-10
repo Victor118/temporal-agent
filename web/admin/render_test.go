@@ -38,6 +38,11 @@ func TestRender_AllPages(t *testing.T) {
 		if !strings.Contains(w.Body.String(), "</html>") {
 			t.Errorf("%s: incomplete page", name)
 		}
+		// "present" goes with the coding runs: its pages say so.
+		badge := map[string]string{"skills": `title="Part avec les runs`, "agent": `title="Part avec les runs`, "skill": "temporal-agent:present"}[name]
+		if badge != "" && !strings.Contains(w.Body.String(), badge) {
+			t.Errorf("%s: no runs badge", name)
+		}
 	}
 
 	preview := httptest.NewRecorder()
