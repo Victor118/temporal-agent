@@ -112,11 +112,11 @@ func (c *RootClaim) Alone() bool { return c.alone }
 // commands run as RunAs (ClaudeCodeActivities.Runs); nil = none.
 //
 // Only entries named after a run (RunWorkspacePrefix), and their companions
-// (the CLI's configuration, the copy of the git configuration, the outputs), directly
-// under Root, are touched: a directory is taken back (subproc.Reclaim) then
-// removed without following a link (os.RemoveAll removes a link, not its
-// target); anything else is removed as an entry. A failure is reported and
-// the sweep goes on.
+// (the CLI's configuration, the copy of the git configuration, the outputs,
+// the plugin), directly under Root, are touched: a directory is taken back
+// (subproc.Reclaim) then removed without following a link (os.RemoveAll
+// removes a link, not its target); anything else is removed as an entry. A
+// failure is reported and the sweep goes on.
 func (c *RootClaim) Sweep(lifetime time.Duration, runs RunCounter) (removed []string, err error) {
 	var keepAfter time.Time
 	if !c.alone {
@@ -183,10 +183,11 @@ func sweepRoot(root string, runs RunCounter, keepAfter time.Time, alone bool) (r
 }
 
 // isRunEntry tells whether name is a run's workspace or one of its
-// companions (cliConfigDir, gitConfigCopy, outputsDir, subproc.GitShimDir).
+// companions (cliConfigDir, gitConfigCopy, outputsDir, pluginDir,
+// subproc.GitShimDir).
 func isRunEntry(name string) bool {
 	base := name
-	for _, companion := range []string{".claude", ".gitconfig", ".outputs", ".bin"} {
+	for _, companion := range []string{".claude", ".gitconfig", ".outputs", ".plugin", ".bin"} {
 		base = strings.TrimSuffix(base, companion)
 	}
 	return strings.HasPrefix(base, RunWorkspacePrefix) && len(base) > len(RunWorkspacePrefix)

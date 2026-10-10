@@ -21,7 +21,8 @@ var devCmd = &cobra.Command{
 }
 
 // runDev is a server and a worker in one process: the workers publish to the
-// server's own SSE hub, and the skills come from ./skills.
+// server's own SSE hub, and the skills come from SKILLS_DIR (./skills by
+// default), loaded once.
 func runDev(cmd *cobra.Command, args []string) {
 	cfg := config.Load()
 
@@ -40,9 +41,12 @@ func runDev(cmd *cobra.Command, args []string) {
 	// SSE hub (in-memory, shared between server and worker)
 	hub := sse.NewHub()
 
-	// Skills — dev mode loads from the local filesystem, and the back-office
-	// shows the same ones.
-	skillStore := &skill.FileStore{Dir: "./skills"}
+	// Skills — dev mode loads them once, from SKILLS_DIR (./skills by
+	// default) or SKILLS_REPO, and the back-office shows the same ones.
+	skillStore, skillsSource, err := skillSource(cfg, "temporal-agent-skills-dev", "./skills")
+	if err != nil {
+		log.Fatalf("Skills: %v", err)
+	}
 	// The machines' gateway is in this process: directives reach it in
 	// memory, like the notifications reach the hub.
 	machines := newGateway(cfg, st, temporalClient, hub)
@@ -59,7 +63,7 @@ func runDev(cmd *cobra.Command, args []string) {
 	}
 	srv := newHTTPServer(cfg.HTTPAddr, newHTTPHandler(cfg, st, temporalClient, hub, httpOptions{
 		skills:       func() []skill.Skill { return rt.skills },
-		skillsSource: skillStore.Dir,
+		skillsSource: skillsSource,
 		machines:     machines,
 	}))
 

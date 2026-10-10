@@ -81,6 +81,9 @@ type ClaudeCodeActivities struct {
 	// Publisher stores what a run leaves in its outputs (PublishOutputs);
 	// nil: they are not published, and the run is told so.
 	Publisher *tool.Publisher
+	// Skills reads the skills a run takes along, this worker's own
+	// (PrepareWorkspace); nil = none.
+	Skills RunSkillReader
 
 	live cliRuns
 }
@@ -363,6 +366,10 @@ type PrepareWorkspaceInput struct {
 	// produce commits starts on the branch that will carry them, so nothing
 	// can land on the base by accident.
 	Branch string `json:"branch,omitempty"`
+	// Skills names the calling agent's skills for the run
+	// (tool.CallContext.RunSkills), read from this worker's own skills and
+	// written as the run's plugin (pluginDir).
+	Skills []string `json:"skills,omitempty"`
 }
 
 type PrepareWorkspaceOutput struct {
@@ -371,6 +378,12 @@ type PrepareWorkspaceOutput struct {
 	// measures the run's commits against.
 	Commit string `json:"commit"`
 	Branch string `json:"branch,omitempty"`
+	// Skills are those written in the run's plugin, for RunClaudeCode;
+	// SkillsMissing, those named that were not found ("name: reason");
+	// SkillsVersion, what they were loaded from.
+	Skills        []string `json:"skills,omitempty"`
+	SkillsMissing []string `json:"skills_missing,omitempty"`
+	SkillsVersion string   `json:"skills_version,omitempty"`
 }
 
 // PrepareWorkspace clones repo into a fresh directory under Root. It clones
@@ -448,7 +461,45 @@ func (a *ClaudeCodeActivities) PrepareWorkspace(ctx context.Context, in PrepareW
 	if err := a.RunAs.Give(outputsDir(dir)); err != nil {
 		return PrepareWorkspaceOutput{}, stepError("prepare workspace", err)
 	}
-	return PrepareWorkspaceOutput{Dir: dir, Commit: strings.TrimSpace(commit), Branch: in.Branch}, nil
+	out := PrepareWorkspaceOutput{Dir: dir, Commit: strings.TrimSpace(commit), Branch: in.Branch}
+	if err := a.writePlugin(dir, in.Skills, &out); err != nil {
+		return PrepareWorkspaceOutput{}, err
+	}
+	return out, nil
+}
+
+// writePlugin writes the skills named for the run in dir as its plugin
+// (machine.WritePlugin, pluginDir), read from this worker's own skills, and
+// says in out what it wrote and what it did not find. The plugin stays the
+// worker's: the run's user reads it, and cannot change it. Skills a run
+// cannot take (past its bounds, a name no plugin can carry) fail the step
+// for good: the same skills would fail again.
+func (a *ClaudeCodeActivities) writePlugin(dir string, names []string, out *PrepareWorkspaceOutput) error {
+	if len(names) == 0 {
+		return nil
+	}
+	var set RunSkillSet
+	if a.Skills != nil {
+		set = a.Skills.RunSkills(names)
+	} else {
+		set.Missing = names
+	}
+	for _, name := range set.Missing {
+		out.SkillsMissing = append(out.SkillsMissing, name+": "+machine.SkillNotFound)
+	}
+	if len(set.Skills) == 0 {
+		return nil
+	}
+	if err := machine.CheckRunSkills(set.Skills); err != nil {
+		return temporal.NewNonRetryableApplicationError(
+			fmt.Sprintf("prepare workspace: the agent's skills cannot go with the run: %v", err), "InvalidInput", nil)
+	}
+	written, err := machine.WritePlugin(pluginDir(dir), set.Skills)
+	if err != nil {
+		return stepError("prepare workspace: the run's skills", err)
+	}
+	out.Skills, out.SkillsVersion = written, set.Version
+	return nil
 }
 
 // gitConfigCopy is where the clone's .git/config is kept while the run works:
@@ -589,16 +640,20 @@ func restoreGitConfig(dir string) (changed bool, err error) {
 // workspace, in Root, and thrown away with it.
 func cliConfigDir(dir string) string { return dir + ".claude" }
 
+// pluginDir is the run's plugin, its skills (machine.WritePlugin): next to
+// the workspace, in Root, the worker's, and deleted with it.
+func pluginDir(dir string) string { return dir + ".plugin" }
+
 // outputsDir is where the run in dir may leave files for the user
 // (machine.OutputsPrompt): next to the workspace, in Root, the run's own,
 // published after it (PublishOutputs) and deleted with it.
 func outputsDir(dir string) string { return dir + ".outputs" }
 
 // removeWorkspace deletes a run's directory, the copy of its git
-// configuration, its CLI configuration, its outputs and its git
+// configuration, its CLI configuration, its outputs, its plugin and its git
 // (subproc.GitShimDir).
 func removeWorkspace(dir string) error {
-	for _, path := range []string{dir, cliConfigDir(dir), outputsDir(dir), subproc.GitShimDir(dir)} {
+	for _, path := range []string{dir, cliConfigDir(dir), outputsDir(dir), pluginDir(dir), subproc.GitShimDir(dir)} {
 		if err := os.RemoveAll(path); err != nil {
 			return err
 		}
@@ -699,6 +754,10 @@ type RunClaudeCodeInput struct {
 	// (machine.OutputsPrompt): the directory is the worker's to name. Not
 	// for an analysis: plan mode refuses every write.
 	Outputs bool `json:"outputs,omitempty"`
+	// Skills are those PrepareWorkspace wrote in the run's plugin
+	// (pluginDir): the CLI loads it, and its system prompt names them
+	// (machine.SkillsPrompt).
+	Skills []string `json:"skills,omitempty"`
 }
 
 // RunClaudeCode runs one coding session and heartbeats while it does. A run the
@@ -753,6 +812,11 @@ func (a *ClaudeCodeActivities) RunClaudeCode(ctx context.Context, in RunClaudeCo
 		prompt = strings.TrimSpace(prompt + "\n" + machine.OutputsPrompt(out))
 		addDirs = []string{out}
 	}
+	var plugins []string
+	if len(in.Skills) > 0 {
+		plugins = []string{pluginDir(dir)}
+		prompt = strings.TrimSpace(prompt + "\n" + machine.SkillsPrompt(in.Skills))
+	}
 	// The run's git: the worker's, in Root, not the run's to change. No
 	// workspace: the runner says so.
 	env := machine.RunGitEnv()
@@ -777,6 +841,7 @@ func (a *ClaudeCodeActivities) RunClaudeCode(ctx context.Context, in RunClaudeCo
 		DisallowedTools:    in.DisallowedTools,
 		AppendSystemPrompt: prompt,
 		AddDirs:            addDirs,
+		PluginDirs:         plugins,
 		MaxBudgetUSD:       lowerCap(a.MaxBudgetUSD, in.MaxBudgetUSD),
 		SessionID:          in.SessionID,
 		// The workspace is deleted at the end of the run, so a transcript on
@@ -805,6 +870,11 @@ func (a *ClaudeCodeActivities) RunClaudeCode(ctx context.Context, in RunClaudeCo
 		var stall *claudecode.StallError
 		if errors.As(err, &stall) {
 			typ, msg = ErrRunStalled, "claude code: the run was ended as stuck"
+		}
+		// The operator's managed settings forbid the run's plugin: said as
+		// such, the CLI's line with it.
+		if line := claudecode.PluginRefusal(res, err); line != "" && len(plugins) > 0 {
+			err = errors.New("the CLI refused the run's skills: this worker's managed settings forbid --plugin-dir: " + line)
 		}
 		return res, temporal.NewNonRetryableApplicationError(msg, typ, err, res.Progress)
 	}

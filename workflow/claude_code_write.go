@@ -110,7 +110,7 @@ func implementFeature(ctx workflow.Context, rawInput json.RawMessage, probed *ac
 			RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: prepareAttempts},
 		}),
 		ccAct.PrepareWorkspace,
-		activity.PrepareWorkspaceInput{Name: name, Repo: input.Repo, Ref: input.Base, Branch: branch},
+		activity.PrepareWorkspaceInput{Name: name, Repo: input.Repo, Ref: input.Base, Branch: branch, Skills: input.RunSkills},
 	).Get(r.ctx, &prepared)
 	if err != nil {
 		if r.failed(err) {
@@ -121,6 +121,7 @@ func implementFeature(ctx workflow.Context, rawInput json.RawMessage, probed *ac
 		return out, nil
 	}
 	out.Commit = prepared.Commit
+	out.preparedSkills(prepared)
 	defer r.cleanup(prepared.Dir)
 
 	var result claudeCodeResult
@@ -141,6 +142,7 @@ func implementFeature(ctx workflow.Context, rawInput json.RawMessage, probed *ac
 			AppendSystemPrompt: implementSystemPrompt,
 			MaxBudgetUSD:       input.MaxBudgetUSD,
 			Outputs:            true,
+			Skills:             prepared.Skills,
 		},
 	).Get(r.ctx, &result)
 	ran := workflow.Now(ctx).Sub(runStarted)
@@ -168,6 +170,7 @@ func implementFeature(ctx workflow.Context, rawInput json.RawMessage, probed *ac
 		out.DurationMS = result.DurationMS
 		out.NumTurns = result.NumTurns
 		out.ToolUses = result.ToolUses
+		out.loadedSkills(result)
 		if result.IsError {
 			out.Error = fmt.Sprintf("the run reported a failure (%s)", result.Subtype)
 		}

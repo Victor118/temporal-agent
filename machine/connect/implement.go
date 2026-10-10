@@ -40,7 +40,7 @@ func (a *Coder) Implement(ctx context.Context, input json.RawMessage, progress f
 	if !a.AllowPush {
 		return nil, Refuse("this machine does not let its runs push (agent connect --allow-push)")
 	}
-	if err := a.refuse(in.Repo); err != nil {
+	if err := a.refuse(in.Repo, in.Skills); err != nil {
 		return nil, err
 	}
 	r, err := a.newRun(true)
@@ -67,7 +67,7 @@ func (a *Coder) Implement(ctx context.Context, input json.RawMessage, progress f
 	// outputs keep their time.
 	cliCtx, cancel := context.WithDeadline(ctx, cliDeadline(ctx, time.Now()))
 	defer cancel()
-	runErr := a.runCLI(cliCtx, claudecode.Params{
+	p := claudecode.Params{
 		Cwd:                r.clone,
 		Task:               in.Task,
 		PermissionMode:     machine.ImplementPermissionMode,
@@ -76,7 +76,12 @@ func (a *Coder) Implement(ctx context.Context, input json.RawMessage, progress f
 		AppendSystemPrompt: machine.ImplementSystemPrompt + "\n" + machine.OutputsPrompt(r.outputs),
 		AddDirs:            []string{r.outputs},
 		MaxBudgetUSD:       in.MaxBudgetUSD,
-	}, &out, progress)
+	}
+	skills, err := r.withSkills(in.Skills, &p)
+	if err != nil {
+		return nil, err
+	}
+	runErr := a.runCLI(cliCtx, p, skills, &out, progress)
 	var refusal *Refusal
 	if errors.As(runErr, &refusal) {
 		return nil, runErr

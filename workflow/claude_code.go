@@ -123,6 +123,15 @@ type ClaudeCodeOutput struct {
 	Files       []tool.FileRef `json:"files,omitempty"`
 	Unpublished []string       `json:"unpublished,omitempty"`
 
+	// Skills are the calling agent's skills the run's CLI was given (its
+	// plugin, machine.WritePlugin); SkillsMissing, those it went without,
+	// and why ("name: reason": not found where the run was prepared, not
+	// loaded by the CLI); SkillsVersion, what they were loaded from (a
+	// repository's commit), when known.
+	Skills        []string `json:"skills,omitempty"`
+	SkillsMissing []string `json:"skills_missing,omitempty"`
+	SkillsVersion string   `json:"skills_version,omitempty"`
+
 	CostUSD float64 `json:"cost_usd,omitempty"`
 	// PaidBy says what paid the run: "subscription" or "api" when the
 	// worker's choice and the CLI's word agree, else empty.
@@ -205,7 +214,7 @@ func analyzeRepo(ctx workflow.Context, rawInput json.RawMessage, probed *activit
 			RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: prepareAttempts},
 		}),
 		ccAct.PrepareWorkspace,
-		activity.PrepareWorkspaceInput{Name: name, Repo: input.Repo, Ref: input.Ref},
+		activity.PrepareWorkspaceInput{Name: name, Repo: input.Repo, Ref: input.Ref, Skills: input.RunSkills},
 	).Get(r.ctx, &prepared)
 	if err != nil {
 		if r.failed(err) {
@@ -216,6 +225,7 @@ func analyzeRepo(ctx workflow.Context, rawInput json.RawMessage, probed *activit
 		return out, nil
 	}
 	out.Commit = prepared.Commit
+	out.preparedSkills(prepared)
 	defer r.cleanup(prepared.Dir)
 
 	var result claudeCodeResult
@@ -234,6 +244,7 @@ func analyzeRepo(ctx workflow.Context, rawInput json.RawMessage, probed *activit
 			Task:               input.Task,
 			PermissionMode:     analyzePermissionMode,
 			AppendSystemPrompt: analyzeSystemPrompt,
+			Skills:             prepared.Skills,
 		},
 	).Get(r.ctx, &result)
 	ran := workflow.Now(ctx).Sub(runStarted)
@@ -253,10 +264,26 @@ func analyzeRepo(ctx workflow.Context, rawInput json.RawMessage, probed *activit
 	out.DurationMS = result.DurationMS
 	out.NumTurns = result.NumTurns
 	out.ToolUses = result.ToolUses
+	out.loadedSkills(result)
 	if result.IsError {
 		out.Error = fmt.Sprintf("the run reported a failure (%s)", result.Subtype)
 	}
 	return out, nil
+}
+
+// preparedSkills records the skills PrepareWorkspace wrote for the run, and
+// those it did not find.
+func (o *ClaudeCodeOutput) preparedSkills(p activity.PrepareWorkspaceOutput) {
+	o.Skills, o.SkillsVersion = p.Skills, p.SkillsVersion
+	o.SkillsMissing = append(o.SkillsMissing, p.SkillsMissing...)
+}
+
+// loadedSkills records the run's skills its CLI did not load: absent from
+// its init's slash_commands (the plugin ignored).
+func (o *ClaudeCodeOutput) loadedSkills(res claudeCodeResult) {
+	if len(o.Skills) > 0 {
+		o.SkillsMissing = append(o.SkillsMissing, machine.SkillsNotLoaded(o.Skills, res.SlashCommands)...)
+	}
 }
 
 // publishOutputs publishes, on the run's worker and before its clone goes,
@@ -310,6 +337,9 @@ type claudeCodeResult struct {
 	// PaidBy is "subscription" or "api" when the worker's way of
 	// authenticating and the CLI's word agree (claudecode.Result.Payer).
 	PaidBy string `json:"paid_by"`
+	// SlashCommands are those the CLI listed in its init, the run's skills
+	// among them when its plugin was loaded.
+	SlashCommands []string `json:"slash_commands"`
 }
 
 // interrupted records a run that ended with err, without the CLI's result:
@@ -413,6 +443,19 @@ func (o ClaudeCodeOutput) Summary() string {
 		sb.WriteString("files not published:\n")
 		for _, u := range o.Unpublished {
 			fmt.Fprintf(&sb, "  %s\n", u)
+		}
+	}
+	if len(o.Skills) > 0 {
+		fmt.Fprintf(&sb, "skills given to the run: %s", strings.Join(o.Skills, ", "))
+		if o.SkillsVersion != "" {
+			fmt.Fprintf(&sb, " (skills at %s)", shortCommit(o.SkillsVersion))
+		}
+		sb.WriteString("\n")
+	}
+	if len(o.SkillsMissing) > 0 {
+		sb.WriteString("skills the run went without:\n")
+		for _, m := range o.SkillsMissing {
+			fmt.Fprintf(&sb, "  %s\n", m)
 		}
 	}
 	if o.Machine != "" {

@@ -147,3 +147,61 @@ func TestHTTPDirectiveHandoff(t *testing.T) {
 		t.Errorf("502: %v", err)
 	}
 }
+
+// skillReader is a worker's skills, by name.
+type skillReader map[string]machine.RunSkill
+
+func (r skillReader) RunSkills(names []string) RunSkillSet {
+	set := RunSkillSet{Version: "abc123"}
+	for _, n := range names {
+		if s, ok := r[n]; ok {
+			set.Skills = append(set.Skills, s)
+		} else {
+			set.Missing = append(set.Missing, n)
+		}
+	}
+	return set
+}
+
+// The directive's input is final before the machine is reserved: the
+// skills named are read, and added to it; a name not found is said; skills
+// a run cannot take are a refusal, with nothing reserved.
+func TestPickMachine_Skills(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestActivityEnvironment()
+	st := &fakeMachineStore{}
+	reader := skillReader{"tdd": {Name: "tdd", Description: "Test first", Content: "RED, GREEN, REFACTOR."}, "BAD": {Name: "BAD", Content: "x"}}
+	env.RegisterActivity(&MachineActivities{Store: st, Skills: reader})
+	pick := func(names ...string) (PickMachineOutput, error) {
+		st.pick = store.PickRequest{}
+		v, err := env.ExecuteActivity((&MachineActivities{}).PickMachine, PickMachineInput{UserID: "u-1", Capabilities: []string{machine.CapClaudeCode},
+			Kind: machine.KindAnalyzeRepo, Input: json.RawMessage(`{"repo":"r","task":"t"}`), CallKey: "c", Timeout: time.Hour, Skills: names})
+		var out PickMachineOutput
+		if err == nil {
+			err = v.Get(&out)
+		}
+		return out, err
+	}
+
+	out, err := pick("tdd", "ghost")
+	if err != nil || out.DirectiveID == "" || len(out.Skills) != 1 || out.Skills[0] != "tdd" || out.SkillsVersion != "abc123" ||
+		len(out.SkillsMissing) != 1 || out.SkillsMissing[0] != "ghost: "+machine.SkillNotFound {
+		t.Fatalf("pick: %+v %v", out, err)
+	}
+	var in machine.AnalyzeInput
+	if err := json.Unmarshal(st.pick.Input, &in); err != nil || in.Repo != "r" || in.Task != "t" || len(in.Skills) != 1 ||
+		in.Skills[0] != reader["tdd"] {
+		t.Errorf("directive input %s %v", st.pick.Input, err)
+	}
+
+	out, err = pick("BAD")
+	if err != nil || out.Refused == "" || out.DirectiveID != "" || st.pick.UserID != "" {
+		t.Errorf("refused: %+v %v, reserved %+v", out, err, st.pick)
+	}
+
+	// None found: the run goes without, said so; the input is the model's.
+	out, err = pick("ghost")
+	if err != nil || out.DirectiveID == "" || len(out.Skills) != 0 || len(out.SkillsMissing) != 1 || string(st.pick.Input) != `{"repo":"r","task":"t"}` {
+		t.Errorf("none found: %+v %v %s", out, err, st.pick.Input)
+	}
+}

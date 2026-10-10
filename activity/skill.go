@@ -95,9 +95,11 @@ func NewSkillActivities(skills []skill.Skill, catalog *Catalog) *SkillActivities
 }
 
 // SetSkills is a package-level wrapper so external packages can update skills
-// without exposing a method that Temporal would register as an activity.
-func SetSkills(a *SkillActivities, skills []skill.Skill) {
+// without exposing a method that Temporal would register as an activity;
+// version is what they were loaded from (skill.Version).
+func SetSkills(a *SkillActivities, skills []skill.Skill, version string) {
 	a.Prompts.SetSkills(skills)
+	a.Prompts.SetVersion(version)
 }
 
 type LoadSkillsForAgentInput struct {
@@ -114,16 +116,21 @@ type LoadSkillsForAgentOutput struct {
 	// LLMOnMachine is where its turns call their model
 	// (store.LLMOnMachine*); empty = never, the server's key.
 	LLMOnMachine string `json:"llm_on_machine,omitempty"`
+	// RunSkills are the names of its skills marked "runs: true", which its
+	// coding runs take along (tool.CallContext.RunSkills).
+	RunSkills []string `json:"run_skills,omitempty"`
 }
 
 // LoadSkillsForAgent returns the agent's name, its prompt for the tools its
-// allowlist grants, and where its turns call their model.
+// allowlist grants, where its turns call their model, and the skills its
+// coding runs take along.
 func (a *SkillActivities) LoadSkillsForAgent(ctx context.Context, input LoadSkillsForAgentInput) (LoadSkillsForAgentOutput, error) {
 	var tools []string
 	for name := range a.catalog.AllowedTools(input.AgentID).Resolutions {
 		tools = append(tools, name)
 	}
 	name, onMachine := input.AgentID, ""
+	var runSkills []string
 	for _, e := range a.catalog.Agents() {
 		if e.ID != input.AgentID {
 			continue
@@ -132,8 +139,10 @@ func (a *SkillActivities) LoadSkillsForAgent(ctx context.Context, input LoadSkil
 			name = e.Name
 		}
 		onMachine = e.LLMOnMachine
+		runSkills = a.Prompts.runSkillNames(e.Skills)
 	}
-	return LoadSkillsForAgentOutput{SystemPrompt: a.Prompts.AgentPrompt(input.AgentID, tools), Name: name, LLMOnMachine: onMachine}, nil
+	return LoadSkillsForAgentOutput{SystemPrompt: a.Prompts.AgentPrompt(input.AgentID, tools), Name: name, LLMOnMachine: onMachine,
+		RunSkills: runSkills}, nil
 }
 
 // matchSkills returns the skills named in names, in order, skipping unknown ones.

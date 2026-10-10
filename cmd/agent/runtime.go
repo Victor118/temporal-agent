@@ -165,9 +165,12 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 
 	registry := buildRegistry(cfg, st, tc, runAs, runs, pub, workerConf.Workflows, routing)
 
-	skills := loadSkills(opts.skills)
+	skills, skillsVersion := loadSkills(opts.skills)
 	catalog := initCatalog(st)
 	skillAct := activity.NewSkillActivities(skills, catalog)
+	activity.SetSkills(skillAct, skills, skillsVersion)
+	// The fallback's coding runs read the skills they take along here.
+	codeAct.Skills = skillAct.Prompts
 
 	// Load activity queue mapping from DB and register for workflow SideEffect access
 	workerCfg := activity.NewWorkerConfig()
@@ -246,8 +249,8 @@ func newWorkerRuntime(cfg *config.Config, st store.Store, tc client.Client, opts
 	go mcpServers.Run(ctx, catalogPublisher{st: st, tc: tc, queue: workerConf.Queue})
 	if opts.watchSkills && opts.skills != nil {
 		go watchSkillsVersionDB(ctx, st, catalogRefresh, func() {
-			if skills, ok := reloadSkills(opts.skills); ok {
-				activity.SetSkills(skillAct, skills)
+			if skills, version, ok := reloadSkills(opts.skills); ok {
+				activity.SetSkills(skillAct, skills, version)
 				log.Printf("Worker reloaded %d skills", len(skills))
 			}
 		})
@@ -316,7 +319,7 @@ func workerActivities(d activityDeps) []any {
 		&activity.NotificationActivities{Notifiers: d.notifiers},
 		&activity.DeliveryActivities{Web: d.web, Store: d.store},
 		&activity.ScheduleActivities{Client: d.schedules, Store: d.store},
-		&activity.MachineActivities{Store: d.machines, Handoff: d.handoff, Routing: d.routing},
+		&activity.MachineActivities{Store: d.machines, Handoff: d.handoff, Routing: d.routing, Skills: d.skills.Prompts},
 		d.skills,
 	}
 }
@@ -587,30 +590,37 @@ func prepareRunAs(cfg *config.Config, runAs *subproc.Identity) error {
 	return nil
 }
 
-// loadSkills loads the skills once at startup. A failure leaves the worker
-// without skills rather than down.
-func loadSkills(s skill.Store) []skill.Skill {
+// loadSkills loads the skills once at startup, and what they were loaded
+// from (skill.Version). A failure leaves the worker without skills rather
+// than down.
+func loadSkills(s skill.Store) ([]skill.Skill, string) {
 	if s == nil {
 		log.Println("No skills source configured, running without skills")
-		return nil
+		return nil, ""
 	}
-	skills, ok := reloadSkills(s)
+	skills, version, ok := reloadSkills(s)
 	if !ok {
-		return nil
+		return nil, ""
 	}
-	log.Printf("Loaded %d skills", len(skills))
-	return skills
+	runs := 0
+	for _, sk := range skills {
+		if sk.Runs {
+			runs++
+		}
+	}
+	log.Printf("Loaded %d skills, %d of them for the coding runs (runs: true)", len(skills), runs)
+	return skills, version
 }
 
-func reloadSkills(s skill.Store) ([]skill.Skill, bool) {
+func reloadSkills(s skill.Store) ([]skill.Skill, string, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	skills, err := s.LoadAll(ctx)
 	if err != nil {
 		log.Printf("Warning: failed to load skills: %v", err)
-		return nil, false
+		return nil, "", false
 	}
-	return skills, true
+	return skills, skill.Version(ctx, s), true
 }
 
 // start runs every worker in the background.

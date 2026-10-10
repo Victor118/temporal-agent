@@ -4,15 +4,12 @@ import (
 	"context"
 	"errors"
 	"log"
-	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/victor/temporal-agent/activity"
 	"github.com/victor/temporal-agent/config"
-	"github.com/victor/temporal-agent/skill"
 )
 
 var workerCmd = &cobra.Command{
@@ -22,8 +19,8 @@ var workerCmd = &cobra.Command{
 }
 
 // runWorker serves Temporal only. Its notifications go to the server's
-// internal API, and its skills come from the skills repository, reloaded when
-// skills_version moves.
+// internal API, and its skills come from the skills repository or directory
+// (SKILLS_REPO, SKILLS_DIR), reloaded when skills_version moves.
 func runWorker(cmd *cobra.Command, args []string) {
 	cfg := config.Load()
 
@@ -39,15 +36,15 @@ func runWorker(cmd *cobra.Command, args []string) {
 	// RunOnMachine hands its directives to the server's gateway, through
 	// the same internal API and key.
 	opts := workerOptions{web: notifier, machines: st, handoff: activity.NewHTTPDirectiveHandoff(cfg.NotifyURL, cfg.InternalAPIKey)}
-	if cfg.SkillsRepo != "" {
-		opts.skills = &skill.GitStore{
-			RepoURL:  cfg.SkillsRepo,
-			Branch:   cfg.SkillsBranch,
-			CacheDir: filepath.Join(os.TempDir(), "temporal-agent-skills-worker"),
-		}
-		opts.watchSkills = true
+	skills, source, err := skillSource(cfg, "temporal-agent-skills-worker", "")
+	if err != nil {
+		log.Fatalf("Skills: %v", err)
+	}
+	if skills != nil {
+		opts.skills, opts.watchSkills = skills, true
+		log.Printf("Skills from %s", source)
 	} else {
-		log.Println("No skills repo configured (SKILLS_REPO), running without skills")
+		log.Println("No skills source configured (SKILLS_REPO or SKILLS_DIR), running without skills")
 	}
 
 	rt, err := newWorkerRuntime(cfg, st, temporalClient, opts)

@@ -327,6 +327,8 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 
 	// What a tool flagged NeedsCallContext receives of this run.
 	call := callContext(input, currentChain, signed, workflow.GetInfo(ctx).TaskQueueName)
+	// The skills its coding runs take along: its own, a sub-agent's too.
+	call.RunSkills = skillsResult.RunSkills
 
 	// ReAct loop
 	for i := 0; i < maxReActIterations; i++ {

@@ -185,7 +185,8 @@ func onMachine(ctx workflow.Context, t codingTool, c codingCall, out *ClaudeCode
 	participant, _ := ParticipantOf(wfID)
 	pin := activity.PickMachineInput{UserID: c.call.UserID, Capabilities: machine.CapabilitiesOf(t.kind), Kind: t.kind,
 		Input: raw, CallKey: t.kind, Timeout: t.timeout,
-		SessionID: sessionID, Participant: participant, Agent: c.call.Agent, CallID: c.call.CallID}
+		SessionID: sessionID, Participant: participant, Agent: c.call.Agent, CallID: c.call.CallID,
+		Skills: c.call.RunSkills}
 	// Where the files it publishes go: the turn the call works for, and the
 	// agent that made it (the last of its chain).
 	if turn := c.call.Turn; turn != nil && turn.SessionID == sessionID {
@@ -204,7 +205,11 @@ func onMachine(ctx workflow.Context, t codingTool, c codingCall, out *ClaudeCode
 	if pick.NoMachine != "" {
 		return false, "", nil
 	}
+	if pick.Refused != "" {
+		return false, pick.Refused, nil
+	}
 	out.Machine = pick.MachineName
+	out.Skills, out.SkillsMissing, out.SkillsVersion = pick.Skills, pick.SkillsMissing, pick.SkillsVersion
 	started := workflow.Now(ctx)
 	var res machine.Result
 	err = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, runOnMachineOptions(t.timeout, 0)),
@@ -273,6 +278,7 @@ func (o *ClaudeCodeOutput) fromMachine(t codingTool, res machine.Result) {
 	o.Report, o.Commit = c.Report, c.Commit
 	o.CostUSD, o.PaidBy, o.DurationMS, o.NumTurns, o.ToolUses = c.CostUSD, c.PaidBy, c.DurationMS, c.NumTurns, c.ToolUses
 	o.Unpublished = c.Unpublished
+	o.SkillsMissing = append(o.SkillsMissing, c.SkillsMissing...)
 	if t.kind == machine.KindImplementFeature {
 		// The branch is the workflow's own (Branch, set before): the
 		// machine says what is on it.

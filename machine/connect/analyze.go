@@ -49,6 +49,10 @@ type Coder struct {
 	MaxBudgetUSD float64
 	// Model is the runs' model; empty = the CLI's default.
 	Model string
+	// PluginDir: the CLI loads a plugin for one run (--plugin-dir, read in
+	// its --help at start: claudecode.Runner.SupportsFlag). Without it, a
+	// run that has skills is refused, and goes elsewhere.
+	PluginDir bool
 	// WorkDir holds the clones, one per run, deleted after it (under the
 	// user's cache, its own: Sweep empties it at start).
 	WorkDir string
@@ -183,7 +187,7 @@ func (a *Coder) Analyze(ctx context.Context, input json.RawMessage, progress fun
 		return nil, err
 	}
 	// Refused before anything runs: the workflow takes it elsewhere.
-	if err := a.refuse(in.Repo); err != nil {
+	if err := a.refuse(in.Repo, in.Skills); err != nil {
 		return nil, err
 	}
 	r, err := a.newRun(false)
@@ -198,12 +202,17 @@ func (a *Coder) Analyze(ctx context.Context, input json.RawMessage, progress fun
 		return nil, err
 	}
 	out := machine.CodingOutput{Commit: commit}
-	err = a.runCLI(ctx, claudecode.Params{
+	p := claudecode.Params{
 		Cwd:                r.clone,
 		Task:               in.Task,
 		PermissionMode:     machine.AnalyzePermissionMode,
 		AppendSystemPrompt: machine.AnalyzeSystemPrompt,
-	}, &out, progress)
+	}
+	skills, err := r.withSkills(in.Skills, &p)
+	if err != nil {
+		return nil, err
+	}
+	err = a.runCLI(ctx, p, skills, &out, progress)
 	var refusal *Refusal
 	if errors.As(err, &refusal) {
 		return nil, err
@@ -217,22 +226,27 @@ func (a *Coder) Analyze(ctx context.Context, input json.RawMessage, progress fun
 
 // refuse turns a run down before anything runs (a Refusal: the workflow
 // takes it elsewhere): a repository the owner does not allow, Claude Code
-// not logged in.
-func (a *Coder) refuse(repo string) error {
+// not logged in, skills a CLI without --plugin-dir cannot load.
+func (a *Coder) refuse(repo string, skills []machine.RunSkill) error {
 	if !a.AllowsRepo(repo) {
 		return Refuse("repository %q is not one this machine may use (agent connect --repos)", repo)
 	}
 	if a.Login() != claudecode.LoginOK {
 		return Refuse("Claude Code is not logged in on this machine")
 	}
+	if len(skills) > 0 && !a.PluginDir {
+		return Refuse("the claude CLI on this machine is too old to load the agent's skills (no %s): update it, then restart agent connect",
+			claudecode.PluginDirFlag)
+	}
 	return nil
 }
 
 // codingRun is one run's directory under WorkDir: the clone, and next to it
-// (an implementation's) the outputs the CLI may leave and the copy of the
-// clone's git configuration, all deleted with it.
+// (an implementation's) the outputs the CLI may leave, the copy of the
+// clone's git configuration and the run's plugin (its skills), all deleted
+// with it.
 type codingRun struct {
-	dir, clone, outputs, gitConfig string
+	dir, clone, outputs, gitConfig, plugin string
 }
 
 func (a *Coder) newRun(outputs bool) (*codingRun, error) {
@@ -244,7 +258,7 @@ func (a *Coder) newRun(outputs bool) (*codingRun, error) {
 		return nil, err
 	}
 	r := &codingRun{dir: dir, clone: filepath.Join(dir, "repo"), outputs: filepath.Join(dir, machine.OutputsDir),
-		gitConfig: filepath.Join(dir, "gitconfig")}
+		gitConfig: filepath.Join(dir, "gitconfig"), plugin: filepath.Join(dir, "plugin")}
 	if outputs {
 		if err := os.Mkdir(r.outputs, 0o700); err != nil {
 			os.RemoveAll(dir)
@@ -256,10 +270,31 @@ func (a *Coder) newRun(outputs bool) (*codingRun, error) {
 
 func (r *codingRun) remove() { os.RemoveAll(r.dir) }
 
+// withSkills writes the directive's skills as the run's plugin, in its
+// directory (machine.WritePlugin: the frontmatter its own, never the
+// source's), and gives them to p: the plugin, and the line of the system
+// prompt that names them. It returns the names written, which the owner's
+// log shows.
+func (r *codingRun) withSkills(skills []machine.RunSkill, p *claudecode.Params) ([]string, error) {
+	if len(skills) == 0 {
+		return nil, nil
+	}
+	names, err := machine.WritePlugin(r.plugin, skills)
+	if err != nil {
+		return nil, fmt.Errorf("the run's skills: %w", err)
+	}
+	p.PluginDirs = []string{r.plugin}
+	p.AppendSystemPrompt += "\n" + machine.SkillsPrompt(names)
+	log.Printf("connect: the run takes the agent's skills %s", strings.Join(names, ", "))
+	return names, nil
+}
+
 // runCLI runs the CLI with p (the machine's model, cap and session settings
-// added) and fills out with what it says. A login refused before any tool
-// ran is a Refusal: nothing was done, the workflow takes the run elsewhere.
-func (a *Coder) runCLI(ctx context.Context, p claudecode.Params, out *machine.CodingOutput, progress func(string)) error {
+// added) and fills out with what it says; skills are those of its plugin.
+// A login refused before any tool ran is a Refusal: nothing was done, the
+// workflow takes the run elsewhere. So is a plugin the owner's managed
+// settings forbid: the CLI refuses it before any tool.
+func (a *Coder) runCLI(ctx context.Context, p claudecode.Params, skills []string, out *machine.CodingOutput, progress func(string)) error {
 	runner := a.Runner
 	runner.Auth = a.Auth
 	// Nothing the CLI starts may wait on the owner's terminal.
@@ -295,6 +330,14 @@ func (a *Coder) runCLI(ctx context.Context, p claudecode.Params, out *machine.Co
 		p.Env = append(p.Env, "XDG_CONFIG_HOME="+xdg)
 	}
 	res, err := runner.Run(ctx, p)
+	if line := claudecode.PluginRefusal(res, err); line != "" && len(skills) > 0 {
+		log.Printf("connect: Claude Code refused the run's plugin (%q)", line)
+		return Refuse("Claude Code on this machine refuses the agent's skills: its managed settings forbid %s (%s)",
+			claudecode.PluginDirFlag, machine.Cut(line, 512))
+	}
+	if res.Subtype != "" {
+		out.SkillsMissing = machine.SkillsNotLoaded(skills, res.SlashCommands)
+	}
 	if line := claudecode.AuthFailure(res, err); line != "" {
 		log.Printf("connect: Claude Code's login was refused (%q): Claude Code withdrawn", line)
 		a.loginRefused()
