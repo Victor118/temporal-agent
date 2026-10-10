@@ -401,6 +401,12 @@ func (a *ClaudeCodeActivities) PrepareWorkspace(ctx context.Context, in PrepareW
 		return PrepareWorkspaceOutput{}, temporal.NewNonRetryableApplicationError(
 			fmt.Sprintf("prepare workspace: invalid ref %q or branch %q", in.Ref, in.Branch), "InvalidInput", nil)
 	}
+	// The run's skills, read and checked before anything is cloned: skills
+	// it cannot take end the step at once.
+	skills, err := a.runSkills(in.Skills)
+	if err != nil {
+		return PrepareWorkspaceOutput{}, err
+	}
 
 	// A retried attempt finds the previous one's half-written clone. Start over
 	// rather than trying to repair it.
@@ -462,37 +468,41 @@ func (a *ClaudeCodeActivities) PrepareWorkspace(ctx context.Context, in PrepareW
 		return PrepareWorkspaceOutput{}, stepError("prepare workspace", err)
 	}
 	out := PrepareWorkspaceOutput{Dir: dir, Commit: strings.TrimSpace(commit), Branch: in.Branch}
-	if err := a.writePlugin(dir, in.Skills, &out); err != nil {
+	if err := writePlugin(dir, skills, &out); err != nil {
 		return PrepareWorkspaceOutput{}, err
 	}
 	return out, nil
 }
 
-// writePlugin writes the skills named for the run in dir as its plugin
-// (machine.WritePlugin, pluginDir), read from this worker's own skills, and
-// says in out what it wrote and what it did not find. The plugin stays the
-// worker's: the run's user reads it, and cannot change it. Skills a run
-// cannot take (past its bounds, a name no plugin can carry) fail the step
-// for good: the same skills would fail again.
-func (a *ClaudeCodeActivities) writePlugin(dir string, names []string, out *PrepareWorkspaceOutput) error {
-	if len(names) == 0 {
-		return nil
-	}
+// runSkills reads the skills named for a run from this worker's own. Skills
+// a run cannot take (past its bounds, a name no plugin can carry) are an
+// error for good: the same skills would fail again.
+func (a *ClaudeCodeActivities) runSkills(names []string) (RunSkillSet, error) {
 	var set RunSkillSet
+	if len(names) == 0 {
+		return set, nil
+	}
 	if a.Skills != nil {
 		set = a.Skills.RunSkills(names)
 	} else {
 		set.Missing = names
 	}
+	if err := machine.CheckRunSkills(set.Skills); err != nil {
+		return set, temporal.NewNonRetryableApplicationError(
+			fmt.Sprintf("prepare workspace: the agent's skills cannot go with the run: %v", err), "InvalidInput", nil)
+	}
+	return set, nil
+}
+
+// writePlugin writes set as the plugin of the run in dir (machine.WritePlugin,
+// pluginDir), and says in out what it wrote and what was not found. The
+// plugin stays the worker's: the run's user reads it, and cannot change it.
+func writePlugin(dir string, set RunSkillSet, out *PrepareWorkspaceOutput) error {
 	for _, name := range set.Missing {
 		out.SkillsMissing = append(out.SkillsMissing, name+": "+machine.SkillNotFound)
 	}
 	if len(set.Skills) == 0 {
 		return nil
-	}
-	if err := machine.CheckRunSkills(set.Skills); err != nil {
-		return temporal.NewNonRetryableApplicationError(
-			fmt.Sprintf("prepare workspace: the agent's skills cannot go with the run: %v", err), "InvalidInput", nil)
 	}
 	written, err := machine.WritePlugin(pluginDir(dir), set.Skills)
 	if err != nil {
@@ -873,7 +883,7 @@ func (a *ClaudeCodeActivities) RunClaudeCode(ctx context.Context, in RunClaudeCo
 		}
 		// The operator's managed settings forbid the run's plugin: said as
 		// such, the CLI's line with it.
-		if line := claudecode.PluginRefusal(res, err); line != "" && len(plugins) > 0 {
+		if line := claudecode.PluginRefusal(res, err); line != "" && len(plugins) > 0 && res.Progress.ToolCalls == 0 {
 			err = errors.New("the CLI refused the run's skills: this worker's managed settings forbid --plugin-dir: " + line)
 		}
 		return res, temporal.NewNonRetryableApplicationError(msg, typ, err, res.Progress)

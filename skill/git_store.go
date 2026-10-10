@@ -33,22 +33,24 @@ func (s *GitStore) sync(ctx context.Context) error {
 		branch = "main"
 	}
 
-	if _, err := os.Stat(filepath.Join(s.CacheDir, ".git")); os.IsNotExist(err) {
-		return s.clone(ctx, branch)
-	}
-	return s.pull(ctx, branch)
-}
-
-// clone clones the repository into CacheDir, a directory of this process's
-// user alone (0700): a private repository's URL keeps its credentials in
-// .git/config, which a coding run's user (RUN_AS_UID) must not read.
-func (s *GitStore) clone(ctx context.Context, branch string) error {
+	// The process's own, before a clone as before a pull: a private
+	// repository's URL keeps its credentials in .git/config, which a coding
+	// run's user (RUN_AS_UID) must not read, and a cache an earlier version
+	// left open is closed.
 	if err := os.MkdirAll(s.CacheDir, 0o700); err != nil {
 		return err
 	}
 	if err := os.Chmod(s.CacheDir, 0o700); err != nil {
 		return err
 	}
+	if _, err := os.Stat(filepath.Join(s.CacheDir, ".git")); os.IsNotExist(err) {
+		return s.clone(ctx, branch)
+	}
+	return s.pull(ctx, branch)
+}
+
+// clone clones the repository into CacheDir, empty and 0700 (sync).
+func (s *GitStore) clone(ctx context.Context, branch string) error {
 	args := []string{"clone", "--depth", "1", "--branch", branch, s.RepoURL, s.CacheDir}
 	return s.git(ctx, args...)
 }

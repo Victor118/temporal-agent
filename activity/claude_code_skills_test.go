@@ -80,7 +80,7 @@ func TestPrepareWorkspace_WritesThePlugin(t *testing.T) {
 	}
 }
 
-// Skills a run cannot take fail the preparation for good.
+// Skills a run cannot take fail the preparation for good, before the clone.
 func TestPrepareWorkspace_RefusesSkillsPastTheBounds(t *testing.T) {
 	src := initRepo(t)
 	a := &ClaudeCodeActivities{AllowedRepos: testRepos, Root: t.TempDir(), Skills: skillReader{"Bad": {Name: "Bad", Content: "x"}}}
@@ -88,6 +88,10 @@ func TestPrepareWorkspace_RefusesSkillsPastTheBounds(t *testing.T) {
 	var appErr *temporal.ApplicationError
 	if !errors.As(err, &appErr) || !appErr.NonRetryable() || !strings.Contains(err.Error(), "skills cannot go") {
 		t.Errorf("%v", err)
+	}
+	// Refused before the clone: nothing was fetched.
+	if entries, _ := os.ReadDir(a.Root); len(entries) != 0 {
+		t.Errorf("cloned before refusing: %v", entries)
 	}
 }
 
@@ -169,5 +173,20 @@ func TestRunClaudeCode_PluginRefusedByPolicy(t *testing.T) {
 	_, err := a.RunClaudeCode(context.Background(), RunClaudeCodeInput{Dir: dir, Task: "x", Skills: []string{"tdd"}})
 	if !hasType(err, ErrRunFailed) || !strings.Contains(err.Error(), "managed settings forbid --plugin-dir") {
 		t.Errorf("%v", err)
+	}
+
+	// A run that quotes it, its tools called: the CLI's own words, not a
+	// refusal of the skills.
+	script = `#!/bin/sh
+echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Read","input":{}}]},"session_id":"s"}'
+echo "--plugin-dir is disabled by your organization's managed settings (disableSideloadFlags)." >&2
+exit 1
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err = a.RunClaudeCode(context.Background(), RunClaudeCodeInput{Dir: dir, Task: "x", Skills: []string{"tdd"}})
+	if !hasType(err, ErrRunFailed) || strings.Contains(err.Error(), "refused the run's skills") {
+		t.Errorf("after a tool: %v", err)
 	}
 }
