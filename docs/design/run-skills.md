@@ -1,6 +1,6 @@
 # Conception : les skills d'un agent dans ses runs Claude Code
 
-Statut : **version 2.2**, proposition, rien n'est fait ; vérifiée contre la vraie CLI le 10 octobre 2026 (§9). Version 1 le 9 octobre 2026, révisée le même jour après deux relectures contre le code et contre la CLI 2.1.280 de l'image (lue dans son binaire, sans appel au modèle). Les points de la première sont marqués *[rev. 1…16]*, ceux de la seconde *[rev2 1…4]*.
+Statut : **version 2.2, faite** (§11, avec ses écarts) ; vérifiée contre la vraie CLI le 10 octobre 2026 (§9). Version 1 le 9 octobre 2026, révisée le même jour après deux relectures contre le code et contre la CLI 2.1.280 de l'image (lue dans son binaire, sans appel au modèle). Les points de la première sont marqués *[rev. 1…16]*, ceux de la seconde *[rev2 1…4]*.
 
 ## 1. Pourquoi
 
@@ -86,3 +86,28 @@ Le binaire a répondu au reste (§2) ; il faut encore un vrai run, minuscule et 
 ## 10. Tests
 
 Unitaires : frontmatter `runs` strict, sélection, `WritePlugin` (arborescence, frontmatter recomposé sans `allowed-tools` ni `hooks`, noms refusés, dédoublonnés, taille), bornes de `Check`, options de la CLI, lecture de `slash_commands`. `RealServer` des machines (CLI factice) : la directive porte les skills (et les garde à la relecture du `hello`) ; la CLI factice reçoit `--plugin-dir` et y trouve le `SKILL.md` ; CLI sans l'option → refus → repli ; politique qui refuse le plugin → refus → repli ; skill absente de `init` dite dans le résultat ; repli sur un worker avec `SKILLS_DIR`. Puis un essai avec la skill `tdd` sur une machine et sur le repli.
+
+## 11. Ce qui est fait, et les écarts
+
+Fait le 10 octobre 2026, branche `feature/run-skills`. Tout ce que décrivent les §3 à §8 et les tests du §10, sauf l'essai avec la vraie CLI (§10, dernière phrase : il paie, il reste à faire à la main).
+
+**Où vit quoi.**
+- `skill` : `Skill.Runs` (`runs: true` seul) ; `GitStore` clone dans un cache 0700 et dit son commit (`Version`, lu par `skill.Version`).
+- `machine/skills.go` : `RunSkill`, `CheckRunSkills` (16, 64 Kio, nom), `UniqueSkills`, `WritePlugin`, `SkillsPrompt`, `SkillsNotLoaded`, `PluginName`, `SkillNotFound`/`SkillNotLoaded` ; `Skills` dans `AnalyzeInput`/`ImplementInput` (bornées par `Check`), `CodingOutput.SkillsMissing`, `CapRunSkills`, protocole 5.
+- `claudecode` : `Params.PluginDirs`, `Result.SlashCommands`, `Runner.SupportsFlag`, `PluginDirFlag`, `PluginRefusal`.
+- `activity` : `Prompts.RunSkills` (le lecteur, `RunSkillReader`) et `SetVersion` ; `LoadSkillsForAgentOutput.RunSkills` ; `MachineActivities.Skills` et `PickMachine` (`withSkills`) ; `ClaudeCodeActivities.Skills`, `PrepareWorkspace` (`writePlugin`, `pluginDir`), `RunClaudeCode` (`Skills`), `.plugin` dans le balayage.
+- `workflow` : `call.RunSkills` dans `AgentWorkflow` ; `PickMachineInput.Skills` et `Refused` dans `onMachine` ; `PrepareWorkspaceInput.Skills`/`RunClaudeCodeInput.Skills` dans les deux workflows de repli ; `ClaudeCodeOutput.Skills`, `SkillsMissing`, `SkillsVersion` et leurs lignes dans `Summary`.
+- `agent connect` : `Coder.PluginDir` (lu par `newCoder`), le plugin dans `<run>/plugin`, refus (CLI ancienne, politique), noms journalisés ; `cmd/agent` : `skillSource` (`SKILLS_DIR`/`SKILLS_REPO`) pour les trois modes ; `/admin` : badge « runs ».
+
+**Écarts et précisions.**
+1. *§5, « annoncé avec la capacité `claude-code` ».* Une capacité à part, `run-skills`, annoncée quand Claude Code l'est et que la CLI a `--plugin-dir` ; « Mes machines » la montre. `PickMachine` ne l'exige pas : comme prévu, une machine sans elle refuse un run qui a des skills, et le refus dit pourquoi (« too old… update it ») là où un `NoMachine` le tairait.
+2. *§6, `agent dev`.* Une seule règle pour les trois modes (`skillSource`) : `SKILLS_DIR`, sinon `SKILLS_REPO`, sinon le dossier du mode (`./skills` pour `agent dev`, aucun pour `server` et `worker`) ; les deux ensemble = refus au démarrage. `agent dev` lit donc un `SKILLS_REPO` posé sans `SKILLS_DIR` (il l'ignorait), toujours sans rechargement (§7). Le bouton de `/admin` s'appelle « Recharger » (un dossier se recharge aussi) et existe dès qu'une source existe.
+3. *§3.3, « nom introuvable ».* Le lecteur ne rend que les skills marquées `runs` **là où il lit** : une skill présente mais non marquée y compte comme introuvable. Les noms sont dédoublonnés à la lecture (`Prompts.RunSkills`) et à l'écriture (`WritePlugin`).
+4. *§3.3, sur le repli.* Des skills hors bornes font échouer `PrepareWorkspace` sans relance (`InvalidInput`) : le run ne part pas sans elles en silence. Sur une machine, `PickMachine` les refuse avant (`Refused` → repli, qui échoue alors de même, en le disant).
+5. *§4, frontmatter recomposé.* `name` et `description` en scalaires entre guillemets (le JSON est du YAML) ; description coupée à 1 024 octets, remplacée par « Skill <nom> of the agent that started this run. » si vide. Manifeste : version fixe `1.0.0`. Le commit des skills va dans le résultat (`SkillsVersion`, « skills at <commit> »), pas dans le manifeste ; il ne vient que d'un `GitStore` (rien pour un dossier).
+6. *§5, politique.* Reconnue par la ligne que la 2.1.280 écrit (lue dans le binaire) : « --plugin-dir is disabled by your organization's managed settings (disableSideloadFlags)… », seulement sans résultat de la CLI. Une politique qui laisse charger le plugin mais l'ignore (`strictKnownMarketplaces`…) tombe dans le cas du plugin ignoré (`slash_commands`).
+7. *§5, plugin ignoré.* Jugé seulement quand la CLI a rendu son résultat (son `init` est passé) : un run interrompu ne dit rien de ses skills. Sur un worker, le workflow compare (`claudeCodeResult.SlashCommands`, tout l'`init` dans l'historique) ; sur une machine, `agent connect`, qui le met dans `CodingOutput.SkillsMissing`.
+8. *§5, CLI trop ancienne.* Vérifiée sur la machine seulement : l'image des workers a la 2.1.280. Une CLI sans l'option sur un worker échoue au premier run avec sa propre erreur (option inconnue), dite comme tout run sans résultat.
+9. *Sortie.* En plus de `ClaudeCodeOutput.Skills` : `SkillsMissing` (« nom: raison », introuvable ou non chargée) et `SkillsVersion`, comme `Unpublished` pour les fichiers.
+10. *Compose.* `SKILLS_DIR=/app/skills` est dans `docker-compose.yml`, hors du dépôt (le dossier parent) : à recréer (`docker compose up -d claude-code claude-code-ro`) pour qu'il compte.
+

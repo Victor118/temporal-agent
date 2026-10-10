@@ -18,7 +18,7 @@ aux redémarrages, aux pannes de workers et aux attentes longues.
 | Concept | Ce que c'est | Source de vérité |
 |---|---|---|
 | **Agent** | Une persona : nom, description, skills, outils autorisés (allowlist). Ne dit rien de *où* il s'exécute. | Table `agents` (éditable via l'UI). `agents.yaml` sert uniquement de seed. |
-| **Skill** | Des instructions métier (markdown) injectées dans le prompt d'un agent. | Repo Git (`SKILLS_REPO`) ou `./skills` en dev. |
+| **Skill** | Des instructions métier (markdown) injectées dans le prompt d'un agent ; marquées `runs: true`, aussi dans la CLI de ses runs Claude Code (`docs/design/run-skills.md`). | Repo Git (`SKILLS_REPO`) ou dossier (`SKILLS_DIR`, `./skills` par défaut en dev). |
 | **Tool** | Une action exécutable : nom, description, schéma d'entrée (JSON Schema). Codé en Go ou découvert via un serveur MCP. | Déclaré par les workers, publié dans la table `tools`. |
 | **Worker** | Un processus qui expose un ensemble d'outils sur **une queue**. | Sa propre config locale (`worker.yaml`). |
 | **Queue** | Une **capacité** : un pool de workers équivalents capables d'exécuter les mêmes outils. | Déclarée par la config worker. |
