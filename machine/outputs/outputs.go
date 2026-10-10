@@ -13,6 +13,7 @@ import (
 	"io/fs"
 	"os"
 	"path"
+	"slices"
 	"time"
 
 	"github.com/victor/temporal-agent/machine"
@@ -33,8 +34,11 @@ type Upload func(ctx context.Context, name string, content []byte) error
 // machine.MaxOutputDepth directories deep, machine.MaxOutputEntries entries
 // read, within Budget. The run must be over: nothing should change the
 // directory under the walk, and what does cannot lead it out of dir. A
-// context already done publishes nothing, and says why.
-func Publish(ctx context.Context, dir string, max int64, upload Upload) []string {
+// context already done publishes nothing, and says why. A file under a
+// reserved name is not published either (the bundle of the branch,
+// machine.BundleName: a run knows its branch, and a file of its own under
+// that name would pass for its commits).
+func Publish(ctx context.Context, dir string, max int64, upload Upload, reserved ...string) []string {
 	switch err := ctx.Err(); {
 	case errors.Is(err, context.DeadlineExceeded):
 		return []string{"outputs not published: the run's time ran out"}
@@ -98,6 +102,10 @@ func Publish(ctx context.Context, dir string, max int64, upload Upload) []string
 			continue
 		}
 		name := path.Base(p)
+		if slices.Contains(reserved, name) {
+			refused = append(refused, fmt.Sprintf("%s: the name %s is reserved for the branch's bundle", p, name))
+			continue
+		}
 		if names[name] {
 			refused = append(refused, fmt.Sprintf("%s: another file is published as %s", p, name))
 			continue

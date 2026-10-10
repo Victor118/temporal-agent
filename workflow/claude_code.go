@@ -122,6 +122,11 @@ type ClaudeCodeOutput struct {
 	// ("name: reason").
 	Files       []tool.FileRef `json:"files,omitempty"`
 	Unpublished []string       `json:"unpublished,omitempty"`
+	// Bundle is, when the push failed, the file among Files that keeps the
+	// commits: a git bundle of the branch (machine.BundleName), for the user
+	// to push themselves. BundleError, why there is none.
+	Bundle      *tool.FileRef `json:"bundle,omitempty"`
+	BundleError string        `json:"bundle_error,omitempty"`
 
 	// Skills are the calling agent's skills the run's CLI was given (its
 	// plugin, machine.WritePlugin); SkillsMissing, those it went without,
@@ -290,7 +295,7 @@ func (o *ClaudeCodeOutput) loadedSkills(res claudeCodeResult) {
 // what an implementation left in its outputs (activity.PublishOutputs), attached to
 // the call's session turn, and tells the session's pages. Best effort: what
 // is not published is said in o, never the run's failure.
-func (o *ClaudeCodeOutput) publishOutputs(ctx workflow.Context, r *run, dir string, call tool.CallContext) {
+func (o *ClaudeCodeOutput) publishOutputs(ctx workflow.Context, r *run, dir, branch string, call tool.CallContext) {
 	if r.lost {
 		return
 	}
@@ -303,7 +308,7 @@ func (o *ClaudeCodeOutput) publishOutputs(ctx workflow.Context, r *run, dir stri
 			RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: publishOutputsAttempts},
 		}),
 		ccAct.PublishOutputs,
-		activity.PublishOutputsInput{Dir: dir, Call: call},
+		activity.PublishOutputsInput{Dir: dir, Call: call, Branch: branch},
 	).Get(r.ctx, &res)
 	if err != nil {
 		if !r.failed(err) && !temporal.IsCanceledError(err) {
@@ -312,15 +317,22 @@ func (o *ClaudeCodeOutput) publishOutputs(ctx workflow.Context, r *run, dir stri
 		return
 	}
 	o.Files, o.Unpublished = res.Files, res.Unpublished
-	if len(res.Files) > 0 && call.Turn != nil {
-		agentID := ""
-		if n := len(call.AgentChain); n > 0 {
-			agentID = call.AgentChain[n-1]
-		}
-		opts := turnNotifyOptions
-		opts.TaskQueue = call.NotifyQueue
-		notifyFilesWith(ctx, opts, *call.Turn, agentID, res.Files)
+	notifyCallFiles(ctx, call, res.Files)
+}
+
+// notifyCallFiles tells the session's pages of files a run published for the
+// call's turn, through the turn's queue.
+func notifyCallFiles(ctx workflow.Context, call tool.CallContext, files []tool.FileRef) {
+	if len(files) == 0 || call.Turn == nil {
+		return
 	}
+	agentID := ""
+	if n := len(call.AgentChain); n > 0 {
+		agentID = call.AgentChain[n-1]
+	}
+	opts := turnNotifyOptions
+	opts.TaskQueue = call.NotifyQueue
+	notifyFilesWith(ctx, opts, *call.Turn, agentID, files)
 }
 
 // claudeCodeResult mirrors the fields of claudecode.Result this package reads.
@@ -445,6 +457,9 @@ func (o ClaudeCodeOutput) Summary() string {
 			fmt.Fprintf(&sb, "  %s\n", u)
 		}
 	}
+	if !o.Pushed {
+		o.writeRescue(&sb)
+	}
 	if len(o.Skills) > 0 {
 		fmt.Fprintf(&sb, "skills given to the run: %s", strings.Join(o.Skills, ", "))
 		if o.SkillsVersion != "" {
@@ -491,6 +506,24 @@ func (o ClaudeCodeOutput) Summary() string {
 		sb.WriteString(" (billed to the Anthropic API)")
 	}
 	return sb.String()
+}
+
+// writeRescue says, when the push failed, where the commits are kept, and
+// what the user does to push them: the agent passes it on, it pushes
+// nothing itself. Without a bundle, that they are not kept.
+func (o ClaudeCodeOutput) writeRescue(sb *strings.Builder) {
+	switch {
+	case o.Bundle != nil:
+		fmt.Fprintf(sb, "the commits are not on the remote, but they are kept in %s (id %s, published above): a git bundle of %s. "+
+			"Nothing will push them for the user: pass these steps on to them, to run themselves once the file is downloaded, "+
+			"in a clone of %s that has %s (git clone %s), with git credentials that may push there:\n"+
+			"  git fetch /path/to/%s %s:%s\n"+
+			"  git push origin %s\n",
+			o.Bundle.Name, o.Bundle.ID, o.Branch, o.Repo, shortCommit(o.Commit), o.Repo,
+			o.Bundle.Name, o.Branch, o.Branch, o.Branch)
+	case o.BundleError != "":
+		fmt.Fprintf(sb, "the commits could not be kept either (%s): they were lost with the clone\n", o.BundleError)
+	}
 }
 
 func shortCommit(c string) string {

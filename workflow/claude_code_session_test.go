@@ -631,10 +631,10 @@ func TestRunSessionTimeouts(t *testing.T) {
 	if want := 98*time.Minute + 30*time.Second; analyzeSessionTimeout != want {
 		t.Errorf("analyze session %s, want %s", analyzeSessionTimeout, want)
 	}
-	if want := 216*time.Minute + 30*time.Second; implementSessionTimeout != want {
+	if want := 231*time.Minute + 30*time.Second; implementSessionTimeout != want {
 		t.Errorf("implement session %s, want %s", implementSessionTimeout, want)
 	}
-	if want := 231*time.Minute + 30*time.Second; RunWorkspaceLifetime != want {
+	if want := 246*time.Minute + 30*time.Second; RunWorkspaceLifetime != want {
 		t.Errorf("RunWorkspaceLifetime %s, want %s", RunWorkspaceLifetime, want)
 	}
 }

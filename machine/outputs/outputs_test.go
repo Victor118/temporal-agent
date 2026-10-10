@@ -104,3 +104,17 @@ func TestPublish_NoDirectory(t *testing.T) {
 		t.Errorf("refused %v", refused)
 	}
 }
+
+// A reserved name is not the run's: refused, wherever the file is, and said.
+func TestPublish_Reserved(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "sub"), 0o700)
+	os.WriteFile(filepath.Join(dir, "sub", "agent-x-1.bundle"), []byte("fake"), 0o600)
+	os.WriteFile(filepath.Join(dir, "notes.md"), []byte("ok"), 0o600)
+	pub := &published{}
+	refused := Publish(context.Background(), dir, 32, pub.upload, "agent-x-1.bundle")
+	if len(pub.files) != 1 || pub.files["notes.md"] != "ok" || len(refused) != 1 ||
+		refused[0] != "sub/agent-x-1.bundle: the name agent-x-1.bundle is reserved for the branch's bundle" {
+		t.Errorf("published %v, refused %v", pub.files, refused)
+	}
+}

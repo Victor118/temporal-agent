@@ -285,6 +285,46 @@ func TestImplementRun_OnTheMachine(t *testing.T) {
 	}
 }
 
+// A machine whose push failed published the commits as a bundle: the
+// gateway's listing names the file, the agent gets the steps for the user.
+// One the machine names but the gateway does not list is not claimed kept.
+func TestImplementRun_PushFailedOnTheMachine(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		listed bool
+		says   []string
+	}{
+		{"published", true, []string{"kept in agent-", "(id f-2", "git fetch /path/to/agent-", "git push origin agent/health-"}},
+		{"not listed", false, []string{"could not be kept either (the machine says it published agent-", "not among the call's files"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var directive machine.ImplementInput
+			rc := &codingRunCase{route: activity.CodingRouting{Machines: true}, pick: activity.PickMachineOutput{DirectiveID: "d-1", MachineName: "maison"}}
+			rc.run = func(activity.RunOnMachineInput) (machine.Result, error) {
+				json.Unmarshal(rc.picks[0].Input, &directive)
+				name := machine.BundleName(directive.Branch)
+				out, _ := json.Marshal(machine.CodingOutput{Report: "Added.", Commit: "base0000", Branch: directive.Branch,
+					Commits: []machine.Commit{{SHA: "c0ffee00c0ffee00", Subject: "Add /health"}},
+					Error:   "the commits were not pushed: exit status 1: refused", Bundle: name})
+				res := machine.Result{Output: out, Files: []machine.FileRef{{ID: "f-1", Name: "notes.md", Size: 120}}}
+				if c.listed {
+					res.Files = append(res.Files, machine.FileRef{ID: "f-2", Name: name, Size: 900})
+				}
+				return res, nil
+			}
+			out, err := runImplementRun(t, rc, implementCall)
+			if err != nil || out.Pushed || (out.Bundle != nil) != c.listed {
+				t.Fatalf("output %+v %v", out, err)
+			}
+			for _, want := range c.says {
+				if !strings.Contains(out.Content, want) {
+					t.Errorf("content lacks %q: %s", want, out.Content)
+				}
+			}
+		})
+	}
+}
+
 // A machine without --allow-push is never picked (its capabilities), and
 // one that turns the run down sends it to the implementation's own fallback
 // queue, in the same run.

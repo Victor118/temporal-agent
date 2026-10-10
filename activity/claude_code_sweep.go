@@ -184,10 +184,10 @@ func sweepRoot(root string, runs RunCounter, keepAfter time.Time, alone bool) (r
 
 // isRunEntry tells whether name is a run's workspace or one of its
 // companions (cliConfigDir, gitConfigCopy, outputsDir, pluginDir,
-// subproc.GitShimDir).
+// bundlePath, subproc.GitShimDir).
 func isRunEntry(name string) bool {
 	base := name
-	for _, companion := range []string{".claude", ".gitconfig", ".outputs", ".plugin", ".bin"} {
+	for _, companion := range []string{".claude", ".gitconfig", ".outputs", ".plugin", ".bundle", ".bin"} {
 		base = strings.TrimSuffix(base, companion)
 	}
 	return strings.HasPrefix(base, RunWorkspacePrefix) && len(base) > len(RunWorkspacePrefix)

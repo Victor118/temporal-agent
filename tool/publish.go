@@ -120,10 +120,17 @@ func recordPublished(ctx context.Context, f FileRef) {
 var errNoTurn = errors.New("Cannot publish: this run belongs to no session turn (a scheduled task, for instance), so there is no session to attach a file to. Put the content in your answer instead.")
 
 // nameTaken refuses a second file of one call under one name, with other
-// content: it would replace the first in the members' eyes.
-func nameTaken(name string) error {
-	return fmt.Errorf("a file named %s was already published by this call with different content: rename one of them", name)
+// content: it would replace the first in the members' eyes. It is a
+// store.ErrFileExists (errors.Is).
+func nameTaken(name string) error { return takenError{name} }
+
+type takenError struct{ name string }
+
+func (e takenError) Error() string {
+	return fmt.Sprintf("a file named %s was already published by this call with different content: rename one of them", e.name)
 }
+
+func (e takenError) Unwrap() error { return store.ErrFileExists }
 
 // errNoCall refuses a file from a call given no call context: the workflow
 // read a catalog that did not yet say the tool needs one. The next call
@@ -183,6 +190,36 @@ func (p *Publisher) Publish(ctx context.Context, name string, content []byte) (F
 		return FileRef{}, err
 	}
 	return FileRef{ID: f.ID, Name: f.Name, ContentType: f.ContentType, Size: f.Size, SHA256: f.SHA256}, nil
+}
+
+// CallFileLister lists the files one call of a session turn published
+// (store.PostgresStore.ListCallFiles).
+type CallFileLister interface {
+	ListCallFiles(ctx context.Context, sessionID, turnKey, callID string) ([]store.File, error)
+}
+
+// Stored is the file the call ctx carries (as for Publish) published under
+// name; found is false when there is none, or when Store cannot list a
+// call's files (CallFileLister).
+func (p *Publisher) Stored(ctx context.Context, name string) (f FileRef, found bool, err error) {
+	call, err := p.call(ctx)
+	if err != nil {
+		return FileRef{}, false, err
+	}
+	lister, ok := p.Store.(CallFileLister)
+	if !ok {
+		return FileRef{}, false, nil
+	}
+	files, err := lister.ListCallFiles(ctx, call.Turn.SessionID, call.Turn.TurnKey, call.CallID)
+	if err != nil {
+		return FileRef{}, false, err
+	}
+	for _, s := range files {
+		if s.Name == name {
+			return FileRef{ID: s.ID, Name: s.Name, ContentType: s.ContentType, Size: s.Size, SHA256: s.SHA256}, true, nil
+		}
+	}
+	return FileRef{}, false, nil
 }
 
 // MaxFileBytes is the largest file Publish stores.

@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -23,6 +24,10 @@ const (
 	pushTimeout      = 10*time.Minute + activity.DefaultRunEndWait
 	inspectAttempts  = 2
 	pushAttempts     = 2
+	// bundleTimeout covers the wait for the run's CLI to be gone, the
+	// bundle, and its publishing.
+	bundleTimeout  = 5*time.Minute + activity.DefaultRunEndWait
+	bundleAttempts = 2
 
 	// What a run may do is set here, the same on a user's machine
 	// (machine.Implement*): never taken from the input.
@@ -59,9 +64,11 @@ type ImplementFeatureInput struct {
 }
 
 // ImplementFeatureWorkflow makes a change to a repository and publishes it as
-// a branch: clone, branch, run Claude Code, check what it actually produced,
-// push, delete the clone. Every step runs on the one worker whose disk holds
-// the clone (openRun): a push from another would find no commit to publish.
+// a branch: clone, branch, try the push (a branch that could not be published
+// does not start the run), run Claude Code, check what it actually produced,
+// push (failing, publish its commits as a bundle for the user), delete the
+// clone. Every step runs on the one worker whose disk holds the clone
+// (openRun): a push from another would find no commit to publish.
 //
 // The run writes the commits; the workflow does the clone, the branch and the
 // push. That split is not stylistic: the push is the only step that holds a
@@ -113,9 +120,13 @@ func implementFeature(ctx workflow.Context, rawInput json.RawMessage, probed *ac
 		activity.PrepareWorkspaceInput{Name: name, Repo: input.Repo, Ref: input.Base, Branch: branch, Skills: input.RunSkills},
 	).Get(r.ctx, &prepared)
 	if err != nil {
-		if r.failed(err) {
+		switch {
+		case r.failed(err):
 			out.Error = r.lostAt("while it cloned the repository", "nothing was done")
-		} else {
+		case hasErrorType(err, activity.ErrPushCheckFailed):
+			// The branch could not be published: the run did not start.
+			out.Error = failureText(err)
+		default:
 			out.Error = fmt.Sprintf("could not prepare the workspace: %v", err)
 		}
 		return out, nil
@@ -147,7 +158,7 @@ func implementFeature(ctx workflow.Context, rawInput json.RawMessage, probed *ac
 	).Get(r.ctx, &result)
 	ran := workflow.Now(ctx).Sub(runStarted)
 	if runErr == nil || !r.failed(runErr) {
-		out.publishOutputs(ctx, r, prepared.Dir, input.CallContext)
+		out.publishOutputs(ctx, r, prepared.Dir, branch, input.CallContext)
 	}
 
 	// The commits are in the clone, on the lost worker's disk: no other
@@ -244,12 +255,59 @@ func implementFeature(ctx workflow.Context, rawInput json.RawMessage, probed *ac
 		} else if hasErrorType(err, activity.ErrRunStillActive) {
 			out.Error = joinErrors(out.Error, stillActive)
 		} else {
-			out.Error = joinErrors(out.Error, fmt.Sprintf("the commits were not pushed: %v", err))
+			var timeoutErr *temporal.TimeoutError
+			timedOut := errors.As(err, &timeoutErr)
+			if timedOut {
+				// Its worker is fine (not r.failed): the push hung, and was
+				// ended. It may have landed all the same.
+				out.Error = joinErrors(out.Error, fmt.Sprintf("the push did not finish in time (%s), so it may or may not have reached the remote; check %s there",
+					whyEnded(err, pushTimeout), branch))
+			} else {
+				out.Error = joinErrors(out.Error, "the commits were not pushed: "+failureText(err))
+			}
+			// git push itself failed, or hung: the commits are kept for the
+			// user to push. Not a workspace tampered with: nothing of it is
+			// kept.
+			if timedOut || hasErrorType(err, activity.ErrPushFailed) {
+				out.keepCommits(ctx, r, activity.BundleBranchInput{Dir: prepared.Dir, Base: prepared.Commit, Branch: branch,
+					Commit: inspected.Commits[0].SHA, Call: input.CallContext})
+			}
 		}
 		return out, nil
 	}
 	out.Pushed = true
 	return out, nil
+}
+
+// keepCommits publishes, on the run's worker and before its clone goes, the
+// commits a push did not publish as a git bundle of the branch
+// (activity.BundleBranch), attached to the call's session turn for its user
+// to push themselves; o says which file, or why there is none.
+func (o *ClaudeCodeOutput) keepCommits(ctx workflow.Context, r *run, in activity.BundleBranchInput) {
+	var ccAct *activity.ClaudeCodeActivities
+	var f tool.FileRef
+	err := workflow.ExecuteActivity(
+		r.step(workflow.ActivityOptions{
+			StartToCloseTimeout: bundleTimeout,
+			HeartbeatTimeout:    gitHeartbeatTimeout,
+			RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: bundleAttempts},
+		}),
+		ccAct.BundleBranch, in,
+	).Get(r.ctx, &f)
+	switch {
+	case err == nil:
+		o.Bundle = &f
+		o.Files = append(o.Files, f)
+		notifyCallFiles(ctx, in.Call, []tool.FileRef{f})
+	case r.failed(err):
+		o.BundleError = "its worker was lost"
+	case temporal.IsCanceledError(err):
+		o.BundleError = "the run was stopped"
+	case hasErrorType(err, activity.ErrRunStillActive):
+		o.BundleError = "the run was still active on its worker"
+	default:
+		o.BundleError = failureText(err)
+	}
 }
 
 // stillActive is what the output says of a run whose CLI still ran on its

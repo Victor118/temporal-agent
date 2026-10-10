@@ -5,6 +5,7 @@ package connect
 import (
 	"context"
 
+	"github.com/victor/temporal-agent/machine"
 	"github.com/victor/temporal-agent/machine/outputs"
 )
 
@@ -22,8 +23,9 @@ func (a *Coder) maxFileBytes() int64 {
 // publishOutputs publishes what the run left in dir (its outputs) for the
 // directive ctx runs, through the gateway (Upload), and returns what it did
 // not publish, and why (outputs.Publish). The CLI is gone by now, its
-// session ended with it. A run stopped or cancelled publishes nothing.
-func (a *Coder) publishOutputs(ctx context.Context, dir string) []string {
+// session ended with it. A run stopped or cancelled publishes nothing. The
+// name of the bundle of branch is not the run's to take (machine.BundleName).
+func (a *Coder) publishOutputs(ctx context.Context, dir, branch string) []string {
 	var upload outputs.Upload
 	if a.Upload != nil {
 		upload = func(ctx context.Context, name string, content []byte) error {
@@ -31,5 +33,5 @@ func (a *Coder) publishOutputs(ctx context.Context, dir string) []string {
 			return err
 		}
 	}
-	return outputs.Publish(ctx, dir, a.maxFileBytes(), upload)
+	return outputs.Publish(ctx, dir, a.maxFileBytes(), upload, machine.BundleName(branch))
 }

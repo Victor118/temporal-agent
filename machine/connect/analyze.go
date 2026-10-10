@@ -243,8 +243,8 @@ func (a *Coder) refuse(repo string, skills []machine.RunSkill) error {
 
 // codingRun is one run's directory under WorkDir: the clone, and next to it
 // (an implementation's) the outputs the CLI may leave, the copy of the
-// clone's git configuration and the run's plugin (its skills), all deleted
-// with it.
+// clone's git configuration, the run's plugin (its skills) and the bundle of
+// its commits when they could not be pushed, all deleted with it.
 type codingRun struct {
 	dir, clone, outputs, gitConfig, plugin string
 }
@@ -408,10 +408,12 @@ var gitEnvNames = []string{"SSH_AUTH_SOCK", "GIT_SSH_COMMAND", "XDG_CONFIG_HOME"
 // (GIT_TERMINAL_PROMPT off; ssh, with no terminal in its session, cannot
 // ask either).
 func gitEnv() []string {
-	return subproc.GitEnvUser(os.Environ(), gitEnvNames...)
+	// git's words in English: gitHint and pushHint read them.
+	return append(subproc.GitEnvUser(os.Environ(), gitEnvNames...), "LC_ALL=C")
 }
 
-// gitHint says, after a clone that failed, what the owner can do about it.
+// gitHint says, after a clone or a push that failed, what the owner can do
+// about it.
 func gitHint(out string) string {
 	switch lower := strings.ToLower(out); {
 	case strings.Contains(lower, "terminal prompts disabled") || strings.Contains(lower, "could not read username"):
@@ -424,6 +426,15 @@ func gitHint(out string) string {
 		return " (only ssh, https and local paths are allowed)"
 	}
 	return ""
+}
+
+// pushHint is gitHint after a push (its dry run included): a refusal there,
+// once the clone worked, is the identity's right to push.
+func pushHint(out string) string {
+	if lower := strings.ToLower(out); strings.Contains(lower, "returned error: 403") || strings.Contains(lower, "permission to ") {
+		return " (your git identity may read this repository but not push to it)"
+	}
+	return gitHint(out)
 }
 
 // git runs one git command for a run, as its owner (their git
