@@ -33,6 +33,13 @@ type implementEnv struct {
 	// outputs is what PublishOutputs returns; published, what it was asked.
 	outputs   activity.PublishOutputsOutput
 	published *activity.PublishOutputsInput
+	// prepareErr, when set, is what the preparation fails with.
+	prepareErr error
+	// bundle and bundleErr are what BundleBranch returns; bundled, what it
+	// was asked.
+	bundle    tool.FileRef
+	bundleErr error
+	bundled   *activity.BundleBranchInput
 }
 
 func newImplementEnv(t *testing.T, result claudeCodeResult, runErr error, inspected activity.InspectWorkspaceOutput, pushErr error) *implementEnv {
@@ -42,6 +49,9 @@ func newImplementEnv(t *testing.T, result claudeCodeResult, runErr error, inspec
 	e.queues = asRunWorker(e.env)
 
 	e.env.RegisterActivityWithOptions(func(ctx context.Context, in activity.PrepareWorkspaceInput) (activity.PrepareWorkspaceOutput, error) {
+		if e.prepareErr != nil {
+			return activity.PrepareWorkspaceOutput{}, e.prepareErr
+		}
 		return activity.PrepareWorkspaceOutput{Dir: "/work/" + in.Name, Commit: "base0000", Branch: in.Branch}, nil
 	}, sdkactivity.RegisterOptions{Name: "PrepareWorkspace"})
 
@@ -79,6 +89,11 @@ func newImplementEnv(t *testing.T, result claudeCodeResult, runErr error, inspec
 		e.published = &in
 		return e.outputs, nil
 	}, sdkactivity.RegisterOptions{Name: "PublishOutputs"})
+
+	e.env.RegisterActivityWithOptions(func(ctx context.Context, in activity.BundleBranchInput) (tool.FileRef, error) {
+		e.bundled = &in
+		return e.bundle, e.bundleErr
+	}, sdkactivity.RegisterOptions{Name: "BundleBranch"})
 
 	return e
 }
@@ -225,6 +240,60 @@ func TestImplementFeatureWorkflow_PushFailureIsReported(t *testing.T) {
 	}
 	if len(e.cleaned) != 1 {
 		t.Error("the workspace should be deleted even when the push failed")
+	}
+	// Not git push's own failure: nothing is kept.
+	if e.bundled != nil || out.Bundle != nil || strings.Contains(out.Content, "git fetch") {
+		t.Errorf("bundled %+v, output %+v", e.bundled, out)
+	}
+}
+
+// A push git itself fails keeps the commits: a bundle of the branch,
+// published for the call, with the steps the user takes to push it; then the
+// clone goes.
+func TestImplementFeatureWorkflow_PushFailedKeepsTheCommits(t *testing.T) {
+	e := newImplementEnv(t, claudeCodeResult{Report: "ok", Subtype: "success"}, nil, oneCommit(),
+		temporal.NewApplicationError("git push of agent/x to r: exit status 1: ! [remote rejected] (pre-receive hook declined)", activity.ErrPushFailed))
+	e.bundle = tool.FileRef{ID: "f-9", Name: "agent-do-it.bundle", Size: 900}
+	call := tool.CallContext{UserID: "u-1", CallID: "call-1", AgentChain: []string{"jarvis"}, NotifyQueue: "agent",
+		Turn: &tool.TurnRef{SessionID: "s-1", TurnKey: "m3.jarvis"}}
+	out := e.run_(t, ImplementFeatureInput{Repo: "https://git.example.com/app.git", Task: "do it", CallContext: call})
+
+	if e.bundled == nil || e.bundled.Dir != e.pushed.Dir || e.bundled.Commit != "abcdef1234" || e.bundled.Base != "base0000" ||
+		e.bundled.Branch != out.Branch || e.bundled.Call.CallID != "call-1" {
+		t.Fatalf("bundled %+v", e.bundled)
+	}
+	if out.Pushed || out.Bundle == nil || out.Bundle.ID != "f-9" || len(out.Files) != 1 || len(e.cleaned) != 1 ||
+		!strings.Contains(out.Error, "pre-receive hook declined") || strings.Contains(out.Error, "activity error") {
+		t.Fatalf("output %+v, cleaned %v", out, e.cleaned)
+	}
+	for _, want := range []string{"agent-do-it.bundle (900 B, id f-9)", "kept in agent-do-it.bundle (id f-9", "pass these steps on to them",
+		"in a clone of https://git.example.com/app.git that has base0000 (git clone https://git.example.com/app.git)",
+		"git fetch /path/to/agent-do-it.bundle " + out.Branch + ":" + out.Branch, "git push origin " + out.Branch} {
+		if !strings.Contains(out.Content, want) {
+			t.Errorf("content lacks %q: %s", want, out.Content)
+		}
+	}
+
+	// The bundle could not be made: said, the work never claimed kept.
+	e = newImplementEnv(t, claudeCodeResult{Report: "ok", Subtype: "success"}, nil, oneCommit(),
+		temporal.NewApplicationError("git push: refused", activity.ErrPushFailed))
+	e.bundleErr = temporal.NewNonRetryableApplicationError("the bundle is 30.0 MB, over the 20.0 MB a published file may be", activity.ErrBundleFailed, nil)
+	out = e.run_(t, ImplementFeatureInput{Repo: "/src/repo", Task: "do it", CallContext: call})
+	if out.Bundle != nil || len(out.Files) != 0 || strings.Contains(out.Content, "git fetch") ||
+		!strings.Contains(out.Content, "could not be kept either (the bundle is 30.0 MB, over the 20.0 MB") {
+		t.Errorf("output %+v", out)
+	}
+}
+
+// A branch that could not be pushed does not start the run: said as the
+// preparation says it, nothing paid.
+func TestImplementFeatureWorkflow_PushCheckFailed(t *testing.T) {
+	e := newImplementEnv(t, claudeCodeResult{Report: "ok", Subtype: "success"}, nil, oneCommit(), nil)
+	e.prepareErr = temporal.NewNonRetryableApplicationError("this worker may not push to r (git push --dry-run, before the run): denied; nothing was run",
+		activity.ErrPushCheckFailed, nil)
+	out := e.run_(t, ImplementFeatureInput{Repo: "r", Task: "do it"})
+	if e.run != nil || e.pushed != nil || out.Pushed || out.Error != "this worker may not push to r (git push --dry-run, before the run): denied; nothing was run" {
+		t.Errorf("run %+v, output %+v", e.run, out)
 	}
 }
 

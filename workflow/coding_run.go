@@ -293,6 +293,20 @@ func (o *ClaudeCodeOutput) fromMachine(t codingTool, res machine.Result) {
 			o.Commits = append(o.Commits, activity.CommitInfo{SHA: cm.SHA, Subject: cm.Subject})
 		}
 		o.Pushed, o.Dirty = c.Pushed, c.Dirty
+		// The bundle of a push that failed, among the files the gateway
+		// listed: the machine's word names it, never more.
+		o.BundleError = c.BundleError
+		if c.Bundle != "" {
+			for _, f := range o.Files {
+				if f.Name == c.Bundle {
+					o.Bundle = &f
+					break
+				}
+			}
+			if o.Bundle == nil {
+				o.BundleError = fmt.Sprintf("the machine says it published %s, which is not among the call's files", c.Bundle)
+			}
+		}
 	}
 	switch {
 	case c.Interrupted:

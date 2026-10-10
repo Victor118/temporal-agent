@@ -47,7 +47,7 @@ const (
 		cleanupAttempts*cleanupTimeout + runSessionMargin
 	implementSessionTimeout = prepareAttempts*prepareTimeout + implementTimeout +
 		publishOutputsAttempts*publishOutputsTimeout + inspectAttempts*inspectTimeout + pushAttempts*pushTimeout +
-		cleanupAttempts*cleanupTimeout + runSessionMargin
+		bundleAttempts*bundleTimeout + cleanupAttempts*cleanupTimeout + runSessionMargin
 )
 
 // RunWorkspaceLifetime bounds how long a run's workspace is in use: the
