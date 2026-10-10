@@ -99,7 +99,7 @@ func (a *Coder) Implement(ctx context.Context, input json.RawMessage, progress f
 		// keeping: the commits decide.
 		a.publish(ctx, in, r, base, &out, progress)
 	}
-	out.Unpublished = a.publishOutputs(ctx, r.outputs)
+	out.Unpublished = a.publishOutputs(ctx, r.outputs, in.Branch)
 	raw, err := json.Marshal(out)
 	if err != nil {
 		return nil, err
@@ -146,7 +146,7 @@ func checkPush(ctx context.Context, in machine.ImplementInput, r *codingRun, bas
 		return Refuse("this machine could not check that it may push to %q: git push --dry-run did not answer within %s", in.Repo, machine.PushCheckTimeout)
 	}
 	return Refuse("this machine's git may not push to %q (git push --dry-run, before the run): %v: %s%s",
-		in.Repo, err, machine.Cut(out, 1024), gitHint(out))
+		in.Repo, err, machine.Cut(out, 1024), pushHint(out))
 }
 
 // publish inspects what the run produced and pushes it when it may.
@@ -207,7 +207,7 @@ func (a *Coder) publish(ctx context.Context, in machine.ImplementInput, r *codin
 	// now, and the remote is the directive's, never the clone's.
 	sha := out.Commits[0].SHA
 	if pushed, err := git(ctx, r.clone, "push", "--", in.Repo, sha+":refs/heads/"+in.Branch); err != nil {
-		out.Error = joinErrors(out.Error, fmt.Sprintf("the commits were not pushed: %v: %s%s", err, machine.Cut(pushed, 2048), gitHint(pushed)))
+		out.Error = joinErrors(out.Error, fmt.Sprintf("the commits were not pushed: %v: %s%s", err, machine.Cut(pushed, 2048), pushHint(pushed)))
 		// Stopped meanwhile: nothing more.
 		if ctx.Err() == nil {
 			out.Bundle, err = a.bundle(ctx, in, r, base, sha)

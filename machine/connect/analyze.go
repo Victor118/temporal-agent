@@ -417,8 +417,6 @@ func gitHint(out string) string {
 	switch lower := strings.ToLower(out); {
 	case strings.Contains(lower, "terminal prompts disabled") || strings.Contains(lower, "could not read username"):
 		return " (this repository asks for credentials: git found none without asking — set a credential helper in your git configuration, or give its ssh URL)"
-	case strings.Contains(lower, "returned error: 403") || strings.Contains(lower, "permission to "):
-		return " (your git identity may read this repository but not push to it)"
 	case strings.Contains(lower, "host key verification failed"):
 		return " (the host's ssh key is not in your known_hosts: connect to it once by hand, e.g. ssh -T git@github.com)"
 	case strings.Contains(lower, "permission denied (publickey)"):
@@ -427,6 +425,15 @@ func gitHint(out string) string {
 		return " (only ssh, https and local paths are allowed)"
 	}
 	return ""
+}
+
+// pushHint is gitHint after a push (its dry run included): a refusal there,
+// once the clone worked, is the identity's right to push.
+func pushHint(out string) string {
+	if lower := strings.ToLower(out); strings.Contains(lower, "returned error: 403") || strings.Contains(lower, "permission to ") {
+		return " (your git identity may read this repository but not push to it)"
+	}
+	return gitHint(out)
 }
 
 // git runs one git command for a run, as its owner (their git

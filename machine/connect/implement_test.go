@@ -252,9 +252,11 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Nothing to
 
 // A push the remote refuses is said, the commits listed, and kept: a bundle
 // of the branch, published for the directive, from which the user's own
-// clone fetches the commit pushed; deleted with the run.
+// clone fetches the commit pushed; deleted with the run. A file the run left
+// in its outputs under the bundle's name is not published: the name is the
+// bundle's.
 func TestCoder_ImplementPushRefused(t *testing.T) {
-	a, remote, _, pub := newImplementer(t, commitScript(""))
+	a, remote, _, pub := newImplementer(t, commitScript(`echo fake > ../outputs/agent-health-1234abcd.bundle`))
 	// A hook of the remote's refuses every push; a dry run runs none.
 	refuseEveryPush(t, remote)
 	raw, err := a.Implement(context.Background(), implementInput(remote), func(string) {})
@@ -265,6 +267,9 @@ func TestCoder_ImplementPushRefused(t *testing.T) {
 	}
 	if out.Bundle != "agent-health-1234abcd.bundle" || out.BundleError != "" || pub.files[out.Bundle] == "" {
 		t.Fatalf("bundle %q %q, published %v", out.Bundle, out.BundleError, pub.files)
+	}
+	if len(out.Unpublished) != 1 || !strings.Contains(out.Unpublished[0], "agent-health-1234abcd.bundle: the name agent-health-1234abcd.bundle is reserved") {
+		t.Errorf("unpublished %v", out.Unpublished)
 	}
 	if got := fetchBundle(t, remote, []byte(pub.files[out.Bundle]), "agent/health-1234abcd"); got != out.Commits[0].SHA {
 		t.Errorf("fetched %s, want %s", got, out.Commits[0].SHA)
@@ -353,15 +358,21 @@ func TestCoder_ImplementPushCheckRefused(t *testing.T) {
 	}
 }
 
-func TestGitHint(t *testing.T) {
+// A push refused to an identity that cloned is its right to push; the same
+// words at a clone are not said so.
+func TestPushHint(t *testing.T) {
+	const forbidden = "remote: Permission to me/app.git denied to bot.\nfatal: unable to access: The requested URL returned error: 403"
 	for out, want := range map[string]string{
-		"fatal: could not read Username for 'https://github.com': terminal prompts disabled":                              "credential helper",
-		"remote: Permission to me/app.git denied to bot.\nfatal: unable to access: The requested URL returned error: 403": "not push to it",
+		"fatal: could not read Username for 'https://github.com': terminal prompts disabled": "credential helper",
+		forbidden:                        "not push to it",
 		"Permission denied (publickey).": "ssh key",
 	} {
-		if got := gitHint(out); !strings.Contains(got, want) {
-			t.Errorf("gitHint(%q) = %q, want %q", out, got, want)
+		if got := pushHint(out); !strings.Contains(got, want) {
+			t.Errorf("pushHint(%q) = %q, want %q", out, got, want)
 		}
+	}
+	if got := gitHint(forbidden); strings.Contains(got, "push") {
+		t.Errorf("gitHint at a clone: %q", got)
 	}
 }
 
