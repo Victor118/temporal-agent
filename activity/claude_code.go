@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"go.temporal.io/sdk/activity"
@@ -532,6 +533,9 @@ var pushRefusals = []string{
 	"permission denied", "authentication failed", "could not read username", "could not read password",
 	"terminal prompts disabled", "returned error: 401", "returned error: 403", "permission to ",
 	"host key verification failed", "not allowed to push", "repository not found",
+	// A deploy key without write access (GitHub), Bitbucket's, Azure
+	// DevOps' (TF401019: no such repository, or no right to it).
+	"read only", "read-only", "access denied", "not have access", "tf401019",
 }
 
 // pushRefused tells a push's refusal, from git's words, from a failure
@@ -1113,15 +1117,23 @@ var gitSafeArgs = subproc.GitSafeArgs
 // The worker's environment is not passed on (subproc.Env): git and the ssh it
 // starts need none of the platform's credentials. Nor is the system's or the
 // user's git configuration read: what git does here is the code's decision.
+//
+// Its words are git's own, in English (LC_ALL=C): pushRefused reads them. It
+// runs in a session of its own, ended with it: an ssh it started does not
+// hold its output open past the step's end.
 func (a *ClaudeCodeActivities) gitEnv(ctx context.Context, dir string, env []string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", append(append([]string(nil), gitSafeArgs...), args...)...)
 	cmd.Dir = dir
 	cmd.Env = subproc.GitEnv(os.Environ())
 	cmd.Env = append(cmd.Env, env...)
+	cmd.Env = append(cmd.Env, "LC_ALL=C")
+	subproc.KillGroupOnCancel(cmd, syscall.SIGTERM, 5*time.Second)
+	subproc.NewSession(cmd)
 
 	defer heartbeatWhile(ctx, strings.Join(args, " "))()
 
 	out, err := cmd.CombinedOutput()
+	subproc.KillGroup(cmd)
 	return string(out), err
 }
 

@@ -455,3 +455,13 @@ func TestCLIDeadline(t *testing.T) {
 		t.Errorf("none: %s", got.Sub(now))
 	}
 }
+
+// The machine's git speaks English, whatever its owner's locale: gitHint
+// and pushHint read its words.
+func TestGitSpeaksEnglish(t *testing.T) {
+	t.Setenv("LC_ALL", "fr_FR.UTF-8")
+	out, err := git(context.Background(), t.TempDir(), "-c", "alias.envdump=!env", "envdump")
+	if err != nil || !strings.Contains("\n"+out+"\n", "\nLC_ALL=C\n") || strings.Contains(out, "LC_ALL=fr") {
+		t.Errorf("git's environment: %v\n%s", err, out)
+	}
+}

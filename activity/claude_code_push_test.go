@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"go.temporal.io/sdk/temporal"
 
@@ -172,10 +173,14 @@ func TestPushRefused(t *testing.T) {
 		"fatal: could not read Username for 'https://github.com': terminal prompts disabled":                              true,
 		"remote: Permission to me/app.git denied to bot.\nfatal: unable to access: The requested URL returned error: 403": true,
 		"remote: You are not allowed to push code to this project.":                                                       true,
-		"ERROR: Repository not found.": true,
-		"ssh: connect to host github.com port 22: Connection refused\nfatal: Could not read from remote repository.": false,
-		"ssh: Could not resolve hostname github.com: Temporary failure in name resolution":                           false,
-		"fatal: unable to access 'https://github.com/me/app.git/': Recv failure: Connection reset by peer":           false,
+		"ERROR: Repository not found.":                                                                                   true,
+		"ERROR: The key you are authenticating with has been marked as read only.":                                       true,
+		"Repository access denied. Access via a deployment key is read-only.":                                            true,
+		"remote: You do not have access to this repository.":                                                             true,
+		"remote: TF401019: The Git repository with name or identifier app does not exist or you do not have permissions": true,
+		"ssh: connect to host github.com port 22: Connection refused\nfatal: Could not read from remote repository.":     false,
+		"ssh: Could not resolve hostname github.com: Temporary failure in name resolution":                               false,
+		"fatal: unable to access 'https://github.com/me/app.git/': Recv failure: Connection reset by peer":               false,
 	} {
 		if got := pushRefused(out); got != want {
 			t.Errorf("pushRefused(%q) = %v, want %v", out, got, want)
@@ -219,5 +224,25 @@ func TestBundleBranchOwnsItsName(t *testing.T) {
 	again, err := a.BundleBranch(context.Background(), in)
 	if err != nil || again.ID != f.ID || len(saver.files) != 1 {
 		t.Errorf("replay: %+v %v, %d files", again, err, len(saver.files))
+	}
+}
+
+// The worker's git speaks English, whatever the worker's locale
+// (pushRefused reads its words), and what it starts ends with it: a child
+// left holding its output does not keep the step past its end.
+func TestGitEnvSpeaksEnglishAndEndsItsChildren(t *testing.T) {
+	t.Setenv("LANG", "fr_FR.UTF-8")
+	t.Setenv("LC_ALL", "fr_FR.UTF-8")
+	a := &ClaudeCodeActivities{}
+	out, err := a.gitEnv(context.Background(), t.TempDir(), nil, "-c", "alias.envdump=!env", "envdump")
+	if err != nil || !strings.Contains(out, "\nLC_ALL=C\n") && !strings.HasPrefix(out, "LC_ALL=C\n") || strings.Contains(out, "LC_ALL=fr") {
+		t.Errorf("git's environment: %v\n%s", err, out)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	a.gitEnv(ctx, t.TempDir(), nil, "-c", "alias.hang=!(sleep 60 &); sleep 60", "hang")
+	if took := time.Since(start); took > 15*time.Second {
+		t.Errorf("git's children kept it %s", took)
 	}
 }

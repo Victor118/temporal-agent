@@ -408,7 +408,8 @@ var gitEnvNames = []string{"SSH_AUTH_SOCK", "GIT_SSH_COMMAND", "XDG_CONFIG_HOME"
 // (GIT_TERMINAL_PROMPT off; ssh, with no terminal in its session, cannot
 // ask either).
 func gitEnv() []string {
-	return subproc.GitEnvUser(os.Environ(), gitEnvNames...)
+	// git's words in English: gitHint and pushHint read them.
+	return append(subproc.GitEnvUser(os.Environ(), gitEnvNames...), "LC_ALL=C")
 }
 
 // gitHint says, after a clone or a push that failed, what the owner can do

@@ -197,7 +197,10 @@ func (a *Coder) publish(ctx context.Context, in machine.ImplementInput, r *codin
 	}
 	// Restored again: a change since the inspection was made by something
 	// the run left running.
-	if changed, err := restoreGitConfig(r); err != nil || changed {
+	if changed, err := restoreGitConfig(r); err != nil {
+		out.Error = joinErrors(out.Error, fmt.Sprintf("could not restore the clone's git configuration: %v; nothing was pushed", err))
+		return
+	} else if changed {
 		out.Error = joinErrors(out.Error, "the clone's git configuration changed since the inspection, so nothing was pushed")
 		return
 	}
@@ -231,7 +234,9 @@ func (a *Coder) bundle(ctx context.Context, in machine.ImplementInput, r *coding
 	if a.Upload == nil {
 		return "", errors.New("nothing publishes a file from this machine")
 	}
-	if changed, err := restoreGitConfig(r); err != nil || changed {
+	if changed, err := restoreGitConfig(r); err != nil {
+		return "", fmt.Errorf("could not restore the clone's git configuration: %v", err)
+	} else if changed {
 		return "", errors.New("the clone's git configuration changed since the inspection")
 	}
 	name := machine.BundleName(in.Branch)
