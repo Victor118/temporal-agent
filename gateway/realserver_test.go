@@ -1049,22 +1049,57 @@ EOF
 		e.tc.TerminateWorkflow(ctx, run.GetID(), "", "seen")
 	})
 
-	t.Run("analyze_repo with skills on a machine whose CLI has no --plugin-dir: refused, the fallback runs it", func(t *testing.T) {
+	t.Run("analyze_repo with skills, the user's machine's CLI has no --plugin-dir: not picked, the fallback runs it, saying why", func(t *testing.T) {
 		rita := e.user("rita")
 		repo := smokeGitRepo(t)
 		e.startCoderHelp(t, rita, "ancienne", repo, false, oldHelp, skillsCLI)
 		var out workflow.ClaudeCodeOutput
 		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 		defer cancel()
-		if err := e.analyzeWith(t, uuid.NewString(), rita, repo, []string{"tdd"}).Get(ctx, &out); err != nil {
+		run := e.analyzeWith(t, uuid.NewString(), rita, repo, []string{"tdd"})
+		if err := run.Get(ctx, &out); err != nil {
 			t.Fatal(err)
 		}
 		if !strings.HasPrefix(out.Report, "from the fallback") || !strings.HasSuffix(out.Report, "skills tdd") || out.Machine != "" ||
-			!strings.Contains(out.Note, `your machine "ancienne" turned it down`) || !strings.Contains(out.Note, "too old") {
+			!strings.Contains(out.Note, `your machine "ancienne" has Claude Code but its CLI lacks --plugin-dir`) {
 			t.Errorf("output %+v", out)
+		}
+		if id, _ := e.directiveOf(run.GetID()); id != "" {
+			t.Errorf("a directive was made: %s", id)
 		}
 		// Without skills, it runs there.
 		if err := e.analyze(t, uuid.NewString(), rita, repo).Get(ctx, &out); err != nil || out.Machine != "ancienne" || out.Report != "skill missing" {
+			t.Errorf("no skills: %+v %v", out, err)
+		}
+	})
+
+	t.Run("analyze_repo with skills, two machines: the one that loads them runs it, past one of a higher priority that cannot", func(t *testing.T) {
+		ugo := e.user("ugo")
+		repo := smokeGitRepo(t)
+		e.startCoderHelp(t, ugo, "prioritaire", repo, false, oldHelp, skillsCLI)
+		e.startCoder(t, ugo, "recente", repo, false, skillsCLI)
+		ms, err := e.st.ListMachines(ctx, ugo)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range ms {
+			if m.Name == "prioritaire" {
+				if err := e.st.SetMachinePriority(ctx, ugo, m.ID, 10); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		var out workflow.ClaudeCodeOutput
+		ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		if err := e.analyzeWith(t, uuid.NewString(), ugo, repo, []string{"tdd"}).Get(ctx, &out); err != nil {
+			t.Fatal(err)
+		}
+		if out.Machine != "recente" || out.Report != "skill found, named" || out.Note != "" {
+			t.Errorf("with skills: %+v", out)
+		}
+		// Without skills, the priority decides.
+		if err := e.analyze(t, uuid.NewString(), ugo, repo).Get(ctx, &out); err != nil || out.Machine != "prioritaire" {
 			t.Errorf("no skills: %+v %v", out, err)
 		}
 	})

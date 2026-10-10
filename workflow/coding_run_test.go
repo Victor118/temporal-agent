@@ -363,4 +363,13 @@ func TestCodingRun_Skills(t *testing.T) {
 	if json.Unmarshal(c.child[0], &in) != nil || !slices.Equal(in.RunSkills, []string{"tdd", "ghost"}) {
 		t.Errorf("the child's input: %s", c.child[0])
 	}
+
+	// The user's machine cannot load skills: the fallback, saying why.
+	lacks := `your machine "vieille" has Claude Code but its CLI lacks --plugin-dir`
+	c = &codingRunCase{route: activity.CodingRouting{Machines: true, AnalyzeQueue: "fallback"},
+		pick: activity.PickMachineOutput{NoMachine: lacks, Lacks: lacks}}
+	out, err = runCodingRun(t, c, call)
+	if err != nil || out.Report != "from the fallback" || !strings.Contains(out.Note, lacks) {
+		t.Errorf("lacks: %+v %v", out, err)
+	}
 }

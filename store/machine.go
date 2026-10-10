@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -231,13 +233,18 @@ type PickRequest struct {
 	UserID      string
 	// Capabilities are what the machine must have announced, all of them.
 	Capabilities []string
-	Kind         string
-	Input        json.RawMessage
-	WorkflowID   string
-	RunID        string
-	CallKey      string
-	HandoffBy    time.Time
-	Deadline     time.Time
+	// Extra are what it must have announced besides, for this directive
+	// (run-skills, for a coding run with skills): when no machine has them
+	// all but one has Capabilities, the error is a *MachineLacksError
+	// naming it.
+	Extra      []string
+	Kind       string
+	Input      json.RawMessage
+	WorkflowID string
+	RunID      string
+	CallKey    string
+	HandoffBy  time.Time
+	Deadline   time.Time
 	// SeenAfter: a machine not heard from since is offline.
 	SeenAfter time.Time
 	// The turn the directive works for (Directive.SessionID…).
@@ -906,12 +913,27 @@ func (s *PostgresStore) PickMachine(ctx context.Context, req PickRequest) (Direc
 			return err
 		}
 
+		all := append(slices.Clone(req.Capabilities), req.Extra...)
 		choices := make([]machineChoice, len(machines))
 		for i, mm := range machines {
 			choices[i] = machineChoice{ID: mm.ID, Priority: mm.Priority, Max: mm.MaxDirectives, Open: open[mm.ID],
-				Online: mm.Online(req.SeenAfter), Paused: mm.Paused, Can: mm.CanAll(req.Capabilities)}
+				Online: mm.Online(req.SeenAfter), Paused: mm.Paused, Can: mm.CanAll(all)}
 		}
 		chosen := chooseMachine(choices)
+		if chosen == "" && len(req.Extra) > 0 {
+			// The one that would have taken it without the extra: what it
+			// lacks says what to do.
+			for i, mm := range machines {
+				choices[i].Can = mm.CanAll(req.Capabilities)
+			}
+			if lacking := chooseMachine(choices); lacking != "" {
+				for _, mm := range machines {
+					if mm.ID == lacking {
+						return &MachineLacksError{Machine: mm.Name, Missing: missingOf(mm, req.Extra)}
+					}
+				}
+			}
+		}
 		if chosen == "" {
 			return ErrNoMachine
 		}
@@ -929,6 +951,31 @@ func (s *PostgresStore) PickMachine(ctx context.Context, req PickRequest) (Direc
 		return err
 	})
 	return d, m, err
+}
+
+// MachineLacksError is a directive no machine of the user can take, though
+// Machine could but for Missing (PickRequest.Extra): it is an ErrNoMachine,
+// whose reason it tells.
+type MachineLacksError struct {
+	Machine string
+	Missing []string
+}
+
+func (e *MachineLacksError) Error() string {
+	return fmt.Sprintf("machine %q lacks %s", e.Machine, strings.Join(e.Missing, ", "))
+}
+
+func (e *MachineLacksError) Is(target error) bool { return target == ErrNoMachine }
+
+// missingOf are those of capabilities m did not announce.
+func missingOf(m Machine, capabilities []string) []string {
+	var missing []string
+	for _, c := range capabilities {
+		if !m.Can(c) {
+			missing = append(missing, c)
+		}
+	}
+	return missing
 }
 
 // StartDirective sets a reserved directive's task token: it runs, until

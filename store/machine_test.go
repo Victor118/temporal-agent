@@ -575,3 +575,46 @@ func TestSaveDirectiveFile(t *testing.T) {
 		t.Errorf("closed: %v", err)
 	}
 }
+
+// A directive that needs a capability besides its kind's (run-skills, for
+// a run with skills) goes to a machine that has it, past one of a higher
+// priority that lacks it; none has it: the one that lacks it is named.
+func TestPickMachine_Extra(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	machineUser(t, s, "zz-mach-dora")
+	seen := time.Now().Add(-time.Minute)
+	enrollMachine(t, s, "zz-mach-dora", "zz-mach-old", "zz-old", []string{"claude-code"}, 1)
+	enrollMachine(t, s, "zz-mach-dora", "zz-mach-new", "zz-new", []string{"claude-code", "run-skills"}, 1)
+	for id, caps := range map[string][]string{"zz-mach-old": {"claude-code"}, "zz-mach-new": {"claude-code", "run-skills"}} {
+		if _, err := s.MachineConnected(ctx, id, "gw", "", MachineInfo{Capabilities: caps, MaxDirectives: 1}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.db.Exec("UPDATE machines SET priority = 5 WHERE id = 'zz-mach-old'")
+	req := func(run string) PickRequest {
+		r := pick("zz-mach-dora", run, "c", seen)
+		r.Capabilities, r.Extra, r.Kind = []string{"claude-code"}, []string{"run-skills"}, "analyze_repo"
+		return r
+	}
+	_, m, err := s.PickMachine(ctx, req("zz-x1"))
+	if err != nil || m.ID != "zz-mach-new" {
+		t.Fatalf("with skills: %+v %v", m, err)
+	}
+	// The one with run-skills is full: the old one is named, an ErrNoMachine.
+	_, _, err = s.PickMachine(ctx, req("zz-x2"))
+	var lacks *MachineLacksError
+	if !errors.Is(err, ErrNoMachine) || !errors.As(err, &lacks) || lacks.Machine != "zz-mach-old" || !slices.Equal(lacks.Missing, []string{"run-skills"}) {
+		t.Errorf("lacking: %v", err)
+	}
+	// Without the extra, the old one takes it.
+	r := req("zz-x3")
+	r.Extra = nil
+	if _, m, err := s.PickMachine(ctx, r); err != nil || m.ID != "zz-mach-old" {
+		t.Errorf("without skills: %+v %v", m, err)
+	}
+	// Nothing could take it even without the extra: a plain ErrNoMachine.
+	if _, _, err := s.PickMachine(ctx, req("zz-x4")); !errors.Is(err, ErrNoMachine) || errors.As(err, &lacks) {
+		t.Errorf("all full: %v", err)
+	}
+}

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,14 +22,19 @@ import (
 type fakeMachineStore struct {
 	pick    store.PickRequest
 	pickErr error
-	start   store.Directive
-	startOK error
-	token   []byte
-	closed  []string
+	// existing is the call's directive an earlier attempt made.
+	existing *store.Directive
+	start    store.Directive
+	startOK  error
+	token    []byte
+	closed   []string
 }
 
 func (f *fakeMachineStore) PickMachine(_ context.Context, req store.PickRequest) (store.Directive, store.Machine, error) {
 	f.pick = req
+	if f.existing != nil {
+		return *f.existing, store.Machine{ID: "m-1", Name: "maison"}, nil
+	}
 	return store.Directive{ID: req.DirectiveID}, store.Machine{ID: "m-1", Name: "maison"}, f.pickErr
 }
 
@@ -190,18 +197,45 @@ func TestPickMachine_Skills(t *testing.T) {
 	}
 	var in machine.AnalyzeInput
 	if err := json.Unmarshal(st.pick.Input, &in); err != nil || in.Repo != "r" || in.Task != "t" || len(in.Skills) != 1 ||
-		in.Skills[0] != reader["tdd"] {
+		in.Skills[0] != reader["tdd"] || in.SkillsVersion != "abc123" {
 		t.Errorf("directive input %s %v", st.pick.Input, err)
 	}
+	// The machine must load them: run-skills, besides the kind's.
+	if !slices.Equal(st.pick.Capabilities, []string{machine.CapClaudeCode}) || !slices.Equal(st.pick.Extra, []string{machine.CapRunSkills}) {
+		t.Errorf("capabilities %v, extra %v", st.pick.Capabilities, st.pick.Extra)
+	}
+
+	// None has run-skills, one has Claude Code: no machine, saying which
+	// and why.
+	st.pickErr = &store.MachineLacksError{Machine: "vieille", Missing: []string{machine.CapRunSkills}}
+	out, err = pick("tdd")
+	if err != nil || out.DirectiveID != "" || !strings.Contains(out.NoMachine, `your machine "vieille" has Claude Code but its CLI lacks --plugin-dir`) ||
+		out.Lacks != out.NoMachine {
+		t.Errorf("lacks: %+v %v", out, err)
+	}
+	st.pickErr = nil
+
+	// Made again for the same call: what the directive holds, not what the
+	// skills are now.
+	stored, _ := json.Marshal(machine.AnalyzeInput{Repo: "r", Task: "t", Skills: []machine.RunSkill{{Name: "old", Content: "x"}}, SkillsVersion: "first"})
+	st.existing = &store.Directive{ID: "d-first", Input: stored}
+	out, err = pick("old", "tdd")
+	if err != nil || out.DirectiveID != "d-first" || !slices.Equal(out.Skills, []string{"old"}) || out.SkillsVersion != "first" ||
+		!slices.Equal(out.SkillsMissing, []string{"tdd: " + machine.SkillNotFound}) {
+		t.Errorf("replayed: %+v %v", out, err)
+	}
+	st.existing = nil
 
 	out, err = pick("BAD")
 	if err != nil || out.Refused == "" || out.DirectiveID != "" || st.pick.UserID != "" {
 		t.Errorf("refused: %+v %v, reserved %+v", out, err, st.pick)
 	}
 
-	// None found: the run goes without, said so; the input is the model's.
+	// None found: the run goes without, said so; the input is the model's,
+	// and any machine with Claude Code takes it.
 	out, err = pick("ghost")
-	if err != nil || out.DirectiveID == "" || len(out.Skills) != 0 || len(out.SkillsMissing) != 1 || string(st.pick.Input) != `{"repo":"r","task":"t"}` {
+	if err != nil || out.DirectiveID == "" || len(out.Skills) != 0 || len(out.SkillsMissing) != 1 || string(st.pick.Input) != `{"repo":"r","task":"t"}` ||
+		len(st.pick.Extra) != 0 {
 		t.Errorf("none found: %+v %v %s", out, err, st.pick.Input)
 	}
 }

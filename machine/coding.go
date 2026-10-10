@@ -187,8 +187,11 @@ type AnalyzeInput struct {
 	Ref  string `json:"ref,omitempty"`
 	Task string `json:"task"`
 	// Skills are the calling agent's skills for the run (PickMachine reads
-	// them where it runs); none = none.
-	Skills []RunSkill `json:"skills,omitempty"`
+	// them where it runs); none = none. SkillsVersion is what they were
+	// loaded from (a repository's commit), kept for the run's result: the
+	// machine does nothing with it.
+	Skills        []RunSkill `json:"skills,omitempty"`
+	SkillsVersion string     `json:"skills_version,omitempty"`
 }
 
 // Check refuses what git or the CLI would read as something else: a
@@ -220,8 +223,9 @@ type ImplementInput struct {
 	Task         string  `json:"task"`
 	Branch       string  `json:"branch"`
 	MaxBudgetUSD float64 `json:"max_budget_usd,omitempty"`
-	// Skills, as AnalyzeInput's.
-	Skills []RunSkill `json:"skills,omitempty"`
+	// Skills and SkillsVersion, as AnalyzeInput's.
+	Skills        []RunSkill `json:"skills,omitempty"`
+	SkillsVersion string     `json:"skills_version,omitempty"`
 }
 
 // branchPattern is a branch a run may publish: under BranchPrefix, of the

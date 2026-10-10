@@ -203,7 +203,7 @@ func onMachine(ctx workflow.Context, t codingTool, c codingCall, out *ClaudeCode
 		return false, "", nil
 	}
 	if pick.NoMachine != "" {
-		return false, "", nil
+		return false, pick.Lacks, nil
 	}
 	if pick.Refused != "" {
 		return false, pick.Refused, nil
