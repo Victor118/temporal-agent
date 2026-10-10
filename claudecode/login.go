@@ -135,12 +135,14 @@ func AuthFailure(res Result, err error) string {
 // settings (an organization's policy) forbid the plugins of the command line
 // (disableSideloadFlags): the line that says so, "" for any other end. Only a
 // CLI that reported nothing counts: it refuses at startup, before any tool,
-// on its stderr.
+// on its stderr. Never the report: what the run read (a repository that
+// quotes the setting) is not the CLI's word. The caller checks that no tool
+// ran (Progress.ToolCalls).
 func PluginRefusal(res Result, err error) string {
 	if res.Subtype != "" {
 		return ""
 	}
-	texts := []string{res.Stderr, res.Report}
+	texts := []string{res.Stderr}
 	if err != nil {
 		texts = append(texts, err.Error())
 	}

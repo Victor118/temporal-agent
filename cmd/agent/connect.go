@@ -255,7 +255,9 @@ func newCoder(cmd *cobra.Command) (*connect.Coder, error) {
 	workDir, _ := f.GetString("work-dir")
 	allowPush, _ := f.GetBool("allow-push")
 	home, _ := os.UserHomeDir()
-	// Whether the CLI loads a run's skills: read once, from its --help.
+	// Whether the CLI loads a run's skills: read once, from its --help,
+	// already without the other mode's credential.
+	runner.Auth = auth
 	pluginDir := runner.SupportsFlag(context.Background(), claudecode.PluginDirFlag)
 	return &connect.Coder{Runner: runner, Auth: auth, Repos: repos, AllowPush: allowPush, MaxBudgetUSD: budget, Model: model,
 		WorkDir: workDir, Environ: os.Environ(), Home: home, PluginDir: pluginDir}, nil

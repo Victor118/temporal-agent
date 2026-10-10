@@ -332,8 +332,13 @@ func (a *Coder) runCLI(ctx context.Context, p claudecode.Params, skills []string
 	res, err := runner.Run(ctx, p)
 	if line := claudecode.PluginRefusal(res, err); line != "" && len(skills) > 0 {
 		log.Printf("connect: Claude Code refused the run's plugin (%q)", line)
-		return Refuse("Claude Code on this machine refuses the agent's skills: its managed settings forbid %s (%s)",
+		refused := fmt.Sprintf("Claude Code on this machine refuses the agent's skills: its managed settings forbid %s (%s)",
 			claudecode.PluginDirFlag, machine.Cut(line, 512))
+		if res.Progress.ToolCalls == 0 {
+			// Nothing done yet: the workflow takes it elsewhere.
+			return Refuse("%s", refused)
+		}
+		out.Error = refused
 	}
 	if res.Subtype != "" {
 		out.SkillsMissing = machine.SkillsNotLoaded(skills, res.SlashCommands)

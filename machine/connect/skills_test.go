@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/victor/temporal-agent/machine"
 )
@@ -130,5 +131,38 @@ func TestCoder_SkillsPastTheBounds(t *testing.T) {
 	a.PluginDir = true
 	if _, err := a.Analyze(context.Background(), skillsInput(repo, machine.RunSkill{Name: "../tdd", Content: "x"}), func(string) {}); err == nil {
 		t.Error("a skill's name read as a path")
+	}
+}
+
+// A run that quotes the setting and is stopped mid-way is no refusal: it
+// ran (tools called), its partial report and how far it got are kept, and
+// it is not paid again elsewhere.
+func TestCoder_PolicyQuotedByARunThatRan(t *testing.T) {
+	a, repo, _ := newAnalyzer(t, `echo '{"type":"system","subtype":"init","session_id":"s"}'
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"The policy file sets disableSideloadFlags: --plugin-dir is disabled by your organization."},{"type":"tool_use","id":"t1","name":"Read","input":{}}]},"session_id":"s"}'
+sleep 60
+`)
+	a.PluginDir = true
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	raw, err := a.Analyze(ctx, skillsInput(repo, tddSkill), func(string) {})
+	var refusal *Refusal
+	var out machine.CodingOutput
+	if errors.As(err, &refusal) || err == nil || json.Unmarshal(raw, &out) != nil || !out.Interrupted || out.ToolCalls != 1 ||
+		!strings.Contains(out.Report, "disableSideloadFlags") {
+		t.Errorf("stopped mid-way: %s %v", raw, err)
+	}
+
+	// The CLI's own refusal after a tool ran: no refusal either, said.
+	b, repo, _ := newAnalyzer(t, `echo '{"type":"system","subtype":"init","session_id":"s"}'
+echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Read","input":{}}]},"session_id":"s"}'
+echo "--plugin-dir is disabled by your organization's managed settings (disableSideloadFlags)." >&2
+exit 1
+`)
+	b.PluginDir = true
+	raw, err = b.Analyze(context.Background(), skillsInput(repo, tddSkill), func(string) {})
+	out = machine.CodingOutput{}
+	if errors.As(err, &refusal) || json.Unmarshal(raw, &out) != nil || !strings.Contains(out.Error, "managed settings forbid --plugin-dir") {
+		t.Errorf("after a tool: %s %v", raw, err)
 	}
 }

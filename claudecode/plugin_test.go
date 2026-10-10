@@ -65,6 +65,10 @@ func TestPluginRefusal(t *testing.T) {
 	if got := PluginRefusal(reported, nil); got != "" {
 		t.Errorf("a reported run: %q", got)
 	}
+	// What the run read, in its partial report, is not the CLI's word.
+	if got := PluginRefusal(Result{Report: "The README says: " + line}, errors.New("run interrupted")); got != "" {
+		t.Errorf("the report: %q", got)
+	}
 	if got := PluginRefusal(Result{Stderr: "Invalid API key"}, errors.New("exit 1")); got != "" {
 		t.Errorf("another failure: %q", got)
 	}
