@@ -41,7 +41,7 @@ happens to answer has locally.
 - **Durable AI workflows** — ReAct loop (LLM reasoning + tool execution) powered by Temporal, with automatic retries and fault tolerance
 - **Multi-agent system** — Agents can spawn sub-agents for specialized tasks, each with isolated context
 - **Background tasks** — A session's agent may launch a long call (a sub-agent, `analyze_repo`, `implement_feature`) without waiting for it: it stays available, and the task's end posts its result in the session and wakes it, to report or go on with what it was asked meanwhile (`when_task_done`). Three running at most per agent in a session; shown, and stopped, in the Agents panel: see [docs/design/async-tasks.md](docs/design/async-tasks.md)
-- **Pluggable skills** — Skills loaded from Git repositories or local files, assigned to agents for domain-specific expertise
+- **Pluggable skills** — Skills loaded from Git repositories or local files, assigned to agents for domain-specific expertise; those marked `runs: true` also reach the Claude Code CLI of the agent's coding runs
 - **Persistent memory** — PostgreSQL-backed storage for conversation history, key-value memory (user/project/session scoped), and task logs
 - **Real-time streaming** — SSE (Server-Sent Events) hub for live updates to connected clients
 - **Built-in tools** — File system operations, web access, shell execution, user interaction, workflow queries, scheduling
@@ -204,6 +204,25 @@ the agent. Regular files only (no link, no file another path shares), 20 at
 most, 4 levels deep, `FILES_MAX_BYTES` each and twice that in all (the
 server's). An analysis has none: the CLI's `plan` mode refuses every write.
 
+An agent's skills marked `runs: true` in their `SKILL.md` (a strict boolean:
+`true` alone) go with its coding runs, on your machine as on the coding
+workers: the CLI gets them as a plugin of that run alone (`--plugin-dir`,
+skills named `temporal-agent:<skill>`), and the run's system prompt names
+them. Only their name, description and body: what else their frontmatter
+says (`allowed-tools`, `hooks`, `mcpServers`…) never reaches the CLI, and
+the run keeps its own tools. 16 skills and 64 KiB per run at most; a name
+in lower case letters, digits, `-` and `_`. `agent connect` reads the CLI's
+`--help` at start and announces `run-skills` when it has `--plugin-dir`: a
+machine without it is not chosen for a run that has skills (another of your
+machines that has it runs it, else the installation's fallback, saying why;
+a run without skills still runs there). A CLI whose managed settings forbid
+plugins (`disableSideloadFlags`) refuses such a run before any tool, and it
+goes to the fallback too. It logs each run's skills; the result says which
+the run was given, and which it went without (not found where it was
+prepared, or not loaded by the CLI). A skill speaks to your CLI, with your
+login and your git identity: an admin's skill is trusted like the admin is
+(`/admin` marks them « runs »). See `skills/tdd/SKILL.md`.
+
 To run the model of your own turns on your machine, with your key and your
 model, start `agent connect` with a provider; an admin chooses, agent by agent,
 whether its turns may run there (`/admin`, « Modèle sur la machine de
@@ -284,7 +303,8 @@ A worker that stops ends its coding runs first, then gives the tasks under way 3
 | `NOTIFY_URL` | Base URL a worker posts its notifications and its machines' directives to (default `http://localhost:9999`), the calls to the model a machine runs included, with their request (up to 4 MiB): the worker that serves `CallLLM` (its `activity_queues` entry too) must reach it |
 | `INTERNAL_API_KEY` | Secret shared by the server and its workers for `/internal/notify` and `/internal/machines/directives` (`Authorization: Bearer …`). Empty = the server refuses every notification and every directive; a worker checks it at startup and logs a refusal as an error |
 | `TRUSTED_PROXIES` | Comma-separated addresses or CIDR ranges of the reverse proxies in front of the server, whose `X-Forwarded-For` gives the client's address; `none` when clients connect directly. Empty (default) = the client's address is unknown, and failed logins are limited per account only; so is a login a trusted proxy forwards without naming the client. The same goes for machines' enrollment requests (20 per address in 10 minutes only when it is known; 500 pending at most in any case) |
-| `SKILLS_REPO`, `SKILLS_BRANCH` | Git repository (and branch) the skills are loaded from |
+| `SKILLS_REPO`, `SKILLS_BRANCH` | Git repository (and branch) the skills are loaded from, by the server and the workers (cloned into a cache of the process's own, 0700: a private repository's URL keeps its credentials there; on a coding worker, prefer `SKILLS_DIR`) |
+| `SKILLS_DIR` | Directory the skills are loaded from instead, as it is (no secret): the coding containers' source (`/app/skills` in the compose file), whose runs read the skills marked `runs: true`. `agent dev` defaults to `./skills` (with `SKILLS_REPO` alone, it reads the repository instead; the compose file's `agent` service sets `SKILLS_DIR=/app/skills`), loaded once; the server and the workers reload it when the skills version moves (`/webhooks/skills`, « Recharger » in `/admin`). With `SKILLS_REPO` = the process does not start |
 | `SKILLS_WEBHOOK_SECRET` | GitHub webhook secret for `/webhooks/skills`. Empty = the route is not served |
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token, to send messages |
 | `TELEGRAM_WEBHOOK_SECRET` | The `secret_token` passed to Telegram's `setWebhook`, checked on every update of `/webhooks/telegram`. Empty = the route is not served |

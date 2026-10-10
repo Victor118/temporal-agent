@@ -31,7 +31,7 @@ func registerMemoryTool(env *testsuite.TestWorkflowEnvironment, f *llmFakes) fun
 		}, nil
 	}, sdkactivity.RegisterOptions{Name: "ListTools"})
 	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.LoadSkillsForAgentInput) (activity.LoadSkillsForAgentOutput, error) {
-		return activity.LoadSkillsForAgentOutput{SystemPrompt: "prompt"}, nil
+		return activity.LoadSkillsForAgentOutput{SystemPrompt: "prompt", RunSkills: []string{"tdd"}}, nil
 	}, sdkactivity.RegisterOptions{Name: "LoadSkillsForAgent"})
 	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.NotifyInput) error {
 		return nil
@@ -115,6 +115,11 @@ func TestAgentWorkflow_SaveMemoryFromTheVersionTheModelRead(t *testing.T) {
 			got := calls()
 			if len(got) != 2 || got[0].Call == nil || got[1].Call == nil {
 				t.Fatalf("tool calls %+v, want two, each with its call context", got)
+			}
+			// The agent's skills for the coding runs ride in every call's
+			// context.
+			if rs := got[0].Call.RunSkills; len(rs) != 1 || rs[0] != "tdd" {
+				t.Errorf("run skills %v, want the agent's", rs)
 			}
 			if v := *got[0].Call.MemoryVersion; v != 3 {
 				t.Errorf("first save from version %d, want 3: the one the first call read", v)

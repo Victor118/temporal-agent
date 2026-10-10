@@ -69,6 +69,9 @@ type Params struct {
 	// repository someone else writes loads "user" only.
 	SettingSources []string `json:"setting_sources,omitempty"`
 	MaxBudgetUSD   float64  `json:"max_budget_usd,omitempty"`
+	// PluginDirs are plugins the CLI loads for this run alone
+	// (--plugin-dir, PluginDirFlag): a run's skills (machine.WritePlugin).
+	PluginDirs []string `json:"plugin_dirs,omitempty"`
 
 	// SessionID pins the CLI session id. A retried activity that reuses the
 	// same id keeps one session in the CLI's own logs instead of scattering
@@ -100,6 +103,9 @@ type Result struct {
 	// APIKeySource is the CLI's own word on where its API key came from:
 	// "none" when it used none. Empty if it never said.
 	APIKeySource string `json:"api_key_source,omitempty"`
+	// SlashCommands are the commands the CLI said it has, in its init: a
+	// plugin's skill it loaded is one of them ("<plugin>:<skill>").
+	SlashCommands []string `json:"slash_commands,omitempty"`
 	// Auth is the worker's way of authenticating the run, and PaidBy what
 	// paid it (Payer), both set by the caller that knows the worker's choice:
 	// the CLI's word alone does not say who pays.
@@ -360,6 +366,31 @@ func (r *Runner) Available() bool {
 	return err == nil
 }
 
+// PluginDirFlag is the CLI's option that loads a plugin for one session
+// (since 2.1.x; documented, unlike --plugin-dir-no-mcp).
+const PluginDirFlag = "--plugin-dir"
+
+// SupportsFlag tells whether the CLI this runner starts lists flag in its
+// --help: an option an older CLI would refuse, run and all. Read without a
+// call to the model; false when the CLI does not answer.
+func (r *Runner) SupportsFlag(ctx context.Context, flag string) bool {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, r.binary(), "--help")
+	cmd.Env = append(r.Auth.Filter(cliEnv(os.Environ())), "DISABLE_AUTOUPDATER=1")
+	cmd.WaitDelay = killGrace
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	for _, field := range strings.Fields(string(out)) {
+		if strings.TrimRight(field, ",=") == flag {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *Runner) binary() string {
 	if r.Binary != "" {
 		return r.Binary
@@ -403,6 +434,9 @@ func buildArgs(p Params) []string {
 	}
 	for _, d := range p.AddDirs {
 		args = append(args, "--add-dir", d)
+	}
+	for _, d := range p.PluginDirs {
+		args = append(args, PluginDirFlag, d)
 	}
 	for _, c := range p.MCPConfig {
 		args = append(args, "--mcp-config", c)

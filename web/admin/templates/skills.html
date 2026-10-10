@@ -2,12 +2,13 @@
 {{define "content"}}
 <div class="head">
 <h1>Skills</h1>
-{{if .Data}}<form class="toolbar" method="post" action="/admin/skills/reload"><button type="submit">Recharger depuis le dépôt</button></form>{{end}}
+{{if .Data}}<form class="toolbar" method="post" action="/admin/skills/reload"><button type="submit">Recharger</button></form>{{end}}
 </div>
 <p class="lead">
   {{with .Inv.SkillsSource}}Skills chargés par le serveur depuis <code>{{.}}</code>.
-  {{else}}Le serveur ne charge aucun skill : <code>SKILLS_REPO</code> n'est pas configuré.{{end}}
+  {{else}}Le serveur ne charge aucun skill : ni <code>SKILLS_REPO</code> ni <code>SKILLS_DIR</code> n'est configuré.{{end}}
   Chaque worker charge les siens : ce qu'il voit peut différer.
+  Un skill marqué <span class="badge b-info">runs</span> (<code>runs: true</code>) part aussi avec les runs Claude Code de ses agents.
 </p>
 
 <div class="card">
@@ -17,7 +18,7 @@
   <tbody>
   {{range .Inv.Skills}}
   <tr>
-    <td><a class="link mono" href="/admin/skills/{{.Name}}">{{.Name}}</a></td>
+    <td><a class="link mono" href="/admin/skills/{{.Name}}">{{.Name}}</a>{{if .Runs}} <span class="badge b-info" title="Part avec les runs Claude Code des agents qui l'ont (analyze_repo, implement_feature)">runs</span>{{end}}</td>
     <td class="sub">{{.Description}}</td>
     <td>{{range .Agents}}<a class="chip" href="/admin/agents/{{.}}">{{.}}</a>{{else}}<span class="sub">—</span>{{end}}</td>
   </tr>

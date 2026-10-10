@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,8 @@ import (
 	"go.temporal.io/sdk/testsuite"
 
 	"github.com/victor/temporal-agent/activity"
+	"github.com/victor/temporal-agent/machine"
+	"github.com/victor/temporal-agent/tool"
 )
 
 // analyzeEnv registers stand-ins for the three activities and reports what the
@@ -40,7 +43,16 @@ func newAnalyzeEnv(t *testing.T, prepareErr error, result claudeCodeResult, runE
 		if prepareErr != nil {
 			return activity.PrepareWorkspaceOutput{}, prepareErr
 		}
-		return activity.PrepareWorkspaceOutput{Dir: "/work/" + in.Name, Commit: "1234567890abcdef"}, nil
+		out := activity.PrepareWorkspaceOutput{Dir: "/work/" + in.Name, Commit: "1234567890abcdef"}
+		// Every skill named is found, but "ghost".
+		for _, name := range in.Skills {
+			if name == "ghost" {
+				out.SkillsMissing = append(out.SkillsMissing, name+": "+machine.SkillNotFound)
+			} else {
+				out.Skills = append(out.Skills, name)
+			}
+		}
+		return out, nil
 	}, sdkactivity.RegisterOptions{Name: "PrepareWorkspace"})
 
 	a.env.RegisterActivityWithOptions(func(ctx context.Context, in activity.RunClaudeCodeInput) (claudeCodeResult, error) {
@@ -311,5 +323,29 @@ func TestAnalyzeRepoWorkflow_RunOutOfTime(t *testing.T) {
 	}
 	if !strings.Contains(out.Content, "progress unknown; cost unknown (run interrupted)") {
 		t.Errorf("content:\n%s", out.Content)
+	}
+}
+
+// On a worker of the fallback, the skills named in the call's context are
+// read where the run is prepared, given to the run, and what it went
+// without is said: not found there, not loaded by the CLI.
+func TestAnalyzeRepoWorkflow_Skills(t *testing.T) {
+	a := newAnalyzeEnv(t, nil, claudeCodeResult{Report: "ok", Subtype: "success", SlashCommands: []string{"temporal-agent:tdd"}}, nil)
+	out := a.run_(t, AnalyzeRepoInput{Repo: "/src/repo", Task: "look around",
+		CallContext: tool.CallContext{RunSkills: []string{"tdd", "review", "ghost"}}})
+	if !slices.Equal(a.prepared.Skills, []string{"tdd", "review", "ghost"}) || !slices.Equal(a.run.Skills, []string{"tdd", "review"}) {
+		t.Errorf("prepared %+v, run %+v", a.prepared.Skills, a.run.Skills)
+	}
+	if !slices.Equal(out.Skills, []string{"tdd", "review"}) ||
+		!slices.Equal(out.SkillsMissing, []string{"ghost: " + machine.SkillNotFound, "review: " + machine.SkillNotLoaded}) ||
+		!strings.Contains(out.Content, "skills given to the run: tdd, review") {
+		t.Errorf("output %+v", out)
+	}
+
+	// No skills: none named to the run, nothing said.
+	a = newAnalyzeEnv(t, nil, claudeCodeResult{Report: "ok", Subtype: "success"}, nil)
+	out = a.run_(t, AnalyzeRepoInput{Repo: "/src/repo", Task: "look around"})
+	if len(a.run.Skills) != 0 || strings.Contains(out.Content, "skills") {
+		t.Errorf("without skills: %+v", out)
 	}
 }

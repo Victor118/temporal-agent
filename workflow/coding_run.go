@@ -143,12 +143,15 @@ func codingRun(ctx workflow.Context, t codingTool, rawInput json.RawMessage) (Cl
 	}
 
 	var why string
+	// lacks: a machine of the user's could have run it but for its CLI
+	// (PickMachineOutput.Lacks): connected already, only to update.
+	lacks := false
 	switch {
 	case !route.Machines:
 	case c.call.UserID == "":
 		why = "the call has no user whose machine could run it"
 	default:
-		ran, refused, err := onMachine(ctx, t, c, &out)
+		ran, refused, lacked, err := onMachine(ctx, t, c, &out)
 		if ran || err != nil {
 			return out, err
 		}
@@ -156,12 +159,15 @@ func codingRun(ctx workflow.Context, t codingTool, rawInput json.RawMessage) (Cl
 		if why == "" {
 			why = t.noMachine
 		}
+		lacks = lacked
 		out = c.out
 	}
 	if queue := t.queue(route); queue != "" {
 		return onFallback(ctx, t, rawInput, queue, why, out)
 	}
 	switch {
+	case lacks:
+		out.Error = why + ", and this installation has no fallback for " + t.name + ": update it, then try again; nothing was done"
 	case why != "":
 		out.Error = why + ", and this installation has no fallback for " + t.name + ": start agent connect on your machine (« Mes machines »); nothing was done"
 	default:
@@ -173,19 +179,21 @@ func codingRun(ctx workflow.Context, t codingTool, rawInput json.RawMessage) (Cl
 // onMachine runs the call on a machine of the turn's author, if one takes
 // it (ran). One that turns it down before anything ran (a repository it does
 // not allow, its login refused, pushes it does not allow, a handoff that
-// failed) is refused, with why: the run goes elsewhere. A cancelled workflow
-// is its error: the rest goes into out.
-func onMachine(ctx workflow.Context, t codingTool, c codingCall, out *ClaudeCodeOutput) (ran bool, refused string, err error) {
+// failed) is refused, with why: the run goes elsewhere. Lacked: none took
+// it, though one could but for its CLI (why says which). A cancelled
+// workflow is its error: the rest goes into out.
+func onMachine(ctx workflow.Context, t codingTool, c codingCall, out *ClaudeCodeOutput) (ran bool, refused string, lacked bool, err error) {
 	raw, err := json.Marshal(c.directive)
 	if err != nil {
-		return false, "", err
+		return false, "", false, err
 	}
 	wfID := workflow.GetInfo(ctx).WorkflowExecution.ID
 	sessionID, _ := SessionOf(wfID)
 	participant, _ := ParticipantOf(wfID)
 	pin := activity.PickMachineInput{UserID: c.call.UserID, Capabilities: machine.CapabilitiesOf(t.kind), Kind: t.kind,
 		Input: raw, CallKey: t.kind, Timeout: t.timeout,
-		SessionID: sessionID, Participant: participant, Agent: c.call.Agent, CallID: c.call.CallID}
+		SessionID: sessionID, Participant: participant, Agent: c.call.Agent, CallID: c.call.CallID,
+		Skills: c.call.RunSkills}
 	// Where the files it publishes go: the turn the call works for, and the
 	// agent that made it (the last of its chain).
 	if turn := c.call.Turn; turn != nil && turn.SessionID == sessionID {
@@ -199,12 +207,16 @@ func onMachine(ctx workflow.Context, t codingTool, c codingCall, out *ClaudeCode
 	if err := workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, pickMachineOptions), mAct.PickMachine, pin).Get(ctx, &pick); err != nil {
 		// The machines' database away: the fallback may still answer.
 		workflow.GetLogger(ctx).Warn("No machine could be picked for a coding run", "tool", t.name, "error", err)
-		return false, "", nil
+		return false, "", false, nil
 	}
 	if pick.NoMachine != "" {
-		return false, "", nil
+		return false, pick.Lacks, pick.Lacks != "", nil
+	}
+	if pick.Refused != "" {
+		return false, pick.Refused, false, nil
 	}
 	out.Machine = pick.MachineName
+	out.Skills, out.SkillsMissing, out.SkillsVersion = pick.Skills, pick.SkillsMissing, pick.SkillsVersion
 	started := workflow.Now(ctx)
 	var res machine.Result
 	err = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, runOnMachineOptions(t.timeout, 0)),
@@ -212,13 +224,13 @@ func onMachine(ctx workflow.Context, t codingTool, c codingCall, out *ClaudeCode
 	switch {
 	case err == nil:
 		out.fromMachine(t, res)
-		return true, "", nil
+		return true, "", false, nil
 	case temporal.IsCanceledError(err):
-		return true, "", err
+		return true, "", false, err
 	case hasErrorType(err, machine.ErrTypeRefused):
 		var appErr *temporal.ApplicationError
 		errors.As(err, &appErr)
-		return false, fmt.Sprintf("your machine %q turned it down (%s)", pick.MachineName, appErr.Message()), nil
+		return false, fmt.Sprintf("your machine %q turned it down (%s)", pick.MachineName, appErr.Message()), false, nil
 	}
 	// What the machine said along with its failure: a partial report, how
 	// far it got, what it published.
@@ -241,7 +253,7 @@ func onMachine(ctx workflow.Context, t codingTool, c codingCall, out *ClaudeCode
 		out.Interrupted = true
 		out.DurationMS = workflow.Now(ctx).Sub(started).Milliseconds()
 	}
-	return true, "", nil
+	return true, "", false, nil
 }
 
 // cliRan tells whether a directive that failed with err had started its CLI:
@@ -273,6 +285,7 @@ func (o *ClaudeCodeOutput) fromMachine(t codingTool, res machine.Result) {
 	o.Report, o.Commit = c.Report, c.Commit
 	o.CostUSD, o.PaidBy, o.DurationMS, o.NumTurns, o.ToolUses = c.CostUSD, c.PaidBy, c.DurationMS, c.NumTurns, c.ToolUses
 	o.Unpublished = c.Unpublished
+	o.SkillsMissing = append(o.SkillsMissing, c.SkillsMissing...)
 	if t.kind == machine.KindImplementFeature {
 		// The branch is the workflow's own (Branch, set before): the
 		// machine says what is on it.

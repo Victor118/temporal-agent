@@ -2,8 +2,9 @@
 {{define "content"}}
 {{with .Data}}
 <div class="crumbs"><a href="/admin/skills">Skills</a> /</div>
-<h1><span class="mono">{{.Name}}</span></h1>
+<h1><span class="mono">{{.Name}}</span>{{if .Runs}} <span class="badge b-info">runs</span>{{end}}</h1>
 <p class="lead">{{.Description}}</p>
+{{if .Runs}}<p class="note">Part avec les runs Claude Code de ses agents (<code>analyze_repo</code>, <code>implement_feature</code>), sur la machine de l'auteur du tour comme sur les workers : la CLI le reçoit comme skill <code>temporal-agent:{{.Name}}</code>, sans rien d'autre de son en-tête que son nom et sa description.</p>{{end}}
 
 <div class="card">
   <h2>Agents</h2>

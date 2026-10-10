@@ -112,6 +112,9 @@ func runConnect(cmd *cobra.Command, args []string) {
 			s.ClaudeCode = string(coder.Login())
 			if s.ClaudeCode == string(claudecode.LoginOK) {
 				s.Capabilities = append(s.Capabilities, machine.CapClaudeCode)
+				if coder.PluginDir {
+					s.Capabilities = append(s.Capabilities, machine.CapRunSkills)
+				}
 			}
 			if coder.AllowPush {
 				s.Capabilities = append(s.Capabilities, machine.CapGitPush)
@@ -252,8 +255,12 @@ func newCoder(cmd *cobra.Command) (*connect.Coder, error) {
 	workDir, _ := f.GetString("work-dir")
 	allowPush, _ := f.GetBool("allow-push")
 	home, _ := os.UserHomeDir()
+	// Whether the CLI loads a run's skills: read once, from its --help,
+	// already without the other mode's credential.
+	runner.Auth = auth
+	pluginDir := runner.SupportsFlag(context.Background(), claudecode.PluginDirFlag)
 	return &connect.Coder{Runner: runner, Auth: auth, Repos: repos, AllowPush: allowPush, MaxBudgetUSD: budget, Model: model,
-		WorkDir: workDir, Environ: os.Environ(), Home: home}, nil
+		WorkDir: workDir, Environ: os.Environ(), Home: home, PluginDir: pluginDir}, nil
 }
 
 // newModeler is the machine's model, when --llm-provider is given (nil
@@ -324,6 +331,12 @@ func describeCoder(a *connect.Coder) {
 			"from eating your usage limit, which your own Claude sessions share")
 	default:
 		log.Println("connect: no spending cap per run (--max-budget-usd)")
+	}
+	if a.PluginDir {
+		log.Println("connect: the runs take along the skills their agent marks for them (runs: true), as a plugin of the run alone; " +
+			"each run's are named here when it starts")
+	} else {
+		log.Printf("connect: the claude CLI has no %s: a run that takes its agent's skills is refused here (update the CLI)", claudecode.PluginDirFlag)
 	}
 	log.Printf("connect: clones go to %s, deleted after each run", a.WorkDir)
 }

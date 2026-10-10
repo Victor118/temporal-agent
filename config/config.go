@@ -138,6 +138,10 @@ type Config struct {
 	SkillsRepo          string // Git repo URL for skills (e.g. "https://github.com/org/agent-skills")
 	SkillsBranch        string // Branch to use (default: "main")
 	SkillsWebhookSecret string // GitHub webhook secret for signature verification
+	// SkillsDir is a directory of skills, read as it is (no secret: the
+	// coding containers' source); empty = none, or ./skills in dev. Never
+	// with SkillsRepo.
+	SkillsDir string
 
 	// Web Search
 	BraveSearchAPIKey string
@@ -236,6 +240,7 @@ func Load() *Config {
 		ClaudeCodeImplementQueue:    envOr("CLAUDE_CODE_IMPLEMENT_QUEUE", DefaultImplementQueue),
 
 		SkillsRepo:          os.Getenv("SKILLS_REPO"),
+		SkillsDir:           os.Getenv("SKILLS_DIR"),
 		SkillsBranch:        envOr("SKILLS_BRANCH", "main"),
 		SkillsWebhookSecret: os.Getenv("SKILLS_WEBHOOK_SECRET"),
 

@@ -38,15 +38,19 @@ func runServer(cmd *cobra.Command, args []string) {
 		log.Fatalf("Failed to seed agents: %v", err)
 	}
 
-	// Back-office skills: the server and the workers reload the repo when
+	// Back-office skills: the server and the workers reload them when
 	// skills_version moves.
-	skills, skillsSource := serverSkills(context.Background(), cfg, st)
+	skillStore, skillsSource, err := skillSource(cfg, "temporal-agent-skills-server", "")
+	if err != nil {
+		log.Fatalf("Skills: %v", err)
+	}
+	skills := serverSkills(context.Background(), skillStore, skillsSource, st)
 	// MACHINES_ENABLED=false: no gateway, no sweep, no machine route.
 	machines := newGateway(cfg, st, temporalClient, hub)
 	handler := newHTTPHandler(cfg, st, temporalClient, hub, httpOptions{
 		skills:           skills,
 		skillsSource:     skillsSource,
-		skillsReloadable: cfg.SkillsRepo != "",
+		skillsReloadable: skillStore != nil,
 		machines:         machines,
 	})
 

@@ -86,6 +86,8 @@ type Delegation struct {
 type SkillRef struct {
 	Name    string
 	Present bool
+	// Runs: the skill goes with the agent's coding runs (runs: true).
+	Runs bool
 }
 
 type ToolView struct {
@@ -211,7 +213,7 @@ func BuildInventory(in Inputs) *Inventory {
 		}
 		for _, name := range a.Skills {
 			sv, ok := inv.skills[name]
-			av.Skills = append(av.Skills, SkillRef{Name: name, Present: ok})
+			av.Skills = append(av.Skills, SkillRef{Name: name, Present: ok, Runs: ok && sv.Runs})
 			if ok {
 				sv.Agents = append(sv.Agents, a.ID)
 				continue

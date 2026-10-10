@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/temporal"
 
+	"github.com/victor/temporal-agent/claudecode"
 	"github.com/victor/temporal-agent/machine"
 	"github.com/victor/temporal-agent/store"
 )
@@ -21,6 +23,7 @@ import (
 // MachineStore is what the machine activities read and write.
 type MachineStore interface {
 	PickMachine(ctx context.Context, req store.PickRequest) (store.Directive, store.Machine, error)
+	DirectiveOfCall(ctx context.Context, runID, callKey string) (store.Directive, store.Machine, error)
 	ChooseLLMMachine(ctx context.Context, userID string, excluded []string, seenAfter time.Time) (store.Machine, error)
 	SetMachineAside(ctx context.Context, id string) error
 	CreateLLMDirective(ctx context.Context, req store.LLMDirectiveRequest) (store.Directive, store.Machine, error)
@@ -51,6 +54,9 @@ type MachineActivities struct {
 	OnlineWindow time.Duration
 	// Routing is where this worker sends coding runs (CodingRoute).
 	Routing CodingRouting
+	// Skills reads the skills a coding run takes along (PickMachine); nil =
+	// this worker has none.
+	Skills RunSkillReader
 }
 
 // CodingRouting is where a coding run goes, as the worker that publishes the
@@ -103,29 +109,84 @@ type PickMachineInput struct {
 	TurnKey string `json:"turn_key,omitempty"`
 	CallID  string `json:"call_id,omitempty"`
 	AgentID string `json:"agent_id,omitempty"`
+	// Skills names the calling agent's skills for a coding run
+	// (tool.CallContext.RunSkills): PickMachine adds them to Input, read
+	// here (Skills of MachineActivities).
+	Skills []string `json:"skills,omitempty"`
 }
 
 // PickMachineOutput is the directive and its machine; NoMachine, with no
-// directive, says why none took it.
+// directive, says why none took it, and Refused why the directive could not
+// be made (its skills past a run's bounds): no machine is reserved either
+// way, and the run may go elsewhere.
 type PickMachineOutput struct {
 	DirectiveID string `json:"directive_id,omitempty"`
 	MachineID   string `json:"machine_id,omitempty"`
 	MachineName string `json:"machine_name,omitempty"`
 	NoMachine   string `json:"no_machine,omitempty"`
+	// Lacks, with NoMachine, is why none took it though one of the user's
+	// could but for a capability the directive needs besides its kind's
+	// (its CLI lacks --plugin-dir, for a run with skills): the run's
+	// fallback says it.
+	Lacks   string `json:"lacks,omitempty"`
+	Refused string `json:"refused,omitempty"`
+	// Skills are the names of the skills the directive carries;
+	// SkillsMissing, those named that were not found here
+	// ("name: reason"); SkillsVersion, what they were loaded from.
+	Skills        []string `json:"skills,omitempty"`
+	SkillsMissing []string `json:"skills_missing,omitempty"`
+	SkillsVersion string   `json:"skills_version,omitempty"`
 }
 
 // PickMachine chooses a machine of the user's (online, not paused, with the
 // capability, the highest priority, then the least busy, under its cap)
 // and creates the directive, in one transaction (store.PickMachine). No
 // machine is a result, not an error: retrying would not make one appear.
+// The directive's input is final before: the skills it names are read here
+// and added to it (what the gateway sends, at once and at every hello, is
+// what the database holds), and the machine must then load them
+// (machine.CapRunSkills). Skills it cannot carry are a refusal, a result
+// too, unless the call's directive exists already. Made again for the same
+// call, it finds the first one's directive, and says of its skills what
+// that one's input holds.
 func (a *MachineActivities) PickMachine(ctx context.Context, in PickMachineInput) (PickMachineOutput, error) {
+	var out PickMachineOutput
+	var extra []string
+	if len(in.Skills) > 0 {
+		input, refused, err := a.withSkills(in, &out)
+		if err != nil {
+			return PickMachineOutput{}, err
+		}
+		if refused != "" {
+			// An earlier attempt may have made the call's directive, with
+			// the skills as they were: it holds a slot of its machine, and
+			// is the call's.
+			run := activity.GetInfo(ctx).WorkflowExecution.RunID
+			d, m, err := a.Store.DirectiveOfCall(ctx, run, in.CallKey)
+			switch {
+			case err == nil:
+				out := storedSkills(d.Input, in.Skills)
+				out.DirectiveID, out.MachineID, out.MachineName = d.ID, m.ID, m.Name
+				return out, nil
+			case !errors.Is(err, store.ErrDirectiveNotFound):
+				return PickMachineOutput{}, err
+			}
+			return PickMachineOutput{Refused: refused, SkillsMissing: out.SkillsMissing}, nil
+		}
+		in.Input = input
+		if len(out.Skills) > 0 {
+			extra = []string{machine.CapRunSkills}
+		}
+	}
 	info := activity.GetInfo(ctx)
 	window := a.onlineWindow()
 	now := time.Now()
+	id := uuid.NewString()
 	d, m, err := a.Store.PickMachine(ctx, store.PickRequest{
-		DirectiveID:  uuid.NewString(),
+		DirectiveID:  id,
 		UserID:       in.UserID,
 		Capabilities: in.Capabilities,
+		Extra:        extra,
 		Kind:         in.Kind,
 		Input:        in.Input,
 		WorkflowID:   info.WorkflowExecution.ID,
@@ -141,14 +202,98 @@ func (a *MachineActivities) PickMachine(ctx context.Context, in PickMachineInput
 		CallID:       in.CallID,
 		AgentID:      in.AgentID,
 	})
-	if errors.Is(err, store.ErrNoMachine) {
+	var lacks *store.MachineLacksError
+	switch {
+	case errors.As(err, &lacks):
+		return PickMachineOutput{NoMachine: lacksText(lacks), Lacks: lacksText(lacks)}, nil
+	case errors.Is(err, store.ErrNoMachine):
 		return PickMachineOutput{NoMachine: fmt.Sprintf(
-			"no machine of yours is connected with %s and a directive to spare", strings.Join(in.Capabilities, ", "))}, nil
-	}
-	if err != nil {
+			"no machine of yours is connected with %s and a directive to spare", strings.Join(append(in.Capabilities, extra...), ", "))}, nil
+	case err != nil:
 		return PickMachineOutput{}, err
 	}
-	return PickMachineOutput{DirectiveID: d.ID, MachineID: m.ID, MachineName: m.Name}, nil
+	if d.ID != id && len(in.Skills) > 0 {
+		// The call's directive, made by an earlier attempt: its input says
+		// what went with it, not what the skills are now.
+		out = storedSkills(d.Input, in.Skills)
+	}
+	out.DirectiveID, out.MachineID, out.MachineName = d.ID, m.ID, m.Name
+	return out, nil
+}
+
+// lacksText says why no machine took a directive that one could have run
+// but for what it lacks.
+func lacksText(e *store.MachineLacksError) string {
+	if slices.Contains(e.Missing, machine.CapRunSkills) {
+		return fmt.Sprintf("your machine %q has Claude Code but its CLI lacks %s, which the agent's skills need (update the claude CLI, then restart agent connect)",
+			e.Machine, claudecode.PluginDirFlag)
+	}
+	return fmt.Sprintf("your machine %q lacks %s", e.Machine, strings.Join(e.Missing, ", "))
+}
+
+// storedSkills is what a directive's input says of its skills: those it
+// carries, its version, and those of named it does not (not found when it
+// was made).
+func storedSkills(input json.RawMessage, named []string) PickMachineOutput {
+	var stored struct {
+		Skills        []machine.RunSkill `json:"skills"`
+		SkillsVersion string             `json:"skills_version"`
+	}
+	json.Unmarshal(input, &stored)
+	out := PickMachineOutput{SkillsVersion: stored.SkillsVersion}
+	for _, s := range stored.Skills {
+		out.Skills = append(out.Skills, s.Name)
+	}
+	for _, name := range named {
+		if !slices.Contains(out.Skills, name) && !slices.Contains(out.SkillsMissing, name+": "+machine.SkillNotFound) {
+			out.SkillsMissing = append(out.SkillsMissing, name+": "+machine.SkillNotFound)
+		}
+	}
+	return out
+}
+
+// withSkills is in's input with the skills it names (machine.RunSkill, in
+// its "skills", and what they were loaded from, in its "skills_version"),
+// and fills out with what they are; or why they cannot go (refused): past a
+// run's bounds, a name no plugin can carry. A name not found is said in
+// out, never in silence, and the run goes without it.
+func (a *MachineActivities) withSkills(in PickMachineInput, out *PickMachineOutput) (json.RawMessage, string, error) {
+	var set RunSkillSet
+	if a.Skills != nil {
+		set = a.Skills.RunSkills(in.Skills)
+	} else {
+		set.Missing = in.Skills
+	}
+	for _, name := range set.Missing {
+		out.SkillsMissing = append(out.SkillsMissing, name+": "+machine.SkillNotFound)
+	}
+	if err := machine.CheckRunSkills(set.Skills); err != nil {
+		return nil, fmt.Sprintf("the agent's skills cannot go with the run (%v)", err), nil
+	}
+	if len(set.Skills) == 0 {
+		return in.Input, "", nil
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(in.Input, &fields); err != nil {
+		return nil, "", temporal.NewNonRetryableApplicationError(fmt.Sprintf("the directive's input: %v", err), "InvalidInput", nil)
+	}
+	skills, err := json.Marshal(set.Skills)
+	if err != nil {
+		return nil, "", err
+	}
+	fields["skills"] = skills
+	if set.Version != "" {
+		fields["skills_version"], _ = json.Marshal(set.Version)
+	}
+	input, err := json.Marshal(fields)
+	if err != nil {
+		return nil, "", err
+	}
+	for _, s := range set.Skills {
+		out.Skills = append(out.Skills, s.Name)
+	}
+	out.SkillsVersion = set.Version
+	return input, "", nil
 }
 
 // RunOnMachineInput names the directive PickMachine created.

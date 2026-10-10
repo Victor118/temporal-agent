@@ -15,6 +15,11 @@ const (
 	// identity (agent connect --allow-push). Without it, an implementation
 	// goes elsewhere: its branch must be pushed, or it is lost.
 	CapGitPush = "git-push"
+	// CapRunSkills: the machine's CLI loads a run's skills (it has
+	// --plugin-dir, read in its --help at agent connect's start). Announced
+	// with CapClaudeCode, required by nothing: a run with skills on a
+	// machine without it is refused there, and goes elsewhere.
+	CapRunSkills = "run-skills"
 	// KindAnalyzeRepo is a read-only analysis of a repository, run by the
 	// machine's own CLI, with its owner's subscription or key.
 	KindAnalyzeRepo = "analyze_repo"
@@ -181,11 +186,21 @@ type AnalyzeInput struct {
 	Repo string `json:"repo"`
 	Ref  string `json:"ref,omitempty"`
 	Task string `json:"task"`
+	// Skills are the calling agent's skills for the run (PickMachine reads
+	// them where it runs); none = none. SkillsVersion is what they were
+	// loaded from (a repository's commit), kept for the run's result: the
+	// machine does nothing with it.
+	Skills        []RunSkill `json:"skills,omitempty"`
+	SkillsVersion string     `json:"skills_version,omitempty"`
 }
 
 // Check refuses what git or the CLI would read as something else: a
-// repository or ref starting with a dash, control characters, no task.
+// repository or ref starting with a dash, control characters, no task;
+// and skills past a run's bounds (CheckRunSkills).
 func (in AnalyzeInput) Check() error {
+	if err := CheckRunSkills(in.Skills); err != nil {
+		return err
+	}
 	switch {
 	case strings.TrimSpace(in.Repo) == "" || strings.TrimSpace(in.Task) == "":
 		return fmt.Errorf("analyze_repo needs a repo and a task")
@@ -208,6 +223,9 @@ type ImplementInput struct {
 	Task         string  `json:"task"`
 	Branch       string  `json:"branch"`
 	MaxBudgetUSD float64 `json:"max_budget_usd,omitempty"`
+	// Skills and SkillsVersion, as AnalyzeInput's.
+	Skills        []RunSkill `json:"skills,omitempty"`
+	SkillsVersion string     `json:"skills_version,omitempty"`
 }
 
 // branchPattern is a branch a run may publish: under BranchPrefix, of the
@@ -218,6 +236,9 @@ var branchPattern = regexp.MustCompile(`^agent/[a-z0-9][a-z0-9-]{0,63}$`)
 // branch outside BranchPrefix: a machine never pushes to a branch a person
 // works on, whatever the directive says.
 func (in ImplementInput) Check() error {
+	if err := CheckRunSkills(in.Skills); err != nil {
+		return err
+	}
 	switch {
 	case strings.TrimSpace(in.Repo) == "" || strings.TrimSpace(in.Task) == "":
 		return fmt.Errorf("implement_feature needs a repo and a task")
@@ -274,6 +295,9 @@ type CodingOutput struct {
 	// why ("name: reason"). What it published, the gateway lists itself
 	// (Result.Files): the machine's word is not needed for that.
 	Unpublished []string `json:"unpublished,omitempty"`
+	// SkillsMissing are the directive's skills the CLI did not load, and
+	// why ("name: reason", SkillNotLoaded).
+	SkillsMissing []string `json:"skills_missing,omitempty"`
 }
 
 // CloneProgress is a coding run's progress while it clones: the CLI has not

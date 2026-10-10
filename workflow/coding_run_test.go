@@ -328,3 +328,55 @@ func TestImplementRun_LostAfterTheRun(t *testing.T) {
 		t.Errorf("output %+v %v", out, err)
 	}
 }
+
+// The agent's skills go with the run: named to PickMachine, which composes
+// them; what was given, not found, or not loaded by the machine's CLI is
+// said in the output. To the fallback, they go in the call's context.
+func TestCodingRun_Skills(t *testing.T) {
+	call := analyzeCall
+	call.RunSkills = []string{"tdd", "ghost"}
+	report, _ := json.Marshal(machine.CodingOutput{Report: "Done.", SkillsMissing: []string{"tdd: " + machine.SkillNotLoaded}})
+	c := &codingRunCase{route: activity.CodingRouting{Machines: true, AnalyzeQueue: "fallback"},
+		pick: activity.PickMachineOutput{DirectiveID: "d-1", MachineName: "maison", Skills: []string{"tdd"},
+			SkillsMissing: []string{"ghost: " + machine.SkillNotFound}, SkillsVersion: "0123456789abcdef"},
+		run: func(activity.RunOnMachineInput) (machine.Result, error) { return machine.Result{Output: report}, nil }}
+	out, err := runCodingRun(t, c, call)
+	if err != nil || !slices.Equal(c.picks[0].Skills, []string{"tdd", "ghost"}) || !slices.Equal(out.Skills, []string{"tdd"}) ||
+		!slices.Equal(out.SkillsMissing, []string{"ghost: " + machine.SkillNotFound, "tdd: " + machine.SkillNotLoaded}) {
+		t.Fatalf("output %+v %v, picks %+v", out, err, c.picks)
+	}
+	for _, want := range []string{"skills given to the run: tdd (skills at 01234567)", "ghost: not found", "tdd: not loaded by the CLI"} {
+		if !strings.Contains(out.Content, want) {
+			t.Errorf("content lacks %q: %s", want, out.Content)
+		}
+	}
+
+	// Skills the directive cannot carry: nothing reserved, the fallback
+	// runs it, saying why; the child gets the names in its call's context.
+	c = &codingRunCase{route: activity.CodingRouting{Machines: true, AnalyzeQueue: "fallback"},
+		pick: activity.PickMachineOutput{Refused: "the agent's skills cannot go with the run (17 skills)"}}
+	out, err = runCodingRun(t, c, call)
+	if err != nil || out.Report != "from the fallback" || !strings.Contains(out.Note, "skills cannot go") {
+		t.Fatalf("refused: %+v %v", out, err)
+	}
+	var in AnalyzeRepoInput
+	if json.Unmarshal(c.child[0], &in) != nil || !slices.Equal(in.RunSkills, []string{"tdd", "ghost"}) {
+		t.Errorf("the child's input: %s", c.child[0])
+	}
+
+	// The user's machine cannot load skills: the fallback, saying why.
+	lacks := `your machine "vieille" has Claude Code but its CLI lacks --plugin-dir`
+	c = &codingRunCase{route: activity.CodingRouting{Machines: true, AnalyzeQueue: "fallback"},
+		pick: activity.PickMachineOutput{NoMachine: lacks, Lacks: lacks}}
+	out, err = runCodingRun(t, c, call)
+	if err != nil || out.Report != "from the fallback" || !strings.Contains(out.Note, lacks) {
+		t.Errorf("lacks: %+v %v", out, err)
+	}
+	// No fallback: the machine is connected, its CLI is to update.
+	c = &codingRunCase{route: activity.CodingRouting{Machines: true}, pick: activity.PickMachineOutput{NoMachine: lacks, Lacks: lacks}}
+	out, err = runCodingRun(t, c, call)
+	if err != nil || !strings.Contains(out.Error, lacks) || !strings.Contains(out.Error, "update it, then try again") ||
+		strings.Contains(out.Error, "start agent connect") {
+		t.Errorf("lacks, no fallback: %+v %v", out, err)
+	}
+}

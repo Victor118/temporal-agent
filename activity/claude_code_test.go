@@ -734,6 +734,14 @@ func TestWorkspaceChangesHandsWithTheRun(t *testing.T) {
 		}
 		return fi.Sys().(*syscall.Stat_t).Ino
 	}
+	// Held open, as a run could: the old file's inode stays taken, and the
+	// new file cannot be given it back (the inode a deleted file frees is
+	// often the next one handed out).
+	oldConfig, err := os.Open(filepath.Join(prepared.Dir, ".git", "config"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer oldConfig.Close()
 	configInode := inode(filepath.Join(prepared.Dir, ".git", "config"))
 
 	// The run commits, as its own user, and leaves a file in .git that

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,15 +22,27 @@ import (
 type fakeMachineStore struct {
 	pick    store.PickRequest
 	pickErr error
-	start   store.Directive
-	startOK error
-	token   []byte
-	closed  []string
+	// existing is the call's directive an earlier attempt made.
+	existing *store.Directive
+	start    store.Directive
+	startOK  error
+	token    []byte
+	closed   []string
 }
 
 func (f *fakeMachineStore) PickMachine(_ context.Context, req store.PickRequest) (store.Directive, store.Machine, error) {
 	f.pick = req
+	if f.existing != nil {
+		return *f.existing, store.Machine{ID: "m-1", Name: "maison"}, nil
+	}
 	return store.Directive{ID: req.DirectiveID}, store.Machine{ID: "m-1", Name: "maison"}, f.pickErr
+}
+
+func (f *fakeMachineStore) DirectiveOfCall(context.Context, string, string) (store.Directive, store.Machine, error) {
+	if f.existing != nil {
+		return *f.existing, store.Machine{ID: "m-1", Name: "maison"}, nil
+	}
+	return store.Directive{}, store.Machine{}, store.ErrDirectiveNotFound
 }
 
 func (f *fakeMachineStore) StartDirective(_ context.Context, id string, token []byte, _ string, _ time.Time) (store.Directive, error) {
@@ -145,5 +159,99 @@ func TestHTTPDirectiveHandoff(t *testing.T) {
 	status = http.StatusBadGateway
 	if err := h.Deliver(context.Background(), "d-1"); err == nil || errors.Is(err, errHandoffRefused) {
 		t.Errorf("502: %v", err)
+	}
+}
+
+// skillReader is a worker's skills, by name.
+type skillReader map[string]machine.RunSkill
+
+func (r skillReader) RunSkills(names []string) RunSkillSet {
+	set := RunSkillSet{Version: "abc123"}
+	for _, n := range names {
+		if s, ok := r[n]; ok {
+			set.Skills = append(set.Skills, s)
+		} else {
+			set.Missing = append(set.Missing, n)
+		}
+	}
+	return set
+}
+
+// The directive's input is final before the machine is reserved: the
+// skills named are read, and added to it; a name not found is said; skills
+// a run cannot take are a refusal, with nothing reserved.
+func TestPickMachine_Skills(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestActivityEnvironment()
+	st := &fakeMachineStore{}
+	reader := skillReader{"tdd": {Name: "tdd", Description: "Test first", Content: "RED, GREEN, REFACTOR."}, "BAD": {Name: "BAD", Content: "x"}}
+	env.RegisterActivity(&MachineActivities{Store: st, Skills: reader})
+	pick := func(names ...string) (PickMachineOutput, error) {
+		st.pick = store.PickRequest{}
+		v, err := env.ExecuteActivity((&MachineActivities{}).PickMachine, PickMachineInput{UserID: "u-1", Capabilities: []string{machine.CapClaudeCode},
+			Kind: machine.KindAnalyzeRepo, Input: json.RawMessage(`{"repo":"r","task":"t"}`), CallKey: "c", Timeout: time.Hour, Skills: names})
+		var out PickMachineOutput
+		if err == nil {
+			err = v.Get(&out)
+		}
+		return out, err
+	}
+
+	out, err := pick("tdd", "ghost")
+	if err != nil || out.DirectiveID == "" || len(out.Skills) != 1 || out.Skills[0] != "tdd" || out.SkillsVersion != "abc123" ||
+		len(out.SkillsMissing) != 1 || out.SkillsMissing[0] != "ghost: "+machine.SkillNotFound {
+		t.Fatalf("pick: %+v %v", out, err)
+	}
+	var in machine.AnalyzeInput
+	if err := json.Unmarshal(st.pick.Input, &in); err != nil || in.Repo != "r" || in.Task != "t" || len(in.Skills) != 1 ||
+		in.Skills[0] != reader["tdd"] || in.SkillsVersion != "abc123" {
+		t.Errorf("directive input %s %v", st.pick.Input, err)
+	}
+	// The machine must load them: run-skills, besides the kind's.
+	if !slices.Equal(st.pick.Capabilities, []string{machine.CapClaudeCode}) || !slices.Equal(st.pick.Extra, []string{machine.CapRunSkills}) {
+		t.Errorf("capabilities %v, extra %v", st.pick.Capabilities, st.pick.Extra)
+	}
+
+	// None has run-skills, one has Claude Code: no machine, saying which
+	// and why.
+	st.pickErr = &store.MachineLacksError{Machine: "vieille", Missing: []string{machine.CapRunSkills}}
+	out, err = pick("tdd")
+	if err != nil || out.DirectiveID != "" || !strings.Contains(out.NoMachine, `your machine "vieille" has Claude Code but its CLI lacks --plugin-dir`) ||
+		out.Lacks != out.NoMachine {
+		t.Errorf("lacks: %+v %v", out, err)
+	}
+	st.pickErr = nil
+
+	// Made again for the same call: what the directive holds, not what the
+	// skills are now.
+	stored, _ := json.Marshal(machine.AnalyzeInput{Repo: "r", Task: "t", Skills: []machine.RunSkill{{Name: "old", Content: "x"}}, SkillsVersion: "first"})
+	st.existing = &store.Directive{ID: "d-first", Input: stored}
+	out, err = pick("old", "tdd")
+	if err != nil || out.DirectiveID != "d-first" || !slices.Equal(out.Skills, []string{"old"}) || out.SkillsVersion != "first" ||
+		!slices.Equal(out.SkillsMissing, []string{"tdd: " + machine.SkillNotFound}) {
+		t.Errorf("replayed: %+v %v", out, err)
+	}
+	st.existing = nil
+
+	out, err = pick("BAD")
+	if err != nil || out.Refused == "" || out.DirectiveID != "" || st.pick.UserID != "" {
+		t.Errorf("refused: %+v %v, reserved %+v", out, err, st.pick)
+	}
+	// Refused now, though an earlier attempt made the call's directive:
+	// that one, not a refusal that would leave it holding a slot.
+	firstInput, _ := json.Marshal(machine.AnalyzeInput{Repo: "r", Task: "t", Skills: []machine.RunSkill{{Name: "tdd", Content: "x"}}})
+	st.existing = &store.Directive{ID: "d-earlier", Input: firstInput}
+	out, err = pick("BAD")
+	if err != nil || out.Refused != "" || out.DirectiveID != "d-earlier" || out.MachineName != "maison" || !slices.Equal(out.Skills, []string{"tdd"}) {
+		t.Errorf("refused, a directive made: %+v %v", out, err)
+	}
+	st.existing = nil
+
+	// None found: the run goes without, said so; the input is the model's,
+	// and any machine with Claude Code takes it.
+	out, err = pick("ghost")
+	if err != nil || out.DirectiveID == "" || len(out.Skills) != 0 || len(out.SkillsMissing) != 1 || string(st.pick.Input) != `{"repo":"r","task":"t"}` ||
+		len(st.pick.Extra) != 0 {
+		t.Errorf("none found: %+v %v %s", out, err, st.pick.Input)
 	}
 }

@@ -95,6 +95,11 @@ type CallContext struct {
 	// one whose machines a coding run may use. Empty: no user (a sub-agent
 	// of no turn has its parent's).
 	UserID string `json:"user_id,omitempty"`
+	// RunSkills are the calling agent's skills marked "runs: true": a
+	// coding run (analyze_repo, implement_feature) gives them to its CLI,
+	// read by name where the run is prepared (docs/design/run-skills.md).
+	// Names only, never their content.
+	RunSkills []string `json:"run_skills,omitempty"`
 }
 
 // callContextKeys are the input keys CallContext's fields decode from: its

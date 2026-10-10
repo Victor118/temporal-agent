@@ -31,7 +31,7 @@ func testInputs() Inputs {
 			"tools": {Queue: "tools", Activity: fresh},
 			"gone":  {Queue: "gone"},
 		},
-		Skills:         []skill.Skill{{Name: "present"}},
+		Skills:         []skill.Skill{{Name: "present", Runs: true}},
 		DefaultAgentID: "boss",
 		WorkflowQueue:  "agent",
 	}
@@ -188,7 +188,7 @@ func TestBuildInventory_Skills(t *testing.T) {
 		t.Errorf("missing skills = %+v", inv.MissingSkills)
 	}
 	refs := inv.Agent("boss").Skills
-	if !refs[0].Present || refs[1].Present {
+	if !refs[0].Present || refs[1].Present || !refs[0].Runs || refs[1].Runs {
 		t.Errorf("boss skill refs = %+v", refs)
 	}
 }
