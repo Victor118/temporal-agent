@@ -25,6 +25,8 @@ type streamLine struct {
 	// init line: which API key the CLI uses, "none" when it has none (a
 	// subscription's login or token).
 	APIKeySource string `json:"apiKeySource"`
+	// init line: the commands it has, a plugin's skills among them.
+	SlashCommands []string `json:"slash_commands"`
 
 	// result lines
 	Result            string          `json:"result"`
@@ -124,6 +126,7 @@ func (r *Runner) parseLine(line []byte, res *Result, report *strings.Builder, to
 				res.Model = sl.Model
 			}
 			res.APIKeySource = sl.APIKeySource
+			res.SlashCommands = sl.SlashCommands
 			return []Event{{Kind: EventInit, Raw: raw}}
 		}
 

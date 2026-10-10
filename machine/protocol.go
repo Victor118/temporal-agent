@@ -19,10 +19,11 @@ import (
 // versions of the project really meet. 2: a machine's capabilities change
 // while connected; 3: implement_feature, git-push, and the files a machine
 // publishes (phase 2); 4: the model on the machine (llm directives, a cap
-// per family, 4 MiB messages, compression).
+// per family, 4 MiB messages, compression); 5: a coding run's skills
+// (RunSkill in its directive's input, run-skills).
 const (
-	Protocol    = 4
-	MinProtocol = 4
+	Protocol    = 5
+	MinProtocol = 5
 )
 
 // Message types. A machine sends hello, rotated, progress, result and

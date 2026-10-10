@@ -31,16 +31,18 @@ func (s *FileStore) LoadAll(_ context.Context) ([]Skill, error) {
 			continue
 		}
 
-		name, description, body := parseFrontmatter(string(data))
+		fm, body := parseFrontmatter(string(data))
+		name := fm.name
 		if name == "" {
 			name = entry.Name()
 		}
 
 		skills = append(skills, Skill{
 			Name:        name,
-			Description: description,
+			Description: fm.description,
 			Content:     body,
 			Path:        skillFile,
+			Runs:        fm.runs,
 		})
 	}
 

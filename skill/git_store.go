@@ -39,9 +39,32 @@ func (s *GitStore) sync(ctx context.Context) error {
 	return s.pull(ctx, branch)
 }
 
+// clone clones the repository into CacheDir, a directory of this process's
+// user alone (0700): a private repository's URL keeps its credentials in
+// .git/config, which a coding run's user (RUN_AS_UID) must not read.
 func (s *GitStore) clone(ctx context.Context, branch string) error {
+	if err := os.MkdirAll(s.CacheDir, 0o700); err != nil {
+		return err
+	}
+	if err := os.Chmod(s.CacheDir, 0o700); err != nil {
+		return err
+	}
 	args := []string{"clone", "--depth", "1", "--branch", branch, s.RepoURL, s.CacheDir}
 	return s.git(ctx, args...)
+}
+
+// Version is the commit the skills were last loaded from: what a coding run
+// says it took them from (docs/design/run-skills.md §7). Empty when it
+// cannot be read.
+func (s *GitStore) Version(ctx context.Context) string {
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "HEAD")
+	cmd.Dir = s.CacheDir
+	cmd.Env = s.gitEnv()
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func (s *GitStore) pull(ctx context.Context, branch string) error {
