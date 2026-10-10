@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -37,6 +38,7 @@ import (
 	"github.com/victor/temporal-agent/claudecode"
 	"github.com/victor/temporal-agent/machine"
 	"github.com/victor/temporal-agent/machine/connect"
+	"github.com/victor/temporal-agent/skill"
 	"github.com/victor/temporal-agent/store"
 	"github.com/victor/temporal-agent/workflow"
 )
@@ -142,7 +144,8 @@ func newSmokeEnv(t *testing.T) *smokeEnv {
 	w.RegisterWorkflow(workflow.CodingRunWorkflow)
 	w.RegisterWorkflow(workflow.ImplementRunWorkflow)
 	w.RegisterActivity(&activity.MachineActivities{Store: st, Handoff: activity.NewHTTPDirectiveHandoff(e.base, smokeInternalKey),
-		Routing: activity.CodingRouting{Machines: true, AnalyzeQueue: e.fallback, ImplementQueue: e.implFallback}})
+		Routing: activity.CodingRouting{Machines: true, AnalyzeQueue: e.fallback, ImplementQueue: e.implFallback},
+		Skills:  smokeSkills(t)})
 	if err := w.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +160,8 @@ func newSmokeEnv(t *testing.T) *smokeEnv {
 	fw.RegisterWorkflowWithOptions(func(ctx sdkworkflow.Context, fin workflow.AnalyzeFallbackInput) (workflow.ClaudeCodeOutput, error) {
 		var in workflow.AnalyzeRepoInput
 		json.Unmarshal(fin.Input, &in)
-		return workflow.ClaudeCodeOutput{Repo: in.Repo, Report: "from the fallback, for " + in.UserID + ", as " + sdkworkflow.GetInfo(ctx).WorkflowExecution.ID}, nil
+		return workflow.ClaudeCodeOutput{Repo: in.Repo, Report: "from the fallback, for " + in.UserID + ", as " + sdkworkflow.GetInfo(ctx).WorkflowExecution.ID +
+			", skills " + strings.Join(in.RunSkills, ",")}, nil
 	}, sdkworkflow.RegisterOptions{Name: "AnalyzeFallbackWorkflow"})
 	if err := fw.Start(); err != nil {
 		t.Fatal(err)
@@ -986,6 +990,118 @@ EOF
 		}
 	})
 
+	t.Run("analyze_repo with the agent's skills: the machine's CLI loads them from --plugin-dir", func(t *testing.T) {
+		pia := e.user("pia")
+		repo := smokeGitRepo(t)
+		a, _ := e.startCoder(t, pia, "atelier", repo, false, skillsCLI)
+		ms, _ := e.st.ListMachines(ctx, pia)
+		if len(ms) != 1 || !ms[0].Can(machine.CapRunSkills) {
+			t.Errorf("run-skills not announced: %+v", ms)
+		}
+		run := e.analyzeWith(t, uuid.NewString(), pia, repo, []string{"tdd", "review"})
+		var out workflow.ClaudeCodeOutput
+		ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		if err := run.Get(ctx, &out); err != nil {
+			t.Fatal(err)
+		}
+		if out.Report != "skill found, named" || out.Machine != "atelier" || !slices.Equal(out.Skills, []string{"tdd"}) ||
+			!slices.Equal(out.SkillsMissing, []string{"review: " + machine.SkillNotFound}) || !strings.Contains(out.Content, "skills given to the run: tdd") {
+			t.Fatalf("output %+v", out)
+		}
+		id, _ := e.directiveOf(run.GetID())
+		d, err := e.st.GetDirective(ctx, id)
+		var in machine.AnalyzeInput
+		if err != nil || json.Unmarshal(d.Input, &in) != nil || len(in.Skills) != 1 || in.Skills[0].Name != "tdd" ||
+			in.Skills[0].Content != "RED, GREEN, REFACTOR: one commit per step." {
+			t.Errorf("the directive's input: %s %v", d.Input, err)
+		}
+		waitFor(t, "run deleted", 10*time.Second, func() bool { entries, _ := os.ReadDir(a.WorkDir); return len(entries) == 0 })
+	})
+
+	t.Run("the directive's skills, sent again at a hello, are the database's", func(t *testing.T) {
+		quinn := e.user("quinn")
+		_, token := e.enrollToken(quinn, "brute", []string{machine.CapClaudeCode}, 1)
+		raw := dialRaw(t, e.base, token)
+		raw.send(t, machine.Message{Type: machine.TypeHello, Protocol: machine.Protocol, OS: "linux",
+			Capabilities: []string{machine.CapClaudeCode, machine.CapRunSkills}, MaxDirectives: 1, ClaudeCode: "ok"})
+		raw.expect(t, machine.TypeWelcome)
+		run := e.analyzeWith(t, uuid.NewString(), quinn, smokeGitRepo(t), []string{"tdd"})
+		d := raw.expect(t, machine.TypeDirective)
+		var in machine.AnalyzeInput
+		if json.Unmarshal(d.Input, &in) != nil || len(in.Skills) != 1 || in.Skills[0].Name != "tdd" {
+			t.Fatalf("directive %s", d.Input)
+		}
+		// As if it had never been sent: the next hello sends it, from the
+		// database.
+		raw.ws.CloseNow()
+		if _, err := e.db.Exec("UPDATE machine_directives SET sent_conn = '' WHERE id = $1", d.ID); err != nil {
+			t.Fatal(err)
+		}
+		raw = dialRaw(t, e.base, token)
+		raw.send(t, machine.Message{Type: machine.TypeHello, Protocol: machine.Protocol, OS: "linux",
+			Capabilities: []string{machine.CapClaudeCode, machine.CapRunSkills}, MaxDirectives: 1, ClaudeCode: "ok"})
+		again := raw.expect(t, machine.TypeDirective)
+		var in2 machine.AnalyzeInput
+		if again.ID != d.ID || json.Unmarshal(again.Input, &in2) != nil || len(in2.Skills) != 1 || in2.Skills[0] != in.Skills[0] {
+			t.Errorf("sent again: %+v %s", again, again.Input)
+		}
+		e.tc.TerminateWorkflow(ctx, run.GetID(), "", "seen")
+	})
+
+	t.Run("analyze_repo with skills on a machine whose CLI has no --plugin-dir: refused, the fallback runs it", func(t *testing.T) {
+		rita := e.user("rita")
+		repo := smokeGitRepo(t)
+		e.startCoderHelp(t, rita, "ancienne", repo, false, oldHelp, skillsCLI)
+		var out workflow.ClaudeCodeOutput
+		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
+		if err := e.analyzeWith(t, uuid.NewString(), rita, repo, []string{"tdd"}).Get(ctx, &out); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasPrefix(out.Report, "from the fallback") || !strings.HasSuffix(out.Report, "skills tdd") || out.Machine != "" ||
+			!strings.Contains(out.Note, `your machine "ancienne" turned it down`) || !strings.Contains(out.Note, "too old") {
+			t.Errorf("output %+v", out)
+		}
+		// Without skills, it runs there.
+		if err := e.analyze(t, uuid.NewString(), rita, repo).Get(ctx, &out); err != nil || out.Machine != "ancienne" || out.Report != "skill missing" {
+			t.Errorf("no skills: %+v %v", out, err)
+		}
+	})
+
+	t.Run("analyze_repo with skills on a machine whose managed settings forbid plugins: refused, the fallback runs it", func(t *testing.T) {
+		sam := e.user("sam")
+		repo := smokeGitRepo(t)
+		e.startCoder(t, sam, "geree", repo, false, `echo "--plugin-dir is disabled by your organization's managed settings (disableSideloadFlags). Plugins, custom agents, and MCP servers can only be loaded from sources your administrator has approved." >&2
+exit 1
+`)
+		var out workflow.ClaudeCodeOutput
+		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
+		if err := e.analyzeWith(t, uuid.NewString(), sam, repo, []string{"tdd"}).Get(ctx, &out); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasPrefix(out.Report, "from the fallback") || out.Interrupted || !strings.Contains(out.Note, "managed settings") {
+			t.Errorf("output %+v", out)
+		}
+	})
+
+	t.Run("analyze_repo whose CLI did not load the skill: the run goes on, the output says so", func(t *testing.T) {
+		tom := e.user("tom")
+		repo := smokeGitRepo(t)
+		e.startCoder(t, tom, "distraite", repo, false, analyzeOK)
+		var out workflow.ClaudeCodeOutput
+		ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		if err := e.analyzeWith(t, uuid.NewString(), tom, repo, []string{"tdd"}).Get(ctx, &out); err != nil {
+			t.Fatal(err)
+		}
+		if out.Report != "ok" || out.Machine != "distraite" || !slices.Equal(out.SkillsMissing, []string{"tdd: " + machine.SkillNotLoaded}) ||
+			!strings.Contains(out.Content, "tdd: not loaded by the CLI") {
+			t.Errorf("output %+v", out)
+		}
+	})
+
 	t.Run("two live connections of one machine: both cut", func(t *testing.T) {
 		erin := e.user("erin")
 		_, token := e.enrollToken(erin, "double", []string{machine.KindEcho}, 1)
@@ -1052,6 +1168,56 @@ func smokeGitRepo(t *testing.T) string {
 	return repo
 }
 
+// smokeSkills are the skills of the worker that picks the machines, as read
+// from a SKILLS_DIR: tdd goes with the runs, its source's allowed-tools
+// never reaches the CLI; review does not.
+func smokeSkills(t *testing.T) activity.RunSkillReader {
+	dir := t.TempDir()
+	for name, content := range map[string]string{
+		"tdd":    "---\nname: tdd\ndescription: Test first\nruns: true\nallowed-tools: Bash(*)\n---\nRED, GREEN, REFACTOR: one commit per step.",
+		"review": "---\nname: review\ndescription: Look twice\n---\nLook twice.",
+	} {
+		os.MkdirAll(filepath.Join(dir, name), 0o755)
+		if err := os.WriteFile(filepath.Join(dir, name, "SKILL.md"), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	skills, err := (&skill.FileStore{Dir: dir}).LoadAll(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return activity.NewSkillActivities(skills, activity.NewCatalog()).Prompts
+}
+
+// pluginHelp is what a CLI that loads plugins says in its --help; oldHelp,
+// one that does not.
+const (
+	pluginHelp = "  --plugin-dir <path>   Load a plugin from a directory or .zip for this session only"
+	oldHelp    = "  --add-dir <directories...>   Additional directories to allow tool access to"
+)
+
+// skillsCLI is a stand-in CLI that does with its plugin what the real one
+// does: it lists the skill in its init when it finds it under
+// --plugin-dir, and reports whether its SKILL.md is the machine's (the
+// body, never the source's allowed-tools) and the system prompt names it.
+const skillsCLI = `plugin=none prompt=none
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --plugin-dir) plugin=$2 ;;
+    --append-system-prompt) prompt=$2 ;;
+  esac
+  shift
+done
+skill="$plugin/skills/tdd/SKILL.md"
+cmds='"compact"'
+[ -r "$skill" ] && cmds='"compact","temporal-agent:tdd"'
+verdict=missing
+if grep -q "RED, GREEN, REFACTOR" "$skill" 2>/dev/null && ! grep -q allowed-tools "$skill" && ! grep -q "runs:" "$skill"; then verdict=found; fi
+case "$prompt" in *temporal-agent:tdd*) verdict="$verdict, named" ;; esac
+echo '{"type":"system","subtype":"init","session_id":"s","apiKeySource":"none","slash_commands":['"$cmds"']}'
+echo '{"type":"result","subtype":"success","is_error":false,"result":"skill '"$verdict"'","session_id":"s"}'
+`
+
 // startAnalyzer starts a machine of userID's that runs analyses with a
 // stand-in for the claude CLI (script), on repo.
 func (e *smokeEnv) startAnalyzer(t *testing.T, userID, name, repo, script string) (*connect.Coder, chan error) {
@@ -1062,6 +1228,12 @@ func (e *smokeEnv) startAnalyzer(t *testing.T, userID, name, repo, script string
 // stand-in for the claude CLI (script), on repo, pushing there with
 // allowPush; what its runs leave in their outputs is uploaded.
 func (e *smokeEnv) startCoder(t *testing.T, userID, name, repo string, allowPush bool, script string) (*connect.Coder, chan error) {
+	return e.startCoderHelp(t, userID, name, repo, allowPush, pluginHelp, script)
+}
+
+// startCoderHelp is startCoder with a CLI whose --help says help: whether
+// it loads a run's skills is read there, as agent connect does at start.
+func (e *smokeEnv) startCoderHelp(t *testing.T, userID, name, repo string, allowPush bool, help, script string) (*connect.Coder, chan error) {
 	t.Helper()
 	id, token := e.enrollToken(userID, name, []string{machine.CapClaudeCode}, 1)
 	dir := t.TempDir()
@@ -1069,17 +1241,21 @@ func (e *smokeEnv) startCoder(t *testing.T, userID, name, repo string, allowPush
 		t.Fatal(err)
 	}
 	bin := filepath.Join(t.TempDir(), "claude")
-	if err := os.WriteFile(bin, []byte("#!/bin/sh\ncat >/dev/null\n"+script), 0o755); err != nil {
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n[ \"$1\" = --help ] && { echo '"+help+"'; exit 0; }\ncat >/dev/null\n"+script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	a := &connect.Coder{Runner: claudecode.Runner{Binary: bin}, Auth: claudecode.AuthSubscription, Repos: []string{repo}, AllowPush: allowPush,
 		WorkDir: t.TempDir(), Environ: []string{claudecode.OAuthTokenEnv + "=smoke"}, Home: t.TempDir(), ProgressEvery: 200 * time.Millisecond}
+	a.PluginDir = a.Runner.SupportsFlag(context.Background(), claudecode.PluginDirFlag)
 	c := &connect.Client{State: connect.State{Dir: dir},
 		Executors: map[string]connect.Executor{machine.KindAnalyzeRepo: a.Analyze, machine.KindImplementFeature: a.Implement},
 		Status: func() connect.Status {
 			s := connect.Status{ClaudeCode: string(a.Login())}
 			if s.ClaudeCode == string(claudecode.LoginOK) {
 				s.Capabilities = []string{machine.CapClaudeCode}
+				if a.PluginDir {
+					s.Capabilities = append(s.Capabilities, machine.CapRunSkills)
+				}
 			}
 			if a.AllowPush {
 				s.Capabilities = append(s.Capabilities, machine.CapGitPush)
@@ -1134,8 +1310,14 @@ func (e *smokeEnv) implement(t *testing.T, session, userID, repo string) client.
 // analyze starts analyze_repo as a turn of session's participant jarvis
 // would, for userID.
 func (e *smokeEnv) analyze(t *testing.T, session, userID, repo string) client.WorkflowRun {
+	return e.analyzeWith(t, session, userID, repo, nil)
+}
+
+// analyzeWith is analyze for an agent whose runs take skills along (the
+// call's context's run_skills).
+func (e *smokeEnv) analyzeWith(t *testing.T, session, userID, repo string, skills []string) client.WorkflowRun {
 	t.Helper()
-	raw, _ := json.Marshal(map[string]string{"repo": repo, "task": "Where is the handler?", "user_id": userID, "agent": "Jarvis"})
+	raw, _ := json.Marshal(map[string]any{"repo": repo, "task": "Where is the handler?", "user_id": userID, "agent": "Jarvis", "run_skills": skills})
 	id := session + ":p:jarvis:m1:tool:analyze_repo:call-" + smokeRandom(t)
 	run, err := e.tc.ExecuteWorkflow(context.Background(), client.StartWorkflowOptions{ID: id, TaskQueue: e.queue}, workflow.CodingRunWorkflow, json.RawMessage(raw))
 	if err != nil {
