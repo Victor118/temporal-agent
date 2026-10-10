@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // Coding runs on a machine: analyze_repo (phase 1), implement_feature
@@ -178,6 +179,23 @@ func OutputsPrompt(dir string) string {
 		"Nothing else you write outside the repository is kept.", dir, MaxOutputFiles)
 }
 
+// What keeps an implementation's commits when they cannot be pushed, on a
+// worker as on a machine. Before the CLI, a git push --dry-run of the base to
+// the run's branch, as the real push would go (its identity, its options):
+// it reaches the remote and authenticates as a push does (receive-pack), so
+// a run whose work could not be published is refused before anything is
+// paid. It runs no hook of the server's and checks no branch protection:
+// what those refuse is only known at the push. A push that fails anyway
+// publishes the commits as a git bundle of the branch (BundleName), for the
+// user to push themselves. PushCheckTimeout bounds the dry run.
+const PushCheckTimeout = 2 * time.Minute
+
+// BundleName is the file the commits of a branch that could not be pushed
+// are published as: the branch, its slashes as dashes (agent-fix-login-ab12.bundle).
+func BundleName(branch string) string {
+	return strings.ReplaceAll(branch, "/", "-") + ".bundle"
+}
+
 // maxAnalyzeTask bounds an analysis's task.
 const maxAnalyzeTask = 64 << 10
 
@@ -291,6 +309,11 @@ type CodingOutput struct {
 	Commits []Commit `json:"commits,omitempty"`
 	Pushed  bool     `json:"pushed,omitempty"`
 	Dirty   bool     `json:"dirty,omitempty"`
+	// Bundle is the name of the git bundle of the branch the machine
+	// published when the push failed (BundleName): the gateway lists the
+	// file itself. BundleError says why there is none, when the push failed.
+	Bundle      string `json:"bundle,omitempty"`
+	BundleError string `json:"bundle_error,omitempty"`
 	// Unpublished are the run's outputs the machine did not publish, and
 	// why ("name: reason"). What it published, the gateway lists itself
 	// (Result.Files): the machine's word is not needed for that.

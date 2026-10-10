@@ -24,9 +24,11 @@ import (
 // identity, only to a repository of --repos and with --allow-push; publish
 // the outputs; delete the clone. As ImplementFeatureWorkflow does on a
 // worker, with the same rules: no push when the run changed the clone's git
-// configuration, left HEAD elsewhere, or made no commit. The output goes
-// along with an error too (a run that did not complete: what it committed
-// may still be pushed).
+// configuration, left HEAD elsewhere, or made no commit. The push is tried
+// before the CLI runs (checkPush): a run whose work could not be published
+// is refused, and goes elsewhere; one whose push fails anyway publishes its
+// commits as a bundle (bundle). The output goes along with an error too (a
+// run that did not complete: what it committed may still be pushed).
 func (a *Coder) Implement(ctx context.Context, input json.RawMessage, progress func(string)) (json.RawMessage, error) {
 	var in machine.ImplementInput
 	if err := json.Unmarshal(input, &in); err != nil {
@@ -58,6 +60,9 @@ func (a *Coder) Implement(ctx context.Context, input json.RawMessage, progress f
 	// land on the base by accident.
 	if out, err := git(ctx, r.clone, "checkout", "--quiet", "-b", in.Branch); err != nil {
 		return nil, fmt.Errorf("create branch %s: %v: %s", in.Branch, err, out)
+	}
+	if err := checkPush(ctx, in, r, base); err != nil {
+		return nil, err
 	}
 	if err := keepGitConfig(r); err != nil {
 		return nil, err
@@ -121,6 +126,29 @@ func cliDeadline(ctx context.Context, now time.Time) time.Time {
 	return deadline.Add(-reserve)
 }
 
+// checkPush tries the push before the run: git push --dry-run of the base to
+// the directive's branch, with the push's identity and options, within
+// machine.PushCheckTimeout. Its refusal (a remote that does not take the
+// owner's credentials, none found without asking) is a Refusal: the clone
+// was made, nothing was paid, the workflow takes the run elsewhere — rather
+// than a run whose commits could not be published.
+func checkPush(ctx context.Context, in machine.ImplementInput, r *codingRun, base string) error {
+	tryCtx, cancel := context.WithTimeout(ctx, machine.PushCheckTimeout)
+	defer cancel()
+	out, err := git(tryCtx, r.clone, "push", "--dry-run", "--", in.Repo, base+":refs/heads/"+in.Branch)
+	switch {
+	case err == nil:
+		return nil
+	case ctx.Err() != nil:
+		// Stopped or cancelled: not the remote's answer.
+		return ctx.Err()
+	case tryCtx.Err() != nil:
+		return Refuse("this machine could not check that it may push to %q: git push --dry-run did not answer within %s", in.Repo, machine.PushCheckTimeout)
+	}
+	return Refuse("this machine's git may not push to %q (git push --dry-run, before the run): %v: %s%s",
+		in.Repo, err, machine.Cut(out, 1024), gitHint(out))
+}
+
 // publish inspects what the run produced and pushes it when it may.
 func (a *Coder) publish(ctx context.Context, in machine.ImplementInput, r *codingRun, base string, out *machine.CodingOutput, progress func(string)) {
 	// The run has no reason to touch the repository's git configuration,
@@ -180,10 +208,48 @@ func (a *Coder) publish(ctx context.Context, in machine.ImplementInput, r *codin
 	sha := out.Commits[0].SHA
 	if pushed, err := git(ctx, r.clone, "push", "--", in.Repo, sha+":refs/heads/"+in.Branch); err != nil {
 		out.Error = joinErrors(out.Error, fmt.Sprintf("the commits were not pushed: %v: %s%s", err, machine.Cut(pushed, 2048), gitHint(pushed)))
+		// Stopped meanwhile: nothing more.
+		if ctx.Err() == nil {
+			out.Bundle, err = a.bundle(ctx, in, r, base, sha)
+			if err != nil {
+				out.BundleError = machine.Cut(err.Error(), 1024)
+			}
+		}
 		return
 	}
 	out.Pushed = true
 	log.Printf("connect: pushed %s (%d commits) to %s", in.Branch, len(out.Commits), in.Repo)
+}
+
+// bundle keeps the commits a push did not publish: a git bundle of the
+// branch at sha, from base (machine.WriteBundle), made by the owner's git as
+// the push was, the clone's configuration restored; in the run's directory,
+// out of the outputs, deleted with it; published as a file of the directive
+// (Upload), for the user to fetch and push themselves. It returns the file's
+// name; its error says why there is none.
+func (a *Coder) bundle(ctx context.Context, in machine.ImplementInput, r *codingRun, base, sha string) (string, error) {
+	if a.Upload == nil {
+		return "", errors.New("nothing publishes a file from this machine")
+	}
+	if changed, err := restoreGitConfig(r); err != nil || changed {
+		return "", errors.New("the clone's git configuration changed since the inspection")
+	}
+	name := machine.BundleName(in.Branch)
+	path := filepath.Join(r.dir, name)
+	run := func(ctx context.Context, args ...string) (string, error) { return git(ctx, r.clone, args...) }
+	if err := machine.WriteBundle(ctx, run, in.Branch, base, sha, path); err != nil {
+		return "", err
+	}
+	content, err := machine.ReadBundle(path, a.maxFileBytes())
+	if err != nil {
+		return "", err
+	}
+	f, err := a.Upload(ctx, name, content)
+	if err != nil {
+		return "", fmt.Errorf("%s was not published: %v", name, err)
+	}
+	log.Printf("connect: %s not pushed: its commits published as %s", in.Branch, f.Name)
+	return f.Name, nil
 }
 
 // keepGitConfig keeps a copy of the clone's git configuration, outside the

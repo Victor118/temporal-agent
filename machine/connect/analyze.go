@@ -243,8 +243,8 @@ func (a *Coder) refuse(repo string, skills []machine.RunSkill) error {
 
 // codingRun is one run's directory under WorkDir: the clone, and next to it
 // (an implementation's) the outputs the CLI may leave, the copy of the
-// clone's git configuration and the run's plugin (its skills), all deleted
-// with it.
+// clone's git configuration, the run's plugin (its skills) and the bundle of
+// its commits when they could not be pushed, all deleted with it.
 type codingRun struct {
 	dir, clone, outputs, gitConfig, plugin string
 }
@@ -411,11 +411,14 @@ func gitEnv() []string {
 	return subproc.GitEnvUser(os.Environ(), gitEnvNames...)
 }
 
-// gitHint says, after a clone that failed, what the owner can do about it.
+// gitHint says, after a clone or a push that failed, what the owner can do
+// about it.
 func gitHint(out string) string {
 	switch lower := strings.ToLower(out); {
 	case strings.Contains(lower, "terminal prompts disabled") || strings.Contains(lower, "could not read username"):
 		return " (this repository asks for credentials: git found none without asking — set a credential helper in your git configuration, or give its ssh URL)"
+	case strings.Contains(lower, "returned error: 403") || strings.Contains(lower, "permission to "):
+		return " (your git identity may read this repository but not push to it)"
 	case strings.Contains(lower, "host key verification failed"):
 		return " (the host's ssh key is not in your known_hosts: connect to it once by hand, e.g. ssh -T git@github.com)"
 	case strings.Contains(lower, "permission denied (publickey)"):

@@ -239,7 +239,8 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Nothing to
 			if err != nil || json.Unmarshal(raw, &out) != nil {
 				t.Fatalf("implement: %s %v", raw, err)
 			}
-			if out.Pushed || !strings.Contains(out.Error, c.says) || !strings.Contains(out.Error, "nothing was pushed") {
+			// No push tried: no bundle either.
+			if out.Pushed || !strings.Contains(out.Error, c.says) || !strings.Contains(out.Error, "nothing was pushed") || out.Bundle != "" || out.BundleError != "" {
 				t.Errorf("output %+v", out)
 			}
 			if got := remoteBranch(t, remote, "agent/health-1234abcd"); got != "" {
@@ -249,17 +250,118 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Nothing to
 	}
 }
 
-// A push the remote refuses is said, the commits listed.
+// A push the remote refuses is said, the commits listed, and kept: a bundle
+// of the branch, published for the directive, from which the user's own
+// clone fetches the commit pushed; deleted with the run.
 func TestCoder_ImplementPushRefused(t *testing.T) {
-	a, remote, _, _ := newImplementer(t, commitScript(""))
-	// A hook of the remote's refuses every push.
-	hook := filepath.Join(remote, "hooks", "pre-receive")
-	os.WriteFile(hook, []byte("#!/bin/sh\necho refused by policy >&2\nexit 1\n"), 0o755)
+	a, remote, _, pub := newImplementer(t, commitScript(""))
+	// A hook of the remote's refuses every push; a dry run runs none.
+	refuseEveryPush(t, remote)
 	raw, err := a.Implement(context.Background(), implementInput(remote), func(string) {})
 	var out machine.CodingOutput
 	json.Unmarshal(raw, &out)
 	if err != nil || out.Pushed || len(out.Commits) != 1 || !strings.Contains(out.Error, "were not pushed") || !strings.Contains(out.Error, "refused by policy") {
-		t.Errorf("output %+v %v", out, err)
+		t.Fatalf("output %+v %v", out, err)
+	}
+	if out.Bundle != "agent-health-1234abcd.bundle" || out.BundleError != "" || pub.files[out.Bundle] == "" {
+		t.Fatalf("bundle %q %q, published %v", out.Bundle, out.BundleError, pub.files)
+	}
+	if got := fetchBundle(t, remote, []byte(pub.files[out.Bundle]), "agent/health-1234abcd"); got != out.Commits[0].SHA {
+		t.Errorf("fetched %s, want %s", got, out.Commits[0].SHA)
+	}
+	if entries, _ := os.ReadDir(a.WorkDir); len(entries) != 0 {
+		t.Errorf("left behind: %v", entries)
+	}
+
+	// Not kept: said, never claimed.
+	for name, setup := range map[string]func(a *Coder){
+		"too large":       func(a *Coder) { a.MaxFileBytes = 10 },
+		"nothing uploads": func(a *Coder) { a.Upload = nil },
+		"upload refused": func(a *Coder) {
+			a.Upload = func(context.Context, string, []byte) (machine.FileRef, error) {
+				return machine.FileRef{}, &UploadRefused{Reason: "over"}
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			a, remote, _, _ := newImplementer(t, commitScript(""))
+			refuseEveryPush(t, remote)
+			setup(a)
+			raw, _ := a.Implement(context.Background(), implementInput(remote), func(string) {})
+			var out machine.CodingOutput
+			json.Unmarshal(raw, &out)
+			if out.Pushed || out.Bundle != "" || out.BundleError == "" {
+				t.Errorf("output %+v", out)
+			}
+		})
+	}
+}
+
+// refuseEveryPush gives remote a hook that refuses every push.
+func refuseEveryPush(t *testing.T, remote string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(remote, "hooks", "pre-receive"), []byte("#!/bin/sh\necho refused by policy >&2\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// fetchBundle fetches branch from a bundle into a fresh clone of remote, as
+// its user would, and returns the commit it got.
+func fetchBundle(t *testing.T, remote string, bundle []byte, branch string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "saved.bundle")
+	os.WriteFile(path, bundle, 0o600)
+	clone := filepath.Join(dir, "clone")
+	for _, args := range [][]string{{"clone", "--quiet", remote, clone}, {"-C", clone, "fetch", "--quiet", path, branch + ":" + branch}} {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v %s", args, err, out)
+		}
+	}
+	got, err := exec.Command("git", "-C", clone, "rev-parse", "refs/heads/"+branch).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(string(got))
+}
+
+// A remote that will not take the push is found before the CLI runs: the
+// directive is refused (the workflow takes it elsewhere), git's words and
+// the clone gone.
+func TestCoder_ImplementPushCheckRefused(t *testing.T) {
+	a, remote, seen, _ := newImplementer(t, commitScript(""))
+	// The remote's receive-pack fails to start: any push fails, a fetch not.
+	if out, err := exec.Command("git", "-C", remote, "config", "receive.unpackLimit", "notanumber").CombinedOutput(); err != nil {
+		t.Fatalf("config: %v %s", err, out)
+	}
+	_, err := a.Implement(context.Background(), implementInput(remote), func(string) {})
+	var refusal *Refusal
+	if !errors.As(err, &refusal) || !strings.Contains(err.Error(), "may not push") || !strings.Contains(err.Error(), "--dry-run") ||
+		!strings.Contains(err.Error(), "receive.unpacklimit") {
+		t.Fatalf("not refused: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(seen, "args")); err == nil {
+		t.Error("the CLI ran")
+	}
+	if entries, _ := os.ReadDir(a.WorkDir); len(entries) != 0 {
+		t.Errorf("clone left behind: %v", entries)
+	}
+	// An analysis does not push: the same remote is analysed.
+	a.Runner.Binary = fakeClaude(t, t.TempDir(), analyzeStream)
+	if _, err := a.Analyze(context.Background(), input(remote, ""), func(string) {}); err != nil {
+		t.Errorf("analysis: %v", err)
+	}
+}
+
+func TestGitHint(t *testing.T) {
+	for out, want := range map[string]string{
+		"fatal: could not read Username for 'https://github.com': terminal prompts disabled":                              "credential helper",
+		"remote: Permission to me/app.git denied to bot.\nfatal: unable to access: The requested URL returned error: 403": "not push to it",
+		"Permission denied (publickey).": "ssh key",
+	} {
+		if got := gitHint(out); !strings.Contains(got, want) {
+			t.Errorf("gitHint(%q) = %q, want %q", out, got, want)
+		}
 	}
 }
 
