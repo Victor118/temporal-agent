@@ -687,6 +687,8 @@ func newHTTPHandler(cfg *config.Config, st store.Store, tc client.Client, hub *s
 	// The background tasks whose workflow closed without ending them: one
 	// sweep per server (one replica).
 	go srv.sessions.RunTaskSweep(context.Background())
+	// The access rules that target nothing any more, told to the admins.
+	go runAccessSweep(context.Background(), st, userAlerts(st, hub, "access"))
 	return srv.routes()
 }
 

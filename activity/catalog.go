@@ -82,7 +82,7 @@ func (c *Catalog) Tools() []store.ToolRecord {
 // tools are generated from the agents catalog, never published by a worker, so
 // the allowlist governs delegation like any other tool: "agent_code-reviewer"
 // for one agent, "agent_*" for all of them.
-const AgentToolPrefix = "agent_"
+const AgentToolPrefix = access.AgentToolPrefix
 
 // AgentToolName returns the name of the tool that delegates to agentID.
 func AgentToolName(agentID string) string { return AgentToolPrefix + agentID }

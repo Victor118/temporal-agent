@@ -114,6 +114,17 @@ func Matching(t ToolRef, rules []Rule) []Rule {
 	return matching
 }
 
+// Targets returns the tools of tools that r targets, in order.
+func Targets(r Rule, tools []ToolRef) []ToolRef {
+	var targeted []ToolRef
+	for _, t := range tools {
+		if r.Matches(t) {
+			targeted = append(targeted, t)
+		}
+	}
+	return targeted
+}
+
 // Allowed decides whether u may use t:
 //   - no user (nil): only a tool no rule targets;
 //   - a disabled user: nothing, admin or not;

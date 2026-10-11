@@ -84,10 +84,16 @@ type notificationAppender interface {
 // machineAlerts posts a machine's alert in its owner's notifications, and
 // shows it live, like a scheduled task's result.
 func machineAlerts(st notificationAppender, hub *sse.Hub) func(ctx context.Context, userID, text string) {
+	return userAlerts(st, hub, "machine")
+}
+
+// userAlerts posts an alert of kind (its key's prefix, and the log's) in a
+// user's notifications, and shows it live.
+func userAlerts(st notificationAppender, hub *sse.Hub, kind string) func(ctx context.Context, userID, text string) {
 	return func(ctx context.Context, userID, text string) {
 		topic := notificationsOf(userID)
-		if _, err := st.AppendMessage(ctx, topic, "machine:"+newUUID(), store.Message{Role: store.RoleAssistant, Content: text}); err != nil {
-			log.Printf("machines: notify user %s: %v", userID, err)
+		if _, err := st.AppendMessage(ctx, topic, kind+":"+newUUID(), store.Message{Role: store.RoleAssistant, Content: text}); err != nil {
+			log.Printf("%s: notify user %s: %v", kind, userID, err)
 			return
 		}
 		data, _ := json.Marshal(text)
