@@ -15,6 +15,11 @@ func (f *routeStore) GetActiveSessionByChannel(context.Context, string, string, 
 	return nil, nil
 }
 func (f *routeStore) GetAgent(_ context.Context, id string) (*store.Agent, error) {
+	for _, a := range f.agents {
+		if a.ID == id {
+			return &a, nil
+		}
+	}
 	if id == "default" {
 		return &store.Agent{ID: "default", Name: "Default"}, nil
 	}

@@ -172,7 +172,15 @@ func (u *ui) buildPage(ctx context.Context, me *store.User, sessionID, view, blo
 	if err != nil {
 		return nil, err
 	}
-	p.Agents, p.Agent = directory.List, directory.Session
+	// The agents the viewer may call: those open to them. The thread still
+	// signs every answer by its agent (directory).
+	p.Agent = directory.Session
+	for _, a := range directory.List {
+		if u.sessions.AgentOpen(ctx, me.ID, a.ID) {
+			p.Agents = append(p.Agents, a)
+		}
+	}
+	p.AgentClosed = !u.sessions.AgentOpen(ctx, me.ID, sess.AgentID)
 	// Where each agent stands, and what the viewer may stop: the Agents
 	// panel, in the rail of both views.
 	p.Participants = u.agentsPanel(ctx, me, &sess, directory)
@@ -413,6 +421,10 @@ func (u *ui) sessionStream(w http.ResponseWriter, r *http.Request) {
 
 func (u *ui) newSessionForm(w http.ResponseWriter, r *http.Request) {
 	id, err := u.sessions.Open(r.Context(), auth.UserFrom(r.Context()), session.OpenOptions{Title: r.FormValue("title")})
+	if errors.Is(err, session.ErrAgentNotOpen) {
+		http.Error(w, "Aucun agent ne t'est ouvert : demande à un admin.", http.StatusForbidden)
+		return
+	}
 	if err != nil {
 		log.Printf("ui: new session: %v", err)
 		http.Error(w, "Impossible de créer la session", http.StatusInternalServerError)
@@ -437,7 +449,7 @@ func (u *ui) sendForm(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	_, err = u.sessions.Deliver(r.Context(), sess, auth.UserFrom(r.Context()), text)
+	d, err := u.sessions.Deliver(r.Context(), sess, auth.UserFrom(r.Context()), text)
 	switch {
 	case errors.Is(err, session.ErrSummaryPending):
 		fail("Le résumé de la session parente est en cours : patiente un instant.")
@@ -450,6 +462,12 @@ func (u *ui) sendForm(w http.ResponseWriter, r *http.Request) {
 		fail("Message non envoyé : " + err.Error())
 		return
 	}
+	if len(d.Refused) > 0 {
+		// The author is told who will not answer: under the thread, until
+		// its next reload.
+		u.renderPage(w, r, sessionID, "thread", "thread", func(p *chat.Page) { p.Notice = session.RefusedText(d.Refused) })
+		return
+	}
 	u.renderPage(w, r, sessionID, "thread", "thread", nil)
 }
 
@@ -460,8 +478,11 @@ func (u *ui) forkForm(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Printf("ui: fork %s at %d: %v", sessionID, messageID, err)
 		msg := "Fork impossible : " + err.Error()
-		if errors.Is(err, session.ErrPurposeTooLong) {
+		switch {
+		case errors.Is(err, session.ErrPurposeTooLong):
 			msg = "Fork impossible : le but tient en quelques phrases, la spec reste dans la session parente."
+		case errors.Is(err, session.ErrAgentNotOpen):
+			msg = "Fork impossible : l'agent de cette session ne t'est pas ouvert, il ne te répondrait pas."
 		}
 		u.renderPage(w, r, sessionID, "thread", "thread", func(p *chat.Page) { p.Error = msg })
 		return

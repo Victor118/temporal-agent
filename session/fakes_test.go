@@ -18,6 +18,7 @@ import (
 	"go.temporal.io/sdk/converter"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/victor/temporal-agent/access"
 	"github.com/victor/temporal-agent/activity"
 	"github.com/victor/temporal-agent/store"
 )
@@ -46,7 +47,12 @@ type memStore struct {
 	cancelledBy map[string]string
 	tasksMu     sync.Mutex
 	onDelete    func() // called as the session is deleted
+	// rules are the access rules and the users they decide for; none:
+	// every agent is open.
+	rules access.Snapshot
 }
+
+func (m *memStore) AccessSnapshot(context.Context) (access.Snapshot, error) { return m.rules, nil }
 
 func (m *memStore) ListRunningTasks(_ context.Context, sessionID, participant string) ([]store.BackgroundTask, error) {
 	m.tasksMu.Lock()

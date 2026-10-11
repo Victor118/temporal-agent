@@ -23,9 +23,11 @@ type OpenOptions struct {
 }
 
 // Open creates a session for me, and returns its ID. Nothing runs for it
-// until a message calls an agent.
+// until a message calls an agent. Its agent must be open to me
+// (ErrAgentNotOpen): without one asked for, the default agent, or else the
+// first one open to me.
 func (s *Service) Open(ctx context.Context, me *store.User, o OpenOptions) (string, error) {
-	agentID, err := s.resolveAgentID(ctx, o.AgentID)
+	agentID, err := s.resolveOpenAgentID(ctx, me.ID, o.AgentID)
 	if err != nil {
 		return "", err
 	}
@@ -221,6 +223,31 @@ func (s *Service) resolveAgentID(ctx context.Context, requested string) (string,
 		return agents[0].ID, nil
 	}
 	return "", fmt.Errorf("no agents configured")
+}
+
+// resolveOpenAgentID is resolveAgentID among the agents open to userID: one
+// requested must be; without a request, the default agent if it is, else
+// the first one that is, in resolveAgentID's order.
+func (s *Service) resolveOpenAgentID(ctx context.Context, userID, requested string) (string, error) {
+	if requested != "" {
+		id, err := s.resolveAgentID(ctx, requested)
+		if err == nil && !s.AgentOpen(ctx, userID, id) {
+			return "", ErrAgentNotOpen
+		}
+		return id, err
+	}
+	id, err := s.resolveAgentID(ctx, "")
+	if err != nil || s.AgentOpen(ctx, userID, id) {
+		return id, err
+	}
+	agents, err := s.store.ListAgents(ctx)
+	if err != nil {
+		return "", fmt.Errorf("list agents: %w", err)
+	}
+	if open := s.OpenAgents(ctx, userID, agents); len(open) > 0 {
+		return open[0].ID, nil
+	}
+	return "", ErrAgentNotOpen
 }
 
 // agentOrDefault is the session's agent, or the default one if it is gone.

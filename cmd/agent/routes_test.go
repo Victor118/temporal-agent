@@ -21,6 +21,7 @@ import (
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/converter"
 
+	"github.com/victor/temporal-agent/access"
 	"github.com/victor/temporal-agent/activity"
 	"github.com/victor/temporal-agent/auth"
 	"github.com/victor/temporal-agent/config"
@@ -35,6 +36,10 @@ import (
 // routeStore holds users, logins and one session in memory. What the routes
 // under test never reach answers empty (see fakes_test.go).
 type routeStore struct {
+	// agents are the installation's agents; nil: the default one alone.
+	agents []store.Agent
+	// rules are the access rules; none: every agent is open.
+	rules    access.Snapshot
 	users    []store.User
 	logins   map[string]string
 	session  store.Session
@@ -473,8 +478,13 @@ func TestRoutes_ForkInfoHidesAnInaccessibleParent(t *testing.T) {
 }
 
 func (f *routeStore) ListAgents(context.Context) ([]store.Agent, error) {
+	if f.agents != nil {
+		return f.agents, nil
+	}
 	return []store.Agent{{ID: "default", Name: "Default"}}, nil
 }
+
+func (f *routeStore) AccessSnapshot(context.Context) (access.Snapshot, error) { return f.rules, nil }
 
 // --- Messages and @agent ---
 
