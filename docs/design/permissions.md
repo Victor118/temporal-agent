@@ -1,6 +1,6 @@
 # Conception : qui peut se servir de quels outils et agents
 
-Statut : **version 1.1, à valider**, 10 octobre 2026. Rien n'est codé. Version 1 relue contre le code le même jour : les points de la relecture sont marqués *[rev. B1…, I1…, M1…]*.
+Statut : **version 1.1, validée** le 11 octobre 2026 (les quatre choix du §8 acceptés tels que proposés). Rien n'est codé. Version 1 relue contre le code le 10 octobre : les points de la relecture sont marqués *[rev. B1…, I1…, M1…]*.
 
 ## 1. Pourquoi
 
@@ -149,7 +149,7 @@ L'enforcement reste dans le tour (§4.1) : le serveur peut se tromper (règle ch
 - **`web/admin`** : groupes, règles, colonnes « qui » sur la page d'un agent, vue d'un utilisateur, bandeaux.
 - **`CLAUDE.md`** : une section « Droits ».
 
-## 8. Points ouverts, avec la proposition
+## 8. Choix validés
 
 1. **Nommer les outils fermés dans le prompt** (§4.2) : oui, les noms seuls, ceux de la liste de l'agent seulement.
 2. **Intersection des règles** (§3.3) plutôt qu'union : oui, avec les garde-fous des changements hors règles (§3.1, §3.2, §3.3).
