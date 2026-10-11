@@ -1,6 +1,6 @@
 # Conception : qui peut se servir de quels outils et agents
 
-Statut : **version 1.1, validée** le 11 octobre 2026 (les quatre choix du §8 acceptés tels que proposés). Rien n'est codé. Version 1 relue contre le code le 10 octobre : les points de la relecture sont marqués *[rev. B1…, I1…, M1…]*.
+Statut : **version 1.1, faite** (§10, avec ses écarts), branche `feature/permissions` ; validée le 11 octobre 2026 (les quatre choix du §8 acceptés tels que proposés). Version 1 relue contre le code le 10 octobre : les points de la relecture sont marqués *[rev. B1…, I1…, M1…]*.
 
 ## 1. Pourquoi
 
@@ -169,3 +169,35 @@ L'enforcement reste dans le tour (§4.1) : le serveur peut se tromper (règle ch
 - Balayage : règle qui ne vise plus rien après renommage d'un serveur = alerte une fois.
 - Publication : `mcp_server` posé et lu.
 - Smoke `RealServer` de `workflow/` (boucle du participant, `AgentWorkflow`) et `TestMachinesLLM_RealServer`.
+
+## 10. Ce qui est fait, et les écarts
+
+Fait le 11 octobre 2026, branche `feature/permissions`. Tout ce que décrivent les §3 à §7 et les tests du §9 ; `go test ./...` (store sur une base jetable), le smoke `RealServer` de `workflow/` et ceux de `gateway/` (`TestMachines_RealServer`, `TestMachinesLLM_RealServer`) passent.
+
+**Où vit quoi.**
+- `access` (pur, sans dépendance) : `Rule`, `User`, `ToolRef`, `Allowed`, `Matching`, `Targets`, `Removes`, `Snapshot` (règles + utilisateurs, `Snapshot.User` / `Snapshot.Allowed`), `Agent(id)` (= `agent_<id>`, `AgentToolPrefix`, qu'`activity` reprend).
+- `tool` : `Tool.MCPServer`, posé par `MCPClient.Discover` ; `store.ToolRecord.MCPServer`, colonne `tools.mcp_server`, publiée (`publishTools`).
+- `store/access.go` : `groups`, `group_members`, `access_rules`, `access_rule_groups`, `access_rule_users` ; `DeleteGroup` (refus `SoleHolderError` dans la transaction, règles verrouillées), `AccessSnapshot` (une transaction en lecture), `ListMCPServers`, `SetAccessRulesMatched`, `ClaimUnmatchedAlert`.
+- `activity` : `Catalog.SetAccess`/`Access`, `AllowedToolsFor` (`Refused`, `Closed`), `AgentNotOpen` ; `ListToolsInput.UserID` ; `PromptRef.Closed` et `closedSection` ; `withdrawnTools` généralisé ; `ScheduleActivities.PauseSchedule`.
+- `workflow` : `AgentWorkflow` (`ListTools` avec `UserID`, arrêt sur `Refused`, `AgentNotOpenMessage`, `subAgentNotOpen`), relais du participant après un refus, `ScheduledAgentWorkflow` (`pauseRefused`).
+- `session/access.go` : cache des règles (3 s), `AgentOpen`, `OpenAgents`, `ErrAgentNotOpen` ; `Deliver` (`Delivery{Called, Refused}`, `RefusedText`), `Open` (`resolveOpenAgentID`), `Fork`.
+- `cmd/agent` : catalogue des workers (`refreshCatalog` lit les droits), balayage (`access.go`, `runAccessSweep`, `userAlerts`), adaptateurs (403, `refused_agents`, réponse Telegram, `Page.Notice`, `Page.AgentClosed`, rail filtré).
+- `web/admin/access.go` et `access.html`, `rule_edit.html`, `group.html` : §5.
+
+**Écarts et précisions.**
+1. *§4.1, `LoadSkillsForAgentOutput.SystemPrompt`.* Le back-office le lisait encore (le prompt d'un agent dans sa page), en appelant l'activité dans son processus ; aucun workflow. Retiré de la sortie : le back-office construit le prompt lui-même (`Prompts.AgentPrompt` avec la liste non filtrée de `AllowedTools`), et l'activité ne calcule plus de liste d'outils.
+2. *§4.1, ordre.* `ListTools` passe avant `ChooseMachine` (`startLLMRoute`) : un agent fermé s'arrête avant le choix d'une machine et sa note, pas seulement avant le modèle.
+3. *§4.1, texte du refus.* « L'agent X n'est pas ouvert à Bob : un admin peut lui en donner l'accès. » plutôt que « Tu n'as pas accès… » : l'erreur est un `turn_end` du fil partagé, que les autres membres lisent aussi. Sans nom (tâche planifiée, que seul son propriétaire lit) : « L'agent X ne t'est pas ouvert… ».
+4. *§4.1, catalogue au démarrage.* Un catalogue qui n'a jamais pu lire les droits ne prend ni agent ni outil (`refreshCatalog`) : sinon tout serait ouvert jusqu'au rechargement suivant. Une fois lus, un échec garde les précédents, comme pour les agents et les outils.
+5. *§4.1, tâche planifiée.* La raison de la pause est dans la note du schedule (Temporal) et dans la notification, pas dans `task_logs` (seulement `status = paused`) : pas de colonne de plus. Aucun outil ne reprend un schedule : le propriétaire l'annule (`cancel_schedule`) et la replanifie une fois l'accès donné (la notification le dit) ; un admin qui le reprend dans Temporal laisse le journal à `paused`. Une tâche unique refusée échoue comme un autre run (supprimée, `failed`).
+6. *§4.2, sous-agent.* La ligne dit « this user » : l'entrée d'un sous-agent ne porte pas le nom de l'utilisateur (la lui donner ferait lire sa tâche comme un message de ce membre, `[Bob] …`).
+7. *§4.3.* Les stubs sont triés par nom (préfixe du cache stable), et couvrent tout outil appelé et non offert, y compris un outil sorti de la liste de l'agent depuis l'appel. « Withdrawn » s'il a quitté le catalogue (demandé et manquant, ou inconnu), « Not open in this turn » sinon. Seul un stub « Withdrawn » est journalisé.
+8. *§4.4, lecture des règles.* Le serveur lit le même `AccessSnapshot` que les workers (gardé 3 s, horloge des états de session), pas une `UserAccess(user)` par requête : une seule lecture pour toutes les requêtes, une seule fonction de décision. Illisible : ouvert ici (journalisé), le tour décide.
+9. *§4.4, `Deliver`.* Renvoie `Delivery{Called, Refused}`. « Le fil affiche » : l'auteur lit le refus sous le fil (`Page.Notice`, jusqu'au rechargement suivant), pas un repère enregistré avec le message ; les autres membres ont `refused_agents` dans l'événement `user_message` (mentions), que le fil ne montre pas (l'événement n'est qu'une sonnette). L'API JSON rend `refused_agents` avec `agent_called`.
+10. *§4.4, listes d'agents.* L'accueil et le « + » de l'arbre ne listent aucun agent (une session web prend l'agent par défaut) : seul le rail (« Agents à appeler ») est filtré, et `Open` choisit le premier agent ouvert. Aucun agent ouvert : 403 « Aucun agent ne t'est ouvert », Telegram le dit en texte.
+11. *§4.4, Telegram.* « La première réponse est signée » : quand la session n'a pas encore de titre (son premier message) et que son agent n'est pas `DEFAULT_AGENT_ID`, sur un autre canal que le web.
+12. *§3.2, détenteurs.* Les comptes ne sont jamais supprimés (désactivés seulement) : une règle sans détenteur ne naît que d'une suppression à la main en base, ou d'un enregistrement voulu (« fermé à tous sauf aux admins », permis, signalé en alerte). Un détenteur désactivé n'est pas signalé.
+13. *§3.3, « ce qu'elle retire ».* Montré en direct dans l'aperçu du formulaire (`/admin/access/preview`) et dans la liste des règles, sans étape de confirmation. `access.Removes` prend aussi les autres règles (`Removes(rule, others, users, agents)`) : un utilisateur qui n'avait déjà plus d'agent n'est pas compté.
+14. *§3.1, balayage.* `access_rules.unmatched_alerted_at` en plus de `last_matched_at` : l'alerte part une fois (`ClaimUnmatchedAlert`, conditionnelle, sûre à plusieurs serveurs), aux admins actifs, dans leurs notifications ; une règle qui vise de nouveau quelque chose l'efface, une règle modifiée repart de zéro. Une règle qui n'a jamais rien visé n'alerte pas (elle est signalée dans `/admin`).
+15. *§5, `Sensitive` ouvert à tous.* Signalé sur la page Droits et en badge dans la liste des outils, pas dans les alertes de la vue d'ensemble : sans aucune règle (le défaut), chaque installation y aurait `exec`, `write_file`, `send_email`…
+
