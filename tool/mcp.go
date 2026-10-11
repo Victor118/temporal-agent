@@ -121,6 +121,7 @@ func (c *MCPClient) Discover(ctx context.Context) ([]*Tool, error) {
 			InputSchema: info.InputSchema,
 			Kind:        ToolKindMCP,
 			Timeout:     mcpCallTimeout + TimeoutMargin,
+			MCPServer:   c.config.Name,
 			Execute: func(ctx context.Context, input json.RawMessage) (string, error) {
 				return c.callTool(ctx, info.Name, input) // the server's own name
 			},

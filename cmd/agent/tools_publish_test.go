@@ -64,6 +64,11 @@ func TestPublishTools_CarriesTheProperties(t *testing.T) {
 	if p.records["exec"].PrivateInput || p.records["save_user_memory"].Sensitive {
 		t.Errorf("properties leaked between tools: %+v", p.records)
 	}
+	// The server an MCP tool comes from, which a rule may target.
+	publishTools(context.Background(), p, nil, []*tool.Tool{{Name: "crm_search", Kind: tool.ToolKindMCP, MCPServer: "crm"}}, "tools")
+	if p.records["crm_search"].MCPServer != "crm" || p.records["exec"].MCPServer != "" {
+		t.Errorf("servers: crm_search %q, exec %q", p.records["crm_search"].MCPServer, p.records["exec"].MCPServer)
+	}
 }
 
 // After startup, an MCP server's new tools are published and the ones it

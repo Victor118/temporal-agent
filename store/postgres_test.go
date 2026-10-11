@@ -361,7 +361,7 @@ func TestToolProperties(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	rec := ToolRecord{Name: "zz-private", TaskQueue: "q", InputSchema: []byte(`{}`), Kind: "activity",
-		PrivateInput: true, Sensitive: true, NeedsCallContext: true, Timeout: 330 * time.Second, SchemaHash: "h"}
+		PrivateInput: true, Sensitive: true, NeedsCallContext: true, Timeout: 330 * time.Second, MCPServer: "crm", SchemaHash: "h"}
 	if err := s.UpsertTool(ctx, rec); err != nil {
 		t.Fatal(err)
 	}
@@ -370,7 +370,7 @@ func TestToolProperties(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, got := range tools {
-		if got.Name == "zz-private" && !(got.PrivateInput && got.Sensitive && got.NeedsCallContext && got.Timeout == 330*time.Second) {
+		if got.Name == "zz-private" && !(got.PrivateInput && got.Sensitive && got.NeedsCallContext && got.Timeout == 330*time.Second && got.MCPServer == "crm") {
 			t.Errorf("read back %+v", got)
 		}
 	}

@@ -220,7 +220,10 @@ type ToolRecord struct {
 	PrivateInput     bool `json:"private_input,omitempty"`
 	NeedsCallContext bool `json:"needs_call_context,omitempty"`
 	// Timeout bounds one call (tool.Tool.Timeout); zero = the default.
-	Timeout    time.Duration `json:"timeout,omitempty"`
-	SchemaHash string        `json:"schema_hash"`
-	UpdatedAt  time.Time     `json:"updated_at"`
+	Timeout time.Duration `json:"timeout,omitempty"`
+	// MCPServer is the MCP server the tool comes from, empty for any other
+	// (tool.Tool.MCPServer): what a rule on a server targets.
+	MCPServer  string    `json:"mcp_server,omitempty"`
+	SchemaHash string    `json:"schema_hash"`
+	UpdatedAt  time.Time `json:"updated_at"`
 }

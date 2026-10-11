@@ -418,6 +418,12 @@ func TestMCPClient_ExposedNameReachesTheRealName(t *testing.T) {
 	if got := names(tools); got != "[srv_search_web srv_files_read srv_plain-name_1]" {
 		t.Fatalf("tools = %s", got)
 	}
+	// Each says which server it comes from: a rule may target a server.
+	for _, tl := range tools {
+		if tl.MCPServer != "srv" {
+			t.Errorf("%s comes from server %q", tl.Name, tl.MCPServer)
+		}
+	}
 	if got, err := call(t, tools, "srv_search_web", `{"q":1}`); err != nil || got != `search.web {"q":1}` {
 		t.Errorf("call = %q, %v", got, err)
 	}

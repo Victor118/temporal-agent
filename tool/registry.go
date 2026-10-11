@@ -59,6 +59,11 @@ type Tool struct {
 	// and returns what it has: stopped by Temporal, it returns nothing.
 	// A workflow tool runs as a child workflow, with no timeout: unused.
 	Timeout time.Duration `json:"-"`
+	// MCPServer is the MCP server the tool comes from (its name in the
+	// worker's configuration), empty for any other: a rule may target a
+	// server's tools (docs/design/permissions.md), whose names only share
+	// a prefix by convention.
+	MCPServer string `json:"-"`
 }
 
 const (
