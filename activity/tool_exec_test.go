@@ -85,4 +85,8 @@ func TestListTools_WaitsForTheCatalog(t *testing.T) {
 	if out, err := a.ListTools(context.Background(), in); err != nil || out.Refused != "" || !c.Ready() {
 		t.Errorf("a ready catalog: %+v, %v", out, err)
 	}
+	// An agent created since the last reload: not known yet, retried.
+	if _, err := a.ListTools(context.Background(), ListToolsInput{AgentID: "new"}); err == nil {
+		t.Error("an agent unknown to the catalog answered")
+	}
 }

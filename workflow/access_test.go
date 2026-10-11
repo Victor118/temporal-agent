@@ -238,7 +238,7 @@ func TestAgentWorkflow_WaitsForAReadyCatalog(t *testing.T) {
 				}
 				return
 			}
-			if err == nil || len(f.model.sent()) != 0 || calls < 5 || calls > 30 {
+			if err == nil || len(f.model.sent()) != 0 || calls != 12 {
 				t.Errorf("err %v, %d model calls, %d ListTools", err, len(f.model.sent()), calls)
 			}
 		})

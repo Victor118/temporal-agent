@@ -13,6 +13,7 @@ import (
 
 	"go.temporal.io/sdk/temporal"
 
+	"github.com/victor/temporal-agent/access"
 	"github.com/victor/temporal-agent/provider"
 	"github.com/victor/temporal-agent/skill"
 	"github.com/victor/temporal-agent/store"
@@ -26,6 +27,15 @@ func (p failingProvider) Chat(context.Context, provider.ChatRequest) (provider.C
 }
 
 // recordingModel answers every request with done, and keeps them.
+// readyCatalog is a catalog that has read its agents (none) and its access
+// rules (none), as a worker's after its first reload: ready.
+func readyCatalog() *Catalog {
+	c := NewCatalog()
+	c.SetAgents(nil)
+	c.SetAccess(access.Snapshot{})
+	return c
+}
+
 type recordingModel struct{ requests []provider.ChatRequest }
 
 func (m *recordingModel) Chat(_ context.Context, req provider.ChatRequest) (provider.ChatResponse, error) {
@@ -71,7 +81,7 @@ func (promptOf) AgentPrompt(agentID string, tools []string) string {
 
 // newLLM is an LLMActivities over st, an empty catalog and model.
 func newLLM(model provider.LLMProvider, st ConversationLoader) *LLMActivities {
-	return &LLMActivities{Provider: model, Store: st, Catalog: NewCatalog(), Prompts: promptOf{}}
+	return &LLMActivities{Provider: model, Store: st, Catalog: readyCatalog(), Prompts: promptOf{}}
 }
 
 // what lists the text of each message the model read, with its role.
@@ -209,7 +219,7 @@ func TestCallLLM_InlineConversation(t *testing.T) {
 // them; one gone from the catalog since is dropped, from the tools and from
 // the prompt.
 func TestCallLLM_OffersTheToolsByName(t *testing.T) {
-	c := NewCatalog()
+	c := readyCatalog()
 	c.SetAgents([]AgentCatalogEntry{
 		{ID: "default", Tools: []string{"*"}},
 		{ID: "analyst", Name: "Analyst", Description: "Markets."},
@@ -257,7 +267,7 @@ func TestCallLLM_KeepsAWithdrawnToolItCalled(t *testing.T) {
 	} {
 		catalog := tc.catalog
 		t.Run(tc.name, func(t *testing.T) {
-			c := NewCatalog()
+			c := readyCatalog()
 			c.SetTools(catalog)
 			model := &recordingModel{}
 			a := &LLMActivities{Provider: model, Catalog: c, Prompts: promptOf{}}
@@ -300,7 +310,7 @@ func TestCallLLM_StubsAToolClosedToTheUser(t *testing.T) {
 		{Role: store.RoleAssistant, UserID: "alice", Content: text("found")},
 		{Role: store.RoleUser, Content: text("and Bob's?"), UserID: "bob", Author: "Bob"},
 	}
-	c := NewCatalog()
+	c := readyCatalog()
 	c.SetTools([]store.ToolRecord{
 		{Name: "crm_search", MCPServer: "crm", InputSchema: json.RawMessage(`{"type":"object","properties":{"q":{}}}`)},
 		{Name: "web_fetch", InputSchema: json.RawMessage(`{"type":"object"}`)},
@@ -367,7 +377,7 @@ func TestCallLLM_RefusesAConversationTooLong(t *testing.T) {
 // override), its user's memory, then the part note. A memory that cannot be
 // read leaves its section out.
 func TestCallLLM_BuildsThePromptAsBefore(t *testing.T) {
-	c := NewCatalog()
+	c := readyCatalog()
 	c.SetAgents([]AgentCatalogEntry{{ID: "smith", Name: "Agent Smith", Mention: "smith", Skills: []string{"review"}}})
 	skills := NewSkillActivities([]skill.Skill{{Name: "review", Content: "REVIEW SKILL"}}, c)
 	base := basePrompt(skills, c, "smith")
@@ -447,7 +457,7 @@ func deref(v *int64) string {
 // Another agent's call to a private tool reaches the model as the members
 // see it, whichever agent reads: the catalog says which tools are private.
 func TestCallLLM_HidesPrivateInputs(t *testing.T) {
-	c := NewCatalog()
+	c := readyCatalog()
 	c.SetAgents([]AgentCatalogEntry{{ID: "jarvis", Name: "Jarvis", Mention: "jarvis"}, {ID: "smith"}})
 	c.SetTools([]store.ToolRecord{{Name: "save_user_memory", PrivateInput: true}})
 	model := &recordingModel{}
@@ -471,5 +481,23 @@ func TestRequestSize_UnencodableIsPastAnyLimit(t *testing.T) {
 	bad := provider.ChatRequest{Messages: []provider.ChatMessage{{Role: "user", Content: json.RawMessage(`{not json`)}}}
 	if got := requestSize(bad); got != math.MaxInt {
 		t.Errorf("requestSize = %d, want math.MaxInt", got)
+	}
+}
+
+// A worker whose catalog is not ready (another than the turn's first)
+// fails a call with an ordinary error, retried as any failed call: never a
+// prompt without identity, never a refusal for good. On a machine too,
+// before any directive.
+func TestCallLLM_WaitsForTheCatalog(t *testing.T) {
+	model := &recordingModel{}
+	a := &LLMActivities{Provider: model, Catalog: NewCatalog(), Prompts: promptOf{}}
+	req := LLMTurnRequest{AgentID: "default", Messages: []store.Message{{Role: store.RoleUser, Content: text("go")}}}
+	_, err := a.CallLLM(context.Background(), req)
+	var appErr *temporal.ApplicationError
+	if err == nil || errors.As(err, &appErr) || len(model.requests) != 0 {
+		t.Errorf("CallLLM: %v, %d requests", err, len(model.requests))
+	}
+	if _, _, err := a.buildRequest(context.Background(), req); err == nil {
+		t.Error("a request built from a catalog not ready")
 	}
 }

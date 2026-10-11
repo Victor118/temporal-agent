@@ -138,7 +138,9 @@ func refreshCatalog(st catalogSource, catalog *activity.Catalog) {
 
 	if agents, err := loadAgentsFromDB(ctx, st); err != nil {
 		log.Printf("Warning: failed to load agents catalog from DB: %v", err)
-	} else if !reflect.DeepEqual(agents, catalog.Agents()) {
+	} else if !catalog.AgentsLoaded() || !reflect.DeepEqual(agents, catalog.Agents()) {
+		// The first read is set whatever it holds, an empty table too:
+		// the catalog is ready once it is (Catalog.Ready).
 		catalog.SetAgents(agents)
 		log.Printf("Agents catalog loaded: %d agents", len(agents))
 	}

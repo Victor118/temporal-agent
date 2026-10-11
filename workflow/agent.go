@@ -28,16 +28,18 @@ const maxReActIterations = 50
 // outright. It also keeps a runaway command from eating the model's context.
 const maxToolResultBytes = 96 * 1024
 
-// listToolsOptions bound the turn's ListTools: a worker whose catalog is
-// not ready yet (activity.Catalog.Ready) answers with an error, retried
-// for about two minutes, then the turn fails.
-var listToolsOptions = workflow.ActivityOptions{
-	StartToCloseTimeout:    5 * time.Second,
-	ScheduleToCloseTimeout: 2 * time.Minute,
+// catalogReadyOptions bound the turn's reads of its agent (LoadSkillsForAgent,
+// ListTools): a worker whose catalog is not ready, or does not know the
+// agent yet (activity.Catalog.CheckAgent), answers with an error, retried
+// 12 times, about two minutes (1+2+4+8+15×7 s), then the turn fails. In
+// attempts, not in time: a worker away is waited for, as by the workflow.
+var catalogReadyOptions = workflow.ActivityOptions{
+	StartToCloseTimeout: 5 * time.Second,
 	RetryPolicy: &temporal.RetryPolicy{
 		InitialInterval:    time.Second,
 		BackoffCoefficient: 2,
 		MaximumInterval:    15 * time.Second,
+		MaximumAttempts:    12,
 	},
 }
 
@@ -250,9 +252,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 	// Load the agent's name
 	var skillsResult activity.LoadSkillsForAgentOutput
 	if err := workflow.ExecuteActivity(
-		workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-			StartToCloseTimeout: 5 * time.Second,
-		}),
+		workflow.WithActivityOptions(ctx, catalogReadyOptions),
 		skillAct.LoadSkillsForAgent,
 		activity.LoadSkillsForAgentInput{AgentID: currentAgentID},
 	).Get(ctx, &skillsResult); err != nil {
@@ -279,7 +279,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 	var toolAct *activity.ToolActivities
 	var toolList activity.ListToolsOutput
 	if err := workflow.ExecuteActivity(
-		workflow.WithActivityOptions(ctx, listToolsOptions),
+		workflow.WithActivityOptions(ctx, catalogReadyOptions),
 		toolAct.ListTools,
 		activity.ListToolsInput{AgentID: currentAgentID, UserID: input.UserID},
 	).Get(ctx, &toolList); err != nil {

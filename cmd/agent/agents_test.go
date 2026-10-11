@@ -54,3 +54,13 @@ func TestRefreshCatalog_RulesFirst(t *testing.T) {
 		t.Errorf("rules lost on a failed reload: %+v", snap)
 	}
 }
+
+// An installation with no agent at all: its first read makes the catalog
+// ready, whatever an empty table compares to.
+func TestRefreshCatalog_NoAgentIsReady(t *testing.T) {
+	catalog := activity.NewCatalog()
+	refreshCatalog(&catalogRows{agents: []store.Agent{}}, catalog)
+	if !catalog.Ready() || !catalog.AgentsLoaded() {
+		t.Error("a catalog that read an empty table is not ready")
+	}
+}

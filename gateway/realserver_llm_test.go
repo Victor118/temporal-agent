@@ -19,6 +19,7 @@ import (
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
 
+	"github.com/victor/temporal-agent/access"
 	"github.com/victor/temporal-agent/activity"
 	"github.com/victor/temporal-agent/machine"
 	"github.com/victor/temporal-agent/machine/connect"
@@ -114,6 +115,8 @@ func (e *smokeEnv) startLLMWorker(t *testing.T) *llmWorld {
 	schema := json.RawMessage(`{"type":"object"}`)
 	catalog := activity.NewCatalog()
 	catalog.SetTools([]store.ToolRecord{{Name: "web_fetch", Description: "fetch", InputSchema: schema}})
+	catalog.SetAgents(nil) // read once: CallLLM answers
+	catalog.SetAccess(access.Snapshot{})
 	wk := worker.New(e.tc, w.queue, worker.Options{})
 	wk.RegisterWorkflow(workflow.AgentWorkflow)
 	wk.RegisterActivity(&activity.LLMActivities{Provider: w.server, Store: e.st, Catalog: catalog, Prompts: llmPrompts{},

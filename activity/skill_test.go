@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/victor/temporal-agent/access"
 	"github.com/victor/temporal-agent/conversation"
 	"github.com/victor/temporal-agent/skill"
 	"github.com/victor/temporal-agent/store"
@@ -17,7 +18,7 @@ func basePrompt(a *SkillActivities, c *Catalog, agentID string) string {
 }
 
 func TestAgentPrompt_FollowsAllowlist(t *testing.T) {
-	c := NewCatalog()
+	c := readyCatalog()
 	c.SetAgents([]AgentCatalogEntry{
 		{ID: "default", Name: "Default", Tools: []string{"*"}},
 		{ID: "analyst", Name: "Analyst", Skills: []string{"market"}, Tools: []string{"web_*"}},
@@ -55,7 +56,7 @@ func TestAgentPrompt_FollowsAllowlist(t *testing.T) {
 // The agent knows its name and what calls it: in a shared session the
 // messages it answers start with its mention.
 func TestAgentPrompt_SaysWhatCallsIt(t *testing.T) {
-	c := NewCatalog()
+	c := readyCatalog()
 	c.SetAgents([]AgentCatalogEntry{{ID: "default", Name: "Jarvis", Mention: "jarvis"}})
 	p := basePrompt(NewSkillActivities(nil, c), c, "default")
 	if !strings.Contains(p, "Your name is Jarvis. In a conversation, people address you by writing @jarvis.") {
@@ -67,18 +68,14 @@ func TestAgentPrompt_SaysWhatCallsIt(t *testing.T) {
 	}
 }
 
-// The agent's name signs its messages; an agent the catalog does not know
-// signs with its ID. Every agent of the catalog is named, to show the others'
-// turns.
+// The agent's name signs its messages. Every agent of the catalog is named,
+// to show the others' turns.
 func TestLoadSkillsForAgent_GivesTheName(t *testing.T) {
-	c := NewCatalog()
+	c := readyCatalog()
 	c.SetAgents([]AgentCatalogEntry{{ID: "default", Name: "Jarvis", Mention: "jarvis"}, {ID: "smith", Mention: "smith"}})
 	a := NewSkillActivities(nil, c)
-	for id, want := range map[string]string{"default": "Jarvis", "gone": "gone"} {
-		out, err := a.LoadSkillsForAgent(context.Background(), LoadSkillsForAgentInput{AgentID: id})
-		if err != nil || out.Name != want {
-			t.Errorf("%s: name %q (%v), want %q", id, out.Name, err, want)
-		}
+	if out, err := a.LoadSkillsForAgent(context.Background(), LoadSkillsForAgentInput{AgentID: "default"}); err != nil || out.Name != "Jarvis" {
+		t.Errorf("name %q (%v), want Jarvis", out.Name, err)
 	}
 	labels := c.AgentLabels()
 	if labels["default"] != (conversation.Label{Name: "Jarvis", Mention: "jarvis"}) || labels["smith"] != (conversation.Label{Name: "smith", Mention: "smith"}) {
@@ -89,7 +86,7 @@ func TestLoadSkillsForAgent_GivesTheName(t *testing.T) {
 // The skills an agent's coding runs take along: its own, marked runs, by
 // name; read again by name where a run is prepared.
 func TestRunSkills(t *testing.T) {
-	c := NewCatalog()
+	c := readyCatalog()
 	c.SetAgents([]AgentCatalogEntry{{ID: "coder", Skills: []string{"tdd", "review", "ghost"}}})
 	a := NewSkillActivities(nil, c)
 	SetSkills(a, []skill.Skill{
@@ -108,5 +105,28 @@ func TestRunSkills(t *testing.T) {
 	if len(set.Skills) != 1 || set.Skills[0].Name != "tdd" || set.Skills[0].Content != "RED, GREEN, REFACTOR." || set.Skills[0].Description != "Test first" ||
 		len(set.Missing) != 2 || set.Missing[0] != "review" || set.Missing[1] != "ghost" || set.Version != "c0ffee" {
 		t.Errorf("%+v", set)
+	}
+}
+
+// LoadSkillsForAgent answers only once the catalog can tell: read once at
+// least (agents and rules), and knowing the agent (created less than a
+// reload ago, it does not yet). Answered empty, the turn would sign with
+// the ID, call its model with the server's key, run its code without its
+// skills.
+func TestLoadSkillsForAgent_WaitsForTheCatalog(t *testing.T) {
+	c := NewCatalog()
+	a := NewSkillActivities(nil, c)
+	in := LoadSkillsForAgentInput{AgentID: "coder"}
+	if _, err := a.LoadSkillsForAgent(context.Background(), in); err == nil {
+		t.Error("an empty catalog answered")
+	}
+	c.SetAgents([]AgentCatalogEntry{{ID: "default"}})
+	c.SetAccess(access.Snapshot{})
+	if _, err := a.LoadSkillsForAgent(context.Background(), in); err == nil || !strings.Contains(err.Error(), "agent coder unknown") {
+		t.Errorf("an agent unknown to the catalog: %v", err)
+	}
+	c.SetAgents([]AgentCatalogEntry{{ID: "coder", Name: "Coder", LLMOnMachine: "require"}})
+	if out, err := a.LoadSkillsForAgent(context.Background(), in); err != nil || out.Name != "Coder" || out.LLMOnMachine != "require" {
+		t.Errorf("ready: %+v, %v", out, err)
 	}
 }

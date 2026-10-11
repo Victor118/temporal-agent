@@ -122,8 +122,14 @@ type LoadSkillsForAgentOutput struct {
 }
 
 // LoadSkillsForAgent returns the agent's name, where its turns call their
-// model, and the skills its coding runs take along.
+// model, and the skills its coding runs take along; an error while the
+// catalog cannot tell (Catalog.CheckAgent): answered empty, the turn would
+// sign with the ID, call its model with the server's key, and run its code
+// without its skills.
 func (a *SkillActivities) LoadSkillsForAgent(ctx context.Context, input LoadSkillsForAgentInput) (LoadSkillsForAgentOutput, error) {
+	if err := a.catalog.CheckAgent(input.AgentID); err != nil {
+		return LoadSkillsForAgentOutput{}, err
+	}
 	name, onMachine := input.AgentID, ""
 	var runSkills []string
 	for _, e := range a.catalog.Agents() {

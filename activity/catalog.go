@@ -3,6 +3,7 @@ package activity
 import (
 	"cmp"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"slices"
@@ -43,11 +44,44 @@ func (c *Catalog) SetAgents(agents []AgentCatalogEntry) {
 
 // Ready reports whether the catalog has read its agents and its access
 // rules once at least: before, a turn would know neither its agent (no
-// prompt, no tool) nor who may use it, and must wait (ListTools).
+// prompt, no tool, nor where its model runs) nor who may use it, and must
+// wait (CheckAgent).
 func (c *Catalog) Ready() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.agentsLoaded && c.accessLoaded
+}
+
+// AgentsLoaded reports whether the agents were read once at least, an
+// empty table included.
+func (c *Catalog) AgentsLoaded() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.agentsLoaded
+}
+
+// errCatalogNotReady: the worker has not read its agents and access rules
+// yet (the database away at its start). An ordinary error: the turn
+// retries, on this worker or another.
+var errCatalogNotReady = errors.New("this worker's catalog has not read its agents and access rules yet")
+
+// CheckAgent is why a turn of agentID may not read it from the catalog
+// yet, nil when it may: the catalog not ready, or the agent unknown to it
+// (created since its last reload, 30 s at most). Ordinary errors: the turn
+// retries them (workflow.catalogReadyOptions), and fails past its
+// attempts, saying which.
+func (c *Catalog) CheckAgent(agentID string) error {
+	if !c.Ready() {
+		return errCatalogNotReady
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for _, a := range c.agents {
+		if a.ID == agentID {
+			return nil
+		}
+	}
+	return fmt.Errorf("agent %s unknown to this worker's catalog", agentID)
 }
 
 // SetTools replaces the tools, sorted here by name in byte order: the lookups

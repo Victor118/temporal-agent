@@ -48,6 +48,8 @@ type ConversationLoader interface {
 // LLMCatalog is what the LLM call reads of the worker's catalog: the tools'
 // definitions, the agents' names, and which tool inputs are private.
 type LLMCatalog interface {
+	// Ready: the catalog read its agents and access rules (Catalog.Ready).
+	Ready() bool
 	ToolDefinitions(names []string, background bool) (defs []provider.ToolDefinition, missing []string, backgrounds bool)
 	AgentLabels() map[string]conversation.Label
 	PrivateInput(name string) bool
@@ -190,6 +192,12 @@ func (a *LLMActivities) CallLLM(ctx context.Context, req LLMTurnRequest) (LLMTur
 // buildRequest builds the request req points at, and says what its prompt
 // holds of the user's memory.
 func (a *LLMActivities) buildRequest(ctx context.Context, req LLMTurnRequest) (provider.ChatRequest, PromptMemory, error) {
+	// A worker that started without its catalog (another than the turn's
+	// first) would build a prompt with no identity: an ordinary error,
+	// retried as any failed call.
+	if !a.Catalog.Ready() {
+		return provider.ChatRequest{}, PromptMemory{}, errCatalogNotReady
+	}
 	messages, err := a.conversation(ctx, req)
 	if err != nil {
 		return provider.ChatRequest{}, PromptMemory{}, err
