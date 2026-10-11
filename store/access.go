@@ -157,10 +157,17 @@ func (s *PostgresStore) RenameGroup(ctx context.Context, id, name string) error 
 
 // DeleteGroup deletes a group, and takes it out of the rules it holds with
 // others. The only holder of a rule is refused (SoleHolderError), in the
-// same transaction, the rules locked: a rule changed meanwhile is read as
-// it is.
+// same transaction. The group's row is locked first: a rule write that
+// names it (its foreign key holds the row) either commits before, and is
+// read here, or waits for the deletion, and fails on the group gone; never
+// a rule left with no holder by the cascade.
 func (s *PostgresStore) DeleteGroup(ctx context.Context, id string) error {
 	return s.inTx(ctx, func(tx *sql.Tx) error {
+		if err := tx.QueryRowContext(ctx, `SELECT id FROM groups WHERE id = $1 FOR UPDATE`, id).Scan(&id); err == sql.ErrNoRows {
+			return ErrGroupNotFound
+		} else if err != nil {
+			return err
+		}
 		rows, err := tx.QueryContext(ctx, `
 			SELECT r.id FROM access_rules r
 			JOIN access_rule_groups rg ON rg.rule_id = r.id AND rg.group_id = $1

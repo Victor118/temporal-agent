@@ -5,6 +5,7 @@ import (
 	"errors"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/victor/temporal-agent/access"
 )
@@ -209,5 +210,53 @@ func TestListMCPServers(t *testing.T) {
 	}
 	if n := len(slices.DeleteFunc(slices.Clone(servers), func(n string) bool { return n != "zzsrv" })); n != 1 || slices.Contains(servers, "") {
 		t.Errorf("servers %v", servers)
+	}
+}
+
+// A rule write that makes a group its only holder while the group is being
+// deleted: the deletion waits for it, and refuses; never a rule left with
+// no holder.
+func TestDeleteGroup_RaceWithARuleWrite(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	machineUser(t, s, "zz-acc-race")
+	accessGroup(t, s, "zz-g-race", "zz Race")
+	id, err := s.CreateAccessRule(ctx, access.Rule{Kind: access.KindPattern, Target: "zz_race", Users: []string{"zz-acc-race"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.DeleteAccessRule(ctx, id) })
+
+	// The write, not committed yet: the group becomes the only holder.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM access_rule_users WHERE rule_id = $1`, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO access_rule_groups (rule_id, group_id) VALUES ($1, 'zz-g-race')`, id); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- s.DeleteGroup(ctx, "zz-g-race") }()
+	select {
+	case err := <-done:
+		t.Fatalf("the deletion did not wait for the rule write: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	var sole *SoleHolderError
+	if err := <-done; !errors.As(err, &sole) {
+		t.Errorf("deletion after the write: %v, want the rule named", err)
+	}
+	if r, _ := s.GetAccessRule(ctx, id); r == nil || !r.HasHolder() {
+		t.Errorf("rule %+v left without holder", r)
+	}
+	if err := s.DeleteGroup(ctx, "zz-g-none"); !errors.Is(err, ErrGroupNotFound) {
+		t.Errorf("no such group: %v", err)
 	}
 }
