@@ -25,6 +25,11 @@
   <div class="card">
     <h2>Agents autorisés</h2>
     {{range .Agents}}<a class="chip" href="/admin/agents/{{.}}">{{.}}</a>{{else}}<p class="empty">Aucun agent n'y a accès.</p>{{end}}
+    <h2>Qui</h2>
+    {{if .Rules}}<p>{{.Who}}, et les admins.</p>
+    <p class="note">{{range .Rules}}<a class="chip" href="/admin/access/rules/{{.ID}}">{{.Label}}</a>{{end}}</p>
+    {{else}}<p><span class="sub">Tous</span>{{if .Sensitive}} <span class="badge b-warn">sensible, ouvert à tous</span>{{end}}</p>
+    <p class="note">Aucune règle ne le vise. <a class="link" href="/admin/access/rules/new?kind=pattern&amp;pattern={{.Name}}">Le fermer</a></p>{{end}}
   </div>
 </div>
 

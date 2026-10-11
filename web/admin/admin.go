@@ -3,6 +3,7 @@
 package admin
 
 import (
+	"cmp"
 	"context"
 	"embed"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/victor/temporal-agent/access"
 	"github.com/victor/temporal-agent/activity"
 	"github.com/victor/temporal-agent/auth"
 	"github.com/victor/temporal-agent/skill"
@@ -37,10 +39,25 @@ type Store interface {
 
 	ListUsers(ctx context.Context) ([]store.User, error)
 	GetUser(ctx context.Context, id string) (*store.User, error)
+	GetUserByEmail(ctx context.Context, email string) (*store.User, error)
 	CreateUser(ctx context.Context, u store.User) error
 	UpdateUser(ctx context.Context, u store.User) error
 	SetUserPassword(ctx context.Context, id, passwordHash string) error
 	SetUserDisabled(ctx context.Context, id string, disabled bool) error
+
+	// Who may use which tool (access.go).
+	ListGroups(ctx context.Context) ([]store.Group, error)
+	CreateGroup(ctx context.Context, g store.Group) error
+	RenameGroup(ctx context.Context, id, name string) error
+	DeleteGroup(ctx context.Context, id string) error
+	AddGroupMember(ctx context.Context, groupID, userID string) error
+	RemoveGroupMember(ctx context.Context, groupID, userID string) error
+	ListAccessRules(ctx context.Context) ([]store.AccessRule, error)
+	GetAccessRule(ctx context.Context, id int64) (*store.AccessRule, error)
+	CreateAccessRule(ctx context.Context, r access.Rule) (int64, error)
+	UpdateAccessRule(ctx context.Context, r access.Rule) error
+	DeleteAccessRule(ctx context.Context, id int64) error
+	ListMCPServers(ctx context.Context) ([]string, error)
 }
 
 // Config wires the back-office to the server's state.
@@ -106,6 +123,19 @@ func (a *Admin) Routes() http.Handler {
 		r.Post("/users/{id}/password", a.resetPassword)
 		r.Post("/users/{id}/disable", a.disableUser)
 		r.Post("/users/{id}/enable", a.enableUser)
+		r.Get("/access", a.accessPage)
+		r.Get("/access/preview", a.rulePreview)
+		r.Get("/access/rules/new", a.newRuleForm)
+		r.Post("/access/rules", a.createRule)
+		r.Get("/access/rules/{id}", a.editRuleForm)
+		r.Post("/access/rules/{id}", a.updateRule)
+		r.Post("/access/rules/{id}/delete", a.deleteRule)
+		r.Post("/access/groups", a.createGroup)
+		r.Get("/access/groups/{id}", a.groupPage)
+		r.Post("/access/groups/{id}", a.renameGroup)
+		r.Post("/access/groups/{id}/members", a.addGroupMember)
+		r.Post("/access/groups/{id}/members/{userID}/remove", a.removeGroupMember)
+		r.Post("/access/groups/{id}/delete", a.deleteGroup)
 	})
 	return r
 }
@@ -143,6 +173,22 @@ func (a *Admin) load(ctx context.Context) (*snapshot, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list activity queues: %w", err)
 	}
+	rules, err := a.cfg.Store.ListAccessRules(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list access rules: %w", err)
+	}
+	groups, err := a.cfg.Store.ListGroups(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list groups: %w", err)
+	}
+	users, err := a.cfg.Store.ListUsers(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list users: %w", err)
+	}
+	servers, err := a.cfg.Store.ListMCPServers(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list MCP servers: %w", err)
+	}
 	var skills []skill.Skill
 	if a.cfg.Skills != nil {
 		skills = a.cfg.Skills()
@@ -166,6 +212,10 @@ func (a *Admin) load(ctx context.Context) (*snapshot, error) {
 		ActivityQueues: routes,
 		DefaultAgentID: a.cfg.DefaultAgentID,
 		WorkflowQueue:  a.cfg.WorkflowQueue,
+		Rules:          rules,
+		Groups:         groups,
+		Users:          users,
+		MCPServers:     servers,
 	}
 	return &snapshot{in: in, inv: BuildInventory(in)}, nil
 }
@@ -183,7 +233,7 @@ func (a *Admin) page(w http.ResponseWriter, r *http.Request, name, nav string, d
 		http.NotFound(w, r)
 		return
 	}
-	a.pages.page(w, name, pageData{Nav: nav, Inv: snap.inv, Data: d, Flash: flash(r), Me: auth.UserFrom(r.Context())})
+	a.pages.page(w, name, pageData{Nav: nav, Inv: snap.inv, Data: d, Flash: cmp.Or(flash(r), accessFlash(r)), Me: auth.UserFrom(r.Context())})
 }
 
 func (a *Admin) overview(w http.ResponseWriter, r *http.Request) {

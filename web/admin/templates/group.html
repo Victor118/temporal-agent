@@ -1,0 +1,49 @@
+{{define "title"}}{{.Data.Group.Name}}{{end}}
+{{define "content"}}
+{{with .Data}}
+<div class="crumbs"><a href="/admin/access">Droits</a> /</div>
+<h1>{{.Group.Name}} <span class="badge b-muted">groupe</span></h1>
+
+{{with .Error}}<div class="error">{{.}}</div>{{end}}
+
+<div class="grid2">
+  <div class="card">
+    <h2>Membres <span class="badge b-muted">{{len .Group.Users}}</span></h2>
+    {{$gid := .Group.ID}}
+    {{range .Group.Users}}
+    <form class="glob" method="post" action="/admin/access/groups/{{$gid}}/members/{{.ID}}/remove">
+      <span>{{.Name}}{{if .DisabledAt}} <span class="badge b-bad">désactivé</span>{{end}}</span>
+      <div><button type="submit">Retirer</button></div>
+    </form>
+    {{else}}
+    <p class="empty">Aucun membre.</p>
+    {{end}}
+    <form class="edit" method="post" action="/admin/access/groups/{{$gid}}/members">
+      <label for="m-email">Ajouter un membre <span class="hint">son email</span></label>
+      <input type="email" id="m-email" name="email" required>
+      <div class="actions"><button type="submit">Ajouter</button></div>
+    </form>
+  </div>
+
+  <div>
+    <div class="card">
+      <h2>Règles qui le nomment</h2>
+      {{range .Group.Rules}}<a class="chip" href="/admin/access/rules/{{.ID}}">{{.Label}}</a>{{else}}<p class="empty">Aucune.</p>{{end}}
+      {{with .Group.SoleOf}}<p class="note">Seul détenteur de {{range $i, $r := .}}{{if $i}}, {{end}}<code>{{$r.Label}}</code>{{end}} : il ne peut pas être supprimé tant que ces règles ne nomment personne d'autre.</p>{{end}}
+    </div>
+    <div class="card">
+      <h2>Groupe</h2>
+      <form class="edit" method="post" action="/admin/access/groups/{{$gid}}">
+        <label for="g-rename">Nom</label>
+        <input type="text" id="g-rename" name="name" value="{{.Group.Name}}" required>
+        <div class="actions"><button type="submit">Renommer</button></div>
+      </form>
+      <form class="actions" method="post" action="/admin/access/groups/{{$gid}}/delete" hx-confirm="Supprimer le groupe {{.Group.Name}} ? Ses membres perdent ce que ses règles leur ouvraient.">
+        <span class="spacer"></span>
+        <button class="danger" type="submit">Supprimer le groupe</button>
+      </form>
+    </div>
+  </div>
+</div>
+{{end}}
+{{end}}

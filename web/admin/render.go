@@ -8,6 +8,7 @@ import (
 	"html/template"
 	"log"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -20,7 +21,7 @@ var templateFS embed.FS
 // pageNames are the templates/<name>.html pages. Each gets its own template
 // set (base + partials + the page), so every page can define "content"
 // without colliding with the others.
-var pageNames = []string{"overview", "agents", "agent", "agent_edit", "tools", "tool", "queues", "skills", "skill", "users", "user_edit", "login"}
+var pageNames = []string{"overview", "agents", "agent", "agent_edit", "tools", "tool", "queues", "skills", "skill", "users", "user_edit", "login", "access", "rule_edit", "group"}
 
 type pageData struct {
 	Nav   string
@@ -68,6 +69,7 @@ func (r *renderer) execute(w http.ResponseWriter, set, block string, data any) {
 
 var funcs = template.FuncMap{
 	"ago":        ago,
+	"inList":     func(s string, list []string) bool { return slices.Contains(list, s) },
 	"join":       strings.Join,
 	"prettyJSON": prettyJSON,
 	"shortHash": func(h string) string {

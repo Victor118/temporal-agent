@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/victor/temporal-agent/access"
 	"github.com/victor/temporal-agent/activity"
 	"github.com/victor/temporal-agent/skill"
 	"github.com/victor/temporal-agent/store"
@@ -25,6 +26,12 @@ type Inputs struct {
 	ActivityQueues []store.ActivityQueueEntry
 	DefaultAgentID string
 	WorkflowQueue  string
+	// Who may use which tool: the rules, the groups, the users they decide
+	// for, and the MCP servers a rule may target.
+	Rules      []store.AccessRule
+	Groups     []store.Group
+	Users      []store.User
+	MCPServers []string
 }
 
 // Inventory is the dashboard's view of the configuration, with the
@@ -40,10 +47,19 @@ type Inventory struct {
 	MissingSkills []*MissingSkill
 	SkillsSource  string
 	Alerts        []Alert
+	// Rules and Groups are the access rules and groups (access.go).
+	Rules  []*RuleView
+	Groups []*GroupView
 
 	agents map[string]*AgentView
 	tools  map[string]*ToolView
 	skills map[string]*SkillView
+	rules  map[int64]*RuleView
+	groups map[string]*GroupView
+	// access is the rules and users, as the workers' catalog holds them.
+	access     access.Snapshot
+	users      []store.User
+	mcpServers []string
 }
 
 type AgentView struct {
@@ -59,6 +75,8 @@ type AgentView struct {
 	DelegatesTo    []Delegation
 	CalledBy       []string
 	Skills         []SkillRef
+	// Self is its agent_<id> tool: the rules on the agent itself.
+	Self *ToolView
 }
 
 // GlobView is one allowlist pattern and the published tools it matches.
@@ -98,6 +116,8 @@ type ToolView struct {
 	// Availability: "up", "down" or "unknown", from the pollers of the type the
 	// tool needs on its queue.
 	Availability string
+	// Rules are the access rules that target it: each one required.
+	Rules []*RuleView
 }
 
 type QueueView struct {
@@ -140,6 +160,9 @@ func BuildInventory(in Inputs) *Inventory {
 		agents:       make(map[string]*AgentView),
 		tools:        make(map[string]*ToolView),
 		skills:       make(map[string]*SkillView),
+		rules:        make(map[int64]*RuleView),
+		users:        in.Users,
+		mcpServers:   in.MCPServers,
 	}
 
 	for _, t := range in.Tools {
@@ -251,6 +274,7 @@ func BuildInventory(in Inputs) *Inventory {
 		}
 	}
 
+	inv.buildAccess(in)
 	inv.Queues = buildQueues(in)
 	inv.Alerts = buildAlerts(inv, in)
 	return inv
@@ -452,6 +476,8 @@ func buildAlerts(inv *Inventory, in Inputs) []Alert {
 			add(LevelDanger, link, "Le tool %s est publié sur la queue %s, que plus aucun worker ne sert : ses appels échoueront.", tv.Name, tv.TaskQueue)
 		}
 	}
+
+	accessAlerts(inv, add)
 
 	for _, ms := range inv.MissingSkills {
 		add(LevelWarning, "/admin/skills", "Le skill %s, référencé par %s, n'est pas chargé par le serveur.", ms.Name, strings.Join(ms.Agents, ", "))

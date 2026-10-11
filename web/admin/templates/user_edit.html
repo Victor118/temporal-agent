@@ -66,5 +66,30 @@
   </div>
   {{end}}
 </div>
+
+{{if not .New}}
+{{$id := .ID}}
+<div class="card">
+  <h2>Ce qu'il peut utiliser</h2>
+  <p>Groupes : {{range $.Inv.UserGroups $id}}<a class="chip" href="/admin/access/groups/{{.ID}}">{{.Name}}</a>{{else}}<span class="sub">aucun</span>{{end}}
+    {{if .Disabled}}<span class="badge b-bad">désactivé : aucun agent ne lui répond</span>{{else if eq .Role "admin"}}<span class="badge b-warn">admin : tout lui est ouvert</span>{{end}}</p>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Agent</th><th>Lui répond</th><th>Outils ouverts</th><th>Outils fermés</th></tr></thead>
+    <tbody>
+    {{range ($.Inv.UserAccess $id).Agents}}
+    <tr>
+      <td><a class="link" href="/admin/agents/{{.Agent.ID}}">{{.Agent.Name}}</a></td>
+      <td>{{if .Open}}<span class="badge b-ok">oui</span>{{else}}<span class="badge b-bad">non</span>{{end}}</td>
+      <td>{{range .Tools}}<span class="chip{{if .Sensitive}} sens{{end}}">{{.Name}}</span>{{else}}<span class="sub">—</span>{{end}}</td>
+      <td>{{range .Closed}}<span class="chip dead">{{.Name}}</span>{{else}}<span class="sub">—</span>{{end}}</td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  </div>
+  <p class="note">Décidé comme les workers le décident (<code>access.Allowed</code>), à partir des règles et des groupes enregistrés : vérifie une règle ici avant de la croire. Les workers relisent les droits toutes les 30 s.</p>
+</div>
+{{end}}
 {{end}}
 {{end}}
