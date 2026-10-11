@@ -115,6 +115,9 @@ type PromptRef struct {
 	MemoryOf string `json:"memory_of,omitempty"` // user whose memory the prompt holds; empty = none
 	UserName string `json:"user_name,omitempty"` // that user's name, as the memory section names them
 	PartNote string `json:"part_note,omitempty"` // ends the prompt (several agents addressed)
+	// Closed names the tools of the agent's list closed to the user
+	// (ListToolsOutput.Closed): the prompt tells them, by name.
+	Closed []string `json:"closed,omitempty"`
 }
 
 // TurnHistory points at a session turn's conversation: what its turn reads
@@ -201,7 +204,7 @@ func (a *LLMActivities) buildRequest(ctx context.Context, req LLMTurnRequest) (p
 	for i, t := range tools {
 		offered[i] = t.Name
 	}
-	tools = append(tools, withdrawnTools(req.AgentID, missing, chat)...)
+	tools = append(tools, a.withdrawnTools(req.AgentID, offered, missing, chat)...)
 
 	// Cache breakpoints: the system prompt and the last tool definition are
 	// stable across a turn's calls; the second-to-last message ends the
@@ -223,38 +226,54 @@ func (a *LLMActivities) buildRequest(ctx context.Context, req LLMTurnRequest) (p
 	}, memory, nil
 }
 
-// withdrawnDescription is what the model reads of a tool withdrawn while it
-// was in use.
-const withdrawnDescription = "Withdrawn: this tool is no longer available. Do not call it."
+// What the model reads of a tool the conversation calls and the turn does
+// not offer: withdrawn from the catalog, or closed to this turn's user (it
+// may be open at the next one: another member's turn called it).
+const (
+	withdrawnDescription = "Withdrawn: this tool is no longer available. Do not call it."
+	notOpenDescription   = "Not open in this turn. Do not call it."
+)
 
-// withdrawnTools keeps a definition for each tool of missing, gone from the
-// catalog since the turn started, that the conversation calls: the API
-// rejects tool blocks a request defines no tool for, which an agent whose
-// only tool was withdrawn would send. The definition is a stub that says not
-// to call it, and the tool is never in the prompt; one the conversation does
-// not call is simply not offered.
-func withdrawnTools(agentID string, missing []string, chat []provider.ChatMessage) []provider.ToolDefinition {
-	if len(missing) == 0 {
-		return nil
-	}
-	called := map[string]bool{}
+// withdrawnTools keeps a definition for each tool the conversation calls
+// that the turn does not offer: the API rejects tool blocks a request
+// defines no tool for, which an agent offered none would send (its only
+// tool withdrawn, or every one closed to this user while the agent's turns
+// for another member called them). The definition is a stub that says not
+// to call it, and the tool is never in the prompt; one the conversation
+// does not call is simply not offered. Nothing is told that the history
+// does not hold already: the name.
+func (a *LLMActivities) withdrawnTools(agentID string, offered, missing []string, chat []provider.ChatMessage) []provider.ToolDefinition {
+	var notOffered []string
+	seen := map[string]bool{}
 	for _, m := range chat {
 		for _, tc := range m.ToolCalls {
-			called[tc.Name] = true
+			if !seen[tc.Name] && !slices.Contains(offered, tc.Name) {
+				notOffered = append(notOffered, tc.Name)
+			}
+			seen[tc.Name] = true
 		}
 	}
+	if len(notOffered) == 0 {
+		return nil
+	}
+	slices.Sort(notOffered) // the definitions are a cached prefix: keep it stable
+	// Gone: asked for and missing, or unknown to the catalog.
+	_, unknown, _ := a.Catalog.ToolDefinitions(notOffered, false)
 	var stubs []provider.ToolDefinition
-	var kept []string
-	for _, name := range missing {
-		if called[name] {
-			stubs = append(stubs, provider.ToolDefinition{Name: name, Description: withdrawnDescription, InputSchema: json.RawMessage(`{"type":"object"}`)})
-			kept = append(kept, name)
+	var withdrawn []string
+	for _, name := range notOffered {
+		description := notOpenDescription
+		if slices.Contains(missing, name) || slices.Contains(unknown, name) {
+			description = withdrawnDescription
+			withdrawn = append(withdrawn, name)
 		}
+		stubs = append(stubs, provider.ToolDefinition{Name: name, Description: description, InputSchema: json.RawMessage(`{"type":"object"}`)})
 	}
-	// Only a stub is worth a line: a tool merely gone is common, and this
-	// runs on every call of the turn.
-	if len(kept) > 0 {
-		log.Printf("LLM call: agent %s, tools %v gone from the catalog but already called, kept as withdrawn", agentID, kept)
+	// Only a stub is worth a line, and only a withdrawn one: a tool merely
+	// gone is common, a closed one the rules' business, and this runs on
+	// every call of the turn.
+	if len(withdrawn) > 0 {
+		log.Printf("LLM call: agent %s, tools %v gone from the catalog but already called, kept as withdrawn", agentID, withdrawn)
 	}
 	return stubs
 }
@@ -302,6 +321,7 @@ func (a *LLMActivities) systemPrompt(ctx context.Context, req LLMTurnRequest, to
 	if prompt == "" {
 		prompt = a.Prompts.AgentPrompt(req.AgentID, tools)
 	}
+	prompt += closedSection(p.UserName, p.Closed)
 	var held PromptMemory
 	if p.MemoryOf != "" {
 		memory, err := a.Store.LoadMemory(ctx, store.MemoryScopeUser, p.MemoryOf)
@@ -336,6 +356,23 @@ func (a *LLMActivities) tasksSection(ctx context.Context, h *TurnHistory, tools 
 		running = slices.DeleteFunc(running, func(t store.BackgroundTask) bool { return t.TurnKey == h.TurnKey })
 	}
 	return TasksSection(running, backgrounds, slices.Contains(tools, "when_task_done"))
+}
+
+// closedSection tells the agent the tools of its list closed to the user
+// it answers (docs/design/permissions.md §4.2), by name only: without it,
+// it would behave as if they did not exist, or promise what it cannot do.
+// Sorted, it stays the same over the turn.
+func closedSection(userName string, closed []string) string {
+	if len(closed) == 0 {
+		return ""
+	}
+	who := userName
+	if who == "" {
+		who = "this user"
+	}
+	names := slices.Sorted(slices.Values(closed))
+	return "\nSome of your tools are not open to " + who + ": " + strings.Join(names, ", ") +
+		". If asked for what they do, say an admin can give access.\n"
 }
 
 // TasksSection is the prompt section on background tasks: how to launch

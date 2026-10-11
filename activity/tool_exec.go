@@ -58,16 +58,28 @@ type ToolResolution struct {
 
 type ListToolsInput struct {
 	AgentID string `json:"agent_id"`
+	// UserID is the user the turn answers: the tools are those of the
+	// agent's list open to them (docs/design/permissions.md).
+	UserID string `json:"user_id,omitempty"`
 }
 
 type ListToolsOutput struct {
 	Tools       []provider.ToolDefinition `json:"tools"`       // Definitions sent to the LLM, sorted by name
 	Resolutions map[string]ToolResolution `json:"resolutions"` // Tool name → dispatch info; absent = not allowed
+	// Refused is why the agent is closed to the user, empty when it is
+	// open: the turn stops before its model (AgentNotOpen). Never a
+	// boolean "allowed", whose zero value (a fake, a late worker's output)
+	// would refuse.
+	Refused string `json:"refused,omitempty"`
+	// Closed names the tools of the agent's list closed to the user, by
+	// name: the prompt tells them.
+	Closed []string `json:"closed,omitempty"`
 }
 
-// ListTools returns the tools the agent may use, from the worker's catalog.
+// ListTools returns the tools the agent may use for the turn's user, from
+// the worker's catalog.
 func (a *ToolActivities) ListTools(ctx context.Context, input ListToolsInput) (ListToolsOutput, error) {
-	return a.Catalog.AllowedTools(input.AgentID), nil
+	return a.Catalog.AllowedToolsFor(input.AgentID, input.UserID), nil
 }
 
 func (a *ToolActivities) ExecuteTool(ctx context.Context, input ExecuteToolInput) (ExecuteToolOutput, error) {

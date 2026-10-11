@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"time"
 
+	"github.com/victor/temporal-agent/access"
 	"github.com/victor/temporal-agent/activity"
 	"github.com/victor/temporal-agent/config"
 	"github.com/victor/temporal-agent/store"
@@ -19,11 +20,12 @@ type agentSeeder interface {
 	InsertAgentIfAbsent(ctx context.Context, agent store.Agent) (bool, error)
 }
 
-// catalogSource is where a worker's catalog comes from: the agents, and the
-// tools the workers published.
+// catalogSource is where a worker's catalog comes from: the agents, the
+// tools the workers published, and who may use them.
 type catalogSource interface {
 	ListAgents(ctx context.Context) ([]store.Agent, error)
 	ListTools(ctx context.Context) ([]store.ToolRecord, error)
+	AccessSnapshot(ctx context.Context) (access.Snapshot, error)
 }
 
 // seedAgents imports the seed file into an empty agents table. Once the table
@@ -111,11 +113,28 @@ func initCatalog(st catalogSource) *activity.Catalog {
 	return catalog
 }
 
-// refreshCatalog reloads agents and tools from DB into catalog, logging changes.
-// On a DB error the previous content is kept.
+// refreshCatalog reloads agents, tools and access rules from DB into
+// catalog, logging changes. On a DB error the previous content is kept. A
+// catalog that never read the rules takes no agent nor tool: everything
+// would be open to everyone, the rules not read.
 func refreshCatalog(st catalogSource, catalog *activity.Catalog) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
+	snap, err := st.AccessSnapshot(ctx)
+	_, loaded := catalog.Access()
+	switch {
+	case err != nil && !loaded:
+		log.Printf("Warning: failed to load the access rules from DB, the catalog waits for them: %v", err)
+		return
+	case err != nil:
+		log.Printf("Warning: failed to load the access rules from DB: %v", err)
+	default:
+		if prev, _ := catalog.Access(); !loaded || !reflect.DeepEqual(snap, prev) {
+			catalog.SetAccess(snap)
+			log.Printf("Access rules loaded: %d rules, %d users", len(snap.Rules), len(snap.Users))
+		}
+	}
 
 	if agents, err := loadAgentsFromDB(ctx, st); err != nil {
 		log.Printf("Warning: failed to load agents catalog from DB: %v", err)

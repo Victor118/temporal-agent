@@ -10,7 +10,13 @@ import (
 	"github.com/victor/temporal-agent/store"
 )
 
-func TestLoadSkillsForAgent_PromptFollowsAllowlist(t *testing.T) {
+// basePrompt is agentID's prompt for its whole list of tools, as the
+// back-office shows it.
+func basePrompt(a *SkillActivities, c *Catalog, agentID string) string {
+	return a.Prompts.AgentPrompt(agentID, names(c.AllowedTools(agentID)))
+}
+
+func TestAgentPrompt_FollowsAllowlist(t *testing.T) {
 	c := NewCatalog()
 	c.SetAgents([]AgentCatalogEntry{
 		{ID: "default", Name: "Default", Tools: []string{"*"}},
@@ -22,11 +28,7 @@ func TestLoadSkillsForAgent_PromptFollowsAllowlist(t *testing.T) {
 	})
 	a := NewSkillActivities([]skill.Skill{{Name: "market", Content: "MARKET SKILL"}}, c)
 
-	out, err := a.LoadSkillsForAgent(context.Background(), LoadSkillsForAgentInput{AgentID: "analyst"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	p := out.SystemPrompt
+	p := basePrompt(a, c, "analyst")
 	for _, want := range []string{"look it up with web_fetch.", "MARKET SKILL", "Only use the tools you are given"} {
 		if !strings.Contains(p, want) {
 			t.Errorf("analyst prompt missing %q", want)
@@ -38,36 +40,30 @@ func TestLoadSkillsForAgent_PromptFollowsAllowlist(t *testing.T) {
 		}
 	}
 
-	out, err = a.LoadSkillsForAgent(context.Background(), LoadSkillsForAgentInput{AgentID: "default"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	p = basePrompt(a, c, "default")
 	// "default" may delegate to "analyst" only: never to itself.
 	for _, want := range []string{"use exec.", "delegate it to the agent suited for it: agent_analyst.", "Only use write_file when"} {
-		if !strings.Contains(out.SystemPrompt, want) {
+		if !strings.Contains(p, want) {
 			t.Errorf("default prompt missing %q", want)
 		}
 	}
-	if strings.Contains(out.SystemPrompt, "agent_default") {
+	if strings.Contains(p, "agent_default") {
 		t.Error("default prompt offers delegating to itself")
 	}
 }
 
 // The agent knows its name and what calls it: in a shared session the
 // messages it answers start with its mention.
-func TestLoadSkillsForAgent_SaysWhatCallsIt(t *testing.T) {
+func TestAgentPrompt_SaysWhatCallsIt(t *testing.T) {
 	c := NewCatalog()
 	c.SetAgents([]AgentCatalogEntry{{ID: "default", Name: "Jarvis", Mention: "jarvis"}})
-	out, err := NewSkillActivities(nil, c).LoadSkillsForAgent(context.Background(), LoadSkillsForAgentInput{AgentID: "default"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(out.SystemPrompt, "Your name is Jarvis. In a conversation, people address you by writing @jarvis.") {
-		t.Errorf("prompt %q", out.SystemPrompt)
+	p := basePrompt(NewSkillActivities(nil, c), c, "default")
+	if !strings.Contains(p, "Your name is Jarvis. In a conversation, people address you by writing @jarvis.") {
+		t.Errorf("prompt %q", p)
 	}
 	// Other agents' turns reach it as prefixed text: it must know what they are.
-	if !strings.Contains(out.SystemPrompt, "[agent Name (@mention)]") {
-		t.Errorf("prompt %q does not explain other agents' turns", out.SystemPrompt)
+	if !strings.Contains(p, "[agent Name (@mention)]") {
+		t.Errorf("prompt %q does not explain other agents' turns", p)
 	}
 }
 
@@ -105,8 +101,8 @@ func TestRunSkills(t *testing.T) {
 		t.Fatalf("%+v %v", out.RunSkills, err)
 	}
 	// A run's skill is for the CLI that codes, never in the agent's prompt.
-	if strings.Contains(out.SystemPrompt, "RED, GREEN, REFACTOR.") || !strings.Contains(out.SystemPrompt, "Look twice.") {
-		t.Errorf("prompt:\n%s", out.SystemPrompt)
+	if p := basePrompt(a, c, "coder"); strings.Contains(p, "RED, GREEN, REFACTOR.") || !strings.Contains(p, "Look twice.") {
+		t.Errorf("prompt:\n%s", p)
 	}
 	set := a.Prompts.RunSkills([]string{"tdd", "review", "tdd", "ghost"})
 	if len(set.Skills) != 1 || set.Skills[0].Name != "tdd" || set.Skills[0].Content != "RED, GREEN, REFACTOR." || set.Skills[0].Description != "Test first" ||

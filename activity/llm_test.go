@@ -288,6 +288,56 @@ func TestCallLLM_KeepsAWithdrawnToolItCalled(t *testing.T) {
 	}
 }
 
+// A tool the agent's turns for another member called, closed to this
+// turn's user, keeps a stub that says it is not open: even when it closes
+// every tool of the agent, the request defines the tools its blocks call.
+// The prompt names the tools closed to the user.
+func TestCallLLM_StubsAToolClosedToTheUser(t *testing.T) {
+	calls := []store.Message{
+		{Role: store.RoleUser, Content: text("find Acme"), UserID: "alice", Author: "Alice"},
+		{Role: store.RoleAssistant, UserID: "alice", ToolCalls: []store.ToolCall{{ID: "t1", Name: "crm_search", Input: json.RawMessage(`{}`)}}},
+		{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "t1", Content: "Acme"}},
+		{Role: store.RoleAssistant, UserID: "alice", Content: text("found")},
+		{Role: store.RoleUser, Content: text("and Bob's?"), UserID: "bob", Author: "Bob"},
+	}
+	c := NewCatalog()
+	c.SetTools([]store.ToolRecord{
+		{Name: "crm_search", MCPServer: "crm", InputSchema: json.RawMessage(`{"type":"object","properties":{"q":{}}}`)},
+		{Name: "web_fetch", InputSchema: json.RawMessage(`{"type":"object"}`)},
+	})
+	for _, tc := range []struct {
+		name  string
+		tools []string
+		want  []string
+	}{
+		{"some tools open", []string{"web_fetch"}, []string{"web_fetch", "crm_search"}},
+		{"none open", nil, []string{"crm_search"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			model := &recordingModel{}
+			a := &LLMActivities{Provider: model, Catalog: c, Prompts: promptOf{}}
+			if _, err := a.CallLLM(context.Background(), LLMTurnRequest{AgentID: "default", UserID: "bob", Tools: tc.tools,
+				Prompt: PromptRef{UserName: "Bob", Closed: []string{"crm_search"}}, Messages: calls}); err != nil {
+				t.Fatal(err)
+			}
+			req := model.requests[0]
+			var offered []string
+			for _, d := range req.Tools {
+				offered = append(offered, d.Name)
+				if d.Name == "crm_search" && (d.Description != notOpenDescription || string(d.InputSchema) != `{"type":"object"}`) {
+					t.Errorf("closed tool defined as %+v", d)
+				}
+			}
+			if !reflect.DeepEqual(offered, tc.want) {
+				t.Errorf("offered %v, want %v", offered, tc.want)
+			}
+			if !strings.Contains(req.System, "Some of your tools are not open to Bob: crm_search. If asked for what they do, say an admin can give access.") {
+				t.Errorf("prompt %q does not name the closed tool", req.System)
+			}
+		})
+	}
+}
+
 // A conversation past the bound fails the call for good, with what the
 // members must do; the model is not called.
 func TestCallLLM_RefusesAConversationTooLong(t *testing.T) {
@@ -320,7 +370,7 @@ func TestCallLLM_BuildsThePromptAsBefore(t *testing.T) {
 	c := NewCatalog()
 	c.SetAgents([]AgentCatalogEntry{{ID: "smith", Name: "Agent Smith", Mention: "smith", Skills: []string{"review"}}})
 	skills := NewSkillActivities([]skill.Skill{{Name: "review", Content: "REVIEW SKILL"}}, c)
-	base, _ := skills.LoadSkillsForAgent(context.Background(), LoadSkillsForAgentInput{AgentID: "smith"})
+	base := basePrompt(skills, c, "smith")
 	st := &memConversation{memory: map[string]store.Memory{"u-alice": {Content: "likes tea", Version: 3}}}
 
 	for _, tc := range []struct {
@@ -330,10 +380,10 @@ func TestCallLLM_BuildsThePromptAsBefore(t *testing.T) {
 		want   string
 	}{
 		{"agent", PromptRef{MemoryOf: "u-alice", UserName: "Alice", PartNote: "\n## PART\n"},
-			nil, base.SystemPrompt + userMemorySection("Alice", "likes tea") + "\n## PART\n"},
+			nil, base + userMemorySection("Alice", "likes tea") + "\n## PART\n"},
 		{"override", PromptRef{Override: "OVERRIDE", MemoryOf: "u-alice"}, nil, "OVERRIDE" + userMemorySection("", "likes tea")},
-		{"memory unread", PromptRef{MemoryOf: "u-alice"}, errors.New("db down"), base.SystemPrompt},
-		{"no memory", PromptRef{}, nil, base.SystemPrompt},
+		{"memory unread", PromptRef{MemoryOf: "u-alice"}, errors.New("db down"), base},
+		{"no memory", PromptRef{}, nil, base},
 	} {
 		st.memErr = tc.memErr
 		model := &recordingModel{}
@@ -346,8 +396,8 @@ func TestCallLLM_BuildsThePromptAsBefore(t *testing.T) {
 			t.Errorf("%s: prompt %q\nwant %q", tc.name, got, tc.want)
 		}
 	}
-	if !strings.Contains(base.SystemPrompt, "Your name is Agent Smith") || !strings.Contains(base.SystemPrompt, "REVIEW SKILL") {
-		t.Errorf("base prompt %q lacks the identity or the skill", base.SystemPrompt)
+	if !strings.Contains(base, "Your name is Agent Smith") || !strings.Contains(base, "REVIEW SKILL") {
+		t.Errorf("base prompt %q lacks the identity or the skill", base)
 	}
 }
 

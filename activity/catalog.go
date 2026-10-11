@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/victor/temporal-agent/access"
 	"github.com/victor/temporal-agent/conversation"
 	"github.com/victor/temporal-agent/provider"
 	"github.com/victor/temporal-agent/store"
@@ -22,6 +23,10 @@ type Catalog struct {
 	mu     sync.RWMutex
 	agents []AgentCatalogEntry
 	tools  []store.ToolRecord // sorted by name
+	// access is who may use which tool (docs/design/permissions.md),
+	// reloaded with the rest; accessLoaded: read once at least.
+	access       access.Snapshot
+	accessLoaded bool
 }
 
 func NewCatalog() *Catalog {
@@ -44,6 +49,21 @@ func (c *Catalog) SetTools(tools []store.ToolRecord) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.tools = tools
+}
+
+// SetAccess replaces the access rules and the users they decide for.
+func (c *Catalog) SetAccess(s access.Snapshot) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.access, c.accessLoaded = s, true
+}
+
+// Access returns the access rules and users, and whether they were ever
+// loaded.
+func (c *Catalog) Access() (access.Snapshot, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.access, c.accessLoaded
 }
 
 func (c *Catalog) Agents() []AgentCatalogEntry {
@@ -76,9 +96,57 @@ const AgentToolSchema = `{"type":"object","properties":{"task":{"type":"string",
 // allowlist matches, and the agent_<id> tools of the other agents it matches.
 // Access is denied by default: an empty allowlist, or an unknown agent, gets
 // no tool at all. Granting everything takes an explicit "*".
+//
+// It is the agent's list whoever it answers: the back-office's inventory. A
+// turn takes AllowedToolsFor its user.
 func (c *Catalog) AllowedTools(agentID string) ListToolsOutput {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	out, _ := c.allowedTools(agentID)
+	return out
+}
+
+// AgentNotOpen is the type of the refusal of a turn whose agent is closed
+// to its user (ListToolsOutput.Refused): the turn stops before its model.
+const AgentNotOpen = "AgentNotOpen"
+
+// AllowedToolsFor returns the tools of agentID's list that userID may use
+// (access.Allowed), as a turn for that user offers and dispatches them;
+// Closed names the others, which the prompt tells. An agent closed to the
+// user gets Refused, and no tool. Without a user, only what no rule
+// targets is open.
+func (c *Catalog) AllowedToolsFor(agentID, userID string) ListToolsOutput {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	out, servers := c.allowedTools(agentID)
+	if !c.access.Allowed(userID, access.Agent(agentID)) {
+		who := userID
+		if who == "" {
+			who = "a run without a user"
+		}
+		return ListToolsOutput{
+			Tools:       []provider.ToolDefinition{},
+			Resolutions: map[string]ToolResolution{},
+			Refused:     fmt.Sprintf("agent %s not open to %s", agentID, who),
+		}
+	}
+	kept := out.Tools[:0]
+	for _, t := range out.Tools {
+		if c.access.Allowed(userID, access.ToolRef{Name: t.Name, MCPServer: servers[t.Name]}) {
+			kept = append(kept, t)
+			continue
+		}
+		delete(out.Resolutions, t.Name)
+		out.Closed = append(out.Closed, t.Name) // in the tools' order: by name
+	}
+	out.Tools = kept
+	return out
+}
+
+// allowedTools is AllowedTools, with the server each published tool comes
+// from. The caller holds the lock.
+func (c *Catalog) allowedTools(agentID string) (ListToolsOutput, map[string]string) {
+	servers := map[string]string{}
 
 	var allowlist []string
 	known := false
@@ -107,6 +175,9 @@ func (c *Catalog) AllowedTools(agentID string) ListToolsOutput {
 			continue
 		}
 		out.Tools = append(out.Tools, publishedDefinition(t))
+		if t.MCPServer != "" {
+			servers[t.Name] = t.MCPServer
+		}
 		out.Resolutions[t.Name] = ToolResolution{
 			Kind:             t.Kind,
 			WorkflowName:     t.WorkflowName,
@@ -131,7 +202,7 @@ func (c *Catalog) AllowedTools(agentID string) ListToolsOutput {
 	}
 
 	sort.Slice(out.Tools, func(i, j int) bool { return out.Tools[i].Name < out.Tools[j].Name })
-	return out
+	return out, servers
 }
 
 func publishedDefinition(t store.ToolRecord) provider.ToolDefinition {

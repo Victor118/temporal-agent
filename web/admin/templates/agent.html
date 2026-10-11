@@ -95,5 +95,5 @@
 
 {{define "prompt"}}
 <pre>{{.Data}}</pre>
-<p class="note">Construit par <code>LoadSkillsForAgent</code> avec les skills du serveur, sans la mémoire de l'utilisateur, que le workflow ajoute à chaque tour.</p>
+<p class="note">Construit comme à chaque appel du modèle, avec les skills du serveur et tous les tools de l'agent, sans la mémoire de l'utilisateur ni la ligne des tools qui lui sont fermés, que chaque appel ajoute.</p>
 {{end}}

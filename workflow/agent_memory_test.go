@@ -31,7 +31,7 @@ func registerMemoryTool(env *testsuite.TestWorkflowEnvironment, f *llmFakes) fun
 		}, nil
 	}, sdkactivity.RegisterOptions{Name: "ListTools"})
 	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.LoadSkillsForAgentInput) (activity.LoadSkillsForAgentOutput, error) {
-		return activity.LoadSkillsForAgentOutput{SystemPrompt: "prompt", RunSkills: []string{"tdd"}}, nil
+		return activity.LoadSkillsForAgentOutput{RunSkills: []string{"tdd"}}, nil
 	}, sdkactivity.RegisterOptions{Name: "LoadSkillsForAgent"})
 	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.NotifyInput) error {
 		return nil

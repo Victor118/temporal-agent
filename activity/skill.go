@@ -106,10 +106,10 @@ type LoadSkillsForAgentInput struct {
 	AgentID string `json:"agent_id"`
 }
 
+// LoadSkillsForAgentOutput is what a turn reads of its agent at its start.
+// No prompt: each of its calls builds its own (LLMActivities.CallLLM), and
+// the back-office builds the one it shows (Prompts.AgentPrompt).
 type LoadSkillsForAgentOutput struct {
-	// SystemPrompt is the agent's base prompt, as of now: the back-office
-	// shows it. A turn's calls build theirs (LLMActivities.CallLLM).
-	SystemPrompt string `json:"system_prompt"`
 	// Name is the agent's name, which signs its messages; its ID when the
 	// catalog does not know it.
 	Name string `json:"name,omitempty"`
@@ -121,14 +121,9 @@ type LoadSkillsForAgentOutput struct {
 	RunSkills []string `json:"run_skills,omitempty"`
 }
 
-// LoadSkillsForAgent returns the agent's name, its prompt for the tools its
-// allowlist grants, where its turns call their model, and the skills its
-// coding runs take along.
+// LoadSkillsForAgent returns the agent's name, where its turns call their
+// model, and the skills its coding runs take along.
 func (a *SkillActivities) LoadSkillsForAgent(ctx context.Context, input LoadSkillsForAgentInput) (LoadSkillsForAgentOutput, error) {
-	var tools []string
-	for name := range a.catalog.AllowedTools(input.AgentID).Resolutions {
-		tools = append(tools, name)
-	}
 	name, onMachine := input.AgentID, ""
 	var runSkills []string
 	for _, e := range a.catalog.Agents() {
@@ -141,8 +136,7 @@ func (a *SkillActivities) LoadSkillsForAgent(ctx context.Context, input LoadSkil
 		onMachine = e.LLMOnMachine
 		runSkills = a.Prompts.runSkillNames(e.Skills)
 	}
-	return LoadSkillsForAgentOutput{SystemPrompt: a.Prompts.AgentPrompt(input.AgentID, tools), Name: name, LLMOnMachine: onMachine,
-		RunSkills: runSkills}, nil
+	return LoadSkillsForAgentOutput{Name: name, LLMOnMachine: onMachine, RunSkills: runSkills}, nil
 }
 
 // matchSkills returns the skills named in names, in order, skipping unknown

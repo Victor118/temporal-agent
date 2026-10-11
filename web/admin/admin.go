@@ -242,8 +242,9 @@ func (a *Admin) queuesStatus(w http.ResponseWriter, r *http.Request) {
 	a.pages.fragment(w, "queues", "queue_cards", pageData{Inv: snap.inv})
 }
 
-// agentPrompt renders the system prompt the agent would get, built by the same
-// activity the workers run, from the server's skills.
+// agentPrompt renders the system prompt the agent would get, built as the
+// workers' LLM calls build it, from the server's skills, for its whole list
+// of tools (a turn's user may have fewer: docs/design/permissions.md).
 func (a *Admin) agentPrompt(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	snap, err := a.load(r.Context())
@@ -258,11 +259,10 @@ func (a *Admin) agentPrompt(w http.ResponseWriter, r *http.Request) {
 	}
 
 	catalog := newCatalog(snap.in.Agents, snap.in.Tools)
-	out, err := activity.NewSkillActivities(snap.in.Skills, catalog).
-		LoadSkillsForAgent(r.Context(), activity.LoadSkillsForAgentInput{AgentID: id})
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	var tools []string
+	for _, def := range catalog.AllowedTools(id).Tools {
+		tools = append(tools, def.Name)
 	}
-	a.pages.fragment(w, "agent", "prompt", pageData{Inv: snap.inv, Data: out.SystemPrompt})
+	prompt := activity.NewPrompts(snap.in.Skills, catalog).AgentPrompt(id, tools)
+	a.pages.fragment(w, "agent", "prompt", pageData{Inv: snap.inv, Data: prompt})
 }
