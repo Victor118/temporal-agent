@@ -135,9 +135,9 @@ func TestDeliver_SignalsTheMentionedAgents(t *testing.T) {
 			tc := &fakeTemporal{}
 			sess := &store.Session{SessionID: sid, AgentID: "default", AgentMode: c.mode}
 			svc := newTest(st, tc)
-			called, err := svc.Deliver(context.Background(), sess, alice, c.text)
-			if err != nil || called != c.wantCalled {
-				t.Fatalf("Deliver = %v, %v; want %v", called, err, c.wantCalled)
+			d, err := svc.Deliver(context.Background(), sess, alice, c.text)
+			if err != nil || d.Called != c.wantCalled || d.Refused != nil {
+				t.Fatalf("Deliver = %+v, %v; want %v", d, err, c.wantCalled)
 			}
 			if !c.wantCalled {
 				if len(tc.signalStarts) != 0 {

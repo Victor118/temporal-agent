@@ -36,6 +36,7 @@
   </div>
   {{end}}
   {{with .Error}}<div class="composer-error" id="thread-error">{{.}}</div>{{end}}
+  {{with .Notice}}<div class="note" id="thread-notice">{{.}}</div>{{end}}
 </div>
 {{end}}
 
@@ -199,7 +200,7 @@
   <form class="composer-box" hx-post="/s/{{$sid}}/messages" hx-target="#thread" hx-swap="morph:innerHTML"
         hx-on::after-request="if (event.detail.successful) this.reset()">
     <textarea id="composer-text" name="content" rows="2" required {{if .SummaryPending}}disabled{{end}}
-      placeholder="{{if .AgentOnMention}}Écrire dans ce fil — @{{.Agent.Mention}} pour le solliciter{{if .SeveralAgents}}, la mention d'un autre agent pour l'appeler{{end}}{{else}}Écrire à {{.Agent.Name}}…{{if .SeveralAgents}} ou @mention d'un autre agent{{end}}{{end}}"
+      placeholder="{{if .AgentClosed}}Écrire aux membres de ce fil{{if .Agents}} — @mention d'un agent qui t'est ouvert pour l'appeler{{end}}{{else if .AgentOnMention}}Écrire dans ce fil — @{{.Agent.Mention}} pour le solliciter{{if .SeveralAgents}}, la mention d'un autre agent pour l'appeler{{end}}{{else}}Écrire à {{.Agent.Name}}…{{if .SeveralAgents}} ou @mention d'un autre agent{{end}}{{end}}"
       onkeydown="if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); this.form.requestSubmit(); }"></textarea>
     <div class="composer-bar">
       <div>
@@ -218,7 +219,7 @@
         </details>
         {{end}}
       </div>
-      <span class="hint">{{if .AgentOnMention}}{{.Agent.Name}} ne répond qu'à <code>@{{.Agent.Mention}}</code>{{if .SeveralAgents}}, les autres agents à leur mention{{end}}{{else}}Entrée pour envoyer, Maj+Entrée pour aller à la ligne{{if .SeveralAgents}} · @mention pour appeler un autre agent{{end}}{{end}}</span>
+      <span class="hint">{{if .AgentClosed}}L'agent de cette session ne t'est pas ouvert : tes messages vont aux membres seulement{{if .Agents}}, et aux agents qui te sont ouverts que tu mentionnes{{end}}.{{else if .AgentOnMention}}{{.Agent.Name}} ne répond qu'à <code>@{{.Agent.Mention}}</code>{{if .SeveralAgents}}, les autres agents à leur mention{{end}}{{else}}Entrée pour envoyer, Maj+Entrée pour aller à la ligne{{if .SeveralAgents}} · @mention pour appeler un autre agent{{end}}{{end}}</span>
       <button class="btn primary" type="submit" {{if .SummaryPending}}disabled{{end}}>Envoyer</button>
     </div>
   </form>

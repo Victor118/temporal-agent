@@ -47,3 +47,20 @@ func (a *ScheduleActivities) DeleteSchedule(ctx context.Context, input DeleteSch
 	a.Store.UpdateTaskLogStatus(ctx, input.ScheduleID, status)
 	return nil
 }
+
+type PauseScheduleInput struct {
+	ScheduleID string `json:"schedule_id"`
+	// Reason is the schedule's note in Temporal: why it is paused.
+	Reason string `json:"reason"`
+}
+
+// PauseSchedule pauses a recurring task whose runs are refused for good
+// (its agent closed to its owner: docs/design/permissions.md §4.1), so
+// that each of its next runs does not fail again; its log says paused. It
+// runs again only when resumed: a right given back does not restart it.
+func (a *ScheduleActivities) PauseSchedule(ctx context.Context, input PauseScheduleInput) error {
+	if err := a.Client.GetHandle(ctx, input.ScheduleID).Pause(ctx, client.SchedulePauseOptions{Note: input.Reason}); err != nil {
+		return err
+	}
+	return a.Store.UpdateTaskLogStatus(ctx, input.ScheduleID, store.TaskPaused)
+}

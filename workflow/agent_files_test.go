@@ -61,7 +61,7 @@ func TestAgentWorkflow_NotifiesPublishedFiles(t *testing.T) {
 		}, nil
 	}, sdkactivity.RegisterOptions{Name: "ListTools"})
 	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.LoadSkillsForAgentInput) (activity.LoadSkillsForAgentOutput, error) {
-		return activity.LoadSkillsForAgentOutput{SystemPrompt: "prompt"}, nil
+		return activity.LoadSkillsForAgentOutput{}, nil
 	}, sdkactivity.RegisterOptions{Name: "LoadSkillsForAgent"})
 
 	var mu sync.Mutex

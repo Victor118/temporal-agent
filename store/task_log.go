@@ -22,4 +22,5 @@ const (
 	TaskCancelled = "cancelled"
 	TaskCompleted = "completed" // a one-shot ran and its result was delivered
 	TaskFailed    = "failed"    // a one-shot's run failed, or its result was not delivered
+	TaskPaused    = "paused"    // a recurring task its agent refused (closed to its user): it runs no more until resumed
 )

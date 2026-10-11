@@ -22,6 +22,7 @@ import (
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/converter"
 
+	"github.com/victor/temporal-agent/access"
 	"github.com/victor/temporal-agent/activity"
 	"github.com/victor/temporal-agent/store"
 )
@@ -66,6 +67,8 @@ type Store interface {
 	GetUserByEmail(ctx context.Context, email string) (*store.User, error)
 	GetAgent(ctx context.Context, agentID string) (*store.Agent, error)
 	ListAgents(ctx context.Context) ([]store.Agent, error)
+	// The access rules, and the users they decide for (access.go).
+	AccessSnapshot(ctx context.Context) (access.Snapshot, error)
 
 	AppendMessage(ctx context.Context, sessionID, key string, msg store.Message) (int64, error)
 	LoadMessagesUpTo(ctx context.Context, sessionID string, lastID int64) ([]store.MessageWithID, error)
@@ -119,7 +122,8 @@ type Service struct {
 	hub      Publisher
 	cfg      Config
 	statuses statusCache
-	turns    turns // what the turn events tell, in memory
+	rules    accessCache // who may call which agent
+	turns    turns       // what the turn events tell, in memory
 	// background counts the work started off a caller's way (a title, the
 	// trees' rings): tests wait for it.
 	background sync.WaitGroup

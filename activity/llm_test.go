@@ -13,6 +13,7 @@ import (
 
 	"go.temporal.io/sdk/temporal"
 
+	"github.com/victor/temporal-agent/access"
 	"github.com/victor/temporal-agent/provider"
 	"github.com/victor/temporal-agent/skill"
 	"github.com/victor/temporal-agent/store"
@@ -26,6 +27,15 @@ func (p failingProvider) Chat(context.Context, provider.ChatRequest) (provider.C
 }
 
 // recordingModel answers every request with done, and keeps them.
+// readyCatalog is a catalog that has read its agents (none) and its access
+// rules (none), as a worker's after its first reload: ready.
+func readyCatalog() *Catalog {
+	c := NewCatalog()
+	c.SetAgents(nil)
+	c.SetAccess(access.Snapshot{})
+	return c
+}
+
 type recordingModel struct{ requests []provider.ChatRequest }
 
 func (m *recordingModel) Chat(_ context.Context, req provider.ChatRequest) (provider.ChatResponse, error) {
@@ -71,7 +81,7 @@ func (promptOf) AgentPrompt(agentID string, tools []string) string {
 
 // newLLM is an LLMActivities over st, an empty catalog and model.
 func newLLM(model provider.LLMProvider, st ConversationLoader) *LLMActivities {
-	return &LLMActivities{Provider: model, Store: st, Catalog: NewCatalog(), Prompts: promptOf{}}
+	return &LLMActivities{Provider: model, Store: st, Catalog: readyCatalog(), Prompts: promptOf{}}
 }
 
 // what lists the text of each message the model read, with its role.
@@ -209,7 +219,7 @@ func TestCallLLM_InlineConversation(t *testing.T) {
 // them; one gone from the catalog since is dropped, from the tools and from
 // the prompt.
 func TestCallLLM_OffersTheToolsByName(t *testing.T) {
-	c := NewCatalog()
+	c := readyCatalog()
 	c.SetAgents([]AgentCatalogEntry{
 		{ID: "default", Tools: []string{"*"}},
 		{ID: "analyst", Name: "Analyst", Description: "Markets."},
@@ -257,7 +267,7 @@ func TestCallLLM_KeepsAWithdrawnToolItCalled(t *testing.T) {
 	} {
 		catalog := tc.catalog
 		t.Run(tc.name, func(t *testing.T) {
-			c := NewCatalog()
+			c := readyCatalog()
 			c.SetTools(catalog)
 			model := &recordingModel{}
 			a := &LLMActivities{Provider: model, Catalog: c, Prompts: promptOf{}}
@@ -283,6 +293,56 @@ func TestCallLLM_KeepsAWithdrawnToolItCalled(t *testing.T) {
 			}
 			if req.System != prompt {
 				t.Errorf("prompt %q, want %q", req.System, prompt)
+			}
+		})
+	}
+}
+
+// A tool the agent's turns for another member called, closed to this
+// turn's user, keeps a stub that says it is not open: even when it closes
+// every tool of the agent, the request defines the tools its blocks call.
+// The prompt names the tools closed to the user.
+func TestCallLLM_StubsAToolClosedToTheUser(t *testing.T) {
+	calls := []store.Message{
+		{Role: store.RoleUser, Content: text("find Acme"), UserID: "alice", Author: "Alice"},
+		{Role: store.RoleAssistant, UserID: "alice", ToolCalls: []store.ToolCall{{ID: "t1", Name: "crm_search", Input: json.RawMessage(`{}`)}}},
+		{Role: store.RoleTool, ToolResult: &store.ToolResult{ToolCallID: "t1", Content: "Acme"}},
+		{Role: store.RoleAssistant, UserID: "alice", Content: text("found")},
+		{Role: store.RoleUser, Content: text("and Bob's?"), UserID: "bob", Author: "Bob"},
+	}
+	c := readyCatalog()
+	c.SetTools([]store.ToolRecord{
+		{Name: "crm_search", MCPServer: "crm", InputSchema: json.RawMessage(`{"type":"object","properties":{"q":{}}}`)},
+		{Name: "web_fetch", InputSchema: json.RawMessage(`{"type":"object"}`)},
+	})
+	for _, tc := range []struct {
+		name  string
+		tools []string
+		want  []string
+	}{
+		{"some tools open", []string{"web_fetch"}, []string{"web_fetch", "crm_search"}},
+		{"none open", nil, []string{"crm_search"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			model := &recordingModel{}
+			a := &LLMActivities{Provider: model, Catalog: c, Prompts: promptOf{}}
+			if _, err := a.CallLLM(context.Background(), LLMTurnRequest{AgentID: "default", UserID: "bob", Tools: tc.tools,
+				Prompt: PromptRef{UserName: "Bob", Closed: []string{"crm_search"}}, Messages: calls}); err != nil {
+				t.Fatal(err)
+			}
+			req := model.requests[0]
+			var offered []string
+			for _, d := range req.Tools {
+				offered = append(offered, d.Name)
+				if d.Name == "crm_search" && (d.Description != notOpenDescription || string(d.InputSchema) != `{"type":"object"}`) {
+					t.Errorf("closed tool defined as %+v", d)
+				}
+			}
+			if !reflect.DeepEqual(offered, tc.want) {
+				t.Errorf("offered %v, want %v", offered, tc.want)
+			}
+			if !strings.Contains(req.System, "Some of your tools are not open to Bob: crm_search. If asked for what they do, say an admin can give access.") {
+				t.Errorf("prompt %q does not name the closed tool", req.System)
 			}
 		})
 	}
@@ -317,10 +377,10 @@ func TestCallLLM_RefusesAConversationTooLong(t *testing.T) {
 // override), its user's memory, then the part note. A memory that cannot be
 // read leaves its section out.
 func TestCallLLM_BuildsThePromptAsBefore(t *testing.T) {
-	c := NewCatalog()
+	c := readyCatalog()
 	c.SetAgents([]AgentCatalogEntry{{ID: "smith", Name: "Agent Smith", Mention: "smith", Skills: []string{"review"}}})
 	skills := NewSkillActivities([]skill.Skill{{Name: "review", Content: "REVIEW SKILL"}}, c)
-	base, _ := skills.LoadSkillsForAgent(context.Background(), LoadSkillsForAgentInput{AgentID: "smith"})
+	base := basePrompt(skills, c, "smith")
 	st := &memConversation{memory: map[string]store.Memory{"u-alice": {Content: "likes tea", Version: 3}}}
 
 	for _, tc := range []struct {
@@ -330,10 +390,10 @@ func TestCallLLM_BuildsThePromptAsBefore(t *testing.T) {
 		want   string
 	}{
 		{"agent", PromptRef{MemoryOf: "u-alice", UserName: "Alice", PartNote: "\n## PART\n"},
-			nil, base.SystemPrompt + userMemorySection("Alice", "likes tea") + "\n## PART\n"},
+			nil, base + userMemorySection("Alice", "likes tea") + "\n## PART\n"},
 		{"override", PromptRef{Override: "OVERRIDE", MemoryOf: "u-alice"}, nil, "OVERRIDE" + userMemorySection("", "likes tea")},
-		{"memory unread", PromptRef{MemoryOf: "u-alice"}, errors.New("db down"), base.SystemPrompt},
-		{"no memory", PromptRef{}, nil, base.SystemPrompt},
+		{"memory unread", PromptRef{MemoryOf: "u-alice"}, errors.New("db down"), base},
+		{"no memory", PromptRef{}, nil, base},
 	} {
 		st.memErr = tc.memErr
 		model := &recordingModel{}
@@ -346,8 +406,8 @@ func TestCallLLM_BuildsThePromptAsBefore(t *testing.T) {
 			t.Errorf("%s: prompt %q\nwant %q", tc.name, got, tc.want)
 		}
 	}
-	if !strings.Contains(base.SystemPrompt, "Your name is Agent Smith") || !strings.Contains(base.SystemPrompt, "REVIEW SKILL") {
-		t.Errorf("base prompt %q lacks the identity or the skill", base.SystemPrompt)
+	if !strings.Contains(base, "Your name is Agent Smith") || !strings.Contains(base, "REVIEW SKILL") {
+		t.Errorf("base prompt %q lacks the identity or the skill", base)
 	}
 }
 
@@ -397,7 +457,7 @@ func deref(v *int64) string {
 // Another agent's call to a private tool reaches the model as the members
 // see it, whichever agent reads: the catalog says which tools are private.
 func TestCallLLM_HidesPrivateInputs(t *testing.T) {
-	c := NewCatalog()
+	c := readyCatalog()
 	c.SetAgents([]AgentCatalogEntry{{ID: "jarvis", Name: "Jarvis", Mention: "jarvis"}, {ID: "smith"}})
 	c.SetTools([]store.ToolRecord{{Name: "save_user_memory", PrivateInput: true}})
 	model := &recordingModel{}
@@ -421,5 +481,23 @@ func TestRequestSize_UnencodableIsPastAnyLimit(t *testing.T) {
 	bad := provider.ChatRequest{Messages: []provider.ChatMessage{{Role: "user", Content: json.RawMessage(`{not json`)}}}
 	if got := requestSize(bad); got != math.MaxInt {
 		t.Errorf("requestSize = %d, want math.MaxInt", got)
+	}
+}
+
+// A worker whose catalog is not ready (another than the turn's first)
+// fails a call with an ordinary error, retried as any failed call: never a
+// prompt without identity, never a refusal for good. On a machine too,
+// before any directive.
+func TestCallLLM_WaitsForTheCatalog(t *testing.T) {
+	model := &recordingModel{}
+	a := &LLMActivities{Provider: model, Catalog: NewCatalog(), Prompts: promptOf{}}
+	req := LLMTurnRequest{AgentID: "default", Messages: []store.Message{{Role: store.RoleUser, Content: text("go")}}}
+	_, err := a.CallLLM(context.Background(), req)
+	var appErr *temporal.ApplicationError
+	if err == nil || errors.As(err, &appErr) || len(model.requests) != 0 {
+		t.Errorf("CallLLM: %v, %d requests", err, len(model.requests))
+	}
+	if _, _, err := a.buildRequest(context.Background(), req); err == nil {
+		t.Error("a request built from a catalog not ready")
 	}
 }

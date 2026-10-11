@@ -59,6 +59,9 @@ func (s *PostgresStore) migrate() error {
 	if _, err := tx.Exec(taskSchema); err != nil {
 		return fmt.Errorf("background tasks schema: %w", err)
 	}
+	if _, err := tx.Exec(accessSchema); err != nil {
+		return fmt.Errorf("access schema: %w", err)
+	}
 	return tx.Commit()
 }
 
@@ -281,6 +284,10 @@ const schema = `
 		-- No tool is fire-and-forget any more: a call is launched in the
 		-- background by the model's choice (docs/design/async-tasks.md).
 		ALTER TABLE tools DROP COLUMN IF EXISTS fire_and_forget;
+		-- The MCP server a tool comes from, empty for any other: a rule may
+		-- target a server's tools (access_rules). Filled as the workers
+		-- publish again.
+		ALTER TABLE tools ADD COLUMN IF NOT EXISTS mcp_server TEXT NOT NULL DEFAULT '';
 		-- The spawn_session row the workers published: nothing else deletes from
 		-- tools, and no worker publishes it any more.
 		DELETE FROM tools WHERE name = 'spawn_session';
@@ -800,8 +807,8 @@ func scanAgent(row interface{ Scan(...any) error }) (*Agent, error) {
 func (s *PostgresStore) UpsertTool(ctx context.Context, t ToolRecord) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO tools (name, task_queue, description, input_schema, kind, workflow_name,
-		                   sensitive, private_input, needs_call_context, timeout_seconds, schema_hash)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		                   sensitive, private_input, needs_call_context, timeout_seconds, mcp_server, schema_hash)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		ON CONFLICT (name) DO UPDATE SET
 			task_queue = EXCLUDED.task_queue,
 			description = EXCLUDED.description,
@@ -812,10 +819,11 @@ func (s *PostgresStore) UpsertTool(ctx context.Context, t ToolRecord) error {
 			private_input = EXCLUDED.private_input,
 			needs_call_context = EXCLUDED.needs_call_context,
 			timeout_seconds = EXCLUDED.timeout_seconds,
+			mcp_server = EXCLUDED.mcp_server,
 			schema_hash = EXCLUDED.schema_hash,
 			updated_at = NOW()`,
 		t.Name, t.TaskQueue, t.Description, string(t.InputSchema), t.Kind, t.WorkflowName,
-		t.Sensitive, t.PrivateInput, t.NeedsCallContext, int(t.Timeout/time.Second), t.SchemaHash)
+		t.Sensitive, t.PrivateInput, t.NeedsCallContext, int(t.Timeout/time.Second), t.MCPServer, t.SchemaHash)
 	return err
 }
 
@@ -834,7 +842,7 @@ func (s *PostgresStore) DeleteTool(ctx context.Context, name, taskQueue string) 
 func (s *PostgresStore) ListTools(ctx context.Context) ([]ToolRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT name, task_queue, description, input_schema, kind, workflow_name,
-		       sensitive, private_input, needs_call_context, timeout_seconds, schema_hash, updated_at
+		       sensitive, private_input, needs_call_context, timeout_seconds, mcp_server, schema_hash, updated_at
 		FROM tools ORDER BY name`)
 	if err != nil {
 		return nil, err
@@ -847,7 +855,7 @@ func (s *PostgresStore) ListTools(ctx context.Context) ([]ToolRecord, error) {
 		var schema string
 		var timeoutSeconds int
 		if err := rows.Scan(&t.Name, &t.TaskQueue, &t.Description, &schema, &t.Kind, &t.WorkflowName,
-			&t.Sensitive, &t.PrivateInput, &t.NeedsCallContext, &timeoutSeconds, &t.SchemaHash, &t.UpdatedAt); err != nil {
+			&t.Sensitive, &t.PrivateInput, &t.NeedsCallContext, &timeoutSeconds, &t.MCPServer, &t.SchemaHash, &t.UpdatedAt); err != nil {
 			return nil, err
 		}
 		t.InputSchema = json.RawMessage(schema)

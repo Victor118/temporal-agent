@@ -253,10 +253,12 @@ func TestDeliver_SignalsWithStartTheParticipant(t *testing.T) {
 	tc := &fakeTemporal{}
 	s := newTest(st, tc)
 	alice := &store.User{ID: "u-alice", Email: "alice@example.com"}
-	sess := &store.Session{SessionID: sid, AgentID: "analyst", Channel: "telegram", ChannelID: "42"}
+	// Titled: not its first message, whose answer is signed (its agent is
+	// not the default one, on a channel where the member did not choose).
+	sess := &store.Session{SessionID: sid, AgentID: "analyst", Channel: "telegram", ChannelID: "42", Title: "Bonjour"}
 
-	if called, err := s.Deliver(context.Background(), sess, alice, "bonjour"); err != nil || !called {
-		t.Fatalf("Deliver = %v, %v", called, err)
+	if d, err := s.Deliver(context.Background(), sess, alice, "bonjour"); err != nil || !d.Called {
+		t.Fatalf("Deliver = %+v, %v", d, err)
 	}
 	if len(tc.signals) != 0 || len(tc.started) != 0 {
 		t.Errorf("signalled %v, started %v: want one signal-with-start only", tc.signals, tc.started)

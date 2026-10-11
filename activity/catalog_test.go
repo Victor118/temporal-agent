@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/victor/temporal-agent/access"
 	"github.com/victor/temporal-agent/store"
 )
 
@@ -148,5 +149,67 @@ func TestCatalog_FindsToolsInCollationOrder(t *testing.T) {
 	}
 	if !c.PrivateInput("a_c") || !c.PrivateInput("B") || c.PrivateInput("ab") {
 		t.Error("PrivateInput misses a tool")
+	}
+}
+
+// A turn's tools are those of its agent's list open to its user: the rules
+// close published tools (by server or by name) and agents alike, "*" and
+// "agent_*" in a list open nothing closed. The agent's own list, the
+// back-office's, is unchanged.
+func TestCatalog_AllowedToolsFor(t *testing.T) {
+	c := testCatalog()
+	c.SetTools(append(c.Tools(), store.ToolRecord{Name: "crm_search", Kind: "mcp", TaskQueue: "tools-core", MCPServer: "crm"}))
+	before := names(c.AllowedTools("open"))
+	c.SetAccess(access.Snapshot{
+		Rules: []access.Rule{
+			{Kind: access.KindMCPServer, Target: "crm", Groups: []string{"sales"}},
+			{Kind: access.KindPattern, Target: "agent_restricted", Users: []string{"alice"}},
+			{Kind: access.KindPattern, Target: "exec", Users: []string{"alice"}},
+		},
+		Users: map[string]access.User{
+			"alice": {ID: "alice", Groups: []string{"sales"}},
+			"bob":   {ID: "bob"},
+			"root":  {ID: "root", Admin: true},
+		},
+	})
+	if got := names(c.AllowedTools("open")); !reflect.DeepEqual(got, before) {
+		t.Errorf("the agent's list changed: %v, was %v", got, before)
+	}
+
+	bob := c.AllowedToolsFor("open", "bob")
+	if want := []string{"agent_delegator", "agent_none", "agent_unset", "github_list", "web_fetch"}; !reflect.DeepEqual(names(bob), want) {
+		t.Errorf("bob's tools %v, want %v", names(bob), want)
+	}
+	if want := []string{"agent_restricted", "crm_search", "exec"}; !reflect.DeepEqual(bob.Closed, want) {
+		t.Errorf("closed to bob %v, want %v", bob.Closed, want)
+	}
+	if _, ok := bob.Resolutions["exec"]; ok || len(bob.Resolutions) != len(bob.Tools) || bob.Refused != "" {
+		t.Errorf("bob's resolutions %v, refused %q", bob.Resolutions, bob.Refused)
+	}
+	for _, user := range []string{"alice", "root"} {
+		out := c.AllowedToolsFor("open", user)
+		if !reflect.DeepEqual(names(out), before) || out.Closed != nil {
+			t.Errorf("%s: %v, closed %v", user, names(out), out.Closed)
+		}
+	}
+
+	// A closed agent refuses its turn, and offers nothing.
+	if out := c.AllowedToolsFor("restricted", "bob"); out.Refused == "" || len(out.Tools) != 0 || len(out.Resolutions) != 0 {
+		t.Errorf("restricted for bob: %+v", out)
+	}
+	if out := c.AllowedToolsFor("restricted", "alice"); out.Refused != "" || !reflect.DeepEqual(names(out), []string{"github_list", "web_fetch"}) {
+		t.Errorf("restricted for alice: %+v", out)
+	}
+	// Without a user, only what no rule targets.
+	if out := c.AllowedToolsFor("restricted", ""); out.Refused == "" {
+		t.Errorf("restricted without a user: %+v", out)
+	}
+	if out := c.AllowedToolsFor("delegator", ""); out.Refused != "" || !reflect.DeepEqual(names(out), []string{"web_fetch"}) {
+		t.Errorf("delegator without a user: %+v", out)
+	}
+	// No rule, nothing closed.
+	c.SetAccess(access.Snapshot{})
+	if out := c.AllowedToolsFor("open", "bob"); !reflect.DeepEqual(names(out), before) || out.Closed != nil || out.Refused != "" {
+		t.Errorf("without rules: %+v", out)
 	}
 }

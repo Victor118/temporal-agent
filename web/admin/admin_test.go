@@ -22,6 +22,9 @@ type fakeStore struct {
 	tools  []store.ToolRecord
 	users  []store.User
 	logins map[string]string // token hash → user ID
+	// Groups and access rules (access_test.go).
+	groups []store.Group
+	rules  []store.AccessRule
 }
 
 func (f *fakeStore) ListAgents(context.Context) ([]store.Agent, error) {

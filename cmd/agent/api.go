@@ -151,6 +151,10 @@ func (a *api) createSession(w http.ResponseWriter, r *http.Request) {
 		json.NewDecoder(r.Body).Decode(&req)
 	}
 	sessionID, err := a.sessions.Open(r.Context(), auth.UserFrom(r.Context()), session.OpenOptions{AgentID: req.AgentID, Title: req.Title})
+	if errors.Is(err, session.ErrAgentNotOpen) {
+		http.Error(w, "Agent not open to you", http.StatusForbidden)
+		return
+	}
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to create session: %v", err), http.StatusInternalServerError)
 		return
@@ -216,7 +220,7 @@ func (a *api) sendMessage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Session not found", http.StatusNotFound)
 		return
 	}
-	called, err := a.sessions.Deliver(r.Context(), sess, auth.UserFrom(r.Context()), req.Content)
+	d, err := a.sessions.Deliver(r.Context(), sess, auth.UserFrom(r.Context()), req.Content)
 	switch {
 	case errors.Is(err, session.ErrSummaryPending):
 		http.Error(w, "The summary of the parent session is still being written", http.StatusConflict)
@@ -225,7 +229,13 @@ func (a *api) sendMessage(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		http.Error(w, fmt.Sprintf("Failed to send message: %v", err), http.StatusInternalServerError)
 	default:
-		writeJSON(w, http.StatusAccepted, map[string]bool{"agent_called": called})
+		// The agents it addressed that are closed to its author, who do
+		// not answer: by mention.
+		refused := []string{}
+		for _, ag := range d.Refused {
+			refused = append(refused, ag.Mention)
+		}
+		writeJSON(w, http.StatusAccepted, map[string]any{"agent_called": d.Called, "refused_agents": refused})
 	}
 }
 
@@ -639,6 +649,8 @@ func (a *api) forkSession(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "No such message to fork from in this session", http.StatusBadRequest)
 	case errors.Is(err, session.ErrPurposeTooLong):
 		http.Error(w, err.Error(), http.StatusBadRequest)
+	case errors.Is(err, session.ErrAgentNotOpen):
+		http.Error(w, "Agent not open to you", http.StatusForbidden)
 	case err != nil:
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	default:

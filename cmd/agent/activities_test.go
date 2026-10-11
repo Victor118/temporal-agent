@@ -107,6 +107,7 @@ func TestWorkerActivities_AreTheActivities(t *testing.T) {
 		"ListTools",
 		"LoadSkillsForAgent",
 		"NotifyStep",
+		"PauseSchedule",
 		"PersistContext",
 		"PickMachine",
 		"PostForkReport",

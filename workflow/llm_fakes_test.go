@@ -10,6 +10,7 @@ import (
 	sdkactivity "go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/testsuite"
 
+	"github.com/victor/temporal-agent/access"
 	"github.com/victor/temporal-agent/activity"
 	"github.com/victor/temporal-agent/provider"
 	"github.com/victor/temporal-agent/store"
@@ -220,6 +221,9 @@ func registerLLM(env *testsuite.TestWorkflowEnvironment, answer func(n int, req 
 	schema := json.RawMessage(`{"type":"object"}`)
 	catalog := activity.NewCatalog()
 	catalog.SetTools([]store.ToolRecord{{Name: "exec", InputSchema: schema}, {Name: "web_fetch", InputSchema: schema}, {Name: "web_search", InputSchema: schema}})
+	// Read once, as a worker's after its first reload: CallLLM answers.
+	catalog.SetAgents(nil)
+	catalog.SetAccess(access.Snapshot{})
 	f := &llmFakes{
 		session: &memSession{memory: map[string]store.Memory{}},
 		model:   &fakeModel{answer: answer},

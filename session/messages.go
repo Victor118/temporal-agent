@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"go.temporal.io/sdk/client"
 
+	"github.com/victor/temporal-agent/access"
 	"github.com/victor/temporal-agent/activity"
 	"github.com/victor/temporal-agent/store"
 	"github.com/victor/temporal-agent/workflow"
@@ -85,17 +86,28 @@ func answered(mode string, members int, mentioned []workflow.AddressedAgent) boo
 	}
 }
 
+// Delivery is what became of a message: whether it called an agent, and
+// the agents it addressed that are closed to its author, who do not
+// answer.
+type Delivery struct {
+	Called  bool
+	Refused []workflow.AddressedAgent
+}
+
 // Deliver takes a human message into a session, from any channel, and
 // reports whether it called an agent:
 //  1. it resolves who answers (answered): the agents it mentions, in order,
 //     or the session's agent (the default one if it is gone); this depends
 //     on the text alone;
-//  2. it refuses the message when the first of them has MaxQueued messages
-//     waiting already, as far as the server knows (ErrQueueFull), without
-//     storing it: refused after being stored, it would be in the
+//  2. it takes out the agents closed to the author (Delivery.Refused), and
+//     only then: a message that mentions only closed agents calls nobody,
+//     never the session's agent in their place;
+//  3. it refuses the message when the first agent left has MaxQueued
+//     messages waiting already, as far as the server knows (ErrQueueFull),
+//     without storing it: refused after being stored, it would be in the
 //     conversation, unanswered, and sent again;
-//  3. it stores it, and shows it to the members;
-//  4. it delivers it to the first agent's participant, by SignalWithStart:
+//  4. it stores it, and shows it to the members;
+//  5. it delivers it to the first agent's participant, by SignalWithStart:
 //     started if it does not run, queued behind its current message if it
 //     does. The participant relays it to the next agents.
 //
@@ -106,38 +118,42 @@ func answered(mode string, members int, mentioned []workflow.AddressedAgent) boo
 // would replay it to the LLM, which rejects a user message with no content —
 // the session would be poisoned for good. A fork takes messages once its
 // summary is in: the summary must be its first message.
-func (s *Service) Deliver(ctx context.Context, sess *store.Session, author *store.User, text string) (bool, error) {
+func (s *Service) Deliver(ctx context.Context, sess *store.Session, author *store.User, text string) (Delivery, error) {
 	if strings.TrimSpace(text) == "" {
-		return false, ErrEmptyMessage
+		return Delivery{}, ErrEmptyMessage
 	}
 	if sess.ForkedAtMessageID != 0 && s.ForkSummaryState(ctx, sess) == SummaryPending {
-		return false, ErrSummaryPending
+		return Delivery{}, ErrSummaryPending
 	}
 
 	members, err := s.store.ListSessionMembers(ctx, sess.SessionID)
 	if err != nil {
-		return false, fmt.Errorf("list members: %w", err)
+		return Delivery{}, fmt.Errorf("list members: %w", err)
 	}
 	agents, err := s.store.ListAgents(ctx)
 	if err != nil {
-		return false, fmt.Errorf("list agents: %w", err)
+		return Delivery{}, fmt.Errorf("list agents: %w", err)
 	}
 	mentioned, dropped := mentionedAgents(text, agents, maxAgentsPerMessage)
 	if len(dropped) > 0 {
 		log.Printf("Session %s: a message calls more than %d agents; not called: %s", sess.SessionID, maxAgentsPerMessage, strings.Join(dropped, ", "))
 	}
-	var who []workflow.AddressedAgent
+	var who, refused []workflow.AddressedAgent
 	sessionAgent := ""
 	if answered(sess.AgentMode, len(members), mentioned) {
 		if sessionAgent, err = s.agentOrDefault(ctx, sess.AgentID); err != nil {
-			return false, err
+			return Delivery{}, err
 		}
 		who = mentioned
 		if len(who) == 0 {
 			who = []workflow.AddressedAgent{addressed(sessionAgent, agents)}
 		}
-		if s.turns.queued(sess.SessionID, who[0].ID) >= MaxQueued {
-			return false, ErrQueueFull
+		who, refused = s.openTo(ctx, author.ID, who)
+		if len(refused) > 0 {
+			log.Printf("Session %s: agents not open to %s, not called: %s", sess.SessionID, author.ID, mentionsOf(refused))
+		}
+		if len(who) > 0 && s.turns.queued(sess.SessionID, who[0].ID) >= MaxQueued {
+			return Delivery{}, ErrQueueFull
 		}
 	}
 
@@ -145,12 +161,12 @@ func (s *Service) Deliver(ctx context.Context, sess *store.Session, author *stor
 	stored := store.Message{Role: store.RoleUser, Content: string(content), UserID: author.ID, Author: author.Name()}
 	id, err := s.store.AppendMessage(ctx, sess.SessionID, store.HumanMessageKey(uuid.New().String()), stored)
 	if err != nil {
-		return false, fmt.Errorf("store message: %w", err)
+		return Delivery{}, fmt.Errorf("store message: %w", err)
 	}
 	s.inBackground(func() { s.setTitleFrom(sess.SessionID, text) })
-	s.publishUserMessage(sess.SessionID, text, author, who)
+	s.publishUserMessage(sess.SessionID, text, author, who, refused)
 	if len(who) == 0 {
-		return false, nil
+		return Delivery{Refused: refused}, nil
 	}
 
 	defer s.statuses.invalidate()
@@ -158,17 +174,52 @@ func (s *Service) Deliver(ctx context.Context, sess *store.Session, author *stor
 		MessageID: id, UserID: author.ID, UserName: author.Name(),
 		Next: who[1:],
 		// On the channel, an answer that could be taken for another
-		// agent's is signed.
-		SignReply: len(who) > 1 || who[0].ID != sessionAgent,
-		Channel:   sess.Channel, ChannelID: sess.ChannelID,
+		// agent's is signed; so is the first answer of a session on a
+		// channel where the member did not choose its agent, when it is
+		// not the default one (closed to them, say: Open chose another).
+		SignReply: len(who) > 1 || who[0].ID != sessionAgent ||
+			(sess.Channel != ChannelWeb && sess.Title == "" && who[0].ID != s.cfg.DefaultAgentID),
+		Channel: sess.Channel, ChannelID: sess.ChannelID,
 	}
 	if len(who) > 1 {
 		msg.Part = &workflow.Part{Agents: who, Quote: workflow.Quote(text)}
 	}
 	if err := s.deliver(ctx, sess, who[0].ID, msg); err != nil {
-		return false, err
+		return Delivery{Refused: refused}, err
 	}
-	return true, nil
+	return Delivery{Called: true, Refused: refused}, nil
+}
+
+// openTo splits who into the agents open to userID and the others, in
+// order.
+func (s *Service) openTo(ctx context.Context, userID string, who []workflow.AddressedAgent) (open, refused []workflow.AddressedAgent) {
+	snap := s.access(ctx)
+	for _, a := range who {
+		if snap.Allowed(userID, access.Agent(a.ID)) {
+			open = append(open, a)
+		} else {
+			refused = append(refused, a)
+		}
+	}
+	return open, refused
+}
+
+// mentionsOf is "@a, @b".
+func mentionsOf(agents []workflow.AddressedAgent) string {
+	names := make([]string, len(agents))
+	for i, a := range agents {
+		names[i] = "@" + cmp.Or(a.Mention, a.ID)
+	}
+	return strings.Join(names, ", ")
+}
+
+// RefusedText is what the author of a message reads of the agents it
+// addressed that are closed to them.
+func RefusedText(refused []workflow.AddressedAgent) string {
+	if len(refused) == 1 {
+		return mentionsOf(refused) + " ne t'est pas ouvert : ton message est enregistré, sans réponse de sa part."
+	}
+	return mentionsOf(refused) + " ne te sont pas ouverts : ton message est enregistré, sans réponse de leur part."
 }
 
 // addressed is the agent agentID as a message addresses it, named from
@@ -209,10 +260,15 @@ func (s *Service) deliver(ctx context.Context, sess *store.Session, agentID stri
 // publishUserMessage shows a user's message to the other members of the
 // session, live, and which agents it calls, by name (none: no agent
 // answers), with, for each one answering a message already, that message
-// (queued_behind, by agent ID): this one waits behind it. The sender
-// displays it already and skips its own.
-func (s *Service) publishUserMessage(sessionID, text string, author *store.User, who []workflow.AddressedAgent) {
+// (queued_behind, by agent ID): this one waits behind it; and the agents it
+// addressed that are closed to its author (refused_agents, by mention). The
+// sender displays it already and skips its own.
+func (s *Service) publishUserMessage(sessionID, text string, author *store.User, who, refused []workflow.AddressedAgent) {
 	names := make([]string, len(who))
+	refusedMentions := make([]string, len(refused))
+	for i, a := range refused {
+		refusedMentions[i] = cmp.Or(a.Mention, a.ID)
+	}
 	behind := map[string]int64{}
 	for i, a := range who {
 		names[i] = cmp.Or(a.Name, a.ID)
@@ -221,12 +277,13 @@ func (s *Service) publishUserMessage(sessionID, text string, author *store.User,
 		}
 	}
 	data, _ := json.Marshal(map[string]any{
-		"content":       text,
-		"user_id":       author.ID,
-		"author":        author.Name(),
-		"agent_called":  len(who) > 0,
-		"agents":        names,
-		"queued_behind": behind,
+		"content":        text,
+		"user_id":        author.ID,
+		"author":         author.Name(),
+		"agent_called":   len(who) > 0,
+		"agents":         names,
+		"queued_behind":  behind,
+		"refused_agents": refusedMentions,
 	})
 	s.hub.Publish(sessionID, activity.SSEEvent{Type: EventUserMessage, Data: data})
 }

@@ -59,6 +59,8 @@ type harness struct {
 	turns    []childRun // the turns run, when stubbed
 	// relayErr fails every relay.
 	relayErr error
+	// closed are the agents closed to every user: their turns are refused.
+	closed map[string]bool
 }
 
 // newHarness builds a harness. With agent nil, turns run the real
@@ -107,6 +109,9 @@ func newHarness(t *testing.T, answer func(int, provider.ChatRequest) (provider.C
 		return activity.LoadSkillsForAgentOutput{Name: h.f.session.agents[in.AgentID]}, nil
 	}, sdkactivity.RegisterOptions{Name: "LoadSkillsForAgent"})
 	h.env.RegisterActivityWithOptions(func(_ context.Context, in activity.ListToolsInput) (activity.ListToolsOutput, error) {
+		if h.closed[in.AgentID] {
+			return activity.ListToolsOutput{Refused: "agent " + in.AgentID + " not open to " + in.UserID}, nil
+		}
 		return activity.ListToolsOutput{
 			Tools:       []provider.ToolDefinition{{Name: "web_fetch", InputSchema: json.RawMessage(`{"type":"object"}`)}},
 			Resolutions: map[string]activity.ToolResolution{"web_fetch": {Kind: "activity", TaskQueue: "tools-web"}},

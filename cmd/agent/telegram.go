@@ -72,6 +72,10 @@ func (t *telegramChannel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// /new opens a fresh session, which the chat's next messages go to.
 	if text == "/new" {
 		id, err := t.sessions.Open(r.Context(), user, session.OpenOptions{Channel: telegram.Channel, ChannelID: channelID})
+		if errors.Is(err, session.ErrAgentNotOpen) {
+			replyInWebhook(w, chatID, noAgentOpenText)
+			return
+		}
 		if err != nil {
 			log.Printf("Telegram webhook: failed to create session: %v", err)
 			http.Error(w, "Internal error", http.StatusInternalServerError)
@@ -83,6 +87,10 @@ func (t *telegramChannel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sess, err := t.sessions.OpenOnChannel(r.Context(), user, telegram.Channel, channelID)
+	if errors.Is(err, session.ErrAgentNotOpen) {
+		replyInWebhook(w, chatID, noAgentOpenText)
+		return
+	}
 	if err != nil {
 		log.Printf("Telegram webhook: find or open session: %v", err)
 		http.Error(w, "Internal error", http.StatusInternalServerError)
@@ -94,17 +102,25 @@ func (t *telegramChannel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	_, err = t.sessions.Deliver(r.Context(), sess, user, text)
+	d, err := t.sessions.Deliver(r.Context(), sess, user, text)
 	switch {
 	case errors.Is(err, session.ErrQueueFull):
 		replyInWebhook(w, chatID, queueFullText)
 	case err != nil:
 		log.Printf("Telegram webhook: %v", err)
 		http.Error(w, "Internal error", http.StatusInternalServerError)
+	case len(d.Refused) > 0:
+		// The agents it addressed that will not answer: said at once,
+		// or the member would wait for them.
+		replyInWebhook(w, chatID, session.RefusedText(d.Refused))
 	default:
 		w.WriteHeader(http.StatusOK)
 	}
 }
+
+// noAgentOpenText is what a member reads when no agent is open to them: no
+// session can be opened.
+const noAgentOpenText = "Aucun agent ne t'est ouvert : demande à un admin."
 
 // queueFullText is what a member reads when the agent has too many
 // messages waiting: theirs was not taken.

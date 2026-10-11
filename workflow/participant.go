@@ -448,6 +448,15 @@ func (p *participant) answer(ctx workflow.Context, msg ParticipantMessage, messa
 	switch {
 	case stopped:
 		notifyResponse(ctx, p.in.SessionID, channel, channelID, signer, "Agent interrupted by user.")
+	case result.ErrorType == activity.AgentNotOpen:
+		// The refusal is this agent's, not the message's: a right taken
+		// between the delivery and this turn must not keep the next agents
+		// from it. Relayed as after a turn that went well, without this
+		// one among those the next read: it wrote nothing.
+		p.notifyError(ctx, msg, channel, channelID, signer, reason)
+		if len(msg.Next) > 0 {
+			p.relay(ctx, msg, "", channel, channelID, signer)
+		}
 	case reason != "":
 		p.notifyError(ctx, msg, channel, channelID, signer, reason)
 	case len(msg.Next) > 0:
@@ -552,7 +561,7 @@ func (p *participant) notifyError(ctx workflow.Context, msg ParticipantMessage, 
 }
 
 // relay hands the message to the next participant it addresses, with this
-// turn among those it reads. A relay is an activity: a workflow cannot start
+// turn among those it reads (turnKey; none when empty). A relay is an activity: a workflow cannot start
 // another one by signal. When it fails for good, the next participant's turn
 // gets an end saying so, so that a late delivery is not answered; this
 // participant goes on with its own messages either way.
@@ -563,7 +572,10 @@ func (p *participant) relay(ctx workflow.Context, msg ParticipantMessage, turnKe
 	next := msg.Next[0]
 	relayed := msg
 	relayed.Next = slices.Clone(msg.Next[1:])
-	relayed.EarlierTurns = append(slices.Clone(msg.EarlierTurns), turnKey)
+	relayed.EarlierTurns = slices.Clone(msg.EarlierTurns)
+	if turnKey != "" {
+		relayed.EarlierTurns = append(relayed.EarlierTurns, turnKey)
+	}
 	message, _ := json.Marshal(relayed)
 	start, _ := json.Marshal(ParticipantInput{SessionID: p.in.SessionID, AgentID: next.ID, Channel: p.in.Channel, ChannelID: p.in.ChannelID})
 

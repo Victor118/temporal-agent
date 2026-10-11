@@ -1,0 +1,69 @@
+{{define "title"}}Droits{{end}}
+{{define "content"}}
+<div class="head">
+<h1>Droits</h1>
+<div class="toolbar"><a class="btn primary" href="/admin/access/rules/new">Nouvelle règle</a></div>
+</div>
+<p class="lead">Tout est ouvert tant qu'aucune règle ne vise un outil. Une règle ferme ce qu'elle vise (les outils d'un serveur MCP, ou ceux dont le nom correspond à un motif, <code>agent_&lt;id&gt;</code> pour un agent) à tous sauf à ses groupes et utilisateurs. Un outil visé par plusieurs règles les exige toutes. Un admin actif a tout, un compte désactivé n'a rien. Les workers relisent les droits toutes les 30 s : un tour en cours garde ses outils.</p>
+
+{{range .Inv.Rules}}{{if or (not .HasHolder) .TargetsNothing}}
+<div class="alert {{if or (not .HasHolder) .Lost}}bad{{else}}warn{{end}}">
+  <span class="ico">{{if or (not .HasHolder) .Lost}}!{{else}}⚠{{end}}</span>
+  <span class="msg">Règle sur <code>{{.Label}}</code> :
+    {{if not .HasHolder}}sans détenteur, fermée à tous sauf aux admins.{{end}}
+    {{if .Lost}}ne vise plus aucun outil (un serveur MCP renommé ? ce qu'elle fermait serait ouvert sous son nouveau nom).{{else if .TargetsNothing}}ne vise rien aujourd'hui.{{end}}</span>
+  <a class="link nowrap" href="/admin/access/rules/{{.ID}}">Voir</a>
+</div>
+{{end}}{{end}}
+
+<div class="card">
+  <h2>Règles <span class="badge b-muted">{{len .Inv.Rules}}</span></h2>
+  {{if .Inv.Rules}}
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Cible</th><th>Gardent l'accès</th><th>Vise</th><th>Retire tout agent à</th></tr></thead>
+    <tbody>
+    {{range .Inv.Rules}}
+    <tr>
+      <td class="nowrap"><a class="link mono" href="/admin/access/rules/{{.ID}}">{{.Target}}</a>
+        <div class="sub">{{if eq .Kind "mcp_server"}}serveur MCP{{else}}motif{{end}}</div></td>
+      <td>{{range .Groups}}<a class="chip" href="/admin/access/groups/{{.ID}}">{{.Name}}</a>{{end}}{{range .Users}}<span class="chip">{{.Name}}</span>{{end}}
+        {{if not .HasHolder}}<span class="badge b-bad">personne</span>{{end}}</td>
+      <td>{{range .Targets}}<span class="chip{{if .Sensitive}} sens{{end}}">{{.Name}}</span>{{else}}<span class="badge b-warn">rien</span>{{end}}</td>
+      <td>{{range .Removes}}<span class="chip">{{.Name}}</span>{{else}}<span class="sub">—</span>{{end}}</td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  </div>
+  {{else}}
+  <p class="empty">Aucune règle : tout membre peut parler à tout agent et se servir de tous ses outils.</p>
+  {{end}}
+</div>
+
+<div class="grid2">
+  <div class="card">
+    <h2>Groupes <span class="badge b-muted">{{len .Inv.Groups}}</span></h2>
+    {{range .Inv.Groups}}
+    <div class="glob">
+      <a class="link" href="/admin/access/groups/{{.ID}}">{{.Name}}</a>
+      <div>{{range .Users}}<span class="chip">{{.Name}}</span>{{else}}<span class="sub">aucun membre</span>{{end}}</div>
+    </div>
+    {{else}}
+    <p class="empty">Aucun groupe.</p>
+    {{end}}
+    {{with .Data.Error}}<div class="error">{{.}}</div>{{end}}
+    <form class="edit" method="post" action="/admin/access/groups">
+      <label for="g-name">Nouveau groupe</label>
+      <input type="text" id="g-name" name="name" value="{{.Data.Name}}" required>
+      <div class="actions"><button type="submit">Créer</button></div>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2>Outils sensibles ouverts à tous</h2>
+    {{range .Inv.SensitiveOpen}}<a class="chip sens" href="/admin/tools/{{.Name}}">{{.Name}}</a>{{else}}<p class="empty">Aucun : une règle vise chaque outil sensible.</p>{{end}}
+    <p class="note">Aucune règle ne les vise : tout membre qui parle à un agent qui les a peut s'en servir. C'est le défaut ; une règle les fermerait.</p>
+  </div>
+</div>
+{{end}}

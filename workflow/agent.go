@@ -28,6 +28,21 @@ const maxReActIterations = 50
 // outright. It also keeps a runaway command from eating the model's context.
 const maxToolResultBytes = 96 * 1024
 
+// catalogReadyOptions bound the turn's reads of its agent (LoadSkillsForAgent,
+// ListTools): a worker whose catalog is not ready, or does not know the
+// agent yet (activity.Catalog.CheckAgent), answers with an error, retried
+// 12 times, about two minutes (1+2+4+8+15×7 s), then the turn fails. In
+// attempts, not in time: a worker away is waited for, as by the workflow.
+var catalogReadyOptions = workflow.ActivityOptions{
+	StartToCloseTimeout: 5 * time.Second,
+	RetryPolicy: &temporal.RetryPolicy{
+		InitialInterval:    time.Second,
+		BackoffCoefficient: 2,
+		MaximumInterval:    15 * time.Second,
+		MaximumAttempts:    12,
+	},
+}
+
 // toolScheduleToStartTimeout bounds how long a tool call waits for a worker on
 // its task queue before being reported to the LLM as unavailable.
 const toolScheduleToStartTimeout = 60 * time.Second
@@ -237,9 +252,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 	// Load the agent's name
 	var skillsResult activity.LoadSkillsForAgentOutput
 	if err := workflow.ExecuteActivity(
-		workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-			StartToCloseTimeout: 5 * time.Second,
-		}),
+		workflow.WithActivityOptions(ctx, catalogReadyOptions),
 		skillAct.LoadSkillsForAgent,
 		activity.LoadSkillsForAgentInput{AgentID: currentAgentID},
 	).Get(ctx, &skillsResult); err != nil {
@@ -259,6 +272,27 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 		signed = agentName
 	}
 
+	// Load the tools this agent may use for the turn's user, with the queue
+	// serving each one: those of its list open to them
+	// (docs/design/permissions.md). An agent closed to them stops the turn
+	// here, before anything else runs for it.
+	var toolAct *activity.ToolActivities
+	var toolList activity.ListToolsOutput
+	if err := workflow.ExecuteActivity(
+		workflow.WithActivityOptions(ctx, catalogReadyOptions),
+		toolAct.ListTools,
+		activity.ListToolsInput{AgentID: currentAgentID, UserID: input.UserID},
+	).Get(ctx, &toolList); err != nil {
+		if ctx.Err() != nil {
+			return cancelledOutput(turn), nil
+		}
+		return AgentWorkflowOutput{}, fmt.Errorf("list tools: %w", err)
+	}
+	if toolList.Refused != "" {
+		workflow.GetLogger(ctx).Info("Agent not open to the turn's user", "agent", currentAgentID, "user", input.UserID, "refused", toolList.Refused)
+		return AgentWorkflowOutput{Error: AgentNotOpenMessage(agentName, input.UserName), ErrorType: activity.AgentNotOpen}, nil
+	}
+
 	// Where the turn's model runs: the server's key, or the machine of its
 	// author, chosen once for all its steps (the same model, the same prompt
 	// cache).
@@ -271,22 +305,6 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 	if ctx.Err() != nil {
 		return cancelledOutput(turn), nil
 	}
-
-	// Load the tools this agent may use, with the queue serving each one
-	var toolAct *activity.ToolActivities
-	var toolList activity.ListToolsOutput
-	if err := workflow.ExecuteActivity(
-		workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-			StartToCloseTimeout: 5 * time.Second,
-		}),
-		toolAct.ListTools,
-		activity.ListToolsInput{AgentID: currentAgentID},
-	).Get(ctx, &toolList); err != nil {
-		if ctx.Err() != nil {
-			return cancelledOutput(turn), nil
-		}
-		return AgentWorkflowOutput{}, fmt.Errorf("list tools: %w", err)
-	}
 	// The model is offered the tools this list dispatches, by name: the LLM
 	// call reads their definitions from the catalog.
 	toolNames := make([]string, len(toolList.Tools))
@@ -296,7 +314,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 
 	// Each LLM call builds its prompt from these references. A session turn
 	// and a scheduled task write with their user's memory.
-	prompt := activity.PromptRef{Override: input.SystemPrompt, UserName: input.UserName, PartNote: input.PartNote}
+	prompt := activity.PromptRef{Override: input.SystemPrompt, UserName: input.UserName, PartNote: input.PartNote, Closed: toolList.Closed}
 	if input.TurnKey != "" || input.LoadUserMemory {
 		prompt.MemoryOf = input.UserID
 	}
@@ -584,6 +602,16 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 
 	cancelSafeFlush()
 	return exhaustedOutput(turn), nil
+}
+
+// AgentNotOpenMessage is what the members read of a turn whose agent is
+// closed to the user it answers (activity.AgentNotOpen), named; unnamed (a
+// scheduled task), what that user reads.
+func AgentNotOpenMessage(agent, user string) string {
+	if user == "" {
+		return fmt.Sprintf("L'agent %s ne t'est pas ouvert : un admin peut t'en donner l'accès.", agent)
+	}
+	return fmt.Sprintf("L'agent %s n'est pas ouvert à %s : un admin peut lui en donner l'accès.", agent, user)
 }
 
 // exhaustedOutput ends a run that used all its iterations without an answer.
@@ -909,6 +937,10 @@ func failureType(err error) string {
 	return ""
 }
 
+// subAgentNotOpen is what the parent reads of a sub-agent closed to the
+// user its turn answers: offered when the turn started, closed since.
+const subAgentNotOpen = "This agent is not open to the user you are answering: do the work without it."
+
 // subAgentTooLong is what the parent reads of a sub-agent whose conversation
 // outgrew its model: the fork advice the members read is not for it.
 const subAgentTooLong = "The agent stopped without an answer: its conversation grew too long for its model. Give it a smaller task, or fewer and shorter tool outputs to read."
@@ -929,6 +961,8 @@ func subAgentContent(result json.RawMessage) (content string, isError bool) {
 			return subAgentMachinesOff, true
 		case agent.ErrorType == ErrTypeMachineRequired:
 			return subAgentNoMachine, true
+		case agent.ErrorType == activity.AgentNotOpen:
+			return subAgentNotOpen, true
 		case agent.Error != "":
 			return "The agent stopped without an answer: " + agent.Error, true
 		}

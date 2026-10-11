@@ -16,7 +16,8 @@
     {{range .Tools}}
     <tr>
       <td><a class="link mono" href="/admin/tools/{{.Name}}">{{.Name}}</a>
-        {{if .Sensitive}}<span class="badge b-bad">sensible</span>{{end}}</td>
+        {{if .Sensitive}}<span class="badge b-bad">sensible</span>{{if not .Rules}} <span class="badge b-warn" title="Aucune règle ne le vise">ouvert à tous</span>{{end}}{{end}}
+        {{with .Who}}<div class="sub">{{.}}</div>{{end}}</td>
       <td>{{template "kind" .Kind}}</td>
       <td>{{template "avail" .Availability}}</td>
       <td>{{range .Agents}}<a class="chip" href="/admin/agents/{{.}}">{{.}}</a>{{else}}<span class="badge b-warn">aucun</span>{{end}}</td>

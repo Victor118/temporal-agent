@@ -68,8 +68,11 @@ type Page struct {
 	Agents         []AgentInfo // the agents members can call by their mentions
 	AgentMode      string
 	AgentOnMention bool // a plain message does not call the agent
-	Parent         *ParentInfo
-	IsCreator      bool
+	// AgentClosed: the session's agent is closed to the viewer, and does
+	// not answer their messages (docs/design/permissions.md §4.4).
+	AgentClosed bool
+	Parent      *ParentInfo
+	IsCreator   bool
 	// Participants is the Agents panel: where each agent of the session
 	// stands, and what the viewer may stop.
 	Participants AgentsPanel
@@ -81,6 +84,9 @@ type Page struct {
 
 	Notifications int
 	Error         string
+	// Notice tells the author of a message what became of it, under the
+	// thread: the agents it addressed that will not answer.
+	Notice string
 	// Fragment: the thread is rendered alone, to be swapped in. The composer
 	// then comes with it, out of band, since its state follows the thread's.
 	Fragment bool

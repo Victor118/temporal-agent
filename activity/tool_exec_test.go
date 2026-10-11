@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/victor/temporal-agent/access"
 	"github.com/victor/temporal-agent/store"
 	"github.com/victor/temporal-agent/tool"
 )
@@ -63,5 +64,29 @@ func TestExecuteTool_MemoryVersionComesFromTheCallNotTheModel(t *testing.T) {
 	out, _ = a.ExecuteTool(context.Background(), ExecuteToolInput{Name: "save_user_memory", Input: forged, UserID: "u-alice"})
 	if !out.IsError || !strings.Contains(out.Content, "does not say which version") || len(saver.expected) != 1 {
 		t.Errorf("without one: %+v; saves %v, want the forged version refused", out, saver.expected)
+	}
+}
+
+// A catalog that has not read its agents and its access rules yet answers
+// ListTools with an error, which the turn retries: answering, it would run
+// the turn with no prompt, no tool, and nobody's rules.
+func TestListTools_WaitsForTheCatalog(t *testing.T) {
+	c := NewCatalog()
+	a := &ToolActivities{Catalog: c}
+	in := ListToolsInput{AgentID: "default", UserID: "u-bob"}
+	if _, err := a.ListTools(context.Background(), in); err == nil {
+		t.Error("an empty catalog answered")
+	}
+	c.SetAgents([]AgentCatalogEntry{{ID: "default", Tools: []string{"*"}}})
+	if _, err := a.ListTools(context.Background(), in); err == nil || c.Ready() {
+		t.Error("a catalog without its rules answered")
+	}
+	c.SetAccess(access.Snapshot{})
+	if out, err := a.ListTools(context.Background(), in); err != nil || out.Refused != "" || !c.Ready() {
+		t.Errorf("a ready catalog: %+v, %v", out, err)
+	}
+	// An agent created since the last reload: not known yet, retried.
+	if _, err := a.ListTools(context.Background(), ListToolsInput{AgentID: "new"}); err == nil {
+		t.Error("an agent unknown to the catalog answered")
 	}
 }

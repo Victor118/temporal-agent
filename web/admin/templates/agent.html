@@ -13,6 +13,14 @@
   <span class="sub">{{.Sessions}} session{{if gt .Sessions 1}}s{{end}} · créé {{ago .CreatedAt}} · modifié {{ago .UpdatedAt}}</span><br>
   <span class="sub">Modèle : {{if eq .LLMOn "prefer"}}sur la machine de l'auteur de préférence, sinon la clé du serveur{{else if eq .LLMOn "require"}}sur la machine de l'auteur seulement{{else}}la clé du serveur{{end}}</span></p>
 
+{{with .Self}}{{with .Rules}}
+<div class="card">
+  <h2>Qui peut lui parler</h2>
+  <p>{{$.Data.Self.Who}}, et les admins.</p>
+  <p class="note">Règle{{if gt (len .) 1}}s{{end}} sur l'agent lui-même : {{range .}}<a class="chip" href="/admin/access/rules/{{.ID}}">{{.Label}}</a>{{end}}. Les autres membres n'ont pas de réponse de lui, et ne peuvent pas lui déléguer par un autre agent.</p>
+</div>
+{{end}}{{end}}
+
 <div class="card">
   <h2>Allowlist</h2>
   {{range .Globs}}
@@ -34,7 +42,7 @@
   {{if .Tools}}
   <div class="tablewrap">
   <table>
-    <thead><tr><th>Tool</th><th>Type</th><th>Queue</th><th>État</th><th>Autorisé par</th></tr></thead>
+    <thead><tr><th>Tool</th><th>Type</th><th>Queue</th><th>État</th><th>Autorisé par</th><th>Qui</th></tr></thead>
     <tbody>
     {{range .Tools}}
     <tr>
@@ -44,6 +52,7 @@
       <td><a class="mono" href="/admin/queues#q-{{.TaskQueue}}">{{.TaskQueue}}</a></td>
       <td>{{template "avail" .Availability}}</td>
       <td><code>{{.Via}}</code></td>
+      <td>{{with .Who}}{{.}}{{else}}<span class="sub">tous</span>{{end}}</td>
     </tr>
     {{end}}
     </tbody>
@@ -52,7 +61,7 @@
   {{else}}
   <p class="empty">Aucun tool.</p>
   {{end}}
-  <p class="note">Calculé par le même catalogue que les workers. Ils relisent la base toutes les 30 s.</p>
+  <p class="note">Calculé par le même catalogue que les workers. Ils relisent la base toutes les 30 s. « Qui » : ceux à qui les <a class="link" href="/admin/access">droits</a> laissent l'outil, les admins en plus ; un tour n'offre que les outils ouverts à son utilisateur.</p>
 </div>
 
 <div class="grid2">
@@ -95,5 +104,5 @@
 
 {{define "prompt"}}
 <pre>{{.Data}}</pre>
-<p class="note">Construit par <code>LoadSkillsForAgent</code> avec les skills du serveur, sans la mémoire de l'utilisateur, que le workflow ajoute à chaque tour.</p>
+<p class="note">Construit comme à chaque appel du modèle, avec les skills du serveur et tous les tools de l'agent, sans la mémoire de l'utilisateur ni la ligne des tools qui lui sont fermés, que chaque appel ajoute.</p>
 {{end}}

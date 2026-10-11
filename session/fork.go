@@ -51,6 +51,10 @@ func (s *Service) Fork(ctx context.Context, parentID string, messageID int64, pu
 	if err != nil {
 		return nil, err
 	}
+	// A fork of mine whose agent never answers me would be no use.
+	if !s.AgentOpen(ctx, me.ID, agentID) {
+		return nil, ErrAgentNotOpen
+	}
 	f := store.Session{
 		SessionID:         uuid.New().String(),
 		CreatedBy:         me.ID,

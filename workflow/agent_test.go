@@ -44,7 +44,7 @@ func TestAgentWorkflow_ToolDispatch(t *testing.T) {
 	}, sdkactivity.RegisterOptions{Name: "ListTools"})
 
 	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.LoadSkillsForAgentInput) (activity.LoadSkillsForAgentOutput, error) {
-		return activity.LoadSkillsForAgentOutput{SystemPrompt: "prompt"}, nil
+		return activity.LoadSkillsForAgentOutput{}, nil
 	}, sdkactivity.RegisterOptions{Name: "LoadSkillsForAgent"})
 
 	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.NotifyInput) error {
@@ -114,7 +114,7 @@ func TestAgentWorkflow_ToolTimeoutFromTheCatalog(t *testing.T) {
 		}, nil
 	}, sdkactivity.RegisterOptions{Name: "ListTools"})
 	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.LoadSkillsForAgentInput) (activity.LoadSkillsForAgentOutput, error) {
-		return activity.LoadSkillsForAgentOutput{SystemPrompt: "prompt"}, nil
+		return activity.LoadSkillsForAgentOutput{}, nil
 	}, sdkactivity.RegisterOptions{Name: "LoadSkillsForAgent"})
 	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.NotifyInput) error {
 		return nil
@@ -280,7 +280,7 @@ func TestAgentWorkflow_DelegatesThroughAgentTool(t *testing.T) {
 		}, nil
 	}, sdkactivity.RegisterOptions{Name: "ListTools"})
 	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.LoadSkillsForAgentInput) (activity.LoadSkillsForAgentOutput, error) {
-		return activity.LoadSkillsForAgentOutput{SystemPrompt: "prompt"}, nil
+		return activity.LoadSkillsForAgentOutput{}, nil
 	}, sdkactivity.RegisterOptions{Name: "LoadSkillsForAgent"})
 	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.NotifyInput) error {
 		return nil
@@ -388,7 +388,7 @@ func registerAgentStubs(env *testsuite.TestWorkflowEnvironment) {
 	}, sdkactivity.RegisterOptions{Name: "ListTools"})
 
 	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.LoadSkillsForAgentInput) (activity.LoadSkillsForAgentOutput, error) {
-		return activity.LoadSkillsForAgentOutput{SystemPrompt: "prompt"}, nil
+		return activity.LoadSkillsForAgentOutput{}, nil
 	}, sdkactivity.RegisterOptions{Name: "LoadSkillsForAgent"})
 
 	env.RegisterActivityWithOptions(func(ctx context.Context, in activity.NotifyInput) error {
@@ -814,7 +814,7 @@ func TestAgentWorkflow_SignsItsMessages(t *testing.T) {
 				return activity.ListToolsOutput{}, nil
 			}, sdkactivity.RegisterOptions{Name: "ListTools"})
 			env.RegisterActivityWithOptions(func(ctx context.Context, in activity.LoadSkillsForAgentInput) (activity.LoadSkillsForAgentOutput, error) {
-				return activity.LoadSkillsForAgentOutput{SystemPrompt: "prompt", Name: "Agent Smith"}, nil
+				return activity.LoadSkillsForAgentOutput{Name: "Agent Smith"}, nil
 			}, sdkactivity.RegisterOptions{Name: "LoadSkillsForAgent"})
 			f := registerLLM(env, answers(provider.ChatResponse{Content: "it fits", StopReason: "end_turn"}))
 			var answers []string
