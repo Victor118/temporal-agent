@@ -27,6 +27,8 @@ type Catalog struct {
 	// reloaded with the rest; accessLoaded: read once at least.
 	access       access.Snapshot
 	accessLoaded bool
+	// agentsLoaded: the agents were read once at least.
+	agentsLoaded bool
 }
 
 func NewCatalog() *Catalog {
@@ -36,7 +38,16 @@ func NewCatalog() *Catalog {
 func (c *Catalog) SetAgents(agents []AgentCatalogEntry) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.agents = agents
+	c.agents, c.agentsLoaded = agents, true
+}
+
+// Ready reports whether the catalog has read its agents and its access
+// rules once at least: before, a turn would know neither its agent (no
+// prompt, no tool) nor who may use it, and must wait (ListTools).
+func (c *Catalog) Ready() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.agentsLoaded && c.accessLoaded
 }
 
 // SetTools replaces the tools, sorted here by name in byte order: the lookups

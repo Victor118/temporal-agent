@@ -3,6 +3,7 @@ package activity
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/victor/temporal-agent/provider"
@@ -76,9 +77,17 @@ type ListToolsOutput struct {
 	Closed []string `json:"closed,omitempty"`
 }
 
+// errCatalogNotReady: the worker has not read its agents and access rules
+// yet (the database away at its start). An ordinary error: the turn retries
+// (listToolsOptions), on this worker or another.
+var errCatalogNotReady = errors.New("this worker's catalog has not read its agents and access rules yet")
+
 // ListTools returns the tools the agent may use for the turn's user, from
-// the worker's catalog.
+// the worker's catalog; an error while the catalog is not ready.
 func (a *ToolActivities) ListTools(ctx context.Context, input ListToolsInput) (ListToolsOutput, error) {
+	if !a.Catalog.Ready() {
+		return ListToolsOutput{}, errCatalogNotReady
+	}
 	return a.Catalog.AllowedToolsFor(input.AgentID, input.UserID), nil
 }
 

@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"slices"
 	"strings"
 	"sync"
@@ -204,6 +205,41 @@ func TestScheduledAgentWorkflow_PausedWhenRefused(t *testing.T) {
 			}
 			if !strings.HasPrefix(delivered[0], "Tâche planifiée mise en pause : ") {
 				t.Errorf("delivered %q", delivered[0])
+			}
+		})
+	}
+}
+
+// A worker whose catalog is not ready fails ListTools: the turn retries it
+// for about two minutes, then fails without calling the model.
+func TestAgentWorkflow_WaitsForAReadyCatalog(t *testing.T) {
+	for name, failures := range map[string]int{"ready in time": 3, "never ready": 1000} {
+		t.Run(name, func(t *testing.T) {
+			var suite testsuite.WorkflowTestSuite
+			env := suite.NewTestWorkflowEnvironment()
+			calls := 0
+			env.RegisterActivityWithOptions(func(context.Context, activity.ListToolsInput) (activity.ListToolsOutput, error) {
+				calls++
+				if calls <= failures {
+					return activity.ListToolsOutput{}, errors.New("this worker's catalog has not read its agents and access rules yet")
+				}
+				return activity.ListToolsOutput{}, nil
+			}, sdkactivity.RegisterOptions{Name: "ListTools"})
+			env.RegisterActivityWithOptions(func(context.Context, activity.LoadSkillsForAgentInput) (activity.LoadSkillsForAgentOutput, error) {
+				return activity.LoadSkillsForAgentOutput{}, nil
+			}, sdkactivity.RegisterOptions{Name: "LoadSkillsForAgent"})
+			env.RegisterActivityWithOptions(func(context.Context, activity.NotifyInput) error { return nil }, sdkactivity.RegisterOptions{Name: "NotifyStep"})
+			f := registerLLM(env, answers(done))
+			env.ExecuteWorkflow(AgentWorkflow, AgentWorkflowInput{SessionID: "s1", AgentID: "jarvis", UserID: "u-bob", UserMessage: "hi"})
+			err := env.GetWorkflowError()
+			if failures < 1000 {
+				if err != nil || len(f.model.sent()) != 1 || calls != failures+1 {
+					t.Errorf("err %v, %d model calls, %d ListTools", err, len(f.model.sent()), calls)
+				}
+				return
+			}
+			if err == nil || len(f.model.sent()) != 0 || calls < 5 || calls > 30 {
+				t.Errorf("err %v, %d model calls, %d ListTools", err, len(f.model.sent()), calls)
 			}
 		})
 	}

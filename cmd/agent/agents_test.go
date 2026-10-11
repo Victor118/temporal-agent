@@ -34,14 +34,14 @@ func TestRefreshCatalog_RulesFirst(t *testing.T) {
 	}
 	catalog := activity.NewCatalog()
 	refreshCatalog(rows, catalog)
-	if len(catalog.Agents()) != 0 || len(catalog.Tools()) != 0 {
+	if len(catalog.Agents()) != 0 || len(catalog.Tools()) != 0 || catalog.Ready() {
 		t.Fatalf("catalog loaded without the rules: %v %v", catalog.Agents(), catalog.Tools())
 	}
 
 	rows.accessErr = nil
 	rows.access = access.Snapshot{Rules: []access.Rule{{Kind: access.KindMCPServer, Target: "crm", Users: []string{"alice"}}}}
 	refreshCatalog(rows, catalog)
-	if len(catalog.Agents()) != 1 || len(catalog.Tools()) != 1 {
+	if len(catalog.Agents()) != 1 || len(catalog.Tools()) != 1 || !catalog.Ready() {
 		t.Fatalf("catalog not loaded with the rules: %v %v", catalog.Agents(), catalog.Tools())
 	}
 	if out := catalog.AllowedToolsFor("commercial", "bob"); len(out.Tools) != 0 || len(out.Closed) != 1 {

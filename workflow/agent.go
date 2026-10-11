@@ -28,6 +28,19 @@ const maxReActIterations = 50
 // outright. It also keeps a runaway command from eating the model's context.
 const maxToolResultBytes = 96 * 1024
 
+// listToolsOptions bound the turn's ListTools: a worker whose catalog is
+// not ready yet (activity.Catalog.Ready) answers with an error, retried
+// for about two minutes, then the turn fails.
+var listToolsOptions = workflow.ActivityOptions{
+	StartToCloseTimeout:    5 * time.Second,
+	ScheduleToCloseTimeout: 2 * time.Minute,
+	RetryPolicy: &temporal.RetryPolicy{
+		InitialInterval:    time.Second,
+		BackoffCoefficient: 2,
+		MaximumInterval:    15 * time.Second,
+	},
+}
+
 // toolScheduleToStartTimeout bounds how long a tool call waits for a worker on
 // its task queue before being reported to the LLM as unavailable.
 const toolScheduleToStartTimeout = 60 * time.Second
@@ -266,9 +279,7 @@ func AgentWorkflow(ctx workflow.Context, input AgentWorkflowInput) (AgentWorkflo
 	var toolAct *activity.ToolActivities
 	var toolList activity.ListToolsOutput
 	if err := workflow.ExecuteActivity(
-		workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-			StartToCloseTimeout: 5 * time.Second,
-		}),
+		workflow.WithActivityOptions(ctx, listToolsOptions),
 		toolAct.ListTools,
 		activity.ListToolsInput{AgentID: currentAgentID, UserID: input.UserID},
 	).Get(ctx, &toolList); err != nil {
