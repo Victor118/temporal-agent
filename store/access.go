@@ -30,8 +30,9 @@ type AccessRule struct {
 	access.Rule
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
-	// LastMatchedAt is when the sweep last saw it target a published tool
-	// or an agent; nil = never yet.
+	// LastMatchedAt is when the sweep saw it target a published tool or an
+	// agent (first, or again after it was told it targeted nothing); nil =
+	// never yet.
 	LastMatchedAt *time.Time `json:"last_matched_at,omitempty"`
 	// UnmatchedAlertedAt is when the admins were told it targets nothing
 	// any more; cleared once it targets something again.
@@ -76,7 +77,7 @@ const accessSchema = `
 
 		-- A rule closes what it targets (an MCP server's tools, or the tools
 		-- a name pattern matches) to everyone but its holders: its groups and
-		-- its users. last_matched_at: the sweep last saw it target something;
+		-- its users. last_matched_at: the sweep saw it target something;
 		-- unmatched_alerted_at: the admins were told it targets nothing.
 		CREATE TABLE IF NOT EXISTS access_rules (
 			id                   BIGSERIAL PRIMARY KEY,
@@ -390,12 +391,16 @@ func (s *PostgresStore) ListMCPServers(ctx context.Context) ([]string, error) {
 }
 
 // SetAccessRulesMatched records that the rules of ids target something now:
-// a later alert that one targets nothing may go again.
+// a later alert that one targets nothing may go again. Only the rules whose
+// marks change are written (never matched yet, or told since): the sweep
+// calls it every minute.
 func (s *PostgresStore) SetAccessRulesMatched(ctx context.Context, ids []int64) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	_, err := s.db.ExecContext(ctx, `UPDATE access_rules SET last_matched_at = NOW(), unmatched_alerted_at = NULL WHERE id = ANY($1)`, ids)
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE access_rules SET last_matched_at = NOW(), unmatched_alerted_at = NULL
+		WHERE id = ANY($1) AND (last_matched_at IS NULL OR unmatched_alerted_at IS NOT NULL)`, ids)
 	return err
 }
 

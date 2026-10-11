@@ -315,6 +315,34 @@ func (f ruleForm) check() error {
 	return nil
 }
 
+// checkHolders refuses holders gone since the form was shown (a group
+// deleted, say), rather than let the store's foreign keys say it.
+func (f ruleForm) checkHolders(inv *Inventory) error {
+	for _, id := range f.Groups {
+		if inv.Group(id) == nil {
+			return errors.New("un groupe coché n'existe plus : recharge la page")
+		}
+	}
+	for _, id := range f.Users {
+		if !slices.ContainsFunc(inv.users, func(u store.User) bool { return u.ID == id }) {
+			return errors.New("un utilisateur coché n'existe plus : recharge la page")
+		}
+	}
+	return nil
+}
+
+// checkRule is check, then checkHolders against what the store holds now.
+func (a *Admin) checkRule(r *http.Request, f ruleForm) error {
+	if err := f.check(); err != nil {
+		return err
+	}
+	snap, err := a.load(r.Context())
+	if err != nil {
+		return err
+	}
+	return f.checkHolders(snap.inv)
+}
+
 func ruleFormFromRequest(r *http.Request) ruleForm {
 	r.ParseForm()
 	return ruleForm{
@@ -379,7 +407,7 @@ func (a *Admin) editRuleForm(w http.ResponseWriter, r *http.Request) {
 func (a *Admin) createRule(w http.ResponseWriter, r *http.Request) {
 	f := ruleFormFromRequest(r)
 	f.New = true
-	err := f.check()
+	err := a.checkRule(r, f)
 	var id int64
 	if err == nil {
 		id, err = a.cfg.Store.CreateAccessRule(r.Context(), f.rule())
@@ -396,7 +424,7 @@ func (a *Admin) createRule(w http.ResponseWriter, r *http.Request) {
 func (a *Admin) updateRule(w http.ResponseWriter, r *http.Request) {
 	f := ruleFormFromRequest(r)
 	f.ID, _ = strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-	err := f.check()
+	err := a.checkRule(r, f)
 	if err == nil {
 		err = a.cfg.Store.UpdateAccessRule(r.Context(), f.rule())
 	}

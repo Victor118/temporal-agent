@@ -238,6 +238,12 @@ func TestAccessPages(t *testing.T) {
 	if w := do(h, http.MethodPost, "/admin/access/rules", url.Values{"kind": {"pattern"}, "pattern": {"["}, "group": {gid}}, c); w.Code != http.StatusOK || len(st.rules) != 0 || !strings.Contains(w.Body.String(), "motif invalide") {
 		t.Errorf("bad pattern: %d, rules %v", w.Code, st.rules)
 	}
+	// Holders gone since the form was shown: said, nothing written.
+	for field, id := range map[string]string{"group": "g-gone", "user": "u-gone"} {
+		if w := do(h, http.MethodPost, "/admin/access/rules", url.Values{"kind": {"pattern"}, "pattern": {"exec"}, field: {id}}, c); w.Code != http.StatusOK || len(st.rules) != 0 || !strings.Contains(w.Body.String(), "n&#39;existe plus") {
+			t.Errorf("%s gone: %d, rules %v", field, w.Code, st.rules)
+		}
+	}
 	w = do(h, http.MethodPost, "/admin/access/rules", url.Values{"kind": {"pattern"}, "pattern": {"exec"}, "group": {gid}}, c)
 	if w.Code != http.StatusSeeOther || len(st.rules) != 1 || st.rules[0].Target != "exec" || !strings.HasPrefix(w.Header().Get("Location"), "/admin/access/rules/1?access=") {
 		t.Fatalf("create rule: %d %s, rules %v", w.Code, w.Header().Get("Location"), st.rules)
