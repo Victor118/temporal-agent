@@ -180,7 +180,7 @@ func (u *ui) buildPage(ctx context.Context, me *store.User, sessionID, view, blo
 			p.Agents = append(p.Agents, a)
 		}
 	}
-	p.AgentClosed = !u.sessions.AgentOpen(ctx, me.ID, sess.AgentID)
+	p.AgentClosed = !u.sessions.SessionAgentOpen(ctx, me.ID, &sess)
 	// Where each agent stands, and what the viewer may stop: the Agents
 	// panel, in the rail of both views.
 	p.Participants = u.agentsPanel(ctx, me, &sess, directory)

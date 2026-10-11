@@ -48,11 +48,17 @@ type memStore struct {
 	tasksMu     sync.Mutex
 	onDelete    func() // called as the session is deleted
 	// rules are the access rules and the users they decide for; none:
-	// every agent is open.
-	rules access.Snapshot
+	// every agent is open. rulesErr fails their read; ruleReads counts
+	// the reads.
+	rules     access.Snapshot
+	rulesErr  error
+	ruleReads int
 }
 
-func (m *memStore) AccessSnapshot(context.Context) (access.Snapshot, error) { return m.rules, nil }
+func (m *memStore) AccessSnapshot(context.Context) (access.Snapshot, error) {
+	m.ruleReads++
+	return m.rules, m.rulesErr
+}
 
 func (m *memStore) ListRunningTasks(_ context.Context, sessionID, participant string) ([]store.BackgroundTask, error) {
 	m.tasksMu.Lock()

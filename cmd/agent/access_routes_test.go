@@ -77,6 +77,20 @@ func TestUI_AgentsClosedToTheMember(t *testing.T) {
 	if page := get(t, h, "/s/s1", "", bob).Body.String(); !strings.Contains(page, "L'agent de cette session ne t'est pas ouvert") {
 		t.Errorf("the composer does not say the session's agent is closed: %s", page)
 	}
+	// An agent gone: the default one answers in its place, as Deliver
+	// resolves it.
+	st.session.AgentID = "gone"
+	if page := get(t, h, "/s/s1", "", bob).Body.String(); strings.Contains(page, "L'agent de cette session ne t'est pas ouvert") {
+		t.Errorf("the composer says a gone agent is closed, its default being open")
+	}
+	// The default agent, standing in, closed.
+	h, st = newRouteTestWith(t, &fakeTemporal{})
+	agentTeam(st)
+	st.session.AgentID = "gone"
+	st.rules.Rules = append(st.rules.Rules, access.Rule{Kind: access.KindPattern, Target: "agent_default", Users: []string{"u-alice"}})
+	if page := get(t, h, "/s/s1", "", logIn(t, h, "bob@example.com")).Body.String(); !strings.Contains(page, "L'agent de cette session ne t'est pas ouvert") {
+		t.Errorf("the composer does not say the default agent, standing in, is closed")
+	}
 }
 
 // On Telegram, the agents a message addressed that will not answer are

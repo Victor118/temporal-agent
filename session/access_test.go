@@ -229,3 +229,25 @@ func TestOpenAgents(t *testing.T) {
 		t.Error("an agent closed to its holder")
 	}
 }
+
+// A read of the rules that fails is not tried again on every call: a page
+// asks for each agent. A second later it is.
+func TestAccess_AFailedReadIsRetriedLater(t *testing.T) {
+	st := &memStore{agents: team, rulesErr: errors.New("db down")}
+	s := newTest(st, &fakeTemporal{})
+	now := time.Now()
+	s.statuses.now = func() time.Time { return now }
+	for range 5 {
+		if !s.AgentOpen(context.Background(), "u-alice", "smith") {
+			t.Fatal("rules unread: an agent closed")
+		}
+	}
+	if st.ruleReads != 1 {
+		t.Errorf("%d reads, want one", st.ruleReads)
+	}
+	st.rulesErr, st.rules = nil, closedTo("u-bob", "smith")
+	now = now.Add(accessRetry)
+	if s.AgentOpen(context.Background(), "u-alice", "smith") || st.ruleReads != 2 {
+		t.Errorf("not read again after %s: %d reads", accessRetry, st.ruleReads)
+	}
+}
