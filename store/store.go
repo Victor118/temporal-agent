@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"time"
+
+	"github.com/victor/temporal-agent/access"
 )
 
 type MemoryScope string
@@ -126,6 +128,24 @@ type Store interface {
 	UpsertTool(ctx context.Context, tool ToolRecord) error
 	ListTools(ctx context.Context) ([]ToolRecord, error)
 	DeleteTool(ctx context.Context, name, taskQueue string) (bool, error)
+
+	// Who may use which tool (access.go)
+	ListGroups(ctx context.Context) ([]Group, error)
+	GetGroup(ctx context.Context, id string) (*Group, error)
+	CreateGroup(ctx context.Context, g Group) error
+	RenameGroup(ctx context.Context, id, name string) error
+	DeleteGroup(ctx context.Context, id string) error
+	AddGroupMember(ctx context.Context, groupID, userID string) error
+	RemoveGroupMember(ctx context.Context, groupID, userID string) error
+	ListAccessRules(ctx context.Context) ([]AccessRule, error)
+	GetAccessRule(ctx context.Context, id int64) (*AccessRule, error)
+	CreateAccessRule(ctx context.Context, r access.Rule) (int64, error)
+	UpdateAccessRule(ctx context.Context, r access.Rule) error
+	DeleteAccessRule(ctx context.Context, id int64) error
+	AccessSnapshot(ctx context.Context) (access.Snapshot, error)
+	ListMCPServers(ctx context.Context) ([]string, error)
+	SetAccessRulesMatched(ctx context.Context, ids []int64) error
+	ClaimUnmatchedAlert(ctx context.Context, id int64) (bool, error)
 
 	// Skills version
 	GetSkillsVersion(ctx context.Context) (int64, error)

@@ -59,6 +59,9 @@ func (s *PostgresStore) migrate() error {
 	if _, err := tx.Exec(taskSchema); err != nil {
 		return fmt.Errorf("background tasks schema: %w", err)
 	}
+	if _, err := tx.Exec(accessSchema); err != nil {
+		return fmt.Errorf("access schema: %w", err)
+	}
 	return tx.Commit()
 }
 
