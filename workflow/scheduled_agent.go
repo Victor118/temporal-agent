@@ -12,6 +12,30 @@ import (
 	"github.com/victor/temporal-agent/tool"
 )
 
+// scheduleStepOptions bound the steps that follow a scheduled run: its
+// delivery, the end or the pause of its schedule.
+var scheduleStepOptions = workflow.ActivityOptions{
+	StartToCloseTimeout: 30 * time.Second,
+	RetryPolicy: &temporal.RetryPolicy{
+		MaximumAttempts: 3,
+	},
+}
+
+// pauseRefused pauses a recurring task its agent refused, and reports
+// whether it is paused: if not, the next run tries again, and tells again.
+func pauseRefused(ctx workflow.Context, input tool.ScheduledAgentInput, reason string) bool {
+	var schedAct *activity.ScheduleActivities
+	err := workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, scheduleStepOptions), schedAct.PauseSchedule, activity.PauseScheduleInput{
+		ScheduleID: input.ScheduleID,
+		Reason:     "agent not open to its owner: " + reason,
+	}).Get(ctx, nil)
+	if err != nil {
+		workflow.GetLogger(ctx).Error("Schedule not paused", "schedule_id", input.ScheduleID, "error", err)
+		return false
+	}
+	return true
+}
+
 // ScheduledAgentWorkflow runs an agent loop from a scheduled trigger.
 // It executes the prompt, then delivers the result via the configured channel.
 func ScheduledAgentWorkflow(ctx workflow.Context, input tool.ScheduledAgentInput) error {
@@ -46,6 +70,15 @@ func ScheduledAgentWorkflow(ctx workflow.Context, input tool.ScheduledAgentInput
 
 	response, failed := result.Response, true
 	switch {
+	case err == nil && result.ErrorType == activity.AgentNotOpen && input.Cron != "":
+		// A recurring task whose agent is closed to its owner would fail at
+		// every run, and say so every time: paused, and its owner told once.
+		paused := pauseRefused(ctx, input, result.Error)
+		response = fmt.Sprintf("Scheduled task failed: %s", result.Error)
+		if paused {
+			response = fmt.Sprintf("Tâche planifiée mise en pause : %s Elle ne reprendra pas d'elle-même ; une fois l'accès donné, annule-la et planifie-la à nouveau.", result.Error)
+		}
+		logger.Error("Scheduled agent refused", "schedule_id", input.ScheduleID, "error", result.Error, "paused", paused)
 	case err != nil:
 		response = fmt.Sprintf("Scheduled task failed: %s", err.Error())
 		logger.Error("Scheduled agent failed", "schedule_id", input.ScheduleID, "error", err)
@@ -57,12 +90,7 @@ func ScheduledAgentWorkflow(ctx workflow.Context, input tool.ScheduledAgentInput
 	}
 
 	// Deliver the result
-	deliverCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-		StartToCloseTimeout: 30 * time.Second,
-		RetryPolicy: &temporal.RetryPolicy{
-			MaximumAttempts: 3,
-		},
-	})
+	deliverCtx := workflow.WithActivityOptions(ctx, scheduleStepOptions)
 
 	var deliverAct *activity.DeliveryActivities
 	deliverErr := workflow.ExecuteActivity(deliverCtx, deliverAct.DeliverResult, activity.DeliverInput{
