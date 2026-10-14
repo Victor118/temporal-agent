@@ -14,6 +14,14 @@
 - Pas de hot-reload : le `CMD` du Dockerfile compile une fois au démarrage → `docker compose restart agent` après une modification
 - Port 8888 exposé pour l'API HTTP
 
+## Reprise en TDD · DDD (kit `.claude/`)
+
+- Règles métier par contexte dans `docs/fonctionnel/` (index, sigles DR, CV, AG…, lots) ; chaque contexte devient un **module hexagonal** : `<module>/domain` (pur, bibliothèque standard seule), `<module>/usecase` (un cas d'usage par fichier + les ports qu'il appelle, noms métier), `<module>/adapters/{memory,postgres,temporal,http}` ; dépendances adapters → usecase → domain. Premier module : `access/` (Droits). Le code existant (workflows, activités, `store/`, `session/`, `cmd/agent`) est rebranché dessus comme adaptateur
+- Doctrine et style : `.claude/rules/` (`DOCTRINE.md` d'abord), chargés seulement pour les modules hexagonaux (`paths:`), pas pour le reste du code
+- Agents : `/iterate`, `tdd-analyze`, `tdd-auto`, `tdd`, `/bdd-spec`, `/event-storming` ; guide du mainteneur : `.claude/README.md`. Plan dans `workspace/iterations.md`, listes de tests dans `workspace/current/`
+- Tests lancés par `.claude/scripts/tdd-run.sh <paquet> [<Test>]` | `--unit` | `--all` (Go dans `agent-dev`, une ligne de statut) ; niveaux par paquet (unitaire : `domain`/`usecase` ; intégration : `adapters/postgres` sur base jetable, `adapters/temporal` ; e2e : `adapters/http`), décrits dans la skill `tdd-testing-patterns`
+- Gardes (hooks de `.claude/settings.json`) actives seulement pendant un agent TDD (`.claude/state/tdd-active`) ou un REFACTOR (`refactor-active`) ; marqueur périmé après un plantage : le supprimer. Après une modification de `.claude/` : `lint-kit.sh` à 0, `eval-mechanics.sh` GREEN
+
 ## Architecture
 
 - 3 modes : `agent server`, `agent worker`, `agent dev` (les deux combinés) ; plus `agent connect`, une machine d'utilisateur hors du réseau privé (sans base ni Temporal, voir « Machines »). `worker` et `dev` construisent leurs workers par le même `newWorkerRuntime` (`cmd/agent/runtime.go`) : mêmes workflows, activities et outils ; seuls diffèrent la destination des notifications web et la source des skills. `implement_feature` n'est enregistré que là où la CLI `claude` est installée ; `analyze_repo` l'est par le worker principal (celui qui sert les workflows) quand les machines sont actives ou qu'une queue de repli existe (voir « Machines »). Fournisseur LLM choisi par `provider.New(LLM_PROVIDER)` (registre, `provider.Register`)
