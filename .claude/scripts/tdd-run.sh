@@ -1,20 +1,41 @@
 #!/usr/bin/env bash
-# Runs tests and prints ONE classified status line plus only the lines that explain it.
+# Runs Go tests and prints ONE classified status line plus only the lines that explain it.
 #
-#   tdd-run.sh <TestClass>   one class — *Test (unit), *IT (integration), *E2ETest (e2e)
-#   tdd-run.sh --unit        whole unit suite of the module (boundedcontexts/$TDD_MODULE, default betting; the root project when absent)
-#   tdd-run.sh --all         full `mvn verify` (unit + integration + e2e, every module)
-#   tdd-run.sh --verify      --all, unless the last run was a GREEN --all on the very same source tree:
-#                            then it replays that result without running anything
-#   tdd-run.sh --snapshot <label>        records the content of every source file (tracked or not) as the
-#                                        start of an iteration, in .claude/state/iteration-base
-#   tdd-run.sh --changed-since-snapshot  lists the source files added (A), modified (M) or deleted (D) since
-#                                        that snapshot: what the iteration changed, whatever was committed before it
-# For a class, the module is the one whose src/test/java holds <TestClass>.java.
-# A module-scoped run also builds the reactor modules it depends on (-am), e.g. a shared kernel.
+#   tdd-run.sh <package> [<Test>[/<subtest>]]   one package, or one test of it: tdd-run.sh ./access/usecase TestOpenTools_ClosedToolsLeft
+#                                               (the test name is anchored: ^TestX$, each /subtest part too)
+#   tdd-run.sh <Test>                           the same, the package found by the test's `func <Test>(` declaration
+#   tdd-run.sh --unit                           unit suite of the module $TDD_MODULE (default access): every package
+#                                               under ./$TDD_MODULE/ except those under adapters/ (domain, usecase…)
+#   tdd-run.sh --all                            go vet ./... then go test ./... (whole repository; the store and
+#                                               adapter tests that need a database skip without TEST_DATABASE_URL)
+#   tdd-run.sh --verify                         --all, unless the last run was a GREEN --all on the very same source tree:
+#                                               then it replays that result without running anything
+#   tdd-run.sh --snapshot <label>               records the content of every source file (tracked or not) as the
+#                                               start of an iteration, in .claude/state/iteration-base
+#   tdd-run.sh --changed-since-snapshot         lists the source files added (A), modified (M) or deleted (D) since
+#                                               that snapshot: what the iteration changed, whatever was committed before it
+#
+# Where Go runs (Go is not installed on the host): `go` if it is in the PATH (devcontainer); otherwise
+# `docker exec agent-dev go …` when the agent-dev container runs with this repository mounted on /app;
+# otherwise `docker compose -f ../docker-compose.build.yml run --rm -T agent go …` (slower: a fresh container).
+# TDD_GO overrides it with a whole command prefix. TEST_DATABASE_URL and TEMPORAL_SMOKE_HOST, when set, are
+# passed into the container.
+#
+# Integration tests on a throwaway database (never the `agent` database), from the parent directory, with the
+# compose stack up (CLAUDE.md, « Build & Run »):
+#   docker compose exec -T postgres createdb -U agent agent_dev_tmp
+#   TDD_GO="docker compose -f ../docker-compose.yml exec -T -e TEST_DATABASE_URL=postgres://agent:agent@postgres:5432/agent_dev_tmp?sslmode=disable agent go" \
+#     .claude/scripts/tdd-run.sh ./access/adapters/postgres
+#   docker compose exec -T postgres dropdb -U agent agent_dev_tmp
 #
 # Status: GREEN | RED_ASSERTION | RED_EXCEPTION | COMPILE_ERROR | WIRING_ERROR | NO_TESTS_RAN | INFRA_ERROR
-# Only RED_* is a valid RED. Full Maven log: .claude/state/last-run.log
+#   RED_ASSERTION  a test failed (t.Error, t.Fatal…)          RED_EXCEPTION  a test panicked
+#   COMPILE_ERROR  build failed, or go vet found a problem    WIRING_ERROR   the test binary failed outside any test
+#                                                                            (TestMain, init, a package-level setup)
+#   NO_TESTS_RAN   no package, no test file, or no test matches the name
+#   INFRA_ERROR    Go, Docker or a database unreachable, a timeout (a hang is not a RED), or a target whose tests
+#                  all skipped (they need TEST_DATABASE_URL, TEMPORAL_SMOKE_HOST…): not a test result
+# Only RED_* is a valid RED. Full log (go test -json): .claude/state/last-run.log
 # Records the outcome in .claude/state/last-run (read by hooks/test-first-guard.sh),
 # except for INFRA_ERROR and NO_TESTS_RAN, which say nothing about the code. A GREEN --all also records
 # its scope, the fingerprint of the source tree it ran on and its status line (lines 2-4), which --verify
@@ -22,20 +43,21 @@
 set -uo pipefail
 
 ROOT="$(git -C "${CLAUDE_PROJECT_DIR:-$PWD}" rev-parse --show-toplevel 2>/dev/null || pwd)"
-MODULE="boundedcontexts/${TDD_MODULE:-betting}"
-[ -d "$ROOT/$MODULE" ] || MODULE="."   # no bounded context module: the root project is the module
+MODULE="${TDD_MODULE:-access}"
 STATE="$ROOT/.claude/state"
 SELF="$ROOT/.claude/scripts/tdd-run.sh"
-TARGET="${1:?usage: tdd-run.sh <TestClass> | --unit | --all | --verify | --snapshot <label> | --changed-since-snapshot}"
+USAGE="usage: tdd-run.sh <package> [<Test>] | <Test> | --unit | --all | --verify | --snapshot <label> | --changed-since-snapshot"
+TARGET="${1:?$USAGE}"
 mkdir -p "$STATE"
 cd "$ROOT" || exit 2
 
-tree_fingerprint() {  # content hash of everything a build reads: every module's sources, tests and poms
+tree_fingerprint() {  # content hash of everything a build reads
   source_hashes | shasum -a 256 | cut -d' ' -f1
 }
 
-# What an iteration can change: production and test trees of every module, the poms, the documented endpoints.
-SOURCE_ROOTS=(':(glob)**/src/main/**' ':(glob)**/src/test/**' ':(glob)**/pom.xml' ':(glob)http/**')
+# What an iteration can change: every file of the repository but the kit, the agents' workspace and the docs
+# (Go sources and tests, go.mod / go.sum, embedded templates and assets, YAML configuration).
+SOURCE_ROOTS=(. ':(exclude).claude' ':(exclude)workspace' ':(exclude)docs' ':(exclude,glob)**/*.md')
 
 source_hashes() {  # "<hash> <path>" for every tracked or untracked (not ignored) source file on disk, sorted by path
   local paths
@@ -86,107 +108,233 @@ PY
     exec "$SELF" --all ;;
 esac
 
-if [[ "$TARGET" != --* ]]; then
-  FOUND=$(find . -path ./node_modules -prune -o -path "*/src/test/java/*" -name "$TARGET.java" -print 2>/dev/null | head -1)
-  [ -n "$FOUND" ] && { MODULE="${FOUND%%/src/test/java/*}"; MODULE="${MODULE#./}"; }
+# Statuses that need no Go run: printed the same way as the classifier's.
+early() {  # $1 = status, $2 = headline, rest = details
+  echo "$1 — $2"; shift 2
+  for line in "$@"; do echo "  $line"; done
+  exit 2
+}
+
+# --- Where Go runs ------------------------------------------------------------------------------------------
+PASS_ENV=()
+for var in TEST_DATABASE_URL TEMPORAL_SMOKE_HOST; do
+  [ -n "${!var:-}" ] && PASS_ENV+=(-e "$var")
+done
+if [ -n "${TDD_GO:-}" ]; then
+  read -r -a GO <<<"$TDD_GO"
+elif command -v go >/dev/null 2>&1; then
+  GO=(go)
+elif [ "$(docker inspect agent-dev --format '{{.State.Running}} {{range .Mounts}}{{if eq .Destination "/app"}}{{.Source}}{{end}}{{end}}' 2>/dev/null)" = "true $ROOT" ]; then
+  GO=(docker exec -w /app "${PASS_ENV[@]}" agent-dev go)
+elif [ -f "$ROOT/../docker-compose.build.yml" ] && [ "$(basename "$ROOT")" = agent ] && command -v docker >/dev/null 2>&1; then
+  GO=(docker compose -f "$ROOT/../docker-compose.build.yml" run --rm -T -w /app "${PASS_ENV[@]}" agent go)
+else
+  early INFRA_ERROR "no Go: not in the PATH, no agent-dev container running on $ROOT, no ../docker-compose.build.yml" \
+    "start it: (cd .. && docker compose -f docker-compose.build.yml up -d), or set TDD_GO"
 fi
 
-FINGERPRINT=""
+# --- What to run --------------------------------------------------------------------------------------------
+anchored() {  # TestX/row name → ^TestX$/^row_name$ (go test -run splits on /, subtest names have _ for spaces)
+  local part out=""
+  IFS='/' read -r -a parts <<<"$1"
+  for part in "${parts[@]}"; do
+    part=$(sed -e 's/ /_/g' -e 's/[][\.^$*+?(){}|]/\\&/g' <<<"$part")
+    out="${out:+$out/}^$part\$"
+  done
+  echo "$out"
+}
+
+TIMEOUT="${TDD_TIMEOUT:-5m}"
+VET=""
 case "$TARGET" in
-  --unit)        CMD=(mvn -q -pl "$MODULE" -am test)
-                 DIRS=("$MODULE/target/surefire-reports"); GLOB="TEST-*.xml" ;;
-  --all)         CMD=(mvn -q verify)
-                 FINGERPRINT="$(tree_fingerprint)"
-                 # Patterns, expanded after the run: a report directory the build creates must be counted too.
-                 DIRS=('target/surefire-reports' 'target/failsafe-reports' '*/target/surefire-reports' '*/target/failsafe-reports' 'boundedcontexts/*/target/surefire-reports' 'boundedcontexts/*/target/failsafe-reports'); GLOB="TEST-*.xml" ;;
-  --*)           echo "usage: tdd-run.sh <TestClass> | --unit | --all | --verify | --snapshot <label> | --changed-since-snapshot" >&2
-                 exit 2 ;;
-  *IT|*E2ETest)  CMD=(mvn -q -pl "$MODULE" -am verify "-Dit.test=$TARGET" -Dtest=none -Dsurefire.failIfNoSpecifiedTests=false -Dfailsafe.failIfNoSpecifiedTests=false)
-                 DIRS=("$MODULE/target/failsafe-reports"); GLOB="TEST-*.$TARGET*.xml" ;;
-  *)             CMD=(mvn -q -pl "$MODULE" -am test "-Dtest=$TARGET" -Dsurefire.failIfNoSpecifiedTests=false)
-                 DIRS=("$MODULE/target/surefire-reports"); GLOB="TEST-*.$TARGET*.xml" ;;
+  --unit)
+    [ -d "$MODULE" ] || early INFRA_ERROR "no module ./$MODULE (TDD_MODULE)"
+    mapfile -t PKGS < <("${GO[@]}" list -e "./$MODULE/..." 2>>"$STATE/last-run.list" | grep -v '/adapters/')
+    [ "${#PKGS[@]}" -gt 0 ] || early NO_TESTS_RAN "no package under ./$MODULE outside adapters/" "$(tail -n 3 "$STATE/last-run.list" 2>/dev/null)"
+    rm -f "$STATE/last-run.list"
+    ARGS=("${PKGS[@]}") ;;
+  --all)
+    TIMEOUT="${TDD_TIMEOUT:-20m}"
+    VET=yes
+    ARGS=(./...) ;;
+  --*)
+    echo "$USAGE" >&2
+    exit 2 ;;
+  *)
+    PKG="$TARGET"; TEST="${2:-}"
+    if [[ "$PKG" =~ ^Test[A-Z0-9_] || "$PKG" =~ ^Test$ ]] && [ ! -d "$PKG" ]; then   # a test name alone: find its package
+      TEST="$PKG"
+      mapfile -t FOUND < <(grep -rlE --include='*_test.go' --exclude-dir=.git --exclude-dir=.claude "^func ${TEST%%/*}\(" . | xargs -r -n1 dirname | sort -u)
+      [ "${#FOUND[@]}" -eq 0 ] && early NO_TESTS_RAN "no test named ${TEST%%/*} in any *_test.go"
+      [ "${#FOUND[@]}" -gt 1 ] && early NO_TESTS_RAN "${TEST%%/*} is declared in several packages: name the package" "${FOUND[@]}"
+      PKG="${FOUND[0]}"
+    fi
+    [[ "$PKG" == *.go ]] && PKG="$(dirname "$PKG")"     # a file names its package
+    PKG="${PKG%/}"; PKG="./${PKG#./}"
+    [ -d "$PKG" ] || early NO_TESTS_RAN "no package directory $PKG"
+    ARGS=("$PKG")
+    [ -n "$TEST" ] && ARGS=(-run "$(anchored "$TEST")" "$PKG") ;;
 esac
 
-# Stale reports would be read as this run's result.
-for pattern in "${DIRS[@]}"; do for d in $pattern; do [ -d "$d" ] && find "$d" -name "$GLOB" -delete; done; done
+# --- Run ----------------------------------------------------------------------------------------------------
+: > "$STATE/last-run.log"
+VET_EXIT=0
+if [ -n "$VET" ]; then
+  echo "### go vet ./..." >> "$STATE/last-run.log"
+  "${GO[@]}" vet ./... >>"$STATE/last-run.log" 2>&1
+  VET_EXIT=$?
+  echo "### go test" >> "$STATE/last-run.log"
+fi
+GO_EXIT=0
+if [ "$VET_EXIT" -eq 0 ]; then
+  "${GO[@]}" test -json -count=1 -timeout "$TIMEOUT" "${ARGS[@]}" >>"$STATE/last-run.log" 2>&1
+  GO_EXIT=$?
+fi
 
-"${CMD[@]}" >"$STATE/last-run.log" 2>&1
-MVN_EXIT=$?
+MODE=target
+case "$TARGET" in --unit|--all) MODE=suite ;; esac
+LABEL="$TARGET${TEST:+ $TEST}"
+[ "$MODE" = target ] && LABEL="${PKG}${TEST:+ $TEST}"
+[ "$TARGET" = --unit ] && LABEL="--unit ./$MODULE"
 
-OUTPUT=$(python3 - "$STATE" "$TARGET" "$MVN_EXIT" "$GLOB" "${DIRS[@]}" <<'PY'
-import glob, os, re, sys, xml.etree.ElementTree as ET
+OUTPUT=$(python3 - "$STATE" "$LABEL" "$MODE" "$VET_EXIT" "$GO_EXIT" <<'PY'
+import json, os, re, sys
 
-state, target, mvn_exit, pattern, dirs = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4], sys.argv[5:]
+state, label, mode, vet_exit, go_exit = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]), int(sys.argv[5])
 log = open(os.path.join(state, "last-run.log"), errors="replace").read()
 
-INFRA = re.compile(r"Could not find a valid Docker|Cannot connect to the Docker|ContainerLaunchException|"
-                   r"OutOfMemoryError|Could not resolve dependencies|Connection refused", re.I)
-WIRING = re.compile(r"Failed to load ApplicationContext|NoSuchBeanDefinition|UnsatisfiedDependency|"
-                    r"BeanCreationException|NoUniqueBeanDefinition|FlywayValidateException|SchemaManagementException")
+INFRA = re.compile(r"Cannot connect to the Docker daemon|No such container|is not running|connection refused|"
+                   r"no such host|dial tcp|i/o timeout|too many clients|go: downloading|"
+                   r"executable file not found|exec: \"go\"|OCI runtime", re.I)
+NO_PACKAGE = re.compile(r"matched no packages|directory not found|no Go files in|does not contain main module|"
+                        r"cannot find package|is not in std|no such file or directory")
+SOURCE_LINE = re.compile(r"(\S+\.go):(\d+)(?::\d+)?: ")
+
+events, raw = [], []
+for line in log.splitlines():
+    if line.startswith("{"):
+        try:
+            events.append(json.loads(line))
+            continue
+        except ValueError:
+            pass
+    if not line.startswith("### "):
+        raw.append(line)
+
+def clean(line):
+    line = line.strip()
+    for prefix in ("/app/", "./"):
+        line = line.replace(prefix, "", 1) if line.startswith(prefix) else line
+    return line
 
 def finish(status, headline, details=()):
     print(f"{status} — {headline}")
-    for line in list(details)[:12]:
-        print(f"  {line}")
+    for line in list(dict.fromkeys(details))[:12]:
+        print(f"  {line[:240]}")
     if status not in ("INFRA_ERROR", "NO_TESTS_RAN"):
         with open(os.path.join(state, "last-run"), "w") as f:
             f.write(status + "\n")
     sys.exit(0 if status == "GREEN" else 1 if status.startswith("RED_") else 2)
 
-compile_errors = list(dict.fromkeys(re.sub(r"^\[ERROR\]\s*\S*/src/", "src/", l) for l in log.splitlines()
-                                    if re.search(r"\.java:\[\d+", l)))
-if "COMPILATION ERROR" in log or compile_errors:
-    finish("COMPILE_ERROR", f"{len(compile_errors)} compilation error(s)", compile_errors)
+def tail(lines, n=6):
+    return [clean(l) for l in lines if l.strip()][-n:]
 
-reports = [p for d in dirs for p in glob.glob(os.path.join(d, pattern))]
-if not reports:
-    noise = re.compile(r"^\[ERROR\]\s*(\[Help|To see the full|Re-run Maven|For more information|$)")
-    tail = [l for l in log.splitlines() if l.startswith("[ERROR]") and not noise.match(l)][-6:]
+# go vet (--all only): a finding is a static check that failed; compile errors show here first.
+if vet_exit != 0:
+    findings = [clean(l) for l in raw if SOURCE_LINE.search(l)]
+    if findings:
+        finish("COMPILE_ERROR", f"go vet: {len(findings)} problem(s)", findings)
     if INFRA.search(log):
-        finish("INFRA_ERROR", "infrastructure failure, not a test result", tail)
-    if mvn_exit == 0 or re.search(r"No tests (matching|were executed)", log):
-        finish("NO_TESTS_RAN", f"no test report for {target} — check the class name suffix (*Test, *IT, *E2ETest)", tail)
-    finish("INFRA_ERROR", "build failed before any test ran", tail)
+        finish("INFRA_ERROR", "go vet could not run, not a test result", tail(raw))
+    finish("INFRA_ERROR", "go vet failed without a finding", tail(raw))
 
-tests = failures = errors = 0
-failed, kinds = [], set()
-for path in reports:
-    suite = ET.parse(path).getroot()
-    for case in suite.iter("testcase"):
-        tests += 1
-        for tag in ("failure", "error"):
-            node = case.find(tag)
-            if node is None:
-                continue
-            text = f"{node.get('type', '')} {node.get('message', '')} {node.text or ''}"
-            if INFRA.search(text):
-                kinds.add("INFRA_ERROR")
-            elif WIRING.search(text):
-                kinds.add("WIRING_ERROR")
-            elif tag == "failure":
-                kinds.add("RED_ASSERTION")
-            else:
-                kinds.add("RED_EXCEPTION")
-            failures += tag == "failure"
-            errors += tag == "error"
-            message = (node.get("message") or (node.text or "").strip().splitlines()[0:1] or [""])
-            message = message if isinstance(message, str) else message[0]
-            short_type = node.get("type", "").rsplit(".", 1)[-1]
-            failed.append(f"✗ {case.get('classname', '').rsplit('.', 1)[-1]}.{case.get('name')}: "
-                          f"{short_type}: {' '.join(message.split())[:220]}")
+# Build failures: build-output / build-fail events (Go ≥ 1.24), or plain text from older toolchains.
+build_output = [e.get("Output", "") for e in events if e.get("Action") == "build-output"]
+build_failed = (any(e.get("Action") == "build-fail" or e.get("FailedBuild") for e in events)
+                or any("[build failed]" in l or "[setup failed]" in l for l in raw)
+                or any("[build failed]" in e.get("Output", "") or "[setup failed]" in e.get("Output", "")
+                       for e in events if e.get("Action") == "output"))
+if build_failed:
+    errors = [clean(l) for chunk in build_output for l in chunk.splitlines() if SOURCE_LINE.search(l)]
+    errors += [clean(l) for l in raw if SOURCE_LINE.search(l)]
+    errors = list(dict.fromkeys(errors))
+    finish("COMPILE_ERROR", f"{len(errors)} compilation error(s) — {label}", errors or tail(build_output + raw))
 
-headline = f"{tests} test(s), {failures} failed, {errors} error(s) — {target}"
-if tests == 0:
-    finish("NO_TESTS_RAN", headline)
-for status in ("INFRA_ERROR", "WIRING_ERROR", "RED_ASSERTION", "RED_EXCEPTION"):
-    if status in kinds:
-        finish(status, headline, failed)
+if not events:
+    text = "\n".join(raw)
+    if NO_PACKAGE.search(text):
+        finish("NO_TESTS_RAN", f"no Go package for {label}", tail(raw, 3))
+    if INFRA.search(text) or go_exit != 0:
+        finish("INFRA_ERROR", "go test did not run, not a test result", tail(raw))
+    finish("NO_TESTS_RAN", f"no test ran for {label}", tail(raw, 3))
+
+results, output, failed_packages = {}, {}, set()
+for e in events:
+    action, package, test = e.get("Action"), e.get("Package"), e.get("Test")
+    if action == "output":
+        output.setdefault((package, test), []).append(e.get("Output", "").rstrip("\n"))
+    elif test and action in ("pass", "fail", "skip"):
+        results[(package, test)] = action
+    elif not test and action == "fail":
+        failed_packages.add(package)
+
+package_text = "\n".join(l for (p, t), lines in output.items() if t is None for l in lines)
+if "test timed out after" in package_text:
+    stuck = [l.strip() for l in package_text.splitlines() if re.match(r"\s+Test\S+ \(", l)]
+    finish("INFRA_ERROR", f"timed out: a hang is not a RED (goroutine dump in .claude/state/last-run.log) — {label}",
+           [l for l in package_text.splitlines() if "timed out" in l][:1] + stuck)
+
+top = {k: v for k, v in results.items() if "/" not in k[1]}
+failed = [k for k, v in results.items() if v == "fail"]
+leaves = [k for k in failed if not any(o[0] == k[0] and o[1].startswith(k[1] + "/") for o in failed)]
+skipped = [k for k, v in top.items() if v == "skip"]
+headline = (f"{len(top)} test(s), {sum(v == 'fail' for v in top.values())} failed, "
+            f"{len(skipped)} skipped — {label}")
+
+def lines_of(key):
+    return output.get(key, []) + [l for (p, t), ls in output.items() if p == key[0] and t is None for l in ls]
+
+def explain(key):
+    lines = output.get(key, [])
+    panic = next((l.strip() for l in lines_of(key) if l.startswith("panic: ")), None)
+    if panic:
+        frames = (re.search(r"(?:/app/|^\s+\./)(\S+\.go:\d+)", l) for l in lines_of(key))
+        frame = next((m.group(1) for m in frames if m), "")
+        return f"✗ {key[1]}: {panic}" + (f" at {frame}" if frame else "")
+    said = [l.strip() for l in lines if SOURCE_LINE.search(l.strip() + " ") and not l.strip().startswith("---")]
+    return f"✗ {key[1]}: " + (" | ".join(said) or "failed")
+
+if failed:
+    details = [explain(k) for k in leaves]
+    text = "\n".join(l for k in leaves for l in lines_of(k))
+    if INFRA.search(text):
+        finish("INFRA_ERROR", f"infrastructure failure inside the tests, not a test result — {label}", details)
+    if any(l.startswith("panic: ") for k in leaves for l in lines_of(k)):
+        finish("RED_EXCEPTION", headline, details)
+    finish("RED_ASSERTION", headline, details)
+
+if failed_packages:   # the binary failed although no test did: TestMain, init, a panic outside a test
+    details = [f"✗ {p}: " + (" | ".join(l.strip() for l in output.get((p, None), []) if l.strip()
+                                         and not l.startswith(("FAIL", "ok "))) or "failed")[:200]
+               for p in sorted(failed_packages)]
+    finish("WIRING_ERROR", f"the test binary failed outside any test — {label}", details)
+
+if not top:
+    said = "\n".join(l for lines in output.values() for l in lines)
+    if "no tests to run" in said:
+        finish("NO_TESTS_RAN", f"no test matches {label}")
+    finish("NO_TESTS_RAN", f"no test file in {label}")
+
+if mode == "target" and len(skipped) == len(top):
+    reasons = [l.strip() for k in skipped for l in output.get(k, []) if SOURCE_LINE.search(l.strip() + " ")]
+    finish("INFRA_ERROR", f"every test skipped, not a test result — {label}", reasons or ["skipped"])
+
 finish("GREEN", headline)
 PY
 )
 CODE=$?
 echo "$OUTPUT"
 if [ "$TARGET" = --all ] && [ $CODE -eq 0 ]; then   # what --verify may replay
-  printf '%s\n' GREEN "--all" "$FINGERPRINT" "$(head -n1 <<<"$OUTPUT")" > "$STATE/last-run"
+  printf '%s\n' GREEN "--all" "$(tree_fingerprint)" "$(head -n1 <<<"$OUTPUT")" > "$STATE/last-run"
 fi
 exit $CODE
