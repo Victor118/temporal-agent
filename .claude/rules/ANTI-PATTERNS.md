@@ -1,85 +1,95 @@
+---
+paths:
+  - "**/domain/**"
+  - "**/usecase/**"
+  - "**/adapters/**"
+---
+
 # Anti-Patterns to Reject
 
 ## Domain Anti-Patterns
 
 ### Anemic Domain Model
-❌ Data classes with only getters/setters
-❌ Business logic in services outside entities
-❌ Entities as DTOs
-✅ Rich objects with behavior and invariants
+❌ Structs with exported fields that use cases fill in and read back
+❌ Business logic in a use case, a workflow or a handler instead of the domain
+❌ Domain types used as JSON or SQL rows
+✅ Rich types with behavior and invariants
 
 ### Large Aggregates
 ❌ Including entire object graphs
-❌ Loading collections when only count needed
+❌ Loading collections when only a count is needed
 ❌ Parent tracking all children
 ✅ Small aggregates, reference by ID
 
 ### Aggregate References
-❌ `private Customer customer;`
-❌ Direct object navigation between aggregates
-✅ `private CustomerId customerId;`
+❌ `owner *User`
+❌ Direct navigation between aggregates
+✅ `owner UserID`
 
 ### Bidirectional Associations
 ❌ Parent knows children, children know parent
-❌ `@OneToMany` for navigation convenience
 ✅ Unidirectional, query when needed
 
 ## Architecture Anti-Patterns
 
-### Smart Controllers
-❌ Business logic in REST controllers
+### Smart Adapters
+❌ Business rules in an HTTP handler, an activity, a workflow or a SQL `WHERE`
 ❌ Validation beyond input format in adapters
-✅ Controllers only adapt HTTP to use cases
+✅ Adapters only translate to and from use cases
 
 ### Infrastructure Leak
-❌ JPA annotations in domain entities
-❌ Domain depending on Spring
-❌ Database concepts in domain
+❌ `json:` / `db:` tags, `database/sql`, Temporal or `net/http` types in `domain/`
+❌ `usecase/` importing an adapter
 ✅ Pure domain, infrastructure adapts
 
 ### Shared Mutable State
-❌ Static mutable fields
-❌ Entities modifying other entities directly
-✅ Immutable values, isolated aggregates
+❌ Package-level mutable variables, `init()` wiring
+❌ A slice or map of an aggregate handed out without a copy
+✅ Values copied at the boundary, isolated aggregates
 
 ## Testing Anti-Patterns
 
-See `tdd-testing-patterns` skill for comprehensive testing patterns and anti-patterns.
+See the `tdd-testing-patterns` skill for testing patterns and anti-patterns.
 
 ## Code Quality Anti-Patterns
 
 ### Primitive Obsession
-❌ `String email`, `BigDecimal amount`
+❌ `string` for every ID, `int` for a duration in minutes
 ❌ Validation scattered everywhere
-✅ Value objects with encapsulated validation
+✅ Named types and value objects with encapsulated validation
 
 ### Feature Envy
-❌ Method uses another object's data extensively
+❌ A function that mostly reads another type's data
 ❌ Reaching through objects for data
 ✅ Move behavior to where data lives
 
-### God Classes
-❌ One class doing everything
-❌ 500+ line classes
-✅ Single responsibility, cohesive classes
+### God Packages
+❌ One package doing everything (`util`, `common`, `helpers`)
+❌ 1000-line files
+✅ Packages named for what they provide, cohesive files
 
 ### Long Parameter Lists
-❌ `createOrder(id, customer, date, items, discount, tax, shipping)`
-✅ Parameter objects, builders for complex creation
+❌ `Open(ctx, id, user, agent, title, channel, mode, fork)`
+✅ A command struct
+
+### Interface Pollution
+❌ An interface per struct, declared by its implementer
+❌ Large interfaces "in case"
+✅ Small interfaces declared by the consumer
 
 ## Integration Anti-Patterns
 
 ### Distributed Monolith
-❌ Synchronous calls between bounded contexts
-❌ Shared database between contexts
-✅ Events, eventual consistency
+❌ A module calling into another module's internals
+❌ Two modules writing the same table
+✅ A port in the caller, an adapter that calls the other module's use case or reacts to its events
 
 ### Missing ACL
-❌ External model leaking into domain
+❌ External model leaking into the domain (an MCP payload, a Temporal history, a model provider's response)
 ❌ Direct use of third-party types
-✅ Anti-corruption layer protects domain
+✅ The adapter translates into the module's own types
 
 ### Chatty Integration
-❌ Multiple calls to fulfill one use case
-❌ N+1 query problems across contexts
-✅ Aggregate data, design better boundaries
+❌ Several calls to fulfil one use case
+❌ N+1 queries
+✅ One port call that returns what the use case needs
