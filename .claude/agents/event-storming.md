@@ -379,7 +379,7 @@ DIAGRAM_SPEC:
         to_context: ContextName
         event: EventName
         label: "short description"
-  output: workspace/event-storming-context-map.excalidraw
+  output: workspace/event-storming-context-map.yaml
 ```
 
 Use these context colors (cycle if more than 4 contexts):
@@ -390,7 +390,7 @@ Use these context colors (cycle if more than 4 contexts):
 
 ### Step 3: Return to main agent
 
-Include the `DIAGRAM_SPEC` block in your return message. The main agent will use the `excalidraw-event-storming` skill to generate the `.excalidraw` file.
+Include the `DIAGRAM_SPEC` block in your return message. No diagram skill is installed: the main agent saves the block as it is, in `workspace/event-storming-context-map.yaml`.
 
 If the user says "no" to the diagram, skip this and return without a spec.
 

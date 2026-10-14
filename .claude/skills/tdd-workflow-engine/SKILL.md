@@ -154,8 +154,8 @@ What it runs underneath, for reference (always `-json -count=1`, a test name anc
 | Unit | `<module>/domain`, `<module>/usecase` | `go test -run '^TestX$' ./<module>/usecase` | No |
 | Unit | whole module | `go test <every package of ./<module>/... but adapters/>` | No |
 | Integration | `<module>/adapters/postgres` | same, with `TEST_DATABASE_URL` (a throwaway database) | PostgreSQL |
-| Integration | `<module>/adapters/temporal` | same (the SDK's `testsuite`, in process) | No |
-| E2E | `<module>/adapters/http` | same (`httptest`) | No |
+| Integration | `<module>/adapters/temporalio` | same (the SDK's `testsuite`, in process) | No |
+| E2E | `<module>/adapters/httpapi` | same (`httptest`) | No |
 | Everything | repository | `go vet ./... && go test ./...` | none: tests needing it skip |
 
 - An integration test without `TEST_DATABASE_URL` skips: `tdd-run.sh` answers `INFRA_ERROR`, never GREEN.

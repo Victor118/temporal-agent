@@ -1,6 +1,6 @@
 ---
 name: tdd-integration-patterns
-description: Integration testing patterns for the secondary adapters of a Go module - adapters/postgres against a throwaway PostgreSQL, adapters/temporal with the SDK's testsuite
+description: Integration testing patterns for the secondary adapters of a Go module - adapters/postgres against a throwaway PostgreSQL, adapters/temporalio with the SDK's testsuite
 ---
 
 # Skill: TDD Integration Patterns
@@ -160,7 +160,7 @@ func TestTurnToolsActivity_ARefusalIsFinal(t *testing.T) {
 
 	_, err := env.ExecuteActivity(acts.TurnTools, StartTurnInput{Agent: "dev", User: "bob"})
 
-	var appErr *sdktemporal.ApplicationError
+	var appErr *temporal.ApplicationError
 	if !errors.As(err, &appErr) || appErr.Type() != "AgentNotOpen" || !appErr.NonRetryable() {
 		t.Fatalf("err = %v, want a final AgentNotOpen", err)
 	}

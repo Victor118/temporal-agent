@@ -186,8 +186,8 @@ e.g. "Iteration 03"), else `workspace/current/tdd.md` (overwrite). Every agent â
 **Test Type:** UNIT | E2E | INTEGRATION ([detection reason])
 **Test file:** `<module>/usecase/<use_case>_test.go` (package `./<module>/usecase`)
 (unit â€” beside the use case, `package usecase_test`; a domain-service test is `<module>/domain/<service>_test.go`;
-e2e: `<module>/adapters/http/<resource>_test.go`; integration: `<module>/adapters/postgres/<adapter>_test.go`
-or `<module>/adapters/temporal/<adapter>_test.go`)
+e2e: `<module>/adapters/httpapi/<resource>_test.go`; integration: `<module>/adapters/postgres/<adapter>_test.go`
+or `<module>/adapters/temporalio/<adapter>_test.go`)
 
 ## Ordered Test List
 

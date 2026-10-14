@@ -31,12 +31,12 @@ them. A decision particular to one module is recorded in that module's iteration
   └── adapters/
       ├── memory/           in-memory fakes of the ports + the fixed clock (production code, see below)
       ├── postgres/         SQL adapters
-      ├── temporal/         activities and workflows that call use cases; Temporal client adapters
-      └── http/             handlers
+      ├── temporalio/       activities and workflows that call use cases; Temporal client adapters
+      └── httpapi/          handlers
   ```
-  A directory exists only when a test needs it. A package named like the library it adapts (`http`,
-  `temporal`) imports that library under an alias (`nethttp "net/http"`, `sdktemporal
-  "go.temporal.io/sdk/temporal"`).
+  A directory exists only when a test needs it. An adapter package is never named like the library it
+  adapts (`httpapi`, not `http`; `temporalio`, not `temporal`): `net/http` and the SDK's `temporal`
+  keep their own names in its imports.
 - **The composition root is `cmd/agent`** (and the workers' runtime): it builds the adapters and hands
   them to the use cases. No global, no `init()` wiring.
 
@@ -95,8 +95,8 @@ deterministic orders. Hand-written; no mocking library, no generated mock.
 ## Tests
 
 - **Levels, by package** (`tdd-testing-patterns` owns this): unit = `domain/` and `usecase/` with fakes;
-  integration = `adapters/postgres/` on a throwaway database, `adapters/temporal/` with the SDK's
-  `testsuite`; e2e = `adapters/http/` through `httptest` on the wired module.
+  integration = `adapters/postgres/` on a throwaway database, `adapters/temporalio/` with the SDK's
+  `testsuite`; e2e = `adapters/httpapi/` through `httptest` on the wired module.
 - Tests are run by `.claude/scripts/tdd-run.sh`, never by a raw `go test`.
 - The use case is the unit: `domain/` is driven through it; a domain service gets its own test only when
   its logic reads better specified alone.

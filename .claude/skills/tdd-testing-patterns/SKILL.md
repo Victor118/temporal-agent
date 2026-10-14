@@ -20,8 +20,8 @@ Go has one test runner; the **level is the package** a test lives in. No build t
 |---|---|---|---|
 | unit | `<module>/domain`, `<module>/usecase` | fakes of `adapters/memory`, the fixed clock | always runs |
 | integration | `<module>/adapters/postgres` | a throwaway PostgreSQL (`TEST_DATABASE_URL`) | `t.Skip` → `tdd-run.sh` says `INFRA_ERROR` |
-| integration | `<module>/adapters/temporal` | the SDK's `testsuite` (in process) | always runs |
-| e2e | `<module>/adapters/http` | `httptest` on the module wired with `memory` adapters | always runs |
+| integration | `<module>/adapters/temporalio` | the SDK's `testsuite` (in process) | always runs |
+| e2e | `<module>/adapters/httpapi` | `httptest` on the module wired with `memory` adapters | always runs |
 | smoke | the existing `…RealServer` tests (`workflow/`, `gateway/`) | a real Temporal server (`TEMPORAL_SMOKE_HOST`) | skipped; long, run by hand (`CLAUDE.md`) |
 
 `tdd-run.sh --unit` runs every package of the module but `adapters/`; `--all` runs everything, and the

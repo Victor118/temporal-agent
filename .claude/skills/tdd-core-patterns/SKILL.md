@@ -159,7 +159,7 @@ front; add each one when a failing test needs it.
   - it returns a flat read model (a struct of raw values), asserted directly — **no snapshot**;
   - build the expected read model from the read shape, not from an aggregate's `Snapshot()`;
   - it is side-effect free: no event, no store change;
-  - fake its read port in unit tests; real SQL in `adapters/postgres` tests; `GET` in `adapters/http` tests.
+  - fake its read port in unit tests; real SQL in `adapters/postgres` tests; `GET` in `adapters/httpapi` tests.
 
 ## Anti-Patterns
 

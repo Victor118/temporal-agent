@@ -7,7 +7,7 @@ description: E2E testing patterns for a Go module's HTTP adapter - black-box tes
 
 ## Purpose
 
-End-to-end tests verify a module **through HTTP**: request → handler (`adapters/http`) → use case →
+End-to-end tests verify a module **through HTTP**: request → handler (`adapters/httpapi`) → use case →
 domain → secondary adapters (`memory` fakes) → response. They never reach into domain internals. TDD
 sequence and violations live in `tdd-workflow-engine`; test lists, naming and statuses in `tdd-analysis`;
 test levels in `tdd-testing-patterns`.
@@ -27,13 +27,13 @@ Reading a fake in an assertion is a last resort — prefer a GET through the API
 
 ```
 Test (httptest) ──HTTP──▶ handler ──▶ use case ──▶ domain ──▶ secondary adapters
-                          adapters/http   usecase/      domain/      (memory fakes)
+                          adapters/httpapi   usecase/      domain/      (memory fakes)
 ```
 
 | Allowed | Forbidden |
 |---------|-----------|
-| `httptest.NewRequest(nethttp.MethodPost, "/admin/access/rules", body)` | `domain.FromSnapshot(...)` in an assertion |
-| `rec.Code != nethttp.StatusCreated` | `turnTools.Run(ctx, …)` to check the result |
+| `httptest.NewRequest(http.MethodPost, "/admin/access/rules", body)` | `domain.FromSnapshot(...)` in an assertion |
+| `rec.Code != http.StatusCreated` | `turnTools.Run(ctx, …)` to check the result |
 | decoding the JSON into a local `struct` of raw values | importing `domain` to compare responses |
 | `memory.NewRuleBook()` + `Feed(...)` for the Given | an aggregate built by hand to call the handler |
 
@@ -44,18 +44,18 @@ and hands the handler to `httptest`: a recorder for one request, a server when t
 client (redirects, cookies, a stream).
 
 ```go
-// access/adapters/http/rules_test.go
+// access/adapters/httpapi/rules_test.go
 package http_test
 
 import (
-	nethttp "net/http"
+	"net/http"
 	"net/http/httptest"
 	…
 )
 
 type app struct {
 	rules   *memory.RuleBook
-	handler nethttp.Handler
+	handler http.Handler
 }
 
 func newApp(t *testing.T) *app {
@@ -89,9 +89,9 @@ func TestRulesAPI_PreviewsTheToolsARuleWouldClose(t *testing.T) { // DR26
 	a := newApp(t)
 	a.givenTools("crm_search", "crm_update_contact", "web_fetch")
 
-	rec := a.do(t, nethttp.MethodPost, "/admin/access/preview", `{"kind":"mcp_server","target":"crm"}`)
+	rec := a.do(t, http.MethodPost, "/admin/access/preview", `{"kind":"mcp_server","target":"crm"}`)
 
-	if rec.Code != nethttp.StatusOK {
+	if rec.Code != http.StatusOK {
 		t.Fatalf("status %d, body %s", rec.Code, rec.Body)
 	}
 	var got struct {
@@ -106,7 +106,7 @@ func TestRulesAPI_PreviewsTheToolsARuleWouldClose(t *testing.T) { // DR26
 }
 
 func TestRulesAPI_RefusesToDeleteTheSoleHolderOfARule(t *testing.T) { // DR32
-	… rec.Code == nethttp.StatusConflict, the rules to change named in the body …
+	… rec.Code == http.StatusConflict, the rules to change named in the body …
 }
 ```
 
@@ -127,11 +127,11 @@ Write the test as if the route exists (wishful thinking), then scaffold just eno
 failure, not a compile error or a 404:
 
 ```go
-// access/adapters/http/handler.go
-func NewHandler(save usecase.SaveRule, preview usecase.Preview) nethttp.Handler {
-	mux := nethttp.NewServeMux()
-	mux.HandleFunc("POST /admin/access/preview", func(w nethttp.ResponseWriter, r *nethttp.Request) {
-		w.WriteHeader(nethttp.StatusNotImplemented) // scaffold
+// access/adapters/httpapi/handler.go
+func NewHandler(save usecase.SaveRule, preview usecase.Preview) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /admin/access/preview", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotImplemented) // scaffold
 	})
 	return mux
 }
@@ -153,14 +153,14 @@ workflow's commands, the gateway), VERIFY says they must be run by hand, and the
 ## File Organization
 
 ```
-access/adapters/http/
+access/adapters/httpapi/
 ├── handler.go           routes of the module, NewHandler(use cases…)
 ├── rules.go             one file per resource
 └── rules_test.go        package http_test: wiring helper + tests
 ```
 
 - Naming: `Test<Resource>API_<FinalBehaviour>`; one test file per resource.
-- One test: `.claude/scripts/tdd-run.sh ./access/adapters/http TestRulesAPI_…` (engine §7). No
+- One test: `.claude/scripts/tdd-run.sh ./access/adapters/httpapi TestRulesAPI_…` (engine §7). No
   infrastructure needed: e2e tests run in `--all`, not in `--unit`.
 
 ## Anti-Patterns
