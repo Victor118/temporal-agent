@@ -1,0 +1,10 @@
+# Byte budgets for files preloaded into agents (lint-kit warns above +15%). Raise only on purpose.
+# Set on 2026-10-14 to the sizes of the Go adaptation.
+agents/tdd.md 7409
+agents/tdd-auto.md 7037
+agents/tdd-analyze.md 6276
+skills/tdd-analysis/SKILL.md 14688
+skills/tdd-workflow-engine/SKILL.md 15993
+skills/tdd-testing-patterns/SKILL.md 10668
+rules/ENFORCEMENT.md 2992
+rules/DOCTRINE.md 6043

@@ -56,5 +56,6 @@ le plus de valeur jusqu'aux cas limites.
 4. Le domaine écrit en TDD est pur ; le code actuel (workflows, activités, base, HTTP) est rebranché dessus
    comme adaptateur, et son ancien code métier disparaît.
 
-Le kit de la formation est écrit pour Java/Maven : `tdd-run.sh`, les gardes et les skills de patterns
-sont à adapter à Go avant la première itération.
+Le kit de la formation est adapté à Go dans `.claude/` (guide : `.claude/README.md`) : `tdd-run.sh`, les
+gardes, les skills de patterns et la doctrine (`.claude/rules/DOCTRINE.md`). Son évaluation reste à refaire
+pour Go.
