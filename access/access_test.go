@@ -5,16 +5,16 @@ import (
 )
 
 var (
-	crmSearch = ToolRef{Name: "crm_search", MCPServer: "crm"}
-	crmUpdate = ToolRef{Name: "crm_update_contact", MCPServer: "crm"}
-	webFetch  = ToolRef{Name: "web_fetch"}
-	webSearch = ToolRef{Name: "web_search", MCPServer: "web"}
-	execTool  = ToolRef{Name: "exec"}
+	crmSearch = FromMCP("crm", "crm_search")
+	crmUpdate = FromMCP("crm", "crm_update_contact")
+	webFetch  = BuiltIn("web_fetch")
+	webSearch = FromMCP("web", "web_search")
+	execTool  = BuiltIn("exec")
 )
 
 func TestAllowed_OpenWithoutRules(t *testing.T) {
 	alice := &User{ID: "alice"}
-	for _, tool := range []ToolRef{crmSearch, webFetch, execTool, Agent("commercial")} {
+	for _, tool := range []Tool{crmSearch, webFetch, execTool, Agent("commercial")} {
 		if !Allowed(alice, tool, nil) {
 			t.Errorf("%s closed without any rule", tool.Name)
 		}
@@ -40,6 +40,21 @@ func TestAllowed_ServerIsNotAPrefix(t *testing.T) {
 	}
 }
 
+// A tool is from its MCP server; a built-in tool and an agent from none,
+// whatever a server is called.
+func TestSource(t *testing.T) {
+	if server, ok := crmSearch.Source.MCPServer(); !ok || server != "crm" {
+		t.Errorf("crm_search from %q (%v)", server, ok)
+	}
+	if _, ok := execTool.Source.MCPServer(); ok {
+		t.Error("a built-in tool from a server")
+	}
+	rules := []Rule{{Kind: KindMCPServer, Target: "agent", Users: []string{"alice"}}}
+	if !Allowed(&User{ID: "bob"}, Agent("x"), rules) {
+		t.Error("an agent closed by a rule on a server")
+	}
+}
+
 func TestAllowed_EveryRuleIsALock(t *testing.T) {
 	rules := []Rule{
 		{Kind: KindMCPServer, Target: "crm", Groups: []string{"sales"}},
@@ -50,7 +65,7 @@ func TestAllowed_EveryRuleIsALock(t *testing.T) {
 	both := &User{ID: "b", Groups: []string{"managers", "sales"}}
 	cases := []struct {
 		u    *User
-		tool ToolRef
+		tool Tool
 		want bool
 	}{
 		{seller, crmSearch, true},
@@ -170,7 +185,7 @@ func TestValidTarget(t *testing.T) {
 }
 
 func TestRemoves(t *testing.T) {
-	agents := []ToolRef{Agent("default"), Agent("commercial")}
+	agents := []Tool{Agent("default"), Agent("commercial")}
 	users := []User{
 		{ID: "alice", Groups: []string{"sales"}},
 		{ID: "bob"},

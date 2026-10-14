@@ -109,7 +109,7 @@ func UnmatchedRuleText(r access.Rule) string {
 
 // publishedRefs are the published tools and the agents, as the rules see
 // them.
-func publishedRefs(ctx context.Context, st accessSweepStore) ([]access.ToolRef, error) {
+func publishedRefs(ctx context.Context, st accessSweepStore) ([]access.Tool, error) {
 	records, err := st.ListTools(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list tools: %w", err)
@@ -118,9 +118,9 @@ func publishedRefs(ctx context.Context, st accessSweepStore) ([]access.ToolRef, 
 	if err != nil {
 		return nil, fmt.Errorf("list agents: %w", err)
 	}
-	refs := make([]access.ToolRef, 0, len(records)+len(agents))
+	refs := make([]access.Tool, 0, len(records)+len(agents))
 	for _, t := range records {
-		refs = append(refs, access.ToolRef{Name: t.Name, MCPServer: t.MCPServer})
+		refs = append(refs, t.AccessTool())
 	}
 	for _, a := range agents {
 		refs = append(refs, access.Agent(a.ID))

@@ -163,7 +163,7 @@ const AgentNotOpen = "AgentNotOpen"
 func (c *Catalog) AllowedToolsFor(agentID, userID string) ListToolsOutput {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	out, servers := c.allowedTools(agentID)
+	out, refs := c.allowedTools(agentID)
 	if !c.access.Allowed(userID, access.Agent(agentID)) {
 		who := userID
 		if who == "" {
@@ -177,7 +177,7 @@ func (c *Catalog) AllowedToolsFor(agentID, userID string) ListToolsOutput {
 	}
 	kept := out.Tools[:0]
 	for _, t := range out.Tools {
-		if c.access.Allowed(userID, access.ToolRef{Name: t.Name, MCPServer: servers[t.Name]}) {
+		if c.access.Allowed(userID, refs[t.Name]) {
 			kept = append(kept, t)
 			continue
 		}
@@ -188,10 +188,10 @@ func (c *Catalog) AllowedToolsFor(agentID, userID string) ListToolsOutput {
 	return out
 }
 
-// allowedTools is AllowedTools, with the server each published tool comes
-// from. The caller holds the lock.
-func (c *Catalog) allowedTools(agentID string) (ListToolsOutput, map[string]string) {
-	servers := map[string]string{}
+// allowedTools is AllowedTools, with each tool as the rules see it, by
+// name. The caller holds the lock.
+func (c *Catalog) allowedTools(agentID string) (ListToolsOutput, map[string]access.Tool) {
+	refs := map[string]access.Tool{}
 
 	var allowlist []string
 	known := false
@@ -220,9 +220,7 @@ func (c *Catalog) allowedTools(agentID string) (ListToolsOutput, map[string]stri
 			continue
 		}
 		out.Tools = append(out.Tools, publishedDefinition(t))
-		if t.MCPServer != "" {
-			servers[t.Name] = t.MCPServer
-		}
+		refs[t.Name] = t.AccessTool()
 		out.Resolutions[t.Name] = ToolResolution{
 			Kind:             t.Kind,
 			WorkflowName:     t.WorkflowName,
@@ -241,13 +239,14 @@ func (c *Catalog) allowedTools(agentID string) (ListToolsOutput, map[string]stri
 			continue
 		}
 		out.Tools = append(out.Tools, agentDefinition(a))
+		refs[name] = access.Agent(a.ID)
 		// No task queue: a sub-agent runs where its parent runs, which only
 		// the dispatching workflow knows.
 		out.Resolutions[name] = ToolResolution{Kind: string(tool.ToolKindWorkflow), AgentID: a.ID, Background: true}
 	}
 
 	sort.Slice(out.Tools, func(i, j int) bool { return out.Tools[i].Name < out.Tools[j].Name })
-	return out, servers
+	return out, refs
 }
 
 func publishedDefinition(t store.ToolRecord) provider.ToolDefinition {

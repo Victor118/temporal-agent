@@ -107,8 +107,11 @@ type UserAgent struct {
 }
 
 // ref is a tool as the rules see it.
-func (tv *ToolView) ref() access.ToolRef {
-	return access.ToolRef{Name: tv.Name, MCPServer: tv.MCPServer}
+func (tv *ToolView) ref() access.Tool {
+	if tv.Target != "" {
+		return access.Agent(tv.Target)
+	}
+	return tv.AccessTool()
 }
 
 // buildAccess fills the inventory's rules and groups, and each tool's rules.
@@ -135,7 +138,7 @@ func (inv *Inventory) buildAccess(in Inputs) {
 	}
 
 	tools := slices.Concat(inv.Tools, inv.AgentTools)
-	var agents []access.ToolRef
+	var agents []access.Tool
 	for _, tv := range inv.AgentTools {
 		agents = append(agents, tv.ref())
 	}

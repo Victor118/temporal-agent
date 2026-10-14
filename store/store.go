@@ -247,3 +247,12 @@ type ToolRecord struct {
 	SchemaHash string    `json:"schema_hash"`
 	UpdatedAt  time.Time `json:"updated_at"`
 }
+
+// AccessTool is t as the rules see it: from its MCP server, built-in without
+// one (an empty mcp_server is the column's way of saying built-in).
+func (t ToolRecord) AccessTool() access.Tool {
+	if t.MCPServer == "" {
+		return access.BuiltIn(t.Name)
+	}
+	return access.FromMCP(t.MCPServer, t.Name)
+}
