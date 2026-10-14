@@ -1,0 +1,8 @@
+# Byte budgets for files preloaded into agents (lint-kit warns above +15%). Raise only on purpose.
+agents/tdd.md 7380
+agents/tdd-auto.md 6966
+agents/tdd-analyze.md 5559
+skills/tdd-analysis/SKILL.md 13950
+skills/tdd-workflow-engine/SKILL.md 14811
+skills/tdd-testing-patterns/SKILL.md 9424
+rules/ENFORCEMENT.md 2760

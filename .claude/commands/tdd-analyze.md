@@ -1,0 +1,40 @@
+---
+description: Analyze a business requirement into a contradiction-driven test list (workspace/current/)
+---
+
+# /tdd-analyze -> TDD Analyze Agent
+
+The TDD analysis workflow uses the **`tdd-analyze` custom agent**.
+
+## How to use
+
+The `tdd-analyze` agent is automatically delegated by Claude when you want to analyze a requirement before coding. You can also explicitly invoke it:
+
+```
+"use the tdd-analyze agent to analyze: RG14 — pas de réservation moins de 2 heures avant le rendez-vous"
+"use the tdd-analyze agent to analyze: e2e: exposer la réservation d'un rendez-vous en HTTP"
+"use the tdd-analyze agent to analyze: integration: persister les rendez-vous en PostgreSQL"
+```
+
+## What it produces
+
+Written to `workspace/current/tdd.md` (or `workspace/current/tdd-iteration-XX.md`), with:
+- **FLFI names** — final, short French business names (`devrait_…`)
+- **Ordering** — each test forces what the previous green cannot do (TPP as a heuristic)
+- **Dropped candidates** — every test that would bring no new behaviour, with its reason
+- **Predicted early greens** — marked so the executor deletes them, or pins a threshold's second side, without asking
+- **Design notes** — existing fakes, models, and patterns to reuse
+
+## Next steps
+
+Pass the test list to an execution agent:
+- Interactive: `use the tdd agent to implement workspace/current/tdd.md`
+- Autonomous: `use the tdd-auto agent to implement workspace/current/tdd.md`
+
+## Which one?
+
+| Use | For | Gates |
+|-----|-----|-------|
+| `/iterate <task>` | delivering a multi-iteration task | plan, each iteration, commits |
+| `tdd-analyze` → `tdd-auto` | delivering one requirement | only at the end (proposed tests; early greens are deleted and reported) |
+| `tdd` | learning, demos, reviewing every step | before every RED and every GREEN |
