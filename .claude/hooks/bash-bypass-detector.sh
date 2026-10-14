@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# PostToolUse (Bash) — detects what the PreToolUse judgement missed: a file under src/ that changed during
-# a Bash command while a TDD agent runs, or a file under src/test/ that changed while the orchestrator
-# restructures a REFACTOR (refactor-active). Reports it to the agent (exit 2 shows stderr) and logs a
-# BYPASS. Build output (target/) is ignored.
+# PostToolUse (Bash) — detects what the PreToolUse judgement missed: a Go file (*.go, testdata/) that changed
+# during a Bash command while a TDD agent runs, or a test file (*_test.go, testdata/) that changed while the
+# orchestrator restructures a REFACTOR (refactor-active). Reports it to the agent (exit 2 shows stderr) and
+# logs a BYPASS. .git, .claude and node_modules are ignored.
 set -uo pipefail
 
 input=$(cat)
@@ -12,13 +12,13 @@ STATE="$ROOT/.claude/state"
 
 [ -f "$STATE/bash-start" ] || exit 0
 
-changed_under() {  # $1 = find -path pattern → up to 5 files changed since the Bash command started
-  find "$ROOT" \( -name target -o -name .git -o -name node_modules \) -prune -o -path "$1" -type f \
-       -newer "$STATE/bash-start" -print 2>/dev/null | sed "s#^$ROOT/##" | head -5
+changed_under() {  # $1 = file name pattern → up to 5 files (that name, or under testdata/) changed since the Bash command started
+  find "$ROOT" \( -name .git -o -name .claude -o -name node_modules \) -prune -o \( -name "$1" -o -path '*/testdata/*' \) \
+       -type f -newer "$STATE/bash-start" -print 2>/dev/null | sed "s#^$ROOT/##" | head -5
 }
 
 if [ -f "$STATE/refactor-active" ] && [ -z "$(find "$STATE/refactor-active" -mmin +720 2>/dev/null)" ]; then
-  tests=$(changed_under '*/src/test/*')
+  tests=$(changed_under '*_test.go')
   if [ -n "$tests" ]; then
     echo "$(date '+%F %T') BYPASS (refactor-active) $(tr '\n' ' ' <<<"$tests")" >> "$STATE/guard.log"
     cat >&2 <<EOF
@@ -32,7 +32,7 @@ fi
 
 [ -f "$STATE/tdd-active" ] || exit 0
 
-changed=$(changed_under '*/src/*')
+changed=$(changed_under '*.go')
 [ -z "$changed" ] && exit 0
 
 echo "$(date '+%F %T') BYPASS $(tr '\n' ' ' <<<"$changed")" >> "$STATE/guard.log"
