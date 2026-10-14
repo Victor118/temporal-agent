@@ -1,216 +1,210 @@
 ---
 name: tdd-core-patterns
-description: Strategic testing philosophy for the WealDoc business logic (businesslogic/) - sociable tests through use cases, outside-in TDD, time as a port, and core testing decisions
+description: Strategic testing philosophy for the business logic of a Go hexagonal module (domain/ and usecase/) - sociable tests through use cases, outside-in TDD, time as a port, and core testing decisions
 ---
 
 # Skill: TDD Core Patterns
 
 ## Purpose
 
-Strategic testing philosophy for the business logic of the `appointments` module
-(`com.wealcome.appointments.businesslogic`), using Martin Fowler's **sociable tests**. It defines
-**what to test** and **how to approach** unit tests: through use cases, with real domain
-collaborators and fake ports.
+Strategic testing philosophy for the business logic of a module (`<module>/domain`, `<module>/usecase`),
+using Martin Fowler's **sociable tests**. It defines **what to test** and **how to approach** unit tests:
+through use cases, with real domain values and fake ports.
 
 - **TDD sequence, violations:** `tdd-workflow-engine` · **TPP, test list, status vocabulary:** `tdd-analysis`.
-- **Test doubles, fixtures, snapshot assertions:** `tdd-testing-patterns`.
+- **Test levels, doubles, fixtures, assertions:** `tdd-testing-patterns` · **Doctrine:** `.claude/rules/DOCTRINE.md`.
 
-> **Names below are illustrative, not design commitments.** `appointments` starts empty:
-> `BookAppointmentUseCase`, `Appointment`, `AppointmentId`, `Slot`, `ConsultationReason`,
-> `PatientId`, `FakeAppointmentRepository`, `PatientRestrictedException`, `DateProvider` only show
-> the shape. Let the real names emerge from the tests and the business rules (`RG1`…`RG26`, `README.md`).
+> **Names below are illustrative, not design commitments.** They use `access` (Droits, DR1–DR36 in
+> `docs/fonctionnel/droits.md`): `TurnTools`, `RuleBook`, `Directory`, `Toolbox`, `memory.Clock` only
+> show the shape. Let the real names emerge from the tests and the rules. Today `access/` is a single pure
+> package (`access/access.go`): it becomes `access/domain` through a REFACTOR, never by rewriting it
+> under a new test.
 
 ## Testing Philosophy: Outside-In, Sociable, Wishful Thinking
 
-**Wishful thinking:** the test is written first, calling classes that do not exist yet — see
-`tdd-workflow-engine` for the canonical sequence.
+**Wishful thinking:** the test is written first, calling types and functions that do not exist yet —
+see `tdd-workflow-engine` for the canonical sequence.
 
 **Outside-In:**
-- Start from the use case with a business scenario (one RG example)
+- Start from the use case with a business scenario (one example of a DR rule)
 - Let aggregates and value objects emerge from what the use case needs
-- Begin with simple types, evolve to rich domain objects when a test demands it
+- Begin with simple types, evolve to rich domain types when a test demands it
 
 **Sociable:**
 - The use case works with **real** aggregates, entities and value objects
-- Only **ports** are faked (repositories, clock, agenda, documents, notifications, secretariat)
-- Tests describe business scenarios, not object structure
+- Only **ports** are faked (rule book, directory of users, toolbox, clock, notifier, another module)
+- Tests describe business scenarios, not type structure
 
-**What we avoid:** inside-out design (aggregates before behavior), solitary tests mocking domain
-objects, production code before the test.
+**What we avoid:** inside-out design (aggregates before behaviour), solitary tests doubling domain types,
+production code before the test, a test that reaches the domain through a workflow or a handler.
 
-**Decision rule:** wishful thinking first, outside-in, sociable inside `businesslogic/`, isolated
+**Decision rule:** wishful thinking first, outside-in, sociable inside `domain/` + `usecase/`, isolated
 from infrastructure.
 
 ## Core Principles
 
-- < 10 ms per test, memory only — no database, network or file system
-- Hand-written fakes, **no mocking framework**
-- Fakes live in the production tree (`businesslogic/models/`) so `configuration/` and every test level reuse them
-- **Time is a port:** domain and use cases never call `now()`; they read a `DateProvider`, faked by `DeterministicDateProvider`
-- Assert through `toSnapshot()` (ENFORCEMENT.md). Aggregate equality (id-only vs full-state) is decided at the first test that needs it — then stay consistent
-- Java 25, no `null` (use `Optional`), records for value objects, package-private by default
-- **NEVER add defensive code (null checks, validation) or getters/setters unless a failing test demands it**
+- < 10 ms per test, memory only — no database, network, file system or Temporal
+- Hand-written fakes from `adapters/memory`, **no mocking library**
+- **Time is a port:** domain and use cases never call `time.Now()`; they read `Clock`, faked by `memory.Clock`
+- Assert through `Snapshot()` (`ENFORCEMENT.md`); aggregate equality decided at the first test that needs it
+- Absence as `(T, bool)` or a sentinel, refusals as domain errors, unexported by default
+- **NEVER add defensive code (nil checks, validation) or getters/setters unless a failing test demands it**
 
 ## Test Categories
 
 ### Primary target: use cases
-- **Production:** `boundedcontexts/appointments/src/main/java/com/wealcome/appointments/businesslogic/usecases/<featurename>/XxxUseCase.java`
-- **Test:** `boundedcontexts/appointments/src/test/java/com/wealcome/appointments/unit/businesslogic/usecases/<featurename>/XxxUseCaseTest.java`
+- **Production:** `<module>/usecase/<use_case>.go` (one use case per file, its ports beside it)
+- **Test:** `<module>/usecase/<use_case>_test.go`, `package usecase_test`
 - **Why:** validates complete business scenarios with low maintenance cost
 
 ### Secondary target: domain services (when justified)
-- **Test:** `unit/businesslogic/models/<aggregate>/XxxTest.java`
-- Only for complex isolated logic: calculations, cross-aggregate rules, logic that reads better specified alone
+- **Test:** `<module>/domain/<service>_test.go`
+- Only for complex isolated logic: matching, a calculation, a cross-aggregate rule that reads better
+  specified alone (today's `access.Allowed`, DR1–DR9, is such a decision table)
 
 ### Not tested directly: aggregates, entities, value objects
-Their behavior and invariants are verified through use case scenarios. Isolated tests of
-`Appointment` or `Slot` over-specify structure and break on every refactoring.
+Their behaviour and invariants are verified through use case scenarios. Isolated tests of `Rule` or
+`Pattern` over-specify structure and break on every refactoring.
 
 ## Primary Testing Through Use Cases — Example
 
-Test methods are short French `devrait_[résultat]`, with `_quand_[condition]` only when the result
-alone does not distinguish two tests; no accents or apostrophes. Given-When-Then helpers are in
-French; production code is in English.
+```go
+// access/usecase/turn_tools_test.go
+package usecase_test
 
-```java
-// boundedcontexts/appointments/src/test/java/com/wealcome/appointments/unit/businesslogic/usecases/bookappointment/BookAppointmentUseCaseTest.java
+var now = time.Date(2026, 10, 14, 10, 0, 0, 0, time.UTC)
 
-class BookAppointmentUseCaseTest {
+type world struct {
+	rules     *memory.RuleBook
+	directory *memory.Directory
+	toolbox   *memory.Toolbox
+	turnTools usecase.TurnTools
+}
 
-    private final FakeAppointmentRepository appointmentRepository = new FakeAppointmentRepository();
-    private final DeterministicDateProvider dateProvider = new DeterministicDateProvider();
-    private final BookAppointmentUseCase bookAppointmentUseCase =
-            new BookAppointmentUseCase(appointmentRepository, dateProvider);
+func newWorld() *world {
+	w := &world{rules: memory.NewRuleBook(), directory: memory.NewDirectory(), toolbox: memory.NewToolbox()}
+	w.turnTools = usecase.TurnTools{Rules: w.rules, Users: w.directory, Tools: w.toolbox}
+	return w
+}
 
-    @Test
-    void devrait_reserver_trois_creneaux_consecutifs_pour_un_motif_de_30_minutes() { // RG1, RG2, RG4
-        dateProvider.currentDateTime = LocalDateTime.parse("2026-09-14T07:00:00");
+func TestTurnTools_ClosedToolsAreLeftOut(t *testing.T) { // DR2, DR11
+	w := newWorld()
+	w.givenAgent("dev", "web_fetch", "exec")
+	w.givenRule(domain.RuleSnapshot{ID: 1, Pattern: "exec", Users: []string{"alice"}})
 
-        quandIlReserve(unPatient(), "2026-09-14T09:10:00", uneConsultationDe(3));
+	got := w.whenATurnStarts(t, "dev", "bob")
 
-        alorsLeRendezVousEst(new AppointmentSnapshot(
-                "rdv-1", "patient-1", "2026-09-14T09:10:00", 30, "CONFIRMED"));
-    }
+	if want := []string{"web_fetch"}; !slices.Equal(got.Open, want) {
+		t.Errorf("open tools = %v, want %v", got.Open, want)
+	}
+}
 
-    @Test
-    void devrait_refuser_la_reservation_quand_le_patient_est_restreint() { // RG6
-        assertThatThrownBy(() -> quandIlReserve(unPatientRestreint(), "2026-09-14T09:10:00", uneConsultationDe(1)))
-                .isInstanceOf(PatientRestrictedException.class);
+func TestTurnTools_ADisabledUserGetsNothing(t *testing.T) { // DR8
+	w := newWorld()
+	w.givenAgent("dev", "web_fetch")
+	w.directory.Feed(domain.UserSnapshot{ID: "bob", Disabled: true})
 
-        assertThat(appointmentRepository.allSnapshots()).isEmpty(); // no side effect
-    }
+	_, err := w.turnTools.Run(context.Background(), usecase.StartTurn{Agent: "dev", User: "bob"})
+
+	if !errors.Is(err, domain.ErrAgentNotOpen) {
+		t.Fatalf("err = %v, want ErrAgentNotOpen", err)
+	}
+}
+
+func (w *world) whenATurnStarts(t *testing.T, agent, user string) usecase.TurnToolsResult {
+	t.Helper()
+	got, err := w.turnTools.Run(context.Background(), usecase.StartTurn{Agent: agent, User: user})
+	if err != nil {
+		t.Fatalf("turn of %s for %s: %v", agent, user, err)
+	}
+	return got
 }
 ```
 
 ### Time-bound rules: both sides of the threshold
 
-RG14–RG17, RG20–RG22, RG24–RG25 each get **two tests**, one on each side of the edge, driven by
-the deterministic clock:
+A time-bound rule gets **two tests**, one on each side of the edge, driven by the fixed clock (and the
+inclusivity decided from the rule's wording, written in the list):
 
-```java
-@Test
-void devrait_accepter_la_reservation_quand_le_rendez_vous_est_dans_2_heures() { // RG14
-    dateProvider.currentDateTime = LocalDateTime.parse("2026-09-14T07:10:00");
-    quandIlReserve(unPatient(), "2026-09-14T09:10:00", uneConsultationDe(1));
-    alorsLeRendezVousEst(/* ... */);
-}
-
-@Test
-void devrait_refuser_la_reservation_quand_le_rendez_vous_est_dans_1h59() { // RG14
-    dateProvider.currentDateTime = LocalDateTime.parse("2026-09-14T07:11:00");
-    assertThatThrownBy(() -> quandIlReserve(unPatient(), "2026-09-14T09:10:00", uneConsultationDe(1)))
-            .isInstanceOf(BookingTooLateException.class);
-}
+```go
+func TestSweep_AlertsARuleThatStoppedMatching(t *testing.T) { …  clock.At = lastMatched.Add(time.Minute) … }
+func TestSweep_StaysSilentWhileARuleStillMatches(t *testing.T) { … clock.At = lastMatched … }
 ```
 
 ## Secondary Testing — Domain Service (When Justified)
 
-```java
-// boundedcontexts/appointments/src/test/java/com/wealcome/appointments/unit/businesslogic/models/agenda/ConsecutiveSlotsTest.java
-
-class ConsecutiveSlotsTest {
-
-    @Test
-    void devrait_trouver_les_creneaux_consecutifs_libres() { // RG3, RG4
-        var agenda = unAgendaAvecCreneauxLibres("09:00", "09:10", "09:20");
-
-        var slots = agenda.consecutiveFreeSlotsFrom(Slot.at("09:00"), 3);
-
-        assertThat(slots).map(Slot::startsAt).containsExactly("09:00", "09:10", "09:20");
-    }
-
-    @Test
-    void devrait_ne_rien_trouver_quand_un_creneau_intermediaire_est_pris() { // RG4
-        var agenda = unAgendaAvecCreneauxLibres("09:00", "09:20");
-
-        assertThat(agenda.consecutiveFreeSlotsFrom(Slot.at("09:00"), 2)).isEmpty();
-    }
+```go
+// access/domain/allowed_test.go
+func TestAllowed_ServerIsNotAPrefix(t *testing.T) { // DR4
+	rules := []Rule{{Kind: KindMCPServer, Target: "web", Groups: []string{"research"}}}
+	bob := &User{ID: "bob"}
+	if Allowed(bob, FromMCP("web", "web_search"), rules) {
+		t.Error("the web server's tool open to bob")
+	}
+	if !Allowed(bob, BuiltIn("web_fetch"), rules) {
+		t.Error("web_fetch, a built-in tool, closed by the rule on the server web")
+	}
 }
 ```
 
 ## Machinery Introduced Only When a Test Demands It
 
-`appointments` has no CQRS split, outbox, transaction performer or base aggregate class. Do not create
-them up front; add each one when a failing test needs it.
+A module starts with no event bus, outbox, transaction port or base aggregate type. Do not create them up
+front; add each one when a failing test needs it.
 
-- **Domain events** (e.g. `AppointmentCancelled` for RG19/RG23): assert through a fake port that
-  receives them (publisher or outbox fake), never by bloating the repository fake.
-- **Read side / queries** (e.g. a patient's follow-up sheet, RG26): if a query use case appears,
-  test it through its public method with the same outside-in discipline, but:
-  - it returns a flat immutable record (a view), asserted directly — **no snapshot**;
-  - build the expected view from the read shape, not from `Appointment.toSnapshot()`;
-  - it is side-effect free: no events, no store mutation;
-  - fake its read port in unit tests; real projection query in `integration/*IT.java`; `GET` over HTTP in `e2e/*E2ETest.java`;
-  - if views are fed by events, test the **projection** and the **query** as separate units.
+- **Domain events** (e.g. DR34's alert when a rule stops matching): assert through a spy port that
+  receives them, never by bloating the store fake.
+- **Read side / queries** (e.g. DR27, what a user may use, agent by agent): a query use case is tested
+  through its method with the same outside-in discipline, but:
+  - it returns a flat read model (a struct of raw values), asserted directly — **no snapshot**;
+  - build the expected read model from the read shape, not from an aggregate's `Snapshot()`;
+  - it is side-effect free: no event, no store change;
+  - fake its read port in unit tests; real SQL in `adapters/postgres` tests; `GET` in `adapters/http` tests.
 
 ## Anti-Patterns
 
-### Solitary tests on domain objects
+### Solitary tests on domain types
 
-```java
-// BAD - mocking what we own
-Appointment appointment = mock(Appointment.class);
+```go
+// BAD - an interface over a domain type, to double it
+type ruleMatcher interface{ Matches(domain.Tool) bool }
 
-// GOOD - real collaboration, fake ports only
-quandIlReserve(unPatient(), "2026-09-14T09:10:00", uneConsultationDe(3));
-assertThat(appointmentRepository.allSnapshots()).hasSize(1);
+// GOOD - real values, fake ports only
+w.givenRule(domain.RuleSnapshot{ID: 1, Pattern: "exec", Users: []string{"alice"}})
 ```
-
-Full rationale and the test-double catalog: `tdd-testing-patterns` → *Test Doubles*.
 
 ### Real infrastructure or real time in unit tests
 
-```java
+```go
 // BAD
-var entityManager = emf.createEntityManager();   // slow, not a unit test
-LocalDateTime.now();                             // non-deterministic, threshold untestable
+db, _ := sql.Open("pgx", os.Getenv("DATABASE_URL")) // slow, not a unit test
+time.Now()                                          // non-deterministic, threshold untestable
+env := suite.NewTestWorkflowEnvironment()           // a workflow is an adapter, not the unit
 
 // GOOD
-var appointmentRepository = new FakeAppointmentRepository();
-var dateProvider = new DeterministicDateProvider();
+rules := memory.NewRuleBook()
+clock := &memory.Clock{At: now}
 ```
 
 ## Test Organization and Commands
 
 ```
-boundedcontexts/appointments/src/test/java/com/wealcome/appointments/
-├── unit/businesslogic/
-│   ├── usecases/bookappointment/BookAppointmentUseCaseTest.java   # PRIMARY
-│   └── models/agenda/ConsecutiveSlotsTest.java                    # SECONDARY (justified only)
-├── integration/   # *IT.java      — see tdd-integration-patterns
-└── e2e/           # *E2ETest.java — fixtures in e2e/config/E2ETestConfiguration, see tdd-e2e-patterns
+access/
+├── domain/        allowed.go, allowed_test.go            # SECONDARY (justified only)
+├── usecase/       turn_tools.go, turn_tools_test.go      # PRIMARY
+└── adapters/      memory/ (fakes), postgres/, temporal/, http/ — see the integration and e2e skills
 ```
 
-- One class: `.claude/scripts/tdd-run.sh BookAppointmentUseCaseTest` · whole unit suite: `--unit` (engine §7)
-- Any other file name silently never runs.
+- One test: `.claude/scripts/tdd-run.sh ./access/usecase TestTurnTools_ClosedToolsAreLeftOut` · the
+  module's unit suite: `--unit` with `TDD_MODULE=access` (engine §7)
 
 ## Quick Checklist
 
 - [ ] Testing through a use case (domain service only when justified)
-- [ ] French name `devrait_…` (`_quand_…` only if needed), RG cited
-- [ ] Real domain objects; fakes only for ports, taken from `businesslogic/models/`
-- [ ] No `now()` — `DeterministicDateProvider`; time-bound RG tested on both sides of its threshold
-- [ ] Assertions via `toSnapshot()`; no mocking framework
+- [ ] `Test<Subject>_<FinalBehaviour>`, DR cited
+- [ ] Real domain values; fakes only for ports, from `adapters/memory`
+- [ ] No `time.Now()` — `memory.Clock`; time-bound rules tested on both sides of their threshold
+- [ ] Assertions on snapshots; no mocking library
 - [ ] < 10 ms, memory only
 - [ ] No defensive code, getters or setters without a failing test
 
@@ -218,5 +212,5 @@ boundedcontexts/appointments/src/test/java/com/wealcome/appointments/
 
 - **`tdd-workflow-engine`** — TDD sequence, clean GREEN, violations
 - **`tdd-analysis`** — test list, TPP, naming, status vocabulary
-- **`tdd-testing-patterns`** — test doubles, fixtures, snapshot assertions
+- **`tdd-testing-patterns`** — test levels, doubles, fixtures, assertions
 - **`tdd-integration-patterns`** / **`tdd-e2e-patterns`** — adapter and HTTP levels

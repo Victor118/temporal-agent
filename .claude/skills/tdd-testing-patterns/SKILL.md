@@ -1,237 +1,243 @@
 ---
 name: tdd-testing-patterns
-description: Test patterns, doubles, fixtures, and assertions for Clean Architecture
+description: Test levels, doubles, fixtures and assertions for the Go hexagonal modules — package testing, table-driven tests, hand-written fakes, the clock as a port, snapshot comparisons
 ---
 
 # Skill: TDD Testing Patterns
 
-**Focus:** HOW to write test code — naming, doubles, fixtures, assertions — for WealDoc
-(context modules `appointments` and `reliability`, packages `com.wealcome.<context>`, rules `RG1`…`RG26`
-in `README.md`; examples use `appointments`).
-The TEST FIRST sequence, state machine and violations (V0–V8) belong to `tdd-workflow-engine`;
-test lists, TPP order and statuses (`⏳ Pending` · `✅ GREEN` · `➕ PROPOSED — <why>` ·
-`🧬 PINNED — <mutation>`) belong to `tdd-analysis`. Names below are illustrative.
+**Focus:** HOW to write test code — levels, naming, doubles, fixtures, assertions — for the Go hexagonal
+modules (`<module>/domain`, `usecase`, `adapters/…`; one module per context of `docs/fonctionnel/`, rules
+cited as `DR6`; examples use `access`, the Droits context). Doctrine: `.claude/rules/DOCTRINE.md`.
+The TEST FIRST sequence and violations (V0–V8) belong to `tdd-workflow-engine`; test lists, TPP order and
+statuses (`⏳ Pending` · `✅ GREEN` · `➕ PROPOSED — <why>` · `🧬 PINNED — <mutation>`) belong to
+`tdd-analysis`. Type and function names below are illustrative.
+
+## Test Levels (this section owns the distinction)
+
+Go has one test runner; the **level is the package** a test lives in. No build tag, no `-short`.
+
+| Level | Package | Runs against | Without its infrastructure |
+|---|---|---|---|
+| unit | `<module>/domain`, `<module>/usecase` | fakes of `adapters/memory`, the fixed clock | always runs |
+| integration | `<module>/adapters/postgres` | a throwaway PostgreSQL (`TEST_DATABASE_URL`) | `t.Skip` → `tdd-run.sh` says `INFRA_ERROR` |
+| integration | `<module>/adapters/temporal` | the SDK's `testsuite` (in process) | always runs |
+| e2e | `<module>/adapters/http` | `httptest` on the module wired with `memory` adapters | always runs |
+| smoke | the existing `…RealServer` tests (`workflow/`, `gateway/`) | a real Temporal server (`TEMPORAL_SMOKE_HOST`) | skipped; long, run by hand (`CLAUDE.md`) |
+
+`tdd-run.sh --unit` runs every package of the module but `adapters/`; `--all` runs everything, and the
+tests needing a database or a Temporal server skip there (counted, not failed). A test that needs an
+environment variable skips without it — exactly like `store/postgres_test.go` (`TEST_DATABASE_URL`).
+
+Files: `<file under test>_test.go`, beside the code. Use-case and e2e tests are **black-box**:
+`package usecase_test`, `package http_test` (they see only the exported API, and may import
+`adapters/memory` without an import cycle). A domain-service test may be `package domain`.
+A function runs only if it is `func TestXxx(t *testing.T)` in a `_test.go` file — `Testxxx` (lower case)
+or a missing `*testing.T` never runs: check the name before trusting a green (`go vet` reports it).
 
 ## Test Naming
 
-Short French `devrait_[resultat]`; add `_quand_[condition]` only when the result alone does not
-distinguish two tests. No accents, no apostrophes. Production code stays English.
-Given-When-Then intention helpers are French too.
+`Test<Subject>_<FinalBehaviour>`, English CamelCase, business language; `tdd-analysis` §1 owns the rule.
 
-```java
+```go
 // GOOD
-@Test void devrait_reserver_le_creneau() { }
-@Test void devrait_refuser_la_reservation_quand_le_creneau_commence_dans_moins_de_2h() { } // RG14
+func TestAllowed_EveryRuleIsALock(t *testing.T)            // DR6
+func TestTurnTools_ClosedToolsAreLeftOut(t *testing.T)     // DR11
 
 // BAD
-@Test void testAppointment() { }   // what behavior?
-@Test void bookAppointment() { }   // what outcome?
+func TestAllowed2(t *testing.T)                            // what behaviour?
+func TestTurnTools_ReturnsErrorWhenNil(t *testing.T)       // technical words
 ```
 
-```java
-@Test
-void devrait_refuser_la_reservation_quand_le_patient_est_restreint() {
-    unPatientRestreint();
-    quandIlReserve(unCreneauLibre());
-    alorsLeRendezVousEst(absent());
+Example rows of one behaviour are a table with `t.Run`, row names in plain words:
+
+```go
+func TestAllowed_EveryRuleIsALock(t *testing.T) { // DR6
+	rules := []domain.Rule{onServer("crm", "sales"), onPattern("crm_update_*", "managers")}
+	for _, row := range []struct {
+		name string
+		user domain.User
+		tool domain.Tool
+		want bool
+	}{
+		{"a seller searches the CRM", seller, crmSearch, true},
+		{"a seller cannot update it", seller, crmUpdate, false},
+		{"a seller who manages may", sellerManager, crmUpdate, true},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			if got := domain.Allowed(row.user, row.tool, rules); got != row.want {
+				t.Errorf("allowed = %v, want %v", got, row.want)
+			}
+		})
+	}
 }
 ```
 
-## Test Doubles (No Mocking Frameworks)
+Given/When/Then helpers are English (`givenARuleOn`, `whenBobOpensATurn`, `thenTheToolsAre`) and call
+`t.Helper()` so a failure points at the test line.
+
+## Test Doubles (No Mocking Library)
 
 ```
 What dependency?
-├── Repository              → Fake (in-memory, snapshot copy-on-read)
-├── Clock                   → Deterministic fake (DateProvider)
-├── Id generation           → Stub (predictable ids)
-├── Collaborator port       → Fake or Spy (agenda, documents, notifications, secretariat)
-└── Domain object / VO      → Real object — NEVER mock
+├── Store of aggregates   → Fake in adapters/memory (snapshot copy on write and read)
+├── Clock                 → memory.Clock, fixed, set in the Given
+├── ID generation         → Stub (predictable IDs)
+├── Collaborator port     → Fake or Spy (notifier, another module behind a port)
+└── Domain type / VO      → Real value — NEVER doubled
 ```
 
-Fakes live in the **production tree** (`adapters/secondary/persistence/fakes/`; their port in
-`businesslogic/models/<aggregate>/ports/`), not the test tree, so
-`configuration/` can wire them under `@Profile("fake")` and unit, integration and e2e tests reuse them.
-Ports are domain interfaces; `Fake…` implements them for `fake`, `Sql…` (in
-`adapters/secondary/persistence/jpa/`) for `jpa`.
+Fakes are production code in `<module>/adapters/memory/`, so unit tests, e2e tests and a dev wiring share
+them; each asserts its port at compile time. Hand-written: no testify mock, no gomock, no generated code.
 
-## Repository Fake — Snapshot Pattern (Mandatory)
+## Store Fake — Snapshot Pattern (Mandatory)
 
-```java
-public interface AppointmentRepository {
-    void save(Appointment appointment);
-    Optional<Appointment> findById(AppointmentId id);
+```go
+// access/usecase/rule_book.go — the port, declared by its consumer
+type RuleBook interface {
+	Save(ctx context.Context, rule domain.Rule) error
+	Get(ctx context.Context, id domain.RuleID) (domain.Rule, bool, error)
 }
 
-public class FakeAppointmentRepository implements AppointmentRepository {
-    private final Map<AppointmentId, AppointmentSnapshot> appointments = new HashMap<>();
+// access/adapters/memory/rule_book.go
+var _ usecase.RuleBook = (*RuleBook)(nil)
 
-    @Override
-    public void save(Appointment appointment) {
-        var snapshot = appointment.toSnapshot();
-        appointments.put(new AppointmentId(snapshot.id()), snapshot);
-    }
+type RuleBook struct{ rules map[domain.RuleID]domain.RuleSnapshot }
 
-    @Override
-    public Optional<Appointment> findById(AppointmentId id) {
-        return Optional.ofNullable(appointments.get(id)).map(Appointment::fromSnapshot); // copy on read
-    }
+func NewRuleBook() *RuleBook { return &RuleBook{rules: map[domain.RuleID]domain.RuleSnapshot{}} }
 
-    public List<AppointmentSnapshot> allSnapshots() {
-        return appointments.values().stream()
-                .sorted(Comparator.comparing(AppointmentSnapshot::id))
-                .toList();
-    }
+func (b *RuleBook) Save(_ context.Context, rule domain.Rule) error {
+	s := rule.Snapshot() // a copy: changing rule afterwards changes nothing here
+	b.rules[s.ID] = s
+	return nil
+}
+
+func (b *RuleBook) Get(_ context.Context, id domain.RuleID) (domain.Rule, bool, error) {
+	s, ok := b.rules[id]
+	if !ok {
+		return domain.Rule{}, false, nil
+	}
+	return domain.FromSnapshot(s), true, nil // copy on read
+}
+
+// Snapshots is for tests only: not on the port.
+func (b *RuleBook) Snapshots() []domain.RuleSnapshot {
+	all := slices.Collect(maps.Values(b.rules))
+	slices.SortFunc(all, func(a, b domain.RuleSnapshot) int { return cmp.Compare(a.ID, b.ID) })
+	return all
 }
 ```
 
-**Why:** the use case must call `save()` explicitly; a loaded copy mutated without `save()` changes
-nothing; no shared references leak between test steps.
-
-**Reads are deterministic:** whenever an aggregate or fake holds elements in a `HashSet`/`HashMap`,
-the snapshot (or read method) sorts them — never assert on hash iteration order.
-
-**No `clear()` or event lists** on a fake unless a test demands it (engine V6).
+**Why:** the use case must call `Save` explicitly; a loaded copy changed without `Save` changes nothing;
+no reference leaks between test steps. A snapshot holding a slice clones it (`slices.Clone`).
+**Reads are deterministic:** a fake or snapshot built from a map sorts — never assert on map order.
+**No `Reset()` or event lists** on a fake unless a test demands it (engine V6).
 
 ## Time Is a Port
 
-Domain and use cases never call `now()`. They receive time from a port with a deterministic fake:
+```go
+// access/usecase/clock.go
+type Clock interface{ Now() time.Time }
 
-```java
-public interface DateProvider {
-    LocalDateTime now();
+// access/adapters/memory/clock.go
+type Clock struct{ At time.Time }
+
+func (c *Clock) Now() time.Time { return c.At }
+```
+
+Time-bound rules are tested **on both sides of the threshold**, inclusivity decided explicitly and
+written in the test list:
+
+```go
+var now = time.Date(2026, 10, 14, 10, 0, 0, 0, time.UTC)
+
+func TestTurnTools_ARuleAppliesToTheTurnsStartingFromItsChange(t *testing.T) { // DR15
+	clock := &memory.Clock{At: now}
+	… a rule closing exec, changed at now …
+	if tools := whenATurnStartsAt(t, now); slices.Contains(tools, "exec") { t.Errorf(…) }
 }
 
-public class DeterministicDateProvider implements DateProvider {
-    private LocalDateTime now;
-    public DeterministicDateProvider(LocalDateTime now) { this.now = now; }
-    public void setNow(LocalDateTime now) { this.now = now; }
-    @Override public LocalDateTime now() { return now; }
+func TestTurnTools_ATurnStartedBeforeTheChangeKeepsItsTools(t *testing.T) { // DR15
+	… the same rule, the turn started at now.Add(-time.Second) …
 }
 ```
 
-Time-bound rules (RG14–RG17, RG20–RG22, RG24–RG25) are tested **on both sides of the threshold**,
-and inclusivity is decided explicitly (and written in the test list) — e.g. RG14:
+## Assertions
 
-```java
-private static final LocalDateTime NOW = LocalDateTime.of(2026, 9, 14, 8, 0);
-private final DeterministicDateProvider dateProvider = new DeterministicDateProvider(NOW);
-
-@Test void devrait_accepter_la_reservation_quand_le_creneau_commence_dans_exactement_2h() { // 10:00
-    quandIlReserve(unCreneauA(NOW.plusHours(2)));
-    alorsLeRendezVousEst(reserve());
-}
-
-@Test void devrait_refuser_la_reservation_quand_le_creneau_commence_dans_1h59() {           // 09:59
-    quandIlReserve(unCreneauA(NOW.plusMinutes(119)));
-    alorsLaReservationEstRefusee(TooLateToBook.class);
-}
-```
-
-## Assertions on Snapshots
-
-Per `ENFORCEMENT.md`: assert on `toSnapshot()`, not on the aggregate. Aggregate equality (id-only
-+ snapshot assertions, or full-state equality + direct assertions) is **chosen at the first test
-that needs it, then kept** — check existing aggregates before picking.
-
-```java
-// WRONG (under id-only equality) — passes as soon as ids match
-assertThat(actual).isEqualTo(expected);
-
-// RIGHT
-assertThat(appointmentRepository.allSnapshots()).containsExactly(
-    new AppointmentSnapshot("appointment-1", "patient-1", "2026-09-14T10:00", "FIRST_CONSULTATION", "BOOKED"));
-```
-
-Prefer one whole-snapshot comparison over field-by-field assertions. Snapshots carry raw values
-(`startsAt: "2026-09-14T10:00:00"`, `status: "RESTRICTED"`) — never formatted French.
+- Compare **whole values** in one assertion: `==` on a comparable snapshot; `slices.Equal` for a slice of
+  comparable values; `reflect.DeepEqual` for anything else (maps, nested slices). Print both sides:
+  `t.Errorf("rules = %+v, want %+v", got, want)`.
+- `t.Fatalf` when the rest of the test cannot run (an unexpected error, a missing value); `t.Errorf`
+  otherwise, so several differences show at once.
+- No assertion library and no new dependency (`go-cmp` included) unless the user decides it; say so first.
+- Assert on `Snapshot()`, consistent with the equality choice already made (`DOCTRINE.md`).
+- Snapshots carry raw values (`"exec"`, `time.Time`, `42`), never formatted French.
 
 ## Use Case Results and Refusals
 
-The result shape (exception, sealed result, `Either`) is chosen at the first refusal test, then kept.
-Whatever the shape, assert the **specific** refusal and **no side effect**:
+The refusal shape (sentinel or typed error) is chosen at the first refusal test, then kept. Whatever the
+shape, assert the **specific** refusal and **no side effect**:
 
-```java
-sealed interface BookAppointmentError permits RestrictedPatient, SlotUnavailable, TooLateToBook {}
-record RestrictedPatient() implements BookAppointmentError {}
-```
-
-```java
-// exceptions
-assertThatThrownBy(() -> bookAppointment.handle(command)).isInstanceOf(TooLateToBookException.class);
-// or sealed result
-assertThat(result.error()).containsInstanceOf(TooLateToBook.class);
-
-assertThat(appointmentRepository.allSnapshots()).isEmpty();   // nothing booked
+```go
+err := deleteGroup.Run(ctx, usecase.DeleteGroup{Group: "sales"})
+if !errors.Is(err, domain.ErrSoleHolder) {          // or errors.As(err, &soleHolder)
+	t.Fatalf("err = %v, want ErrSoleHolder", err)
+}
+if got := groups.Snapshots(); !reflect.DeepEqual(got, before) {
+	t.Errorf("groups changed: %+v", got)             // nothing deleted
+}
 ```
 
 ## Spy and Stub
 
-```java
-public class SpyPatientNotifier implements PatientNotifier {        // collaborator port
-    private final List<AppointmentConfirmation> sent = new ArrayList<>();
-    @Override public void notify(AppointmentConfirmation confirmation) { sent.add(confirmation); }
-    public List<AppointmentConfirmation> sent() { return List.copyOf(sent); }
-}
+```go
+type Alerts struct{ sent []domain.Alert } // spy: a collaborator port
 
-public class StubAppointmentIdGenerator implements AppointmentIdGenerator {
-    private String nextId = "appointment-1";
-    public void setNextId(String nextId) { this.nextId = nextId; }
-    @Override public AppointmentId generate() { return new AppointmentId(nextId); }
-}
+func (a *Alerts) Send(_ context.Context, alert domain.Alert) error { a.sent = append(a.sent, alert); return nil }
+func (a *Alerts) Sent() []domain.Alert                         { return slices.Clone(a.sent) }
+
+type IDs struct{ Next domain.RuleID } // stub
+
+func (s *IDs) NewRuleID() domain.RuleID { return s.Next }
 ```
 
-Assert on what the spy received (`containsExactly(...)`), not on call counts, unless the count is the rule.
+Assert on what the spy received (`slices.Equal(alerts.Sent(), want)`), not on call counts, unless the
+count is the rule (DR34: "une seule fois").
 
 ## Domain Events
 
-Nothing exists yet: no aggregate base class, no event publisher, no transaction performer, no outbox.
-Introduce event machinery **only when a test asserts an event**, and design it at that moment (the
-simplest shape the test needs). Never add event lists to aggregates or repository fakes ahead of that
-test (engine V6).
+Nothing exists yet. Introduce event machinery **only when a test asserts an event**, in the simplest
+shape it needs (often a spy port). Never add event lists to aggregates or fakes ahead of it (engine V6).
 
 ## Fixtures
 
-Build Given data through intention helpers and small factories (Object Mother) returning real
-aggregates via `fromSnapshot(...)` or the domain factory. Use a builder only when variations multiply.
-
-```java
-private Patient unPatientRestreint() {
-    var patient = Patient.fromSnapshot(new PatientSnapshot("patient-1", "RESTRICTED"));
-    patientRepository.save(patient);
-    return patient;
-}
-
-private Slot unCreneauA(LocalDateTime startsAt) {
-    return new Slot(startsAt, Duration.ofMinutes(30));
-}
-```
-
-- Seed date-sensitive fixtures **relative to the fake clock** (`NOW.plusDays(1)`), never absolute
-  dates that expire.
-- In e2e (shared Spring context, fixtures in `e2e/config/E2ETestConfiguration`), a test asserting
-  exact content uses a **dedicated id**.
+Given data through intention helpers and small constructors (Object Mother) returning real aggregates via
+`domain.FromSnapshot(...)` or the domain's constructor; a builder only when variations multiply.
+Seed date-sensitive data **relative to the fixed clock** (`now.Add(-24 * time.Hour)`), never absolute dates
+that expire. In e2e and integration (shared server or database), a test asserting exact content uses its
+**own IDs** (`zz-…`, as `store/` tests do).
 
 ## Anti-Patterns
 
-- `mock(Appointment.class)` or any mocking framework on domain objects/VOs — use real ones.
-- Several behaviors in one test (book + cancel + reschedule) — one behavior per test.
-- Calling `LocalDateTime.now()` in domain, use case or test — go through `DateProvider`.
+- A mocking library, or doubling a domain type — use real values.
+- Several behaviours in one test — one behaviour per test; rows of one behaviour in one table.
+- `time.Now()` in domain, use case or test — go through `Clock`.
 - Testing only one side of a time threshold.
-- Asserting on hash iteration order.
-- Fakes in `src/test` that `configuration/` cannot wire.
+- Asserting on map iteration order.
+- Fakes in `_test.go` files that the composition root and other levels cannot reuse.
+- `t.Parallel()` on tests sharing a fake or a database without isolating their data.
 
 ## Quick Checklist
 
-- [ ] Name `devrait_[resultat]` (`_quand_[condition]` only if needed), French helpers, cites `RGn` in the list
-- [ ] Unit tests in `unit/businesslogic/...` named `*Test.java`
-- [ ] Real domain objects; fakes/spies/stubs from `businesslogic/models/`
-- [ ] Snapshot assertions, consistent with the equality choice already made
-- [ ] Refusal tests assert the specific refusal and no side effect
-- [ ] Time via `DateProvider`, both sides of each threshold
-- [ ] JUnit 5 `@Test` + AssertJ, no null (Optional), records for VOs
+- [ ] `Test<Subject>_<FinalBehaviour>`, English, business words, rule cited in the list (`DR11`)
+- [ ] Right package for the level; black-box `_test` package for use cases and HTTP
+- [ ] Real domain values; fakes, spies, stubs from `adapters/memory`
+- [ ] Whole-value comparison on snapshots; refusals with `errors.Is` / `errors.As` and no side effect
+- [ ] Time via `Clock`, both sides of each threshold
+- [ ] Package `testing` only; no new dependency unannounced
 
 ## Related Skills
 
-- **`tdd-workflow-engine`** — TDD sequence, violations, test commands
+- **`tdd-workflow-engine`** — TDD sequence, violations, `tdd-run.sh`
 - `tdd-analysis` — test lists, TPP ordering, test type detection, statuses
-- `tdd-core-patterns` — what to test (sociable tests), performance targets
+- `tdd-core-patterns` — what to test (sociable tests through use cases)
+- `tdd-integration-patterns` / `tdd-e2e-patterns` — adapters and HTTP

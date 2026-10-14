@@ -1,231 +1,184 @@
 ---
 name: tdd-e2e-patterns
-description: E2E testing patterns for Spring Boot with HTTP-boundary black-box testing
+description: E2E testing patterns for a Go module's HTTP adapter - black-box tests through httptest on the wired module, and the RealServer smoke tests that exist
 ---
 
 # Skill: TDD E2E Patterns
 
 ## Purpose
 
-End-to-End tests for WealDoc verify the **complete stack through HTTP**: request → controller →
-use case → domain → secondary adapters (fake or real) → response. They never reach into domain
-internals. TDD sequence and violations live in `tdd-workflow-engine`; test lists, naming and statuses
-in `tdd-analysis`.
+End-to-end tests verify a module **through HTTP**: request → handler (`adapters/http`) → use case →
+domain → secondary adapters (`memory` fakes) → response. They never reach into domain internals. TDD
+sequence and violations live in `tdd-workflow-engine`; test lists, naming and statuses in `tdd-analysis`;
+test levels in `tdd-testing-patterns`.
 
-> Endpoint paths, controller names and HTTP statuses below are **illustrative**. The real ones are
-> decided per iteration, from the business rules (`RG1`…`RG26`, `README.md`).
+> Routes, handler names and statuses below are **illustrative**. The real ones are decided per iteration,
+> from the rules (`docs/fonctionnel/<context>.md`) and the routes that exist (`cmd/agent/routes.go`,
+> the JSON API under `/sessions`, `/api/admin`; the htmx pages are rendered by `web/chat` and `web/admin`).
 
 ## Core Principle: HTTP Boundary Only
 
 ```
-Tests interact ONLY via HTTP requests/responses.
-NO import of aggregates, value objects or use cases in tests.
-Importing port interfaces and Fake… implementations for fixture wiring IS allowed.
+Tests interact ONLY via HTTP requests and responses.
+NO construction of aggregates or value objects, NO call to a use case in an assertion.
+Importing usecase and adapters/memory to WIRE the module (and seed its fakes) IS allowed.
 Reading a fake in an assertion is a last resort — prefer a GET through the API.
 ```
 
 ```
-Test (MockMvc) ──HTTP──▶ Controller ──▶ UseCase ──▶ Domain models ──▶ Secondary adapters
-                         adapters/primary/web   businesslogic/…            (Fake… or Sql…)
+Test (httptest) ──HTTP──▶ handler ──▶ use case ──▶ domain ──▶ secondary adapters
+                          adapters/http   usecase/      domain/      (memory fakes)
 ```
 
 | Allowed | Forbidden |
 |---------|-----------|
-| `mockMvc.perform(post("/appointments"))` | `import com.wealcome.appointments.businesslogic.models.Appointment` |
-| `andExpect(status().isCreated())` | `new AppointmentId(...)` |
-| `jsonPath("$.startsAt").value("2026-09-14T09:10:00")` | `bookAppointmentUseCase.handle(command)` |
-| `import ...businesslogic.models.DateProvider` (wiring) | Direct aggregate construction |
-| `import ...businesslogic.models.DeterministicDateProvider` (fixtures) | Asserting on a domain object |
+| `httptest.NewRequest(nethttp.MethodPost, "/admin/access/rules", body)` | `domain.FromSnapshot(...)` in an assertion |
+| `rec.Code != nethttp.StatusCreated` | `turnTools.Run(ctx, …)` to check the result |
+| decoding the JSON into a local `struct` of raw values | importing `domain` to compare responses |
+| `memory.NewRuleBook()` + `Feed(...)` for the Given | an aggregate built by hand to call the handler |
 
-## Boot 4 Wiring
+## Wiring
 
-A context module (`appointments`, `reliability`; examples use `appointments`) has no `@SpringBootApplication` (it does not depend on `wealdoc-app`). E2E tests need a
-**test-scoped** application class in the **test's own package** (`e2e/`, not a subpackage):
+The test builds the module the way the composition root does, with `memory` adapters and the fixed clock,
+and hands the handler to `httptest`: a recorder for one request, a server when the test needs a real
+client (redirects, cookies, a stream).
 
-```java
-// boundedcontexts/appointments/src/test/java/com/wealcome/appointments/e2e/E2ETestApplication.java
-@SpringBootApplication(scanBasePackages = {
-        "com.wealcome.appointments.adapters",
-        "com.wealcome.appointments.configuration"
-})
-class E2ETestApplication {
+```go
+// access/adapters/http/rules_test.go
+package http_test
+
+import (
+	nethttp "net/http"
+	"net/http/httptest"
+	…
+)
+
+type app struct {
+	rules   *memory.RuleBook
+	handler nethttp.Handler
+}
+
+func newApp(t *testing.T) *app {
+	t.Helper()
+	rules := memory.NewRuleBook()
+	clock := &memory.Clock{At: time.Date(2026, 10, 14, 10, 0, 0, 0, time.UTC)}
+	h := accesshttp.NewHandler(usecase.SaveRule{Rules: rules, Clock: clock}, usecase.Preview{Rules: rules})
+	return &app{rules: rules, handler: h}
+}
+
+func (a *app) do(t *testing.T, method, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	a.handler.ServeHTTP(rec, req)
+	return rec
 }
 ```
 
-Scan `adapters` and `configuration` only: scanning `com.wealcome.appointments` would also pick up
-`IntegrationTestApplication`. MockMvc under Boot 4 needs the test-scoped
-`spring-boot-starter-webmvc-test` and
-`org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc` (the Boot 3 package does
-not resolve).
+Authentication and the admin role are the server's middleware (`auth/`, `requireMember`, the `admin`
+check), not the module's handler: the e2e test of a module starts behind them; a test that the middleware
+is mounted belongs where the routes are (`cmd/agent/routes_test.go`).
 
-Fixtures go in `e2e/config/E2ETestConfiguration`. Seed date-sensitive data **relative to the fake
-clock**, so fixtures never expire:
-
-```java
-@TestConfiguration
-public class E2ETestConfiguration {
-
-    static final LocalDateTime NOW = LocalDateTime.of(2026, 9, 14, 8, 0);
-
-    @Bean
-    @Primary
-    DeterministicDateProvider dateProvider() {
-        return new DeterministicDateProvider(NOW);
-    }
-
-    // @Bean @Primary Fake… per port, seeded with dates computed from NOW (e.g. NOW.plusDays(1))
-}
-```
-
-## Test Modes
-
-### `fake` (default profile)
-
-In-memory `Fake…` implementations (production tree, `businesslogic/models/`), deterministic clock,
-**no Docker**. Target < 100ms per test; this is the TDD loop.
-
-### `jpa`
-
-Only this profile needs PostgreSQL, through Testcontainers (`Sql…` adapters in
-`adapters/secondary/persistence/jpa/`). Adapter correctness is proven by `*IT.java` tests
-(`tdd-integration-patterns`); a `jpa` E2E test is rare and only justified when the wiring itself
-is at risk. Target < 5s per test.
-
-## Shared Spring Context
-
-The context is **shared across E2E classes** (same configuration → cached context). Consequences:
-
-- A fake without `clear()` keeps data from other classes: a test asserting **exact content**
-  (a full list, a count) must use a **dedicated id** nobody else touches.
-- If a fake exposes `clear()`, call it in `@BeforeEach` — never hold a fake in a `static` field.
+Seed date-sensitive data **relative to the fixed clock**, so fixtures never expire.
 
 ## Test Structure
 
-```java
-@SpringBootTest(classes = E2ETestApplication.class)
-@AutoConfigureMockMvc
-@Import(E2ETestConfiguration.class)
-class BookAppointmentE2ETest {
+```go
+func TestRulesAPI_PreviewsTheToolsARuleWouldClose(t *testing.T) { // DR26
+	a := newApp(t)
+	a.givenTools("crm_search", "crm_update_contact", "web_fetch")
 
-    @Autowired
-    private MockMvc mockMvc;
+	rec := a.do(t, nethttp.MethodPost, "/admin/access/preview", `{"kind":"mcp_server","target":"crm"}`)
 
-    @Test
-    void devrait_reserver_un_creneau_libre() throws Exception {
-        mockMvc.perform(post("/appointments")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("""
-                            {"appointmentId": "a1b2c3d4-0000-4000-8000-000000000001",
-                             "patientId": "p-001", "practitionerId": "dr-martin",
-                             "startsAt": "2026-09-15T09:10:00", "durationMinutes": 30}
-                            """))
-                .andExpect(status().isCreated());
+	if rec.Code != nethttp.StatusOK {
+		t.Fatalf("status %d, body %s", rec.Code, rec.Body)
+	}
+	var got struct {
+		Tools []string `json:"tools"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"crm_search", "crm_update_contact"}; !slices.Equal(got.Tools, want) {
+		t.Errorf("tools = %v, want %v", got.Tools, want)
+	}
+}
 
-        mockMvc.perform(get("/appointments/{id}", "a1b2c3d4-0000-4000-8000-000000000001"))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.startsAt").value("2026-09-15T09:10:00"))
-                .andExpect(jsonPath("$.durationMinutes").value(30));
-    }
-
-    @Test
-    void devrait_refuser_quand_les_creneaux_ne_sont_pas_libres() throws Exception { // RG3
-        // slot pre-booked in E2ETestConfiguration
-        mockMvc.perform(post("/appointments")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(bookingOn("2026-09-15T10:00:00")))
-                .andExpect(status().isConflict());
-    }
-
-    @Test
-    void devrait_refuser_un_patient_restreint() throws Exception { // RG6
-        mockMvc.perform(post("/appointments")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(bookingFor("p-restricted")))
-                .andExpect(status().isForbidden())
-                .andExpect(jsonPath("$.status").value("RESTRICTED"));
-    }
+func TestRulesAPI_RefusesToDeleteTheSoleHolderOfARule(t *testing.T) { // DR32
+	… rec.Code == nethttp.StatusConflict, the rules to change named in the body …
 }
 ```
 
-Illustrative statuses: `201` created, `409` slots not free (RG3), `403` restricted patient (RG6),
-`422` for other business refusals, `404` unknown resource. Intention helpers (`bookingOn`,
-`bookingFor`) are named in French in real tests.
+Illustrative statuses, as the JSON API already answers: `201` created, `400` a malformed request, `403` a
+right missing, `404` unknown (or not visible to this user), `409` a state that refuses (`ErrTurnOver`,
+a sole holder), `429` a limit.
 
-### The back never formats
+### The domain never formats
 
-Assert on **raw values**: `durationMinutes: 30`, `startsAt: "2026-09-14T09:10:00"`,
-`status: "RESTRICTED"`. Never `"30 min"`, `"lundi 14 septembre"` or a French label — French
-belongs to the front.
+A JSON response carries **raw values**: `"target": "crm"`, `"since": "2026-10-14T10:00:00Z"`,
+`"kind": "mcp_server"`. Never a French label: wording belongs to the pages (`web/…` templates) and the
+channels. A page is not an e2e target of a module: its rendering is tested where it is built
+(`web/chat/views_test.go`, `render_test.go`).
 
-### Request patterns
+## RED Phase for E2E Tests
 
-```java
-mockMvc.perform(get("/appointments/{id}", appointmentId)).andExpect(status().isOk());
-mockMvc.perform(get("/appointments").param("patientId", patientId)).andExpect(status().isOk());
-mockMvc.perform(delete("/appointments/{id}", appointmentId)).andExpect(status().isNoContent());
+Write the test as if the route exists (wishful thinking), then scaffold just enough for a **behavioural**
+failure, not a compile error or a 404:
+
+```go
+// access/adapters/http/handler.go
+func NewHandler(save usecase.SaveRule, preview usecase.Preview) nethttp.Handler {
+	mux := nethttp.NewServeMux()
+	mux.HandleFunc("POST /admin/access/preview", func(w nethttp.ResponseWriter, r *nethttp.Request) {
+		w.WriteHeader(nethttp.StatusNotImplemented) // scaffold
+	})
+	return mux
+}
 ```
 
-## Verification
+GREEN decodes the request, calls the use case, maps its refusals to statuses and writes the raw values.
+The handler is mounted by `cmd/agent` (a CHORE or the same BEHAVIOR iteration, decided in the plan).
 
-1. **Via the API (preferred)** — POST, then GET and assert the JSON.
-2. **Via SQL (`jpa` only, when no read endpoint exists yet)** — `jdbcTemplate.queryForMap(...)`
-   on the columns the use case must have written. Never in `fake` mode.
+## Smoke Tests Against a Real Temporal Server (described, not run by agents)
 
-## File Organization and Build
+The repository has end-to-end smoke tests above this level, named `…RealServer`:
+`workflow/` (participants, signals, continue-as-new, background tasks; ~6 min, `TEMPORAL_SMOKE_HOST`)
+and `gateway/` (machines over a real WebSocket, a real Temporal server **and** a throwaway database;
+~50 s, plus ~65 s for the model on a machine). Their exact commands are in `CLAUDE.md` (« Build & Run »);
+they skip without their variables, so `tdd-run.sh --all` counts them as skipped. An agent never runs them
+and never adds to them on its own: when an iteration changes what they cover (a participant's loop, a
+workflow's commands, the gateway), VERIFY says they must be run by hand, and the user decides.
+
+## File Organization
 
 ```
-boundedcontexts/appointments/src/test/java/com/wealcome/appointments/e2e/
-├── E2ETestApplication.java
-├── config/
-│   └── E2ETestConfiguration.java
-├── BookAppointmentE2ETest.java
-└── CancelAppointmentE2ETest.java
+access/adapters/http/
+├── handler.go           routes of the module, NewHandler(use cases…)
+├── rules.go             one file per resource
+└── rules_test.go        package http_test: wiring helper + tests
 ```
 
-- Naming: `{Action}{Resource}E2ETest.java`, under `e2e/`. Failsafe includes
-  `**/e2e/**/*E2ETest.java`; any other name (`BookAppointmentE2E.java`, `…EndToEndTest.java`)
-  **silently never runs** — green by absence.
-- `mvn test` skips E2E (Surefire runs `**/unit/**/*Test.java` only). Use `mvn verify`.
-- One class: `.claude/scripts/tdd-run.sh BookAppointmentE2ETest` (engine §7)
-- Document each new endpoint in `http/wealdoc.http`.
+- Naming: `Test<Resource>API_<FinalBehaviour>`; one test file per resource.
+- One test: `.claude/scripts/tdd-run.sh ./access/adapters/http TestRulesAPI_…` (engine §7). No
+  infrastructure needed: e2e tests run in `--all`, not in `--unit`.
 
 ## Anti-Patterns
 
 | Wrong | Right |
 |-------|-------|
-| Calling `BookAppointmentUseCase` or building an `Appointment` in the test | HTTP only |
-| `static` fake shared by hand between tests | Injected bean; `clear()` or dedicated id |
-| Fixture date hard-coded in the past (`2025-01-10`) | Date computed from the fake clock |
-| Asserting a formatted string (`"30 minutes"`) | Asserting the raw value (`30`) |
-| `@CrossOrigin` on a controller | CORS only in `WebCorsConfiguration` (`dev`, `fake`) |
-| `E2ETestApplication` scanning `com.wealcome.appointments` | Scan `adapters` + `configuration` |
-| Demo seeds used as E2E fixtures | Test config feeds its own data (seeds live in `wealdoc-app`) |
-| Business logic in the controller to make the test pass | Controller adapts HTTP to the use case |
-
-## RED Phase for E2E Tests
-
-Write the test as if the endpoint exists (wishful thinking), then scaffold just enough for a
-**behavioral** failure, not a compilation or 404 one:
-
-```java
-// adapters/primary/web/BookAppointmentController.java
-@RestController
-class BookAppointmentController {
-
-    @PostMapping("/appointments")
-    ResponseEntity<Void> book(@RequestBody BookAppointmentRequest request) {
-        return ResponseEntity.status(HttpStatus.NOT_IMPLEMENTED).build(); // scaffold
-    }
-}
-```
-
-GREEN wires it to `businesslogic/usecases/bookappointment/BookAppointmentUseCase.java`; the
-use case and the fakes it needs are provided through `configuration/`.
+| Calling the use case or building an aggregate in the test | HTTP only |
+| A package-level fake shared between tests | A fresh `newApp(t)` per test |
+| A fixture date hard-coded in the past | A date computed from the fixed clock |
+| Asserting a formatted string (`"il y a 5 min"`) | Asserting the raw value |
+| Business logic in the handler to make the test pass | The handler adapts HTTP to the use case |
+| Starting the whole server (`agent dev`) for a module's e2e | `httptest` on the module's handler |
+| A `RealServer` test written or run by an agent | Described in the plan, run by the user |
 
 ## Related Skills
 
-- **`tdd-workflow-engine`** — TDD sequence, violations, test commands
+- **`tdd-workflow-engine`** — TDD sequence, violations, `tdd-run.sh`
 - `tdd-analysis` — test lists, naming, statuses
-- `tdd-testing-patterns` — doubles, fixtures, assertions
-- `tdd-core-patterns` — unit tests for `businesslogic`
-- `tdd-integration-patterns` — `*IT.java` adapter tests with Testcontainers
+- `tdd-testing-patterns` — test levels, doubles, fixtures, assertions
+- `tdd-core-patterns` — unit tests of `domain/` and `usecase/`
+- `tdd-integration-patterns` — `postgres` and `temporal` adapters

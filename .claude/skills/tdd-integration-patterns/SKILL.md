@@ -1,239 +1,189 @@
 ---
 name: tdd-integration-patterns
-description: Integration testing patterns for secondary adapters with testcontainers and real infrastructure
+description: Integration testing patterns for the secondary adapters of a Go module - adapters/postgres against a throwaway PostgreSQL, adapters/temporal with the SDK's testsuite
 ---
 
 # Skill: TDD Integration Patterns
 
 ## Purpose
 
-Integration tests validate **secondary adapters** (`Sql…` implementations of domain ports) against
-real PostgreSQL via Testcontainers. They prove the mapping and the queries, not business rules:
-RG1–RG26 are tested by unit tests through use cases with fakes (`tdd-core-patterns`).
+Integration tests validate **adapters** against real infrastructure: a `postgres` adapter (implementing a
+port of `usecase/`) against a throwaway PostgreSQL, a `temporal` adapter (an activity or a workflow that
+calls a use case) in the SDK's test environment. They prove the mapping, the queries and the wiring, not
+business rules: DR1–DR36 are tested by unit tests through use cases with fakes (`tdd-core-patterns`).
 
-For the TDD sequence, statuses and test-list rules, see `tdd-workflow-engine` and `tdd-analysis`.
+For the TDD sequence, statuses and test-list rules, see `tdd-workflow-engine` and `tdd-analysis`; for the
+test levels, `tdd-testing-patterns`.
 
 ## Scope
 
 | Integration test | Not integration test |
 |------------------|----------------------|
-| `SqlAppointmentRepository`: save/byId round-trip, not found, overwrite by id, queries (e.g. a practitioner's appointments of a day) | Business rules (RG…) → unit tests with fakes |
-| Column mapping of every snapshot field (`startsAt`, `durationMinutes`, `status`) | HTTP contract → `tdd-e2e-patterns` |
-| Flyway migration matching the `…JpaEntity` (`ddl-auto=validate`) | Domain invariants, cross-aggregate rules |
+| `postgres.RuleBook`: save/get round-trip, not found, overwrite by ID, queries (the rules targeting a server, ordered) | Business rules (DR…) → unit tests with fakes |
+| Column mapping of every snapshot field (`kind`, `target`, groups, users, `last_matched_at`) | HTTP contract → `tdd-e2e-patterns` |
+| The table the adapter needs exists after migration (`CREATE TABLE IF NOT EXISTS`, the store's way) | Domain invariants, cross-aggregate rules |
+| An activity adapter turns a use case's refusal into the error type the workflow reads | A workflow deciding a business rule (it must not) |
 
-## Conventions
+## PostgreSQL adapters
 
-- **Contexts:** examples use `appointments`; for `reliability`, substitute the module, package and schema.
-- **Location & naming:** `boundedcontexts/<context>/src/test/java/com/wealcome/<context>/integration/`, mirroring the
-  adapter's package (`integration/adapters/secondary/persistence/jpa/SqlAppointmentRepositoryIT`), class name
-  `…IT.java` (Failsafe `**/*IT.java`). Any other name silently never runs; `mvn test` skips ITs.
-- **Production layout:**
+### Conventions
+
+- **Location:** `<module>/adapters/postgres/<adapter>.go` and `<adapter>_test.go`, `package postgres`
+  (or `postgres_test`). Driver: `database/sql` with `github.com/jackc/pgx/v5/stdlib`, like `store/`.
+- **Throwaway database only**, never `agent`: the test reads `TEST_DATABASE_URL` and skips without it,
+  exactly as `store/postgres_test.go` (`openTestStore`). Procedure (`CLAUDE.md`, « Build & Run »):
   ```
-  boundedcontexts/appointments/src/main/java/com/wealcome/appointments/
-  ├── businesslogic/models/appointment/ports/  AppointmentRepository (port)
-  ├── adapters/secondary/persistence/fakes/   FakeAppointmentRepository
-  ├── adapters/secondary/persistence/jpa/  SqlAppointmentRepository, AppointmentJpaEntity, AppointmentJpaRepository
-  └── configuration/                  fakes declared under @Profile("fake")
-  boundedcontexts/appointments/src/main/resources/db/migration/appointments/  V1__create_appointments.sql (schema only)
+  docker compose exec -T postgres createdb -U agent agent_dev_tmp
+  TDD_GO="docker compose -f ../docker-compose.yml exec -T -e TEST_DATABASE_URL=postgres://agent:agent@postgres:5432/agent_dev_tmp?sslmode=disable agent go" \
+    .claude/scripts/tdd-run.sh ./access/adapters/postgres TestRuleBook_ReadsBackWhatItSaved
+  docker compose exec -T postgres dropdb -U agent agent_dev_tmp
   ```
-- **Adapters:** `@Repository @Profile("jpa")`, named `Sql…`. The persistence model (`…JpaEntity` +
-  Spring Data `…JpaRepository`) is separate from the aggregate; JPA annotations never enter
-  `businesslogic/`.
-- **One SQL schema per bounded context, named after it** (`appointments`). The context owns it end to
-  end in its `JpaPersistenceConfiguration`: its own `Flyway` bean (`schemas(SCHEMA)`,
-  `locations("classpath:db/migration/" + SCHEMA)`, history table inside the schema) wrapped in a
-  `FlywayMigrationInitializer`, and every `@Table` / `@CollectionTable` carries
-  `schema = JpaPersistenceConfiguration.SCHEMA`. Migrations stay unqualified (Flyway sets the schema);
-  raw SQL in ITs is qualified (`DELETE FROM appointments.daily_agendas`). No global `spring.flyway.*`.
-- **Validation:** `spring.jpa.hibernate.ddl-auto=validate` (see
-  `src/test/resources/application-jpa.properties`). Migrations never insert demo rows — demo seeds
-  live in `wealdoc-app/.../configuration/`.
-- **Command** (needs Docker):
-  `.claude/scripts/tdd-run.sh SqlAppointmentRepositoryIT` (engine §7; `INFRA_ERROR` = Docker, not RED)
-  — `fake`/`jpa` are Spring profiles (`@ActiveProfiles`), never Maven `-P`.
-- **PIT runs unit tests only:** surviving mutants in `adapters.*` are expected; ITs cannot kill them.
+  Without `TEST_DATABASE_URL`, `tdd-run.sh` answers `INFRA_ERROR` (every test skipped): not a RED, never a
+  GREEN. The compose stack is the user's to start; ask, never `docker compose up` on your own. Never run
+  `store/` tests and gateway `RealServer` tests on the same database at once (both reset tables).
+- **Schema:** the module's tables are created by its adapter's migration (`CREATE TABLE IF NOT EXISTS`,
+  under the advisory lock `store/postgres.go` uses), and the composition root runs it at start-up. Where
+  that migration lives (the adapter, or `store/`'s list while both coexist) is decided at the first
+  integration test of the module and recorded in the plan's Decisions.
+- **Each test isolates its data:** IDs of its own (`zz-…`), deleted before (a leftover from an aborted run)
+  and after (`t.Cleanup`). No `TRUNCATE` of a table other tests use.
 
-## Boot Setup
+### Helper
 
-`appointments` has no `@SpringBootApplication`, so a test-scoped one sits in the test's own package
-(`integration/`, the level root — never deeper), scanning adapters and configuration only:
-
-```java
-// boundedcontexts/appointments/src/test/java/com/wealcome/appointments/integration/IntegrationTestApplication.java
-@SpringBootApplication(scanBasePackages = {
-        "com.wealcome.appointments.adapters",
-        "com.wealcome.appointments.configuration"})
-class IntegrationTestApplication {
+```go
+// access/adapters/postgres/postgres_test.go
+func openTestDB(t *testing.T) *sql.DB {
+	t.Helper()
+	url := os.Getenv("TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("TEST_DATABASE_URL not set: a throwaway database (CLAUDE.md, Build & Run)")
+	}
+	db, err := sql.Open("pgx", url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := Migrate(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	return db
 }
 ```
 
-One container per JVM (started once, reused by every IT class — `@Container` would restart it per
-class):
+### Adapter test
 
-```java
-// boundedcontexts/appointments/src/test/java/com/wealcome/appointments/integration/PostgresIntegrationTest.java
-@SpringBootTest(classes = IntegrationTestApplication.class)
-@ActiveProfiles({"test", "jpa"})
-public abstract class PostgresIntegrationTest {
+```go
+func TestRuleBook_ReadsBackWhatItSaved(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	const id = domain.RuleID(990001) // this test's own row
+	removeRule(t, db, id)
+	t.Cleanup(func() { removeRule(t, db, id) })
+	book := NewRuleBook(db)
+	rule := domain.FromSnapshot(domain.RuleSnapshot{ID: id, Kind: "mcp_server", Target: "crm",
+		Groups: []string{"sales"}, Users: []string{"alice"}})
 
-    static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:16");
+	if err := book.Save(ctx, rule); err != nil {
+		t.Fatal(err)
+	}
 
-    static {
-        POSTGRES.start();
-    }
-
-    @DynamicPropertySource
-    static void datasource(DynamicPropertyRegistry registry) {
-        registry.add("spring.datasource.url", POSTGRES::getJdbcUrl);
-        registry.add("spring.datasource.username", POSTGRES::getUsername);
-        registry.add("spring.datasource.password", POSTGRES::getPassword);
-    }
+	got, ok, err := book.Get(ctx, id)
+	if err != nil || !ok {
+		t.Fatalf("get: %v, found %v", err, ok)
+	}
+	if !reflect.DeepEqual(got.Snapshot(), rule.Snapshot()) {
+		t.Errorf("read back %+v, want %+v", got.Snapshot(), rule.Snapshot())
+	}
 }
+
+func TestRuleBook_FindsNothingForAnUnknownRule(t *testing.T) { … ok == false, err == nil … }
 ```
 
-Because the container and the Spring context are shared, **each IT cleans its own tables in
-`@BeforeEach`** (prefer this over `@Transactional` rollback, which hides flush/mapping errors the
-test is meant to catch).
-
-## Repository Adapter Test
-
-```java
-// boundedcontexts/appointments/src/test/java/com/wealcome/appointments/integration/adapters/secondary/persistence/jpa/SqlAppointmentRepositoryIT.java
-class SqlAppointmentRepositoryIT extends PostgresIntegrationTest {
-
-    @Autowired
-    private AppointmentRepository appointmentRepository; // the port; SqlAppointmentRepository under "jpa"
-
-    @Autowired
-    private JdbcClient jdbcClient;
-
-    @BeforeEach
-    void cleanTables() {
-        jdbcClient.sql("DELETE FROM appointments").update();
-    }
-
-    @Test
-    void devrait_retrouver_le_rendez_vous_enregistre() {
-        var appointment = Appointment.book(
-                new AppointmentId("a1"),
-                new PractitionerId("p1"),
-                new PatientId("pat1"),
-                LocalDateTime.parse("2026-09-14T09:10:00")); // a 10-minute slot (RG1)
-
-        appointmentRepository.save(appointment);
-
-        assertThat(appointmentRepository.byId(new AppointmentId("a1")))
-                .map(Appointment::toSnapshot)
-                .contains(appointment.toSnapshot());
-    }
-
-    @Test
-    void devrait_ne_rien_retourner_quand_le_rendez_vous_est_inconnu() {
-        assertThat(appointmentRepository.byId(new AppointmentId("unknown"))).isEmpty();
-    }
-
-    @Test
-    void devrait_ecraser_le_rendez_vous_quand_il_est_reenregistre() {
-        var booked = Appointment.book(new AppointmentId("a1"), new PractitionerId("p1"),
-                new PatientId("pat1"), LocalDateTime.parse("2026-09-14T09:10:00"));
-        appointmentRepository.save(booked);
-        var cancelled = booked.cancel(); // immutable: a new instance with the same id
-
-        appointmentRepository.save(cancelled);
-
-        assertThat(appointmentRepository.byId(new AppointmentId("a1")))
-                .map(Appointment::toSnapshot)
-                .contains(cancelled.toSnapshot());
-    }
-}
-```
-
-Names (`book`, `cancel`, statuses) are illustrative: `appointments` starts empty; use whatever the unit
-tests have already driven. Aim for one round-trip per aggregate state that maps differently.
+Names are illustrative; use whatever the unit tests have already driven. Aim for one round-trip per
+aggregate state that maps differently.
 
 ### Principles
 
-1. **Round-trip through the port** — `save` then `byId`, assert the full `toSnapshot()`.
-2. **Real domain objects, real database** — never a `Fake…` here.
-3. **Seed reference data with raw SQL, read back through the port.** When the adapter under test
-   only reads (e.g. a practitioner agenda), insert rows with `JdbcClient`, then query through the
-   domain port. Seeding with the adapter's own `save` makes the test tautological: a symmetric
-   mapping bug passes both ways.
-   ```java
-   jdbcClient.sql("INSERT INTO practitioners (id, name) VALUES (:id, :name)")
-           .param("id", "p1").param("name", "Dr Martin").update();
-   ```
-4. **Deterministic reads** — if the aggregate holds elements in a `Set`, its snapshot sorts them;
-   otherwise the IT flickers on row order. Queries returning lists declare an `ORDER BY`.
-5. **Time is data** — timestamps come from literals or a `DeterministicDateProvider`, never `now()`.
+1. **Round-trip through the port** — `Save` then `Get`, compare the whole `Snapshot()`.
+2. **Real domain values, real database** — never a `memory` fake here.
+3. **Seed reference data with raw SQL, read back through the port** (and the reverse: write through the
+   port, read with raw SQL). Seeding with the adapter's own `Save` makes a read-only test tautological: a
+   symmetric mapping bug passes both ways. No method is added to a port for a test.
+4. **Deterministic reads** — a query returning a list has an `ORDER BY`; a snapshot built from a set sorts.
+5. **Time is data** — timestamps come from literals or `memory.Clock`, never `now()` in SQL or `time.Now()`.
+   PostgreSQL keeps microseconds: no nanosecond literal.
 
-## RED Phase: Scaffold Batch
+### RED phase: scaffold batch
 
-Written with wishful thinking, the IT fails at context startup unless the scaffold batch includes
-**everything the context needs**:
+Written by wishful thinking, the test fails at compile time until the scaffold batch adds the adapter
+type with behavioural-failure bodies **and its table**: without the migration the test fails on
+`relation does not exist`, a setup failure, not a behavioural RED.
 
-1. `SqlAppointmentRepository` (`@Repository @Profile("jpa")`) with behavioral-failure bodies
-2. `AppointmentJpaEntity` + `AppointmentJpaRepository`
-3. **The Flyway migration for the new table** — with `ddl-auto=validate`, a missing table kills
-   the context before any assertion (a compilation/startup RED, not a behavioral RED)
+```go
+// access/adapters/postgres/rule_book.go
+var _ usecase.RuleBook = (*RuleBook)(nil)
 
-```java
-// boundedcontexts/appointments/src/main/java/com/wealcome/appointments/adapters/secondary/persistence/jpa/SqlAppointmentRepository.java
-@Repository
-@Profile("jpa")
-class SqlAppointmentRepository implements AppointmentRepository {
+type RuleBook struct{ db *sql.DB }
 
-    private final AppointmentJpaRepository appointmentJpaRepository;
+func NewRuleBook(db *sql.DB) *RuleBook { return &RuleBook{db: db} }
 
-    SqlAppointmentRepository(AppointmentJpaRepository appointmentJpaRepository) {
-        this.appointmentJpaRepository = appointmentJpaRepository;
-    }
+func (b *RuleBook) Save(ctx context.Context, rule domain.Rule) error { return nil } // scaffold
 
-    @Override
-    public void save(Appointment appointment) {
-        // scaffold: behavioral failure
-    }
-
-    @Override
-    public Optional<Appointment> byId(AppointmentId id) {
-        return Optional.empty(); // scaffold: behavioral failure
-    }
+func (b *RuleBook) Get(ctx context.Context, id domain.RuleID) (domain.Rule, bool, error) {
+	return domain.Rule{}, false, nil // scaffold: behavioural failure
 }
 ```
 
-```sql
--- boundedcontexts/appointments/src/main/resources/db/migration/appointments/V1__create_appointments.sql
-CREATE TABLE appointments (
-    id               VARCHAR(255) PRIMARY KEY,
-    practitioner_id  VARCHAR(255) NOT NULL,
-    patient_id       VARCHAR(255) NOT NULL,
-    starts_at        TIMESTAMP    NOT NULL,
-    duration_minutes INTEGER      NOT NULL,
-    status           VARCHAR(50)  NOT NULL
-);
-```
+## Temporal adapters
 
-The fake counterpart (`FakeAppointmentRepository` in `businesslogic/models/appointment/`) is declared in
-`configuration/` under `@Profile("fake")`, so both profiles always have exactly one bean.
+A Temporal adapter is either an **activity** that calls a use case (primary: it drives the module) or a
+**client** that a port hides (secondary: signal, start, query a workflow). Neither decides a rule.
+
+- **Activity → use case:** `testsuite.WorkflowTestSuite` → `NewTestActivityEnvironment()`, register the
+  activity struct wired with `memory` fakes, `env.ExecuteActivity(...)`, assert its result and the fakes'
+  snapshots. A refusal must come out as the `temporal.ApplicationError` type the workflow reads (non
+  retryable when it is final) — that mapping is what the test proves.
+- **Workflow:** `NewTestWorkflowEnvironment()`, activities registered as **hand-written functions** under
+  their real names (`env.RegisterActivityWithOptions(fn, activity.RegisterOptions{Name: "NotifyStep"})`),
+  as `workflow/ask_user_test.go` does — not `env.OnActivity` mocks.
+- Time in a workflow is `workflow.Now`, driven by the test environment's clock; never `time.Now()`.
+- A workflow's commands are part of its contract: changing them breaks the replay of open runs
+  (`CLAUDE.md`, Conventions). Behaviour that only a real server shows (signals during the end of a
+  workflow, continue-as-new) belongs to the `RealServer` smoke tests, run by hand, never by an agent.
+
+```go
+func TestTurnToolsActivity_ARefusalIsFinal(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestActivityEnvironment()
+	acts := &Activities{TurnTools: usecase.TurnTools{Rules: memory.NewRuleBook(), Users: closedDirectory(), Tools: toolbox()}}
+	env.RegisterActivity(acts)
+
+	_, err := env.ExecuteActivity(acts.TurnTools, StartTurnInput{Agent: "dev", User: "bob"})
+
+	var appErr *sdktemporal.ApplicationError
+	if !errors.As(err, &appErr) || appErr.Type() != "AgentNotOpen" || !appErr.NonRetryable() {
+		t.Fatalf("err = %v, want a final AgentNotOpen", err)
+	}
+}
+```
 
 ## Anti-Patterns
 
 | ❌ | ✅ |
 |----|----|
-| Asserting a business rule (e.g. "slot already taken", RG…) in an IT | Unit test through the use case with fakes |
-| `new FakeAppointmentRepository()` in an IT | Autowire the port, backed by PostgreSQL |
-| Seeding with the adapter under test, then reading with it | Raw SQL seed via `JdbcClient`, read via the port |
-| Relying on data left by another IT class (shared container) | `DELETE` own tables in `@BeforeEach` |
-| Asserting one snapshot field after a round-trip | Assert the whole `toSnapshot()` |
-| Demo rows in a Flyway migration | Seeds in `wealdoc-app/.../configuration/` |
-| `ddl-auto=create-drop` to dodge a missing migration | Migration in the scaffold batch, `validate` |
-| Tables in `public`, or `spring.flyway.*` shared by every context | The context's own schema and `Flyway` bean |
-| `IntegrationTestApplication` scanning `com.wealcome.appointments` whole or in a subpackage | Test's own package, scanning `adapters` + `configuration` |
+| Asserting a business rule (DR…) in an adapter test | Unit test through the use case with fakes |
+| A `memory` fake in a `postgres` test | The adapter on the throwaway database |
+| The `agent` database, or `DATABASE_URL` | `TEST_DATABASE_URL` on `agent_dev_tmp` |
+| Seeding with the adapter under test, then reading with it | Raw SQL seed, read through the port |
+| Relying on rows another test left | Own IDs, deleted before and after |
+| Asserting one field after a round-trip | Compare the whole `Snapshot()` |
+| `env.OnActivity(...).Return(...)` mocks | Hand-written activity functions registered by name |
+| A workflow test that needs a real server | A `RealServer` smoke test, by hand |
 
 ## Related Skills
 
-- **`tdd-workflow-engine`** — TDD sequence, enforcement, test commands
+- **`tdd-workflow-engine`** — TDD sequence, enforcement, `tdd-run.sh`
 - `tdd-analysis` — test lists, naming, statuses
-- `tdd-testing-patterns` — test doubles, fixtures, assertions
+- `tdd-testing-patterns` — test levels, doubles, fixtures, assertions
 - `tdd-core-patterns` — unit tests of the business logic (fakes)
 - `tdd-e2e-patterns` — HTTP-boundary tests
