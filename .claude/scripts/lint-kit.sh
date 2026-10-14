@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Consistency check for the TDD kit (.claude/agents, skills, commands, rules, eval).
+# Consistency check for the TDD kit (.claude/agents, skills, commands, rules, README).
 # Run after editing anything under .claude/. Exit 1 when a problem is found.
 set -uo pipefail
 ROOT="$(git -C "${CLAUDE_PROJECT_DIR:-$PWD}" rev-parse --show-toplevel)"
@@ -9,22 +9,30 @@ import os, re, sys, glob
 root = sys.argv[1]
 kit = os.path.join(root, ".claude")
 files = sorted(p for pattern in ("agents/*.md", "skills/*/SKILL.md", "commands/*.md", "rules/*.md",
-                                 "eval/**/*.md", "README.md")
+                                 "README.md")
                for p in glob.glob(os.path.join(kit, pattern), recursive=True))
 problems = []
 
 def report(path, line_no, message):
     problems.append(f"{os.path.relpath(path, root)}:{line_no}: {message}")
 
-# Leftovers from other projects and retired vocabulary.
+# Leftovers from the training's project (another language, build and domain) and retired vocabulary.
+# The words are spelled with character classes ([a], [n]…) so that a grep for them over .claude finds
+# nothing here: this list is the one place that names them on purpose.
 STALE = [
-    (r"mealbooking|com\.wealcome\.wealdoc|(?<![\w/.])wealdoc/|-pl wealdoc", "old module name (appointments)"), (r"hexagon/", "old test path"),
+    (r"(?i)\bj[a]va\b|\bm[a]ven\b|\bmv[n]\b|\bpom\.xm[l]\b|\bgradl[e]\b", "training's language or build tool"),
+    (r"(?i)ju[n]it|asser[t]j|\bsprin[g]\b|\bjp[a]\b|hibernat[e]|flywa[y]|testcontainer[s]|archuni[t]|surefir[e]|failsaf[e]|pitest|\bPI[T]\b",
+     "training's test or framework tooling"),
+    (r"src/mai[n]|src/tes[t]|businesslogi[c]/|boundedcontext[s]/|com\.wealcom[e]", "training's source layout"),
+    (r"(?i)wealbe[t]|wealdo[c]|mealbookin[g]|\bR[G]\d", "training's project or its rules (RG…)"),
+    (r"(?i)patien[t]|rendez-vou[s]|créneau[x]?\b|\bstak[e]\b|\bparieu[r]", "example from the training's domain"),
     (r"#\[Test\]|PHPUnit|composer\.json|services\.yaml|qualiopi", "PHP leftover"),
     (r"\bpnpm\b|vitest|\.spec\.tsx?\b", "TypeScript leftover"),
-    (r"\bRider\b|\bTrainee\b|VehicleType", "example from another domain"),
+    (r"\bRider\b|\bTrainee\b|VehicleType|ride[ _]booking", "example from another domain"),
     (r"🔴 RED|🟢|⚡|EARLY GREEN —|RULE 6b|DROPPED|allow-main|(?<!O-)RULE [1-68]\b", "retired status / rule / escape"),
     (r"early green: keep|\bkeep / delete\b|keep — pins", "early green kept (user decision: delete, strengthen, reorder, or pin a threshold side)"),
-    (r"(?<!overrides `)should_\[?\w", "old test naming (devrait_…)"),
+    (r"\b(devrai[t]|shoul[d])_[a-z]|@Tes[t]\b|\bvoid [a-z]\w*\(", "test naming of the training (Test<Subject>_<FinalBehaviour>)"),
+    (r"\*\*Test class:\*\*", "analysis field renamed (**Test file:**)"),
 ]
 STATUSES = {"⏳ Pending", "✅ GREEN", "🧬 PINNED", "➕ PROPOSED"}
 STATUS_RE = re.compile(r"((?:[☀-➿\U0001F300-\U0001FAFF]️?)+)\s"
@@ -91,8 +99,14 @@ for hook in ("test-first-guard.sh", "bash-bypass-detector.sh"):
     if hook not in settings:
         report(os.path.join(kit, "settings.json"), 1, f"hook not wired: {hook}")
 
-# Size budget: preloaded files may not silently grow (complexity creep). Update eval/budget.txt on purpose.
-budget_path = os.path.join(kit, "eval/budget.txt")
+# Rules are loaded into every session unless scoped: each one keeps a paths: frontmatter (README.md).
+for path in glob.glob(os.path.join(kit, "rules", "*.md")):
+    head = re.match(r"---\n(.*?)\n---", open(path).read(), re.S)
+    if not head or not re.search(r"^paths:", head.group(1), re.M):
+        report(path, 1, "rule without a paths: frontmatter: it would load in every session")
+
+# Size budget: preloaded files may not silently grow (complexity creep). Update budget.txt on purpose.
+budget_path = os.path.join(kit, "budget.txt")
 if os.path.exists(budget_path):
     for entry in open(budget_path):
         if not entry.strip() or entry.startswith("#"):
@@ -101,7 +115,7 @@ if os.path.exists(budget_path):
         path = os.path.join(kit, name)
         if os.path.exists(path) and os.path.getsize(path) > int(allowed) * 1.15:
             report(path, 1, f"size {os.path.getsize(path)} bytes exceeds budget {allowed} by more than 15% — "
-                            "simplify, or raise the budget on purpose in eval/budget.txt")
+                            "simplify, or raise the budget on purpose in .claude/budget.txt")
 
 for problem in problems:
     print(problem)
