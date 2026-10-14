@@ -60,7 +60,7 @@ START ─(no list)─> EXPECTATIONS_GATE ─"go red"─┐
 ### EXPECTATIONS_GATE (no list given)
 
 1. Run `tdd-analysis` §4 A0–A6 (the analysis file is written).
-2. Show: detected type (and E2E profile `fake`/`jpa`, or the target adapter for integration), the key
+2. Show: detected type (and the target package: `domain`/`usecase`, or the adapter for integration and e2e), the key
    EXPLORE findings in ≤5 bullets, and the Ordered Test List table.
 3. Ask for technical expectations (assertion style, pattern, refusal style…) or "go red". Refinements
    → re-analyze, rewrite the file, gate again. Stored expectations apply to every later phase.
@@ -97,12 +97,12 @@ reorder** (engine §5 — there is no keep):
 
 Engine §2: minimal behaviour, clean form, including the refactoring of existing code this test
 reveals. RULE 7 (`✅ GREEN`) right after the run; still red → engine §3 two-step fallback. A case
-the list misses → `➕ PROPOSED` row (RULE 9), not code. A broken neighbour in the class
+the list misses → `➕ PROPOSED` row (RULE 9), not code. A broken neighbour in the package
 that you cannot fix without touching its assertions → report it at WAIT_FOR_GREEN instead.
 
 ### CYCLE_COMPLETE (gate)
 
-1. If no test is left, run the relevant suite once (`tdd-run.sh --unit`, or `--all` when IT/E2E were
+1. If no test is left, run the relevant suite once (`tdd-run.sh --unit`, or `--all` when adapter (integration or e2e) tests were
    touched) and include the result. Present any `➕ PROPOSED` rows for approval.
 2. **Checklist (RULE 9):** anything noticed but not tested → a `➕ PROPOSED` row now, or say
    "Proposed tests: none".
@@ -126,15 +126,15 @@ Without it, the parent may auto-resume and bypass the gate.
 No RED without "go red", no production code without "go green" (an early green needs a disposition
 instead), and no stop inside RED_PHASE. Numbered rules (RULE 0, 7, 7b, 9, C): engine §8.
 
-## Worked Trace (RG6, unit)
+## Worked Trace (DR13, unit)
 
 ```
-NEXT_TEST_GATE  1 devrait_refuser_la_reservation_d_un_patient_restreint — Baseline RG6
+NEXT_TEST_GATE  1 TestTurnTools_RefusesAnAgentClosedToItsUser — Baseline DR13
                 ⛔ AGENT PAUSED — NEXT_TEST_GATE            user: go red
 RED_PHASE       test written → diagnostics → scaffold batch → tdd-run.sh:
-                RED_ASSERTION "Expecting code to raise PatientRestrictedException"
+                RED_ASSERTION "err = <nil>, want ErrAgentNotOpen"
 WAIT_FOR_GREEN  ⛔ AGENT PAUSED — WAIT_FOR_GREEN            user: go green
-GREEN           throw new PatientRestrictedException();  (V8: unconditional) → ✅ GREEN (already clean)
+GREEN           return TurnToolsResult{}, domain.ErrAgentNotOpen  (V8: unconditional) → ✅ GREEN (already clean)
 CYCLE_COMPLETE  table: 1 ✅ GREEN · 2 ⏳ Pending
                 ⛔ AGENT PAUSED — CYCLE_COMPLETE            user: go red
 ```

@@ -11,9 +11,9 @@ The TDD workflow has been migrated to the **`tdd` custom agent** for stronger id
 The `tdd` agent is automatically delegated by Claude when you describe a feature requirement. You can also explicitly invoke it:
 
 ```
-"use the tdd agent to implement: RG6 — un patient restreint ne peut pas réserver en ligne"
-"use the tdd agent for: e2e: exposer la réservation d'un rendez-vous en HTTP"
-"use the tdd agent for: integration: persister les rendez-vous en PostgreSQL"
+"use the tdd agent to implement: DR13 — un agent fermé à l'utilisateur du tour ne répond pas"
+"use the tdd agent for: e2e: exposer l'aperçu d'une règle d'accès en HTTP (DR26)"
+"use the tdd agent for: integration: persister les règles d'accès en PostgreSQL"
 ```
 
 ## Test type prefixes

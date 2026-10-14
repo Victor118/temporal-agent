@@ -60,7 +60,7 @@ with the gate block below.
 
 **With a list** (a path to an analysis file, or a pasted table): read it, skip ANALYSIS, resume at
 the first row still `⏳ Pending` (engine §8 Resume — its test may already exist from an interrupted run).
-Read `**Mode:**`, `**Test Type:**` and `**Test class:**` from it.
+Read `**Mode:**`, `**Test Type:**` and `**Test file:**` from it.
 
 ### RED_PHASE
 
@@ -74,22 +74,22 @@ Engine §1 for the next `⏳ Pending` row, without stopping. Then:
 ### GREEN_PHASE
 
 Engine §2: minimal behaviour, clean form — including the refactoring of existing code this test
-reveals — then `tdd-run.sh` on the class once; RULE 7 (`✅ GREEN`). Still red → engine §3 two-step
+reveals — then `tdd-run.sh` on the test's package once; RULE 7 (`✅ GREEN`). Still red → engine §3 two-step
 fallback. Never edit a neighbour's assertions to get green. A case the list misses → `➕ PROPOSED`
 row (RULE 9), not code.
 
 ### CYCLE_CHECK
 
-One line of progress per test, e.g. `✅ 2/4 devrait_refuser_la_reservation_d_un_patient_restreint`.
+One line of progress per test, e.g. `✅ 2/4 TestTurnTools_RefusesAnAgentClosedToItsUser`.
 **Do not reprint the whole table after each test.** Tests left → RED_PHASE; none → CYCLE_COMPLETE.
 
 ### CYCLE_COMPLETE (STOP & WAIT)
 
-1. Run the **relevant suite once**: `tdd-run.sh --unit` for unit work; `--all` when IT/E2E classes
-   were touched. A regression → fix it before reporting; if it cannot be fixed
+1. Run the **relevant suite once**: `tdd-run.sh --unit` for unit work; `--all` when adapter (integration or
+   e2e) tests were touched. A regression → fix it before reporting; if it cannot be fixed
    without changing a test's assertion, report it as a failure instead of pretending completion.
 2. **Checklist before reporting (RULE 9):** anything you noticed but did not test — a missing case, an
-   unguarded `orElseThrow`, a question you are about to write in the report — is a `➕ PROPOSED`
+   error ignored or a `(T, bool)` not checked, a question you are about to write in the report — is a `➕ PROPOSED`
    row now. Write "Proposed tests: none" only if there is truly nothing.
 3. Report:
 
@@ -98,8 +98,8 @@ One line of progress per test, e.g. `✅ 2/4 devrait_refuser_la_reservation_d_un
 
 | # | Test | Status |
 |---|------|--------|
-| 1 | devrait_… | ✅ GREEN |
-| 2 | devrait_… | ✅ GREEN |
+| 1 | Test…_… | ✅ GREEN |
+| 2 | Test…_… | ✅ GREEN |
 
 Dropped (early green): [name — assertion that passed — what already satisfied it], or "none"
 Pinned (early green): [name — killing mutation], or "none"
@@ -122,17 +122,18 @@ This (or the business-question stop in ANALYSIS) is the ONLY pause.
 No permission is asked between phases; the only pauses are CYCLE_COMPLETE and a business question.
 Numbered rules (RULE 0, 7, 7b, 9, C): engine §8.
 
-## Worked Trace (RG6, unit)
+## Worked Trace (DR13, unit)
 
-List: 1 `devrait_refuser_la_reservation_d_un_patient_restreint` · 2 `devrait_reserver_pour_un_patient_non_restreint`
+List: 1 `TestTurnTools_RefusesAnAgentClosedToItsUser` · 2 `TestTurnTools_GivesAnOpenAgentItsTools`
 
 ```
-RED 1   test written (BookAppointmentUseCaseTest) → diagnostics: PatientRestrictedException,
-        FakePatientRepository missing → scaffold batch → tdd-run.sh: RED_ASSERTION (expected
-        PatientRestrictedException, nothing thrown)
-GREEN 1 execute(...) { throw new PatientRestrictedException(); }   ← unconditional (V8), already clean → ✅ GREEN
-RED 2   tdd-run.sh: RED_EXCEPTION (PatientRestrictedException for a non-restricted patient)
-GREEN 2 refusal becomes conditional, written clean at once: Patient (via its port) answers
-        isRestricted() (Tell, Don't Ask), appointment saved → one run → ✅ GREEN
+RED 1   test written (access/usecase/turn_tools_test.go) → diagnostics: usecase.TurnTools,
+        memory.RuleBook, domain.ErrAgentNotOpen missing → scaffold batch → tdd-run.sh: RED_ASSERTION
+        (err = <nil>, want ErrAgentNotOpen)
+GREEN 1 Run(...) { return TurnToolsResult{}, domain.ErrAgentNotOpen }   ← unconditional (V8), already clean → ✅ GREEN
+RED 2   tdd-run.sh: RED_ASSERTION (turn of dev for bob: agent not open)
+GREEN 2 refusal becomes conditional, written clean at once: the rules (via the RuleBook port) and the
+        user (via Directory) answer domain.Allowed (Tell, Don't Ask), the open tools returned → one run
+        of the package → ✅ GREEN
 COMPLETE tdd-run.sh --unit → GREEN, 2 tests → report → ⛔ AGENT PAUSED — CYCLE_COMPLETE
 ```

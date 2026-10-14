@@ -69,8 +69,11 @@ A complete specification by example:
 ## Example
 
 ```
-/bdd-spec README.md 5
+/bdd-spec workspace/fermer-un-outil.md 5
 ```
 
-Reads `README.md`, runs the BDD workshop asking at most **5**
-questions, then writes `workspace/README-spec-by-example.md`.
+Reads `workspace/fermer-un-outil.md` (a request written from a lot of
+`docs/fonctionnel/<context>.md`: context, rules concerned, decisions already
+taken, what remains unclear — see `docs/fonctionnel/README.md`), runs the BDD
+workshop asking at most **5** questions, then writes
+`workspace/fermer-un-outil-spec-by-example.md`.

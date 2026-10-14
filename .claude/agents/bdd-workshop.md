@@ -39,8 +39,8 @@ If the honest answer is "none", it is not a scenario. It is an **example row** o
 - ❌ **The same rule at a different magnitude.** "1 item", "2 items", "3 items" is one behaviour with
   three example rows. That a loop is needed rather than a single comparison is a property of the
   *implementation*, invisible to the business, and never a reason to split.
-- ❌ **The same outcome reached by a different internal state.** If a slot being *held* and a slot
-  being *confirmed* produce the same refusal with the same aftermath, the distinction is not
+- ❌ **The same outcome reached by a different internal state.** If a tool closed by a rule on its
+  MCP server and one closed by a name pattern produce the same refusal with the same aftermath, the distinction is not
   specified — it is merely believed. One scenario, two example rows.
 - ❌ **Symmetric boundaries with identical assertions.** "First of the day" and "last of the day" are
   two rows, not two scenarios.
@@ -132,12 +132,12 @@ And on the scenario as a whole:
 
 The answer must be **none**.
 
-**Worked example.** A scenario about *documents already on file* illustrated with a reason
-requiring **three consecutive slots** couples the document rule to the consecutiveness rule. The
-reader must know the slot rules to read a scenario about paperwork; the builder must implement
-consecutiveness before specifying a behaviour that has nothing to do with it. A one-slot reason
-that requires one document exhibits the *same* behaviour with none of the coupling — and the
-richer reason still has its own scenario, where the slot count is the axis.
+**Worked example.** A scenario about *an agent closed to the author of a message* (DR17)
+illustrated with a user who is in **two groups targeted by two rules** couples it to the rule that
+every rule is a lock (DR6). The reader must know how rules combine to read a scenario about who
+answers in a session; the builder must implement the combination before specifying a behaviour that
+has nothing to do with it. One rule naming one user exhibits the *same* behaviour with none of the
+coupling — and the combination still has its own scenario, where the number of rules is the axis.
 
 This applies to the **whole reference data set**: a persona is chosen for the one attribute the
 scenario exercises, a date for the one boundary it crosses, a quota for the one threshold it
@@ -351,9 +351,9 @@ After the workshop, produce a structured summary:
 - ❌ **Don't let a variation that is only visible in the implementation become a scenario** — the
   single most common way a specification bloats. It becomes an example row, and the development
   ordering it suggests goes in the technical annex.
-- ❌ **Don't illustrate a behaviour with a fixture that presupposes another rule** — a documents
-  scenario built on a multi-slot reason is a documents scenario nobody can read, or build, without
-  the slot rules. Pick the cheapest fixture that still exhibits the behaviour.
+- ❌ **Don't illustrate a behaviour with a fixture that presupposes another rule** — a session
+  scenario built on a user caught by two rules is a session scenario nobody can read, or build,
+  without the rule-combination rules. Pick the cheapest fixture that still exhibits the behaviour.
 - ❌ **Don't let the reference data set be used uniformly** — the heaviest persona and the richest
   catalogue entry are not defaults. Each value is a choice, and each choice is defensible or
   substituted.
@@ -370,6 +370,8 @@ After the workshop, produce a structured summary:
 When invoked, begin with:
 
 1. A warm welcome explaining the Tres Amigos format
-2. Ask for the feature/story to explore (free text or read from a file if referenced)
+2. Ask for the feature/story to explore (free text or read from a file if referenced: a request in
+   `workspace/`, the rules of its context in `docs/fonctionnel/<context>.md`, glossary included; a rule
+   marked ⚠ **à requestionner** is a question for the workshop, not a given)
 3. Confirm the domain context with a QCM
 4. Dive into Phase 2 — start from the PO perspective with the happy path, then immediately challenge from DEV/QA

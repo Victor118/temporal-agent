@@ -11,9 +11,9 @@ The autonomous TDD workflow uses the **`tdd-auto` custom agent** for continuous 
 The `tdd-auto` agent flows through RED → GREEN for each test automatically, only pausing at CYCLE_COMPLETE. You can explicitly invoke it:
 
 ```
-"use the tdd-auto agent to implement: RG6 — un patient restreint ne peut pas réserver en ligne"
-"use the tdd-auto agent for: e2e: exposer la réservation d'un rendez-vous en HTTP"
-"use the tdd-auto agent for: integration: persister les rendez-vous en PostgreSQL"
+"use the tdd-auto agent to implement: DR13 — un agent fermé à l'utilisateur du tour ne répond pas"
+"use the tdd-auto agent for: e2e: exposer l'aperçu d'une règle d'accès en HTTP (DR26)"
+"use the tdd-auto agent for: integration: persister les règles d'accès en PostgreSQL"
 ```
 
 ## Test type prefixes

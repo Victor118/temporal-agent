@@ -1,8 +1,8 @@
 ---
 name: tdd-analyze
 description: >
-  Analysis-only TDD agent (first step of delivery and of /iterate) that turns a WealDoc business
-  requirement (RG1–RG26) into a contradiction-driven, FLFI-named test list — or, with CHARACTERIZATION:, a list of pinning tests with their killing
+  Analysis-only TDD agent (first step of delivery and of /iterate) that turns a business
+  requirement of this platform (rules DR, CV, AG… in docs/fonctionnel/) into a contradiction-driven, FLFI-named test list — or, with CHARACTERIZATION:, a list of pinning tests with their killing
   mutations. Explores the feature area, then writes workspace/current/tdd.md (or
   workspace/current/tdd-iteration-XX.md for numbered iterations) for the tdd or tdd-auto agents.
 tools: Read, Glob, Grep, Write, Edit
@@ -36,12 +36,15 @@ Linear, no gates. The only stop is a business question at A0/A2.
 
 1. **RECEIVE.** Read the requirement and, if given, the orchestrator framing (iteration number,
    scope, later iterations to stay out of, decisions and constraints in force, `CHARACTERIZATION:`).
-   Look up the cited rules in `README.md` (RG numbers) — read only those lines. When it points to a
+   Look up the cited rules in `docs/fonctionnel/<context>.md` (the sigle names the file:
+   `docs/fonctionnel/README.md`; e.g. DR → `droits.md`) — read only those lines, their glossary terms
+   and the annex row that says where they live today. When it points to a
    specification (`workspace/…`, a `*-spec-by-examples.md`), read only the sections it names. A decision
    the framing gives is settled: never ask it again.
 2. **A0–A5** exactly as `tdd-analysis` §4 (or §5 in characterization mode). While exploring, read
-   `CLAUDE.md`'s doctrine (time is a port, fakes in `businesslogic/models/`, raw values in HTTP,
-   aggregate equality chosen at the first test needing it) instead of guessing it from code.
+   `.claude/rules/DOCTRINE.md` (module layout, ports declared by the use case, time is a port, fakes in
+   `adapters/memory/`, snapshots, refusals as errors, aggregate equality chosen at the first test needing
+   it) instead of guessing it from code: most of the repository predates it.
 3. **A6 WRITE** the analysis file with Write (create/overwrite).
 4. **REPORT** — keep the conversation output short: the Ordered Test List table, then the candidates
    dropped by A3, any open business question or decision you took (e.g. threshold inclusivity, refusal
@@ -49,7 +52,8 @@ Linear, no gates. The only stop is a business question at A0/A2.
 
 ## Stops
 
-- **Ambiguous rule** (e.g. RG5 "10 créneaux par mois": calendar month or rolling 30 days?) → ask the
+- **Ambiguous rule** (e.g. DR30 "son propriétaire prévenu une fois": once per pause, or once ever?), or a
+  rule marked ⚠ **à requestionner** that the framing does not settle → ask the
   business question, write nothing, stop. Never guess a business rule.
 - **Cannot decompose** → say so and list the specific questions.
 - **Out-of-scope pull** → a test the orchestrator attributed to a later iteration goes in Design
@@ -69,27 +73,29 @@ Linear, no gates. The only stop is a business question at A0/A2.
 
 ## Worked Example (condensed)
 
-**Requirement:** "RG14 — un patient ne peut pas réserver un créneau moins de 2 heures avant l'heure du
-rendez-vous." Iteration 02. EXPLORE finds `BookAppointmentUseCase`, `FakeAppointmentRepository`,
-`DeterministicDateProvider`, and one test `devrait_reserver_les_creneaux_du_motif` (RG2). No clock
-rule exists yet.
+**Requirement:** "DR15 — Un changement de règle vaut pour les tours qui commencent ensuite ; un tour en
+cours garde ses outils." Iteration 02. EXPLORE finds `usecase.TurnTools`, `memory.RuleBook`,
+`memory.Clock`, and one test `TestTurnTools_ClosedToolsAreLeftOut` (DR11). No rule carries the instant
+it changed yet.
 
 `workspace/current/tdd-iteration-02.md`:
 
 | # | Test Name | Contradiction | Status |
 |---|-----------|---------------|--------|
-| 1 | devrait_refuser_la_reservation_a_moins_de_2_heures_du_rendez_vous | RG14 — clock 1h59 before the slot: the current booking accepts at any time → forces a comparison with the clock | ⏳ Pending |
-| 2 | devrait_accepter_la_reservation_a_2_heures_pile_du_rendez_vous | RG14 edge — "moins de 2 heures" excludes exactly 2h: the green of test 1 may legitimately refuse at 2h00 (`!isAfter` instead of `isBefore`) → sets inclusivity `(if early green: pin — isBefore becomes !isAfter in the deadline comparison)` | ⏳ Pending |
+| 1 | TestTurnTools_ATurnStartedBeforeARuleChangeKeepsItsTools | DR15 — rule closing `exec` changed at 10:00, turn started at 09:59:59: the current use case applies every rule whatever the time → forces a comparison with the turn's start | ⏳ Pending |
+| 2 | TestTurnTools_ATurnStartingAsARuleChangesFollowsIt | DR15 edge — "qui commencent ensuite": a turn starting at 10:00 exactly gets the new rule; the green of test 1 may legitimately compare `started.After(changed)` and keep the old tools at 10:00 → sets inclusivity `(if early green: pin — !started.Before(changed) becomes started.After(changed) in the rule's comparison)` | ⏳ Pending |
 
-What A3 did: *"accept 3 hours before"* was dropped (current code already accepts, it cannot fail);
-*"accept exactly 2h before"* survived only **after** test 1, because only then can a legitimate
-implementation get it wrong. Its early green is **predicted** as a pin: if it passes on write, the
-executor proves `isBefore` → `!isAfter` turns it red and keeps it `🧬 PINNED`, without asking — it is
-the only test that proves "moins de". Design notes recorded: *inclusivity decided from the rule's
-wording*; `Dropped: accept 3 hours before — current code already accepts it`.
+What A3 did: *"a turn starting an hour after the change follows it"* was dropped (current code already
+applies every rule, it cannot fail); *"a turn starting at the instant of the change"* survived only
+**after** test 1, because only then can a legitimate implementation get it wrong. Its early green is
+**predicted** as a pin: if it passes on write, the executor proves that `!Before` → `After` turns it red
+and keeps it `🧬 PINNED`, without asking — it is the only test that proves "ensuite" includes the instant.
+Design notes recorded: *inclusivity decided from the rule's wording*; `Dropped: a turn an hour after the
+change follows it — current code already applies every rule`; *DR15's "up to 30 s later" (⚠ à
+requestionner) left out: a reload delay, not a rule*.
 
 ## Agent Memory
 
 Same policy as `tdd-workflow-engine` §10 (restated because that skill isn't preloaded here): record only
 non-obvious findings and business arbitrations the user made, with their date. Never record what a
-Grep finds. Check that a remembered class still exists before relying on it.
+Grep finds. Check that a remembered type or file still exists before relying on it.

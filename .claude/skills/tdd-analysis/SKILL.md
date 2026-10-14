@@ -14,23 +14,28 @@ rules (RED, clean GREEN, violations, commands) live in `tdd-workflow-engine`.
 The name states the **final** business behaviour from day one; only the implementation is
 progressive. A name that will have to change later is a wrong name.
 
-**Convention (user decision, overrides `should_…_when_…` in CODE-STYLE.md):**
-- Test methods in **short French**: `devrait_[résultat]`, adding `_quand_[condition]` **only** when
-  the result alone does not tell two tests apart. No accents, no apostrophes in identifiers.
-- Given-When-Then intention helpers in French (`unPatientRestreint()`, `quandIlReserve(...)`,
-  `alorsLeRendezVousEst(...)`). Production classes and methods stay **English**.
+**Convention (the repository's, `access/access_test.go`):**
+- Test functions in **English CamelCase**: `Test<Subject>_<FinalBehaviour>` — the subject is the use
+  case, the domain service or the API resource under test, the behaviour a short sentence
+  (`TestAllowed_EveryRuleIsALock`, `TestTurnTools_ClosedToolsAreLeftOut`). Go runs only `TestXxx`
+  functions with an upper case after `Test`.
+- Example rows of one behaviour are `t.Run` rows of that test, named in plain words
+  (`"a seller cannot update the CRM"`), never separate functions (§3).
+- Given-When-Then intention helpers in English (`givenARuleOn`, `whenATurnStarts`, `thenTheToolsAre`).
+  All code is English; the rules are French, cited by number.
 - Carry only the **discriminating** behaviour. The complete expected state is the assertion's job
   (snapshot); do not recite it in the name.
-- Business language only: no "exception", "null", "HTTP 409", "Optional". A domain expert must
-  understand it. The e2e **Contradiction** column may name statuses; the label may not.
+- Business language only: no "Error", "Nil", "409", "Panic", "Mock". A domain expert must understand
+  it. The e2e **Contradiction** column may name statuses; the label may not.
 
 | ❌ | ✅ |
 |---|---|
-| `devrait_lever_une_exception` | `devrait_refuser_la_reservation_d_un_patient_restreint` (RG6) |
-| `devrait_marcher_quand_valide` | `devrait_reserver_les_creneaux_consecutifs_du_motif` (RG2, RG4) |
-| `devrait_creer_un_rdv_de_30_min_avec_statut_confirme_et_3_creneaux` | `devrait_reserver_trois_creneaux_pour_un_motif_de_30_minutes` |
+| `TestTurnTools_ReturnsError` | `TestTurnTools_RefusesAnAgentClosedToItsUser` (DR13) |
+| `TestAllowed_Works` | `TestAllowed_EveryRuleIsALock` (DR6) |
+| `TestTurnTools_RuleOnCrmWithGroupSalesAndUserBobReturnsTwoTools` | `TestTurnTools_ClosedToolsAreLeftOut` |
 
-Cite the rule(s) a test proves (`RG14`) in the list's **Contradiction** column, and in commits.
+Cite the rule(s) a test proves (`DR6`) in the list's **Contradiction** column, in a comment on the test
+function's line, and in commits.
 
 ## 2. Transformation Priority Premise (TPP)
 
@@ -52,13 +57,13 @@ start empty or single-element. In sociable use-case tests most steps are "add a 
 it settles a real choice (conditional vs loop, scalar vs collection, why this test comes first).
 
 **Refusal baselines are unconditional.** "Refuse when X" never supplies the success case, so its
-green is an unconditional `throw`. Describe it as *always refuses*; the conditional belongs to the
+green is an unconditional `return ErrX`. Describe it as *always refuses*; the conditional belongs to the
 later test that contradicts it (engine V8) — unless an existing test already supplies the success
 case, in which case the refusal is conditional at once.
 
 **Obvious implementation beats triangulation.** When the general code is as simple as the constant
 (pass a parameter through, read a field), the first test already asks for it — do **not** add a second
-example whose only job is to defeat a hard-coded value (e.g. "same booking at 14:30"). Triangulate only
+example whose only job is to defeat a hard-coded value (e.g. "the same rule for another user"). Triangulate only
 when the generalization is not obvious from one example (a formula, a loop, a rule whose shape one
 example cannot reveal).
 
@@ -96,13 +101,17 @@ requirement (it is then the only analysis the cycle gets). Skip it entirely when
 - **A0 TYPE** — detect the test type (§6). Vague requirement → ask **business** questions and stop.
   Several use cases → propose one analysis per use case.
 - **A1 EXPLORE** (never skip, keep it scoped) — in the feature area only:
-  - existing test names: `Grep` pattern `void devrait_` (or `@Test`) with `output_mode: content`
-    restricted to `boundedcontexts/<context>/src/test/java/**/<feature>/**` (`<context>`: `appointments` or `reliability`, from the RG — `CLAUDE.md`) — names only, don't Read whole test files;
-  - aggregates, value objects, ports and `Fake…` in `businesslogic/models/<aggregate>/`; use cases in
-    `businesslogic/usecases/`; refusal style (domain exceptions vs result type); `DateProvider`-like
-    clock port; fixtures/helpers.
+  - existing test names: `Grep` pattern `^func Test` with `output_mode: content`, glob `*_test.go`,
+    restricted to the module (`<module>/**`; the module is the context of the cited rules,
+    `docs/fonctionnel/README.md`, e.g. DR → `access/`) — names only, don't Read whole test files;
+  - aggregates, value objects and domain errors in `<module>/domain/`; use cases and their ports in
+    `<module>/usecase/`; fakes and the fixed clock in `<module>/adapters/memory/`; refusal style
+    (sentinel vs typed error); fixtures/helpers;
+  - where the rule lives **today** if the module does not hold it yet: the annex of
+    `docs/fonctionnel/<context>.md` names the files (workflows, activities, `store/`, `session/`…) — read
+    them to know the current behaviour, never to copy their design.
   - Read a production file only when its content decides whether a candidate test can fail, and the
-    target test class when a candidate may merge into an existing scenario (§3.4). A claim about
+    target test file when a candidate may merge into an existing scenario (§3.4). A claim about
     existing code written in the analysis is quoted from the file, not recalled.
 - **A2 DECOMPOSE** — one atomic business rule = one candidate. Order of discovery: simplest happy
   path → refusals/preconditions → edges → implicit rules → combinations. Cohesive assertions about
@@ -110,10 +119,11 @@ requirement (it is then the only analysis the cycle gets). Skip it entirely when
   referenced entities) are in; protective rules nobody requested are not — mention them in Design
   Notes in one sentence. No test on an aggregate or value object alone: domain changes are driven
   through the use case.
-  **Time-bound rules** (RG14–RG17, RG20–RG22, RG24–RG25): pin the threshold with the **edge values
-  themselves** — one test exactly at the threshold, one a minute inside it (e.g. RG14: booking
-  exactly 2h before is accepted; 1h59 before is refused). Decide inclusivity from the rule's wording
-  and say so. The clock is always the fake, set in the Given.
+  **Time-bound rules** (a delay, a deadline, "once", "after", "for the turns that start next": e.g.
+  DR15, DR30, DR34): pin the threshold with the **edge values themselves** — one test exactly at the
+  threshold, one just inside it (e.g. DR15: a turn starting at the instant the rule changed gets the new
+  rule; one started a second before keeps its tools). Decide inclusivity from the rule's wording and say
+  so. The clock is always the fake (`memory.Clock`), set in the Given.
 - **A3 DEDUPLICATE — the new-behaviour gate.** For each candidate, name the production line its RED
   will force. Drop any candidate an existing test already proves, or current production code already
   satisfies. Keep a test only if it **can fail against at least one implementation the previous green
@@ -125,7 +135,7 @@ requirement (it is then the only analysis the cycle gets). Skip it entirely when
   the suite.
   **Predicted early green:** when a kept test may pass depending on how the previous green is
   written, append a suffix to its Contradiction cell. The **second side of a threshold** (the edge
-  value a legitimate implementation could put on the wrong side: `isBefore` vs `!isAfter`) gets
+  value a legitimate implementation could put on the wrong side: `t.Before(edge)` vs `!t.After(edge)`) gets
   `(if early green: pin — <mutation>)`, naming the mutation that must turn it red: it is the only
   test that proves the rule's inclusivity, so it stays if the mutation kills it (engine §5). Any other
   predicted early green gets `(if early green: delete — <why>)`. Either way the executor acts without
@@ -152,9 +162,12 @@ code exists and **must not change**; the goal is to pin behaviours a coming refa
 ## 6. Test Type Detection
 
 1. **Explicit prefix** wins: `unit:` · `e2e:` · `integration:`.
-2. **E2E indicators:** api, endpoint, http, rest, route, controller, status code, request, response, json.
-3. **Integration indicators:** postgres, database, sql, persist, jpa, testcontainers, adapter/repository implementation.
-4. **Default:** unit (use case + domain through its ports, fakes wired by hand).
+2. **E2E indicators:** api, endpoint, http, rest, route, handler, status code, request, response, json.
+3. **Integration indicators:** postgres, database, sql, persist, migration, table, temporal, activity,
+   workflow, signal, adapter implementation.
+4. **Default:** unit (use case + domain through its ports, `adapters/memory` fakes wired by hand).
+
+Levels and their packages: `tdd-testing-patterns` (Test Levels).
 
 "actually use unit/e2e/integration" → switch immediately.
 
@@ -167,23 +180,24 @@ e.g. "Iteration 03"), else `workspace/current/tdd.md` (overwrite). Every agent �
 ```markdown
 # TDD Analysis — [title]
 
-> **Objective:** [1–3 self-contained sentences: what the system must do and why, with RG refs]
+> **Objective:** [1–3 self-contained sentences: what the system must do and why, with DR/CV/… refs]
 
 **Mode:** BEHAVIOR | CHARACTERIZATION
 **Test Type:** UNIT | E2E | INTEGRATION ([detection reason])
-**Test class:** `boundedcontexts/<context>/src/test/java/com/wealcome/<context>/unit/businesslogic/usecases/<feature>/<UseCase>Test.java`
-(unit — mirrors `businesslogic/usecases/<feature>/`; a domain-service test goes under `unit/businesslogic/models/`;
-e2e: `e2e/<Feature>E2ETest.java`; integration: `integration/<adapter package>/<Adapter>IT.java`, e.g. `integration/adapters/secondary/persistence/jpa/`)
+**Test file:** `<module>/usecase/<use_case>_test.go` (package `./<module>/usecase`)
+(unit — beside the use case, `package usecase_test`; a domain-service test is `<module>/domain/<service>_test.go`;
+e2e: `<module>/adapters/http/<resource>_test.go`; integration: `<module>/adapters/postgres/<adapter>_test.go`
+or `<module>/adapters/temporal/<adapter>_test.go`)
 
 ## Ordered Test List
 
 | # | Test Name | Contradiction | Status |
 |---|-----------|---------------|--------|
-| 1 | devrait_… | Baseline — [RGx] … | ⏳ Pending |
-| 2 | devrait_… | [RGx] … the previous green cannot … `(TPP: conditional → loop)` · `(if early green: pin — <mutation>)` | ⏳ Pending |
+| 1 | Test…_… | Baseline — [DRx] … | ⏳ Pending |
+| 2 | Test…_… | [DRx] … the previous green cannot … `(TPP: conditional → loop)` · `(if early green: pin — <mutation>)` | ⏳ Pending |
 
 ## Files to Create
-- [path from `boundedcontexts/<context>/src/main/java/com/wealcome/<context>/`]
+- [path from the repository root, e.g. `access/usecase/turn_tools.go`, `access/adapters/memory/rule_book.go`]
 
 ## Design Notes
 - [reusable fakes, helpers, conventions; decisions taken (inclusivity, refusal style); `Dropped: …`; open questions]

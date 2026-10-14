@@ -11,7 +11,7 @@ The Event Storming workflow uses the **`event-storming` custom agent**.
 **CRITICAL:** When delegating to the `event-storming` agent, the parent agent MUST NOT ask it to "produce the output", "run a complete workshop", or "go through all activities autonomously". The event-storming agent is **interactive by design** — it will use `AskUserQuestion` to collaborate with the user at every activity.
 
 The parent agent prompt MUST:
-- Pass the user's focus area or arguments (e.g., "based on the spec ride_booking.md")
+- Pass the user's focus area or arguments (e.g., "based on docs/fonctionnel/droits.md")
 - Let the agent drive the interaction — do NOT pre-digest the spec or list business rules in the prompt
 - Keep the prompt short: "Facilitate an Event Storming workshop. Context: {user_args}"
 
@@ -25,9 +25,9 @@ The parent agent prompt MUST NOT:
 The `event-storming` agent is automatically delegated by Claude when you want to run an Event Storming session. You can also explicitly invoke it:
 
 ```
-"use the event-storming agent to explore the full ride booking domain"
-"use the event-storming agent to focus on: US1 — Book a Ride"
-"use the event-storming agent to discover aggregates and bounded contexts for the ride booking system"
+"use the event-storming agent to explore the background work context (tâches de fond, tâches planifiées, questions)"
+"use the event-storming agent to focus on: Droits, lot 4 — un agent fermé dans une session partagée"
+"use the event-storming agent to discover aggregates and bounded contexts for the machines (docs/fonctionnel/README.md, MA)"
 ```
 
 ## What it produces
